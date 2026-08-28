@@ -28,6 +28,15 @@ func captureStdout(t *testing.T, fn func()) string {
 	return string(raw)
 }
 
+// withChatLog 临时开启聊天表格日志（TestMain 默认关闭），测试结束后恢复。
+// 仅供断言表格行输出的用例使用。
+func withChatLog(t *testing.T) {
+	t.Helper()
+	old := chatLogEnabled
+	chatLogEnabled = true
+	t.Cleanup(func() { chatLogEnabled = old })
+}
+
 func TestChatStatsReaderTokensFromUsage(t *testing.T) {
 	r := newChatStatsReaderSince(strings.NewReader(sseOK), time.Now())
 	if _, err := io.Copy(io.Discard, r); err != nil {
@@ -131,6 +140,7 @@ func TestUIDPrefix(t *testing.T) {
 }
 
 func TestLogChatRowFormat(t *testing.T) {
+	withChatLog(t)
 	out := captureStdout(t, func() {
 		logChatRow(412*time.Millisecond, 27100*time.Millisecond, "deepseek-v4-flash", "stream", "00e26541abcdef", http.StatusOK, 1234)
 	})
@@ -147,6 +157,7 @@ func TestLogChatRowFormat(t *testing.T) {
 }
 
 func TestLogChatRowNoUsageShowsDash(t *testing.T) {
+	withChatLog(t)
 	out := captureStdout(t, func() {
 		logChatRow(0, time.Second, "glm-5.2", "sync", "s1", http.StatusServiceUnavailable, -1)
 	})
@@ -158,6 +169,7 @@ func TestLogChatRowNoUsageShowsDash(t *testing.T) {
 }
 
 func TestLogChatRowSeqIncrements(t *testing.T) {
+	withChatLog(t)
 	out := captureStdout(t, func() {
 		logChatRow(0, time.Second, "m", "sync", "u", 200, 1)
 		logChatRow(0, time.Second, "m", "sync", "u", 200, 1)
@@ -177,6 +189,7 @@ func TestLogChatRowSeqIncrements(t *testing.T) {
 }
 
 func TestChatLogsStreamRow(t *testing.T) {
+	withChatLog(t)
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 200, sseOK, true
 	})
@@ -203,6 +216,7 @@ func TestChatLogsStreamRow(t *testing.T) {
 }
 
 func TestChatLogsSyncRowTTFBDash(t *testing.T) {
+	withChatLog(t)
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 200, sseOK, true
 	})
@@ -226,6 +240,7 @@ func TestChatLogsSyncRowTTFBDash(t *testing.T) {
 }
 
 func TestChatLogsErrorRow(t *testing.T) {
+	withChatLog(t)
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 402, `{"code":1,"msg":"余额不足"}`, false
 	})
@@ -247,6 +262,7 @@ func TestChatLogsErrorRow(t *testing.T) {
 }
 
 func TestHealthzDoesNotLogTableRow(t *testing.T) {
+	withChatLog(t) // 日志开启也应无表格行：非 chat 路由根本不走 logChatRow
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: newFakeUpstream(t, func(string) (int, string, bool) {
 		return 200, sseOK, true

@@ -15,6 +15,10 @@ import (
 // chatSeq 进程级请求序号。
 var chatSeq atomic.Int64
 
+// chatLogEnabled 聊天表格日志总开关。生产恒 true；
+// 测试包经 TestMain 置 false 关闭 stdout 噪音，需要断言行输出的测试用 withChatLog 临时开启（R5）。
+var chatLogEnabled = true
+
 // chatStat 单个 chat 请求的日志统计；handler 挂 defer，请求出口后落一行。
 type chatStat struct {
 	start  time.Time
@@ -152,6 +156,9 @@ func uidPrefix(uid string) string {
 // logChatRow 打印一行请求级表格日志（直接输出 stdout，无 log 时间戳前缀）。
 // toks<0 表示 usage 缺失，显示 "-"。
 func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, toks int) {
+	if !chatLogEnabled {
+		return
+	}
 	seq := chatSeq.Add(1)
 	if len(model) > 11 {
 		model = model[:11]
