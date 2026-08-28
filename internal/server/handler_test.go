@@ -519,6 +519,55 @@ func TestStatusEndpoint(t *testing.T) {
 	if strings.Contains(body, "AccessToken") || strings.Contains(body, `"at"`) {
 		t.Error("token leaked in status output")
 	}
+	// Phase 3 汇总字段。
+	var statusBody map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &statusBody); err != nil {
+		t.Fatalf("status not json: %v", err)
+	}
+	if statusBody["total"] != float64(1) || statusBody["healthy"] != float64(1) ||
+		statusBody["cooling"] != float64(0) || statusBody["disabled"] != float64(0) {
+		t.Errorf("summary=%v want total=1 healthy=1 cooling=0 disabled=0", statusBody)
+	}
+}
+
+func TestStatusPortraitFields(t *testing.T) {
+	// Phase 3：/status 单账号需返回健康画像字段。
+	p := testPoolWith(&auth.Auth{UID: "u1", Nickname: "nick", AccessToken: "at", ExpiresAt: 9999999999})
+	p.NoteSuccess("u1")
+	p.NoteSuccess("u1")
+	p.NoteError("u1", 3, time.Hour) // 记录 last_err；CoolErr 冷却由 Cooldown 显式触发
+	p.Cooldown("u1", pool.CoolErr, time.Hour, "consecutive errors")
+	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	var body struct {
+		Accounts []pool.Status `json:"accounts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("status not json: %v", err)
+	}
+	if len(body.Accounts) != 1 {
+		t.Fatalf("accounts=%d", len(body.Accounts))
+	}
+	st := body.Accounts[0]
+	if !st.Cooling || st.CoolKind != "error_threshold" || st.CoolRemaining <= 0 {
+		t.Errorf("cooling portrait=%+v", st)
+	}
+	if st.SuccessCount != 2 {
+		t.Errorf("success_count=%d want 2", st.SuccessCount)
+	}
+	if st.ErrCount != 0 {
+		t.Errorf("err_count=%d want 0 (cleared by cooldown)", st.ErrCount)
+	}
+	if st.LastSuccessTime.IsZero() {
+		t.Error("last_success should be set")
+	}
+	if st.LastErrTime.IsZero() {
+		t.Error("last_err should be set")
+	}
 }
 
 func TestHealthz(t *testing.T) {

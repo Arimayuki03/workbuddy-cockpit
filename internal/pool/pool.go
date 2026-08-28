@@ -38,23 +38,33 @@ func (k CoolKind) String() string {
 
 // Status 单个账号对外暴露的状态（脱敏）。
 type Status struct {
-	UID      string    `json:"uid"`
-	Nickname string    `json:"nickname,omitempty"`
-	Credits  int64     `json:"credits"`
-	Cooling  bool      `json:"cooling"`
-	Until    time.Time `json:"until,omitempty"`
-	Reason   string    `json:"reason,omitempty"`
-	Disabled bool      `json:"disabled"`
-	ErrCount int       `json:"err_count,omitempty"`
+	UID             string    `json:"uid"`
+	Nickname        string    `json:"nickname,omitempty"`
+	Credits         int64     `json:"credits"`
+	Cooling         bool      `json:"cooling"`
+	CoolKind        string    `json:"cool_kind,omitempty"`
+	CoolRemaining   int64     `json:"cool_remaining_sec,omitempty"`
+	Until           time.Time `json:"until,omitempty"`
+	Reason          string    `json:"reason,omitempty"`
+	Disabled        bool      `json:"disabled"`
+	SuccessCount    int64     `json:"success_count,omitempty"`
+	ErrCount        int       `json:"err_count,omitempty"`
+	LastSuccessTime time.Time `json:"last_success,omitempty"`
+	LastErrTime     time.Time `json:"last_err,omitempty"`
 }
 
 type entry struct {
-	a        *auth.Auth
-	credits  int64
-	disabled bool
-	reason   string
-	until    time.Time
-	errCount int
+	a            *auth.Auth
+	credits      int64
+	successCount int64     // 累计成功
+	errCount     int       // 连续错误
+	lastErr      time.Time // 最近一次错误时间
+	lastSuccess  time.Time // 最近一次成功时间
+	coolKind     CoolKind
+	until        time.Time // 冷却截止
+	disabled     bool
+	reason       string
+	lastUsed     time.Time // 最近被选中时刻（防并发撞号）
 }
 
 func (e *entry) healthy(now time.Time) bool {
@@ -67,14 +77,22 @@ func (e *entry) healthy(now time.Time) bool {
 	return true
 }
 
+// stateAccount 单个账号的持久化状态（JSON tag 全小写下划线，向后兼容：缺字段零值）。
+type stateAccount struct {
+	Credits      int64     `json:"credits"`
+	Disabled     bool      `json:"disabled"`
+	Reason       string    `json:"reason,omitempty"`
+	Until        time.Time `json:"until,omitempty"`
+	CoolKind     CoolKind  `json:"cool_kind"`
+	SuccessCount int64     `json:"success_count,omitempty"`
+	ErrCount     int       `json:"err_count,omitempty"`
+	LastSuccess  time.Time `json:"last_success,omitempty"`
+	LastErr      time.Time `json:"last_err,omitempty"`
+}
+
 // stateFile 持久化格式。
 type stateFile struct {
-	Accounts map[string]struct {
-		Credits  int64     `json:"credits"`
-		Disabled bool      `json:"disabled"`
-		Reason   string    `json:"reason,omitempty"`
-		Until    time.Time `json:"until,omitempty"`
-	} `json:"accounts"`
+	Accounts map[string]stateAccount `json:"accounts"`
 }
 
 // flushInterval 后台落盘周期。
@@ -180,11 +198,39 @@ func (p *Pool) Pick() *auth.Auth {
 // 挑选策略：healthy 账号中取 credits 最高的前 5 名，按 credits 为权重随机抽签
 // （credits 全为 0 时退化为均匀随机）。意图是打散热点，避免永远打同一个账号。
 func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
-	top := p.topHealthy(tried, 5)
-	if len(top) == 0 {
+	return p.pick(tried)
+}
+
+// pick 在 healthy 候选集中按 credits 加权随机选出账号，并记录 lastUsed（供防并发撞号）。
+func (p *Pool) pick(tried map[string]bool) *auth.Auth {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	var cands []*entry
+	for uid, e := range p.byUID {
+		if tried != nil && tried[uid] {
+			continue
+		}
+		if !e.healthy(now) {
+			continue
+		}
+		cands = append(cands, e)
+	}
+	if len(cands) == 0 {
 		return nil
 	}
-	return p.pickWeighted(top).a
+	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].credits != cands[j].credits {
+			return cands[i].credits > cands[j].credits
+		}
+		return cands[i].a.UID < cands[j].a.UID
+	})
+	if len(cands) > 5 {
+		cands = cands[:5]
+	}
+	e := p.pickWeighted(cands)
+	e.lastUsed = time.Now()
+	return e.a
 }
 
 // pickWeighted 按 credits 权重随机抽签；权重总和为 0 时退化为均匀随机。
@@ -213,33 +259,6 @@ func (p *Pool) pickWeighted(cands []*entry) *entry {
 	return cands[len(cands)-1]
 }
 
-// topHealthy 返回 healthy 账号按 credits 降序的前 n 名（不足 n 取全部，按 uid 稳定排序）。
-func (p *Pool) topHealthy(tried map[string]bool, n int) []*entry {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	now := time.Now()
-	var cands []*entry
-	for uid, e := range p.byUID {
-		if tried != nil && tried[uid] {
-			continue
-		}
-		if !e.healthy(now) {
-			continue
-		}
-		cands = append(cands, e)
-	}
-	sort.Slice(cands, func(i, j int) bool {
-		if cands[i].credits != cands[j].credits {
-			return cands[i].credits > cands[j].credits
-		}
-		return cands[i].a.UID < cands[j].a.UID
-	})
-	if len(cands) > n {
-		cands = cands[:n]
-	}
-	return cands
-}
-
 // SetCredits 更新账号余额。
 func (p *Pool) SetCredits(uid string, credits int64) {
 	p.mu.Lock()
@@ -256,6 +275,7 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		e.until = time.Now().Add(d)
+		e.coolKind = kind
 		e.reason = reason
 		e.errCount = 0
 		p.dirty.Store(true)
@@ -294,6 +314,7 @@ func (p *Pool) ReenableIfCredits(uid string, remain int64) {
 		e.credits = remain
 		if remain > 0 && !e.disabled {
 			e.until = time.Time{}
+			e.coolKind = 0
 			e.reason = ""
 			e.errCount = 0
 		}
@@ -307,8 +328,10 @@ func (p *Pool) NoteError(uid string, threshold int, d time.Duration) {
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		e.errCount++
+		e.lastErr = time.Now()
 		if e.errCount >= threshold {
 			e.until = time.Now().Add(d)
+			e.coolKind = CoolErr
 			e.reason = "consecutive errors"
 			e.errCount = 0
 		}
@@ -316,12 +339,15 @@ func (p *Pool) NoteError(uid string, threshold int, d time.Duration) {
 	}
 }
 
-// NoteSuccess 成功请求重置错误计数。
+// NoteSuccess 成功请求累加成功计数、刷新 lastSuccess，并重置连续错误。
 func (p *Pool) NoteSuccess(uid string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
+		e.successCount++
+		e.lastSuccess = time.Now()
 		e.errCount = 0
+		p.dirty.Store(true)
 	}
 }
 
@@ -346,6 +372,39 @@ func (p *Pool) AuthByUID(uid string) *auth.Auth {
 	return nil
 }
 
+// Counts 返回总数与 healthy 数（健康 = 未禁用且未处于冷却期）。
+func (p *Pool) Counts() (total, healthy int) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	for _, e := range p.byUID {
+		total++
+		if e.healthy(now) {
+			healthy++
+		}
+	}
+	return total, healthy
+}
+
+// CountsDetailed 返回 total/healthy/cooling/disabled 四类计数。
+func (p *Pool) CountsDetailed() (total, healthy, cooling, disabled int) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	for _, e := range p.byUID {
+		total++
+		switch {
+		case e.disabled:
+			disabled++
+		case !e.until.IsZero() && now.Before(e.until):
+			cooling++
+		default:
+			healthy++
+		}
+	}
+	return total, healthy, cooling, disabled
+}
+
 // List 返回所有账号状态（按 UID 排序，稳定输出）。
 func (p *Pool) List() []Status {
 	p.mu.RLock()
@@ -364,16 +423,28 @@ func (p *Pool) List() []Status {
 
 func (p *Pool) statusOf(uid string, e *entry) Status {
 	now := time.Now()
-	return Status{
-		UID:      uid,
-		Nickname: e.a.Nickname,
-		Credits:  e.credits,
-		Cooling:  !e.until.IsZero() && now.Before(e.until),
-		Until:    e.until,
-		Reason:   e.reason,
-		Disabled: e.disabled,
-		ErrCount: e.errCount,
+	st := Status{
+		UID:              uid,
+		Nickname:         e.a.Nickname,
+		Credits:          e.credits,
+		Cooling:          !e.until.IsZero() && now.Before(e.until),
+		Reason:           e.reason,
+		Disabled:         e.disabled,
+		SuccessCount:     e.successCount,
+		ErrCount:         e.errCount,
+		LastSuccessTime:  e.lastSuccess,
+		LastErrTime:      e.lastErr,
+		Until:            e.until,
 	}
+	if st.Cooling {
+		// 冷却剩余秒数（向上取整，避免 0 显示为已到期）。
+		st.CoolRemaining = int64(time.Until(e.until).Seconds() + 0.999)
+		if st.CoolRemaining < 0 {
+			st.CoolRemaining = 0
+		}
+		st.CoolKind = e.coolKind.String()
+	}
+	return st
 }
 
 // ---------------------------------------------------------------------------
@@ -391,11 +462,16 @@ func (p *Pool) load() {
 	}
 	for uid, s := range sf.Accounts {
 		p.byUID[uid] = &entry{
-			a:        &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
-			credits:  s.Credits,
-			disabled: s.Disabled,
-			reason:   s.Reason,
-			until:    s.Until,
+			a:            &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
+			credits:      s.Credits,
+			disabled:     s.Disabled,
+			reason:       s.Reason,
+			until:        s.Until,
+			coolKind:     s.CoolKind,
+			successCount: s.SuccessCount,
+			errCount:     s.ErrCount,
+			lastErr:      s.LastErr,
+			lastSuccess:  s.LastSuccess,
 		}
 	}
 }
@@ -404,23 +480,18 @@ func (p *Pool) saveLocked() {
 	if p.stateFp == "" {
 		return
 	}
-	sf := stateFile{Accounts: map[string]struct {
-		Credits  int64     `json:"credits"`
-		Disabled bool      `json:"disabled"`
-		Reason   string    `json:"reason,omitempty"`
-		Until    time.Time `json:"until,omitempty"`
-	}{}}
+	sf := stateFile{Accounts: map[string]stateAccount{}}
 	for uid, e := range p.byUID {
-		sf.Accounts[uid] = struct {
-			Credits  int64     `json:"credits"`
-			Disabled bool      `json:"disabled"`
-			Reason   string    `json:"reason,omitempty"`
-			Until    time.Time `json:"until,omitempty"`
-		}{
-			Credits:  e.credits,
-			Disabled: e.disabled,
-			Reason:   e.reason,
-			Until:    e.until,
+		sf.Accounts[uid] = stateAccount{
+			Credits:      e.credits,
+			Disabled:     e.disabled,
+			Reason:       e.reason,
+			Until:        e.until,
+			CoolKind:     e.coolKind,
+			SuccessCount: e.successCount,
+			ErrCount:     e.errCount,
+			LastSuccess:  e.lastSuccess,
+			LastErr:      e.lastErr,
 		}
 	}
 	raw, err := json.MarshalIndent(sf, "", "  ")

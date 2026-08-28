@@ -3,6 +3,7 @@ package pool
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -258,6 +259,113 @@ func TestNoteSuccessResetsCounter(t *testing.T) {
 	p.NoteError("u1", 3, time.Hour)
 	if p.Pick() == nil {
 		t.Fatal("success should reset error counter")
+	}
+}
+
+func TestNoteSuccessIncrementsAndRecords(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	before := time.Now()
+	p.NoteSuccess("u1")
+	p.NoteSuccess("u1")
+	st, _ := p.Status("u1")
+	if st.SuccessCount != 2 {
+		t.Errorf("success_count=%d want 2", st.SuccessCount)
+	}
+	if st.LastSuccessTime.Before(before) {
+		t.Errorf("last_success=%v before call", st.LastSuccessTime)
+	}
+	if !st.LastErrTime.IsZero() {
+		t.Errorf("last_err should be zero for fresh success: %v", st.LastErrTime)
+	}
+}
+
+func TestNoteErrorRecordsAndKind(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.NoteError("u1", 3, time.Hour)
+	st, _ := p.Status("u1")
+	if st.ErrCount != 1 {
+		t.Errorf("err_count=%d want 1", st.ErrCount)
+	}
+	if st.LastErrTime.IsZero() {
+		t.Error("last_err not set")
+	}
+	// 次次累积两笔，第三笔触发冷却 → cool_kind=error_threshold
+	p.NoteError("u1", 3, time.Hour)
+	p.NoteError("u1", 3, time.Hour)
+	st, _ = p.Status("u1")
+	if !st.Cooling || st.CoolKind != "error_threshold" {
+		t.Errorf("cooling portrait=%+v", st)
+	}
+	if st.CoolRemaining <= 0 {
+		t.Errorf("cool_remaining=%d want >0", st.CoolRemaining)
+	}
+}
+
+func TestCoolKindPersistsAcrossReload(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Cooldown("u1", CoolErr, time.Hour, "consecutive errors")
+	p.Flush()
+
+	// 旧文件缺新字段时零值 → 冷却应仍工作（向后兼容）。
+	p2 := New(fp)
+	p2.Add(&auth.Auth{UID: "u1"})
+	st, ok := p2.Status("u1")
+	if !ok || !st.Cooling {
+		t.Fatalf("cooldown state lost after reload: %+v ok=%v", st, ok)
+	}
+	if st.CoolKind != "error_threshold" {
+		t.Errorf("cool_kind after reload=%q want error_threshold", st.CoolKind)
+	}
+}
+
+func TestStateRoundTripExtendedFields(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Cooldown("u1", CoolHard, time.Hour, "余额不足")
+	p.NoteSuccess("u1")              // successCount=1，last_success 非零
+	p.NoteSuccess("u1")              // successCount=2
+	p.NoteError("u1", 99, time.Hour) // errCount=1（未达阈值），last_err 非零
+	p.Flush()
+
+	raw, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// JSON tag 全小写下划线；err_count 此时 =1 所以也会落盘。
+	for _, want := range []string{`"cool_kind"`, `"success_count"`, `"err_count"`, `"last_success"`, `"last_err"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("state.json missing %s:\n%s", want, raw)
+		}
+	}
+
+	// 重载后字段保留
+	p2 := New(fp)
+	p2.Add(&auth.Auth{UID: "u1"})
+	st, ok := p2.Status("u1")
+	if !ok {
+		t.Fatal("no status")
+	}
+	if st.SuccessCount != 2 || st.CoolKind != "hard_credit" {
+		t.Errorf("reloaded portrait=%+v", st)
+	}
+	if st.LastSuccessTime.IsZero() || st.LastErrTime.IsZero() {
+		t.Error("last_success/last_err lost after reload")
+	}
+}
+
+func TestStatusCoolKindDefaultsWhenNotCooling(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	st, _ := p.Status("u1")
+	if st.CoolKind != "" || st.CoolRemaining != 0 {
+		t.Errorf("non-cooling portrait=%+v", st)
 	}
 }
 
