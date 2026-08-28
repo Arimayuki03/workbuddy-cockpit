@@ -8,7 +8,7 @@ import (
 )
 
 func TestPrepareBodyForcesStream(t *testing.T) {
-	out := PrepareBody([]byte(`{"model":"glm-5.2","messages":[]}`))
+	out := PrepareBodyOpt([]byte(`{"model":"glm-5.2","messages":[]}`), true)
 	var m map[string]any
 	json.Unmarshal(out, &m)
 	if m["stream"] != true {
@@ -17,7 +17,7 @@ func TestPrepareBodyForcesStream(t *testing.T) {
 }
 
 func TestPrepareBodyToolChoiceFunctionObject(t *testing.T) {
-	out := PrepareBody([]byte(`{"tool_choice":{"type":"function","function":{"name":"get_weather"}},"tools":[{"type":"function"}]}`))
+	out := PrepareBodyOpt([]byte(`{"tool_choice":{"type":"function","function":{"name":"get_weather"}},"tools":[{"type":"function"}]}`), true)
 	var m map[string]any
 	json.Unmarshal(out, &m)
 	if m["tool_choice"] != "get_weather" {
@@ -33,7 +33,7 @@ func TestPrepareBodyToolChoiceNone(t *testing.T) {
 		`{"tool_choice":"none","tools":[{}],"functions":[{}]}`,
 		`{"tool_choice":{"type":"none"},"tools":[{}]}`,
 	} {
-		out := PrepareBody([]byte(in))
+		out := PrepareBodyOpt([]byte(in), true)
 		var m map[string]any
 		json.Unmarshal(out, &m)
 		if _, ok := m["tool_choice"]; ok {
@@ -49,7 +49,7 @@ func TestPrepareBodyToolChoiceNone(t *testing.T) {
 }
 
 func TestPrepareBodyToolChoiceAuto(t *testing.T) {
-	out := PrepareBody([]byte(`{"tool_choice":{"type":"auto"}}`))
+	out := PrepareBodyOpt([]byte(`{"tool_choice":{"type":"auto"}}`), true)
 	var m map[string]any
 	json.Unmarshal(out, &m)
 	if m["tool_choice"] != "auto" {
@@ -59,7 +59,7 @@ func TestPrepareBodyToolChoiceAuto(t *testing.T) {
 
 func TestPrepareBodyInvalidJSON(t *testing.T) {
 	in := []byte(`{broken`)
-	out := PrepareBody(in)
+	out := PrepareBodyOpt(in, true)
 	if string(out) != string(in) {
 		t.Error("invalid json should pass through unchanged")
 	}
