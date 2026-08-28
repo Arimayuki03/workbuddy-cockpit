@@ -261,6 +261,88 @@ func TestNoteSuccessResetsCounter(t *testing.T) {
 	}
 }
 
+func TestNextDay4AMBoundaries(t *testing.T) {
+	cases := []struct {
+		name string
+		now  string // RFC3339 (UTC 表示)
+		want string // 次日 04:00（同一时区，UTC 表示）
+	}{
+		{"普通日", "2026-08-28T17:00:00+08:00", "2026-08-29T04:00:00+08:00"},
+		{"凌晨未到4点", "2026-08-28T03:59:59+08:00", "2026-08-29T04:00:00+08:00"},
+		{"正好4点", "2026-08-28T04:00:00+08:00", "2026-08-29T04:00:00+08:00"},
+		{"4点刚过", "2026-08-28T04:00:01+08:00", "2026-08-29T04:00:00+08:00"},
+		{"月末(31天月)", "2026-01-31T12:00:00+08:00", "2026-02-01T04:00:00+08:00"},
+		{"月末(28天月)", "2026-02-28T12:00:00+08:00", "2026-03-01T04:00:00+08:00"},
+		{"闰年月末", "2028-02-29T12:00:00+08:00", "2028-03-01T04:00:00+08:00"},
+		{"年末", "2026-12-31T23:59:59+08:00", "2027-01-01T04:00:00+08:00"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			now, err := time.Parse(time.RFC3339, c.now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := time.Parse(time.RFC3339, c.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := nextDay4AM(now); !got.Equal(want) {
+				t.Errorf("nextDay4AM(%v)=%v want %v", c.now, got, want)
+			}
+		})
+	}
+}
+
+func TestCooldownUntilTomorrow4AM(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	before := time.Now()
+	p.CooldownUntilTomorrow4AM("u1", "余额不足")
+	after := time.Now()
+	st, ok := p.Status("u1")
+	if !ok {
+		t.Fatal("no status")
+	}
+	if !st.Cooling {
+		t.Fatalf("should be cooling: %+v", st)
+	}
+	if st.Reason != "余额不足" {
+		t.Errorf("reason=%q", st.Reason)
+	}
+	// 冷却截止必须是"此刻之后的最近一个 04:00"：晚于 now、距今不超过 24h。
+	if st.Until.Before(after) {
+		t.Errorf("until %v is in the past (call span %v..%v)", st.Until, before, after)
+	}
+	if st.Until.Hour() != 4 {
+		t.Errorf("until hour=%d want 4", st.Until.Hour())
+	}
+	if d := st.Until.Sub(after); d > 24*time.Hour {
+		t.Errorf("until %v is more than 24h out: %v", st.Until, d)
+	}
+	// 冷却拒选。
+	if p.Pick() != nil {
+		t.Fatal("cooling account should not be picked")
+	}
+}
+
+func TestCooldownUntilTomorrow4AMPersists(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.CooldownUntilTomorrow4AM("u1", "余额不足")
+	p.Flush()
+	p2 := New(fp)
+	p2.Add(&auth.Auth{UID: "u1"})
+	if p2.Pick() != nil {
+		t.Fatal("4am cooldown lost after reload")
+	}
+	st, ok := p2.Status("u1")
+	if !ok || st.Until.Hour() != 4 || st.Reason != "余额不足" {
+		t.Errorf("status after reload=%+v ok=%v", st, ok)
+	}
+}
+
 func TestList(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1", Nickname: "nick1"})

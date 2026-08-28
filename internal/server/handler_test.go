@@ -147,6 +147,47 @@ func TestChatRotatesOnHardCredit(t *testing.T) {
 	}
 }
 
+func TestChatHardCreditCooldownUntilNextDay4AM(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		if authz == "Bearer at-bad" {
+			return 402, `{"code":1,"msg":"余额不足"}`, false
+		}
+		return 200, sseOK, true
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("bad", 2000) // bad 积分高，确定性源 → 先被选中
+	p.SetCredits("good", 1000)
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	st, ok := p.Status("bad")
+	if !ok || !st.Cooling {
+		t.Fatalf("bad should be cooling: %+v ok=%v", st, ok)
+	}
+	if st.Reason != "余额不足" {
+		t.Errorf("reason=%q", st.Reason)
+	}
+	// 硬信贷冷却必须是次日 04:00，而不是固定 12h/配置时长。
+	if st.Until.Hour() != 4 {
+		t.Errorf("until hour=%d want 4 (next-day 04:00)", st.Until.Hour())
+	}
+	if d := time.Until(st.Until); d <= 0 || d > 24*time.Hour {
+		t.Errorf("until %v not within (0,24h]: %v", st.Until, d)
+	}
+	// 立即换号成功：good 被选中。
+	stGood, _ := p.Status("good")
+	if stGood.Cooling || stGood.Disabled {
+		t.Errorf("good should stay healthy: %+v", stGood)
+	}
+}
+
 func TestChatAllUnavailableReturns503(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 402, `{"code":1,"msg":"余额不足"}`, false
