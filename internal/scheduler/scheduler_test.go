@@ -90,9 +90,9 @@ func TestRunCheckinReenablesCoolingAccount(t *testing.T) {
 		BillingBaseGlob: srv.URL,
 	}
 	s := New(Config{
-		Pool:          p,
-		Upstream:      up,
-		CheckinHours:  []int{9, 21},
+		Pool:           p,
+		Upstream:       up,
+		CheckinHours:   []int{9, 21},
 		KeepaliveHours: []int{22},
 	})
 	s.RunCheckinNow()

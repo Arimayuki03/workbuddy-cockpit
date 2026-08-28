@@ -8,7 +8,6 @@ import (
 	"log"
 	"time"
 
-	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/upstream"
 )
@@ -130,6 +129,3 @@ func (s *Scheduler) RunKeepaliveNow() {
 		}
 	}
 }
-
-// 确保 auth 引用（auth.Auth 经 pool.AuthByUID 返回）。
-var _ = auth.Auth{}

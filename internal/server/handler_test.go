@@ -2,9 +2,11 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,13 @@ import (
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/upstream"
 )
+
+// TestMain 默认关闭聊天表格日志（chatLogEnabled=false），消除 go test 期间的 stdout 噪音。
+// 断言表格行输出的测试（logging_test.go 中的 ChatLogs/LogChatRow 系列）用 withChatLog 临时开启。
+func TestMain(m *testing.M) {
+	chatLogEnabled = false
+	os.Exit(m.Run())
+}
 
 const sseOK = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好\"}}]}\n\n" +
 	"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n" +
@@ -47,8 +56,13 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+// testPoolWith 构建一个所有账号 credits=1000 的池，并注入确定性随机源：
+// randInt64N 恒返回 0 → pickWeighted 必选候选集中积分最高者（第一个）。
+// 这让依赖"bad 先被选中"的轮转测试（如 TestChatRotatesOnHardCredit）完全确定，
+// 不再受加权随机影响而 flake。
 func testPoolWith(auths ...*auth.Auth) *pool.Pool {
 	p := pool.New("")
+	p.SetRandomSource(func(n int64) int64 { return 0 })
 	for _, a := range auths {
 		p.Add(a)
 		p.SetCredits(a.UID, 1000)
@@ -141,6 +155,47 @@ func TestChatRotatesOnHardCredit(t *testing.T) {
 	}
 }
 
+func TestChatHardCreditCooldownUntilNextDay4AM(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		if authz == "Bearer at-bad" {
+			return 402, `{"code":1,"msg":"余额不足"}`, false
+		}
+		return 200, sseOK, true
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("bad", 2000) // bad 积分高，确定性源 → 先被选中
+	p.SetCredits("good", 1000)
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	st, ok := p.Status("bad")
+	if !ok || !st.Cooling {
+		t.Fatalf("bad should be cooling: %+v ok=%v", st, ok)
+	}
+	if st.Reason != "余额不足" {
+		t.Errorf("reason=%q", st.Reason)
+	}
+	// 硬信贷冷却必须是次日 04:00，而不是固定 12h/配置时长。
+	if st.Until.Hour() != 4 {
+		t.Errorf("until hour=%d want 4 (next-day 04:00)", st.Until.Hour())
+	}
+	if d := time.Until(st.Until); d <= 0 || d > 24*time.Hour {
+		t.Errorf("until %v not within (0,24h]: %v", st.Until, d)
+	}
+	// 立即换号成功：good 被选中。
+	stGood, _ := p.Status("good")
+	if stGood.Cooling || stGood.Disabled {
+		t.Errorf("good should stay healthy: %+v", stGood)
+	}
+}
+
 func TestChatAllUnavailableReturns503(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 402, `{"code":1,"msg":"余额不足"}`, false
@@ -177,6 +232,64 @@ func TestChatSessionDeadDisables(t *testing.T) {
 	st, _ := p.Status("u1")
 	if !st.Disabled {
 		t.Errorf("account should be disabled: %+v", st)
+	}
+}
+
+func TestChatTransportErrorDoesNotPenalize(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, errors.New("connection refused")
+		})},
+		ChatBaseCN:      "https://fake.example",
+		ChatBaseGlobal:  "https://fake.example",
+		BillingBaseCN:   "https://fake.example",
+		BillingBaseGlob: "https://fake.example",
+	}
+	// threshold=1：若传输错误也累计 errCount，一次就会冷却
+	h := NewHandler(Config{Pool: p, Upstream: up, ErrThreshold: 1, ErrCooldown: time.Hour})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != 503 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	st, _ := p.Status("u1")
+	if st.Cooling || st.ErrCount != 0 {
+		t.Fatalf("transport error should not penalize account: %+v", st)
+	}
+}
+
+func TestChatHTTP5xxPenalizes(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 500, `{"code":500}`, false
+	})
+	h := NewHandler(Config{Pool: p, Upstream: up, ErrThreshold: 1, ErrCooldown: time.Hour})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != 503 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	st, _ := p.Status("u1")
+	if !st.Cooling {
+		t.Fatalf("http 5xx should cool account with threshold=1: %+v", st)
+	}
+}
+
+func TestChatHTTP4xxClientDoesNotPenalize(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 400, `{"code":400,"msg":"bad request"}`, false
+	})
+	h := NewHandler(Config{Pool: p, Upstream: up, ErrThreshold: 1, ErrCooldown: time.Hour})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != 503 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	st, _ := p.Status("u1")
+	if st.Cooling || st.ErrCount != 0 {
+		t.Fatalf("generic 4xx should not penalize account: %+v", st)
 	}
 }
 
@@ -299,6 +412,30 @@ func TestModelsDynamicFallsBackToStatic(t *testing.T) {
 	}
 }
 
+func TestModelsFetchFailurePenalizesAccount(t *testing.T) {
+	// 清缓存
+	dynamicModelsCache.Lock()
+	dynamicModelsCache.ids = nil
+	dynamicModelsCache.fetched = time.Time{}
+	dynamicModelsCache.lastFail = time.Time{}
+	dynamicModelsCache.Unlock()
+
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 500, `boom`, false
+	})
+	h := NewHandler(Config{Pool: p, Upstream: up, ErrThreshold: 1, ErrCooldown: time.Hour})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d (static fallback)", rec.Code)
+	}
+	st, _ := p.Status("u1")
+	if !st.Cooling {
+		t.Fatalf("fetch failure should penalize account with threshold=1: %+v", st)
+	}
+}
+
 func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 	// 清缓存
 	dynamicModelsCache.Lock()
@@ -390,14 +527,112 @@ func TestStatusEndpoint(t *testing.T) {
 	if strings.Contains(body, "AccessToken") || strings.Contains(body, `"at"`) {
 		t.Error("token leaked in status output")
 	}
+	// Phase 3 汇总字段。
+	var statusBody map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &statusBody); err != nil {
+		t.Fatalf("status not json: %v", err)
+	}
+	if statusBody["total"] != float64(1) || statusBody["healthy"] != float64(1) ||
+		statusBody["cooling"] != float64(0) || statusBody["disabled"] != float64(0) {
+		t.Errorf("summary=%v want total=1 healthy=1 cooling=0 disabled=0", statusBody)
+	}
 }
 
-func TestHealthz(t *testing.T) {
+func TestStatusPortraitFields(t *testing.T) {
+	// Phase 3：/status 单账号需返回健康画像字段。
+	p := testPoolWith(&auth.Auth{UID: "u1", Nickname: "nick", AccessToken: "at", ExpiresAt: 9999999999})
+	p.NoteSuccess("u1")
+	p.NoteSuccess("u1")
+	p.NoteError("u1", 3, time.Hour) // 记录 last_err；CoolErr 冷却由 Cooldown 显式触发
+	p.Cooldown("u1", pool.CoolErr, time.Hour, "consecutive errors")
+	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	var body struct {
+		Accounts []pool.Status `json:"accounts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("status not json: %v", err)
+	}
+	if len(body.Accounts) != 1 {
+		t.Fatalf("accounts=%d", len(body.Accounts))
+	}
+	st := body.Accounts[0]
+	if !st.Cooling || st.CoolKind != "error_threshold" || st.CoolRemaining <= 0 {
+		t.Errorf("cooling portrait=%+v", st)
+	}
+	if st.SuccessCount != 2 {
+		t.Errorf("success_count=%d want 2", st.SuccessCount)
+	}
+	if st.ErrCount != 0 {
+		t.Errorf("err_count=%d want 0 (cleared by cooldown)", st.ErrCount)
+	}
+	if st.LastSuccessTime.IsZero() {
+		t.Error("last_success should be set")
+	}
+	if st.LastErrTime.IsZero() {
+		t.Error("last_err should be set")
+	}
+}
+
+// TestHealthzEmptyPool 空池（healthy=0）→ 503，表示暂不可服务。
+func TestHealthzEmptyPool(t *testing.T) {
 	h := NewHandler(Config{Pool: pool.New(""), Upstream: upstream.New()})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
-	if rec.Code != 200 {
-		t.Errorf("code=%d", rec.Code)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("code=%d want 503 (healthy=0)", rec.Code)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("healthz not json: %v body=%s", err, rec.Body)
+	}
+	if resp["healthy"] != float64(0) || resp["total"] != float64(0) {
+		t.Errorf("healthz json=%v", resp)
+	}
+}
+
+// TestHealthz503WhenNoHealthy 所有账号禁用/冷却 → 503。
+func TestHealthz503WhenNoHealthy(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
+	p.Disable("u1", "session dead")
+	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code=%d want 503", rec.Code)
+	}
+	ct := rec.Header().Get("Content-Type")
+	if !strings.Contains(ct, "application/json") {
+		t.Errorf("ct=%q want json", ct)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("healthz not json: %v body=%s", err, rec.Body)
+	}
+	if resp["healthy"] != float64(0) || resp["total"] != float64(1) {
+		t.Errorf("healthz json=%v want healthy=0 total=1", resp)
+	}
+}
+
+// TestHealthz200WithHealthy 有健康账号 → 200。
+func TestHealthz200WithHealthy(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d want 200", rec.Code)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("healthz not json: %v body=%s", err, rec.Body)
+	}
+	if resp["healthy"] != float64(1) || resp["total"] != float64(1) {
+		t.Errorf("healthz json=%v want healthy=1 total=1", resp)
 	}
 }
 

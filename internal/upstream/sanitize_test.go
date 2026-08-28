@@ -141,7 +141,7 @@ func TestPrepareBodyOptDisabledPreservesFingerprints(t *testing.T) {
 // PrepareBody 默认行为 = 开启脱敏（保持向后兼容）。
 func TestPrepareBodyDefaultSanitizes(t *testing.T) {
 	body := []byte(`{"model":"glm-5.2","messages":[{"role":"system","content":"` + ccIdentity + `"}]}`)
-	out := PrepareBody(body)
+	out := PrepareBodyOpt(body, true)
 	if strings.Contains(string(out), ccIdentity) {
 		t.Error("PrepareBody default should sanitize")
 	}

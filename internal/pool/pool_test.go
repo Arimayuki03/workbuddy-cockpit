@@ -1,14 +1,28 @@
 package pool
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"workbuddy2api/internal/auth"
 )
 
+// withNoPickGap 临时关闭防并发撞号窗口（minPickGap=0），让纯加权分布测试不受影响。
+func withNoPickGap(t *testing.T) {
+	t.Helper()
+	old := minPickGap
+	minPickGap = 0
+	t.Cleanup(func() { minPickGap = old })
+}
+
 func TestPickHighestCredits(t *testing.T) {
+	withNoPickGap(t)
+	// P1-8：Top5 加权随机。积分悬殊时高积分账号应被多数选中（不再是必中）。
 	p := New("")
 	a1 := &auth.Auth{UID: "u1"}
 	a2 := &auth.Auth{UID: "u2"}
@@ -17,11 +31,14 @@ func TestPickHighestCredits(t *testing.T) {
 	p.Add(a2)
 	p.Add(a3)
 	p.SetCredits("u1", 100)
-	p.SetCredits("u2", 500)
+	p.SetCredits("u2", 50000)
 	p.SetCredits("u3", 300)
-	got := p.Pick()
-	if got == nil || got.UID != "u2" {
-		t.Fatalf("pick=%+v want u2", got)
+	counts := map[string]int{}
+	for i := 0; i < 300; i++ {
+		counts[p.Pick().UID]++
+	}
+	if counts["u2"] < 240 { // u2 权重 50000/50400 ≈ 99.2%
+		t.Errorf("u2 picked %d/300, want overwhelming majority", counts["u2"])
 	}
 }
 
@@ -79,12 +96,166 @@ func TestPickExcluding(t *testing.T) {
 	}
 }
 
+func TestPickExcludingStaysWithinHealthy(t *testing.T) {
+	withNoPickGap(t)
+	// 加权随机不能选出冷却/禁用账号。
+	p := New("")
+	p.Add(&auth.Auth{UID: "u-cold"})
+	p.Add(&auth.Auth{UID: "u-hot"})
+	p.SetCredits("u-cold", 9999)
+	p.SetCredits("u-hot", 1)
+	p.Cooldown("u-cold", CoolHard, time.Hour, "x")
+	for i := 0; i < 20; i++ {
+		got := p.PickExcluding(nil)
+		if got == nil || got.UID != "u-hot" {
+			t.Fatalf("iter %d: picked %+v, want only healthy u-hot", i, got)
+		}
+	}
+}
+
+func TestPickWeightedSkewTowardHighCredits(t *testing.T) {
+	withNoPickGap(t)
+	// Top5 加权随机：单账号 credits 占比足够高时，多数挑中它。
+	p := New("")
+	for _, u := range []string{"w1", "w2", "w3", "w4", "w5", "w6"} {
+		p.Add(&auth.Auth{UID: u})
+		p.SetCredits(u, 1)
+	}
+	p.SetCredits("w1", 1000)
+	counts := map[string]int{}
+	for i := 0; i < 500; i++ {
+		counts[p.Pick().UID]++
+	}
+	if counts["w1"] < 300 {
+		t.Errorf("w1 picked %d/500, want majority (weighted)", counts["w1"])
+	}
+}
+
+func TestPickWeightedUniformWhenAllZero(t *testing.T) {
+	withNoPickGap(t)
+	// credits 全为 0 → 退化为均匀随机，不能只挑固定一个。
+	p := New("")
+	for _, u := range []string{"z1", "z2", "z3"} {
+		p.Add(&auth.Auth{UID: u})
+	}
+	seen := map[string]bool{}
+	for i := 0; i < 30; i++ {
+		seen[p.Pick().UID] = true
+	}
+	if len(seen) != 3 {
+		t.Errorf("uniform fallback should hit all, seen=%v", seen)
+	}
+}
+
+func TestPickWeightedTopFiveOnly(t *testing.T) {
+	withNoPickGap(t)
+	// 第 6 高 credits 的账号在 Top5 之外，权重抽签永远轮不到它。
+	p := New("")
+	for _, u := range []string{"a1", "a2", "a3", "a4", "a5", "a6"} {
+		p.Add(&auth.Auth{UID: u})
+	}
+	p.SetCredits("a1", 1000)
+	p.SetCredits("a2", 1000)
+	p.SetCredits("a3", 1000)
+	p.SetCredits("a4", 1000)
+	p.SetCredits("a5", 1000)
+	p.SetCredits("a6", 5) // Top5 之外
+	for i := 0; i < 2000; i++ {
+		if got := p.Pick(); got == nil || got.UID == "a6" {
+			t.Fatalf("iter %d: picked %+v, a6 must stay outside top-5", i, got)
+		}
+	}
+}
+
+func TestPickDeterministicViaSetRandomSource(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.SetRandomSource(func(n int64) int64 { return 0 })
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Add(&auth.Auth{UID: "u2"})
+	p.SetCredits("u1", 100)
+	p.SetCredits("u2", 50)
+	// r=0 ∈ [0,50) → 命中 u1。注入源应使选号完全确定。
+	for i := 0; i < 50; i++ {
+		if got := p.Pick(); got == nil || got.UID != "u1" {
+			t.Fatalf("iter %d: pick=%+v want u1 (deterministic)", i, got)
+		}
+	}
+}
+
+func TestPickAntiThunderingHerd(t *testing.T) {
+	// 100 goroutine 同时 Pick：防并发撞号窗口内同一账号不应被重复选中。
+	// credits 相同 → 无注入源时加权随机应天然打散；为保证稳定，全部置 0 走均匀随机。
+	p := New("")
+	for i := 0; i < 10; i++ {
+		p.Add(&auth.Auth{UID: fmt.Sprintf("c%02d", i)})
+	}
+	// 关键：验证并发中任意瞬间不会全选同一账号。
+	const N = 100
+	var wg sync.WaitGroup
+	picked := make([]string, N)
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			if a := p.Pick(); a != nil {
+				picked[idx] = a.UID
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	counts := map[string]int{}
+	for _, uid := range picked {
+		if uid != "" {
+			counts[uid]++
+		}
+	}
+	// 选号必须覆盖多个账号，且最热门的账号不超过一半。
+	if len(counts) < 2 {
+		t.Fatalf("anti-thundering-herd failed: all %d picks hit %d account(s) %v", N, len(counts), counts)
+	}
+	for uid, n := range counts {
+		if n > N/2 {
+			t.Errorf("account %s picked %d/%d (>50%%): thundering herd", uid, n, N)
+		}
+	}
+}
+
+func TestPickLRUFallbackWhenTopAllRecentlyUsed(t *testing.T) {
+	// top5 全部刚被选中 → LRU 兜底应挑最近最少使用的那个（= 最早 lastUsed）。
+	old := minPickGap
+	minPickGap = time.Hour // 超大窗口：任何 lastUsed 都在窗口内
+	defer func() { minPickGap = old }()
+
+	p := New("")
+	for i := 0; i < 5; i++ {
+		p.Add(&auth.Auth{UID: fmt.Sprintf("a%d", i)})
+	}
+	// 直接构造 lastUsed：不经过 Pick（避免 Pick 改写 lastUsed）。
+	order := []string{"a4", "a3", "a2", "a1", "a0"}
+	p.mu.Lock()
+	for i, uid := range order {
+		p.byUID[uid].lastUsed = time.Now().Add(-time.Duration(len(order)-i) * time.Second) // a4 最旧
+	}
+	p.mu.Unlock()
+
+	got := p.Pick()
+	if got == nil {
+		t.Fatal("pick returned nil")
+	}
+	if got.UID != "a4" {
+		t.Errorf("LRU fallback picked %s want a4 (oldest lastUsed)", got.UID)
+	}
+}
+
 func TestCooldownPersists(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "state.json")
 	p := New(fp)
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Cooldown("u1", CoolHard, time.Hour, "余额不足")
+	p.Flush() // 状态变更走 dirty 标志，落盘由 Flush / 后台 goroutine 负责
 	p2 := New(fp)
 	p2.Add(&auth.Auth{UID: "u1"})
 	if p2.Pick() != nil {
@@ -102,6 +273,7 @@ func TestDisablePersists(t *testing.T) {
 	p := New(fp)
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Disable("u1", "12153 session dead")
+	p.Flush()
 	p2 := New(fp)
 	p2.Add(&auth.Auth{UID: "u1"})
 	if p2.Pick() != nil {
@@ -172,6 +344,195 @@ func TestNoteSuccessResetsCounter(t *testing.T) {
 	}
 }
 
+func TestNoteSuccessIncrementsAndRecords(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	before := time.Now()
+	p.NoteSuccess("u1")
+	p.NoteSuccess("u1")
+	st, _ := p.Status("u1")
+	if st.SuccessCount != 2 {
+		t.Errorf("success_count=%d want 2", st.SuccessCount)
+	}
+	if st.LastSuccessTime.Before(before) {
+		t.Errorf("last_success=%v before call", st.LastSuccessTime)
+	}
+	if !st.LastErrTime.IsZero() {
+		t.Errorf("last_err should be zero for fresh success: %v", st.LastErrTime)
+	}
+}
+
+func TestNoteErrorRecordsAndKind(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.NoteError("u1", 3, time.Hour)
+	st, _ := p.Status("u1")
+	if st.ErrCount != 1 {
+		t.Errorf("err_count=%d want 1", st.ErrCount)
+	}
+	if st.LastErrTime.IsZero() {
+		t.Error("last_err not set")
+	}
+	// 次次累积两笔，第三笔触发冷却 → cool_kind=error_threshold
+	p.NoteError("u1", 3, time.Hour)
+	p.NoteError("u1", 3, time.Hour)
+	st, _ = p.Status("u1")
+	if !st.Cooling || st.CoolKind != "error_threshold" {
+		t.Errorf("cooling portrait=%+v", st)
+	}
+	if st.CoolRemaining <= 0 {
+		t.Errorf("cool_remaining=%d want >0", st.CoolRemaining)
+	}
+}
+
+func TestCoolKindPersistsAcrossReload(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Cooldown("u1", CoolErr, time.Hour, "consecutive errors")
+	p.Flush()
+
+	// 旧文件缺新字段时零值 → 冷却应仍工作（向后兼容）。
+	p2 := New(fp)
+	p2.Add(&auth.Auth{UID: "u1"})
+	st, ok := p2.Status("u1")
+	if !ok || !st.Cooling {
+		t.Fatalf("cooldown state lost after reload: %+v ok=%v", st, ok)
+	}
+	if st.CoolKind != "error_threshold" {
+		t.Errorf("cool_kind after reload=%q want error_threshold", st.CoolKind)
+	}
+}
+
+func TestStateRoundTripExtendedFields(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Cooldown("u1", CoolHard, time.Hour, "余额不足")
+	p.NoteSuccess("u1")              // successCount=1，last_success 非零
+	p.NoteSuccess("u1")              // successCount=2
+	p.NoteError("u1", 99, time.Hour) // errCount=1（未达阈值），last_err 非零
+	p.Flush()
+
+	raw, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// JSON tag 全小写下划线；err_count 此时 =1 所以也会落盘。
+	for _, want := range []string{`"cool_kind"`, `"success_count"`, `"err_count"`, `"last_success"`, `"last_err"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("state.json missing %s:\n%s", want, raw)
+		}
+	}
+
+	// 重载后字段保留
+	p2 := New(fp)
+	p2.Add(&auth.Auth{UID: "u1"})
+	st, ok := p2.Status("u1")
+	if !ok {
+		t.Fatal("no status")
+	}
+	if st.SuccessCount != 2 || st.CoolKind != "hard_credit" {
+		t.Errorf("reloaded portrait=%+v", st)
+	}
+	if st.LastSuccessTime.IsZero() || st.LastErrTime.IsZero() {
+		t.Error("last_success/last_err lost after reload")
+	}
+}
+
+func TestStatusCoolKindDefaultsWhenNotCooling(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	st, _ := p.Status("u1")
+	if st.CoolKind != "" || st.CoolRemaining != 0 {
+		t.Errorf("non-cooling portrait=%+v", st)
+	}
+}
+
+func TestNextDay4AMBoundaries(t *testing.T) {
+	cases := []struct {
+		name string
+		now  string // RFC3339 (UTC 表示)
+		want string // 次日 04:00（同一时区，UTC 表示）
+	}{
+		{"普通日", "2026-08-28T17:00:00+08:00", "2026-08-29T04:00:00+08:00"},
+		{"凌晨未到4点", "2026-08-28T03:59:59+08:00", "2026-08-29T04:00:00+08:00"},
+		{"正好4点", "2026-08-28T04:00:00+08:00", "2026-08-29T04:00:00+08:00"},
+		{"4点刚过", "2026-08-28T04:00:01+08:00", "2026-08-29T04:00:00+08:00"},
+		{"月末(31天月)", "2026-01-31T12:00:00+08:00", "2026-02-01T04:00:00+08:00"},
+		{"月末(28天月)", "2026-02-28T12:00:00+08:00", "2026-03-01T04:00:00+08:00"},
+		{"闰年月末", "2028-02-29T12:00:00+08:00", "2028-03-01T04:00:00+08:00"},
+		{"年末", "2026-12-31T23:59:59+08:00", "2027-01-01T04:00:00+08:00"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			now, err := time.Parse(time.RFC3339, c.now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := time.Parse(time.RFC3339, c.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := nextDay4AM(now); !got.Equal(want) {
+				t.Errorf("nextDay4AM(%v)=%v want %v", c.now, got, want)
+			}
+		})
+	}
+}
+
+func TestCooldownUntilTomorrow4AM(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	before := time.Now()
+	p.CooldownUntilTomorrow4AM("u1", "余额不足")
+	after := time.Now()
+	st, ok := p.Status("u1")
+	if !ok {
+		t.Fatal("no status")
+	}
+	if !st.Cooling {
+		t.Fatalf("should be cooling: %+v", st)
+	}
+	if st.Reason != "余额不足" {
+		t.Errorf("reason=%q", st.Reason)
+	}
+	// 冷却截止必须是"此刻之后的最近一个 04:00"：晚于 now、距今不超过 24h。
+	if st.Until.Before(after) {
+		t.Errorf("until %v is in the past (call span %v..%v)", st.Until, before, after)
+	}
+	if st.Until.Hour() != 4 {
+		t.Errorf("until hour=%d want 4", st.Until.Hour())
+	}
+	if d := st.Until.Sub(after); d > 24*time.Hour {
+		t.Errorf("until %v is more than 24h out: %v", st.Until, d)
+	}
+	// 冷却拒选。
+	if p.Pick() != nil {
+		t.Fatal("cooling account should not be picked")
+	}
+}
+
+func TestCooldownUntilTomorrow4AMPersists(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.CooldownUntilTomorrow4AM("u1", "余额不足")
+	p.Flush()
+	p2 := New(fp)
+	p2.Add(&auth.Auth{UID: "u1"})
+	if p2.Pick() != nil {
+		t.Fatal("4am cooldown lost after reload")
+	}
+	st, ok := p2.Status("u1")
+	if !ok || st.Until.Hour() != 4 || st.Reason != "余额不足" {
+		t.Errorf("status after reload=%+v ok=%v", st, ok)
+	}
+}
+
 func TestList(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1", Nickname: "nick1"})
@@ -209,5 +570,60 @@ func TestRemoveMissingFromDir(t *testing.T) {
 	}
 	if _, ok := p.Status("u1"); ok {
 		t.Fatal("u1 should not exist")
+	}
+}
+
+func TestFlushPersistsCredits(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetCredits("u1", 42)
+	p.Flush()
+	p2 := New(fp)
+	p2.Add(&auth.Auth{UID: "u1"})
+	st, ok := p2.Status("u1")
+	if !ok || st.Credits != 42 {
+		t.Fatalf("flush not persisted: %+v ok=%v", st, ok)
+	}
+}
+
+func TestAutoFlush(t *testing.T) {
+	old := flushInterval
+	flushInterval = 20 * time.Millisecond
+	defer func() { flushInterval = old }()
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetCredits("u1", 77)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(fp); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("state.json not written by background flusher")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	p2 := New(fp)
+	p2.Add(&auth.Auth{UID: "u1"})
+	st, ok := p2.Status("u1")
+	if !ok || st.Credits != 77 {
+		t.Fatalf("auto flush not persisted: %+v ok=%v", st, ok)
+	}
+}
+
+func TestFlushIdempotentWhenClean(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Flush() // 无 dirty，不应写盘
+	if _, err := os.Stat(fp); !os.IsNotExist(err) {
+		t.Fatalf("flush on clean pool should not write: %v", err)
 	}
 }
