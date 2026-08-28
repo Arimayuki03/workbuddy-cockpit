@@ -224,8 +224,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		rc, status, respBody, terr := h.cfg.Upstream.ChatStream(acct, body)
 		if terr != nil {
+			// 网络层抖动：只换号，不累计 errCount（传输层错误对 5 次连坐 10m 冷却过于严苛）。
+			// 上游 client 已打 transport error 日志。
 			lastErr = terr
-			h.cfg.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 			continue
 		}
 		if status >= 400 {
@@ -249,8 +250,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
 				continue
 			default:
-				// P0: 轮转下一个账号，不直接返回（防雪崩）
-				h.cfg.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
+				// 仅 HTTP 5xx（ErrServer）累计 errCount；其他 4xx 只换号（防雪崩）
+				if status >= 500 {
+					h.cfg.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
+				}
 				lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
 				continue
 			}
