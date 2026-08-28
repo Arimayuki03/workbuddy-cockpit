@@ -1,0 +1,30 @@
+# Auth & secrets
+auths/
+data/
+*.key
+*.pem
+
+# Binaries
+login
+credit
+wb2api
+signin_bin
+
+# Config with secrets (use config.example.json)
+config.json
+
+# Build artifacts
+*.tmp
+__pycache__/
+
+# Backups (contains auth tokens)
+backups/
+
+# IDE
+.idea/
+.vscode/
+LOOP.md
+PLAN.md
+SPEC.md
+docs/
+*.md
