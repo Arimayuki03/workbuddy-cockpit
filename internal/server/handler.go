@@ -17,11 +17,14 @@ import (
 
 // Config handler 依赖。
 type Config struct {
-	Pool         *pool.Pool
-	Upstream     *upstream.Client
-	APIKey       string        // 空 = 不鉴权
-	MaxRotate    int           // 单请求最多换号次数，默认 3
-	HardCooldown time.Duration // 余额不足冷却，默认 12h
+	Pool      *pool.Pool
+	Upstream  *upstream.Client
+	APIKey    string // 空 = 不鉴权
+	MaxRotate int    // 单请求最多换号次数，默认 3
+	// HardCooldown 余额不足冷却时长（默认 12h）。仅作历史兼容保留：
+	// config.example.json 的 cooldown.hard_credit 键仍要求存在，但实际行为已由
+	// Pool.CooldownUntilTomorrow4AM 接管（ErrHardCredit 统一冷却到次日 04:00，等签到恢复）。
+	HardCooldown time.Duration
 	SoftCooldown time.Duration // 429 冷却，默认 60s
 	ErrThreshold int           // 连续其他错误冷却阈值，默认 3
 	ErrCooldown  time.Duration // 错误冷却时长，默认 10m
@@ -80,13 +83,22 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok"))
+	total, healthy := h.cfg.Pool.Counts()
+	status := http.StatusOK
+	if healthy == 0 {
+		status = http.StatusServiceUnavailable
+	}
+	writeJSON(w, status, map[string]any{"healthy": healthy, "total": total})
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
+	total, healthy, cooling, disabled := h.cfg.Pool.CountsDetailed()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"accounts": h.cfg.Pool.List(),
+		"total":    total,
+		"healthy":  healthy,
+		"cooling":  cooling,
+		"disabled": disabled,
 	})
 }
 
@@ -107,8 +119,8 @@ var staticModels = []map[string]any{
 // dynamicModelsCache 动态模型缓存。
 var dynamicModelsCache struct {
 	sync.RWMutex
-	ids     []upstream.ModelInfo
-	fetched time.Time // 最近一次成功拉取时间
+	ids      []upstream.ModelInfo
+	fetched  time.Time // 最近一次成功拉取时间
 	lastFail time.Time // 最近一次拉取失败时间（负缓存）
 }
 
@@ -171,6 +183,8 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 	}
 	infos, err := h.cfg.Upstream.FetchModels(acct)
 	if err != nil || len(infos) == 0 {
+		// 拉取失败惩罚该账号，避免下次 Pick 又选中同一个反复失败；lastFail 保持全局负缓存。
+		h.cfg.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 		dynamicModelsCache.Lock()
 		dynamicModelsCache.lastFail = time.Now()
 		dynamicModelsCache.Unlock()
@@ -195,13 +209,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(body, &peek)
 
+	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
+	st := newChatStat(time.Now(), body, peek.Stream)
+	defer st.done()
+
 	tried := map[string]bool{}
 	var lastErr error
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		acct := h.cfg.Pool.PickExcluding(tried)
 		if acct == nil {
+			st.status = http.StatusServiceUnavailable
 			break
 		}
+		st.uid = acct.UID
 		tried[acct.UID] = true
 
 		// token 临近过期 → 先 refresh（失败冷却换号）
@@ -224,49 +244,41 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		rc, status, respBody, terr := h.cfg.Upstream.ChatStream(acct, body)
 		if terr != nil {
+			// 网络层抖动：只换号，不累计 errCount（传输层错误对 5 次连坐 10m 冷却过于严苛）。
+			// 上游 client 已打 transport error 日志。
+			st.status = http.StatusServiceUnavailable
 			lastErr = terr
-			h.cfg.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 			continue
 		}
 		if status >= 400 {
+			st.status = status
 			kind := upstream.Classify(status, string(respBody))
-			switch kind {
-			case upstream.ErrHardCredit:
-				h.cfg.Pool.Cooldown(acct.UID, pool.CoolHard, h.cfg.HardCooldown, "余额不足")
-				lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
-				continue
-			case upstream.ErrSoftRate:
-				h.cfg.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, "429 rate limit")
-				lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
-				continue
-			case upstream.ErrSessionDead:
-				h.cfg.Pool.Disable(acct.UID, "12153 session dead")
-				lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
-				continue
-			case upstream.ErrNotFound:
-				// P2: 404 短冷却不累计 errCount（防雪崩）
-				h.cfg.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, "upstream 404")
-				lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
-				continue
-			default:
-				// P0: 轮转下一个账号，不直接返回（防雪崩）
-				h.cfg.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
-				lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
-				continue
-			}
+			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
+			h.applyErrorPolicy(acct.UID, kind, status, respBody)
+			continue
 		}
-		defer rc.Close()
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		if peek.Stream {
-			_ = upstream.Stream(w, rc)
+			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
+			st.status = http.StatusOK
+			stats := newChatStatsReaderSince(rc, st.start)
+			_ = upstream.Stream(w, stats)
+			st.ttfb = stats.TTFB()
+			st.toks, _ = stats.Tokens()
+			rc.Close()
 			return
 		}
 		resp, err := upstream.Aggregate(rc)
+		rc.Close()
 		if err != nil {
+			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
+			st.status = http.StatusBadGateway
 			return
 		}
 		writeJSON(w, http.StatusOK, resp)
+		st.status = http.StatusOK
+		st.toks = completionTokens(resp)
 		return
 	}
 	msg := "all accounts unavailable (cooling/disabled)"
@@ -274,6 +286,37 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		msg += ": " + lastErr.Error()
 	}
 	writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
+	st.status = http.StatusServiceUnavailable
+}
+
+// applyErrorPolicy 按错误分类对账号施加冷却/禁用策略。
+// 仅在 chatCompletions 轮转循环内调用：调用方已准备好 lastErr 并打算 continue 换号。
+// 行为等价于原先内联在 switch 各 case 的策略：
+//   - ErrHardCredit   → 积分耗尽，冷却到次日 04:00（签到任务 09/21 点恢复）
+//   - ErrSoftRate     → 429 短冷却
+//   - ErrSessionDead  → 永久禁用（session 死亡，需人工重登）
+//   - ErrNotFound     → 404 短冷却不累计 errCount（防雪崩）
+//   - 其他            → 仅 HTTP 5xx（ErrServer）累计 errCount；其他 4xx 只换号（防雪崩）
+func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, status int, body []byte) {
+	switch kind {
+	case upstream.ErrHardCredit:
+		// 402 + 余额关键词即积分耗尽：同步冷却到次日 04:00（签到任务 09/21 点恢复），
+		// 不需要异步核查（冗余）。立即换号。
+		h.cfg.Pool.CooldownUntilTomorrow4AM(uid, "余额不足")
+	case upstream.ErrSoftRate:
+		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown, "429 rate limit")
+	case upstream.ErrSessionDead:
+		h.cfg.Pool.Disable(uid, "12153 session dead")
+	case upstream.ErrNotFound:
+		// P2: 404 短冷却不累计 errCount（防雪崩）
+		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown, "upstream 404")
+	default:
+		// 仅 HTTP 5xx（ErrServer）累计 errCount；其他 4xx 只换号（防雪崩）
+		if status >= 500 {
+			h.cfg.Pool.NoteError(uid, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
+		}
+	}
+	// body 仅透传保持签名对称；分类用的 Msg 已在调用方构建进 lastErr。
 }
 
 // ---------------------------------------------------------------------------

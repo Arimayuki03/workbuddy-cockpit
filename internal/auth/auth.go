@@ -33,10 +33,13 @@ func (a *Auth) Lock() { a.mu.Lock() }
 // Unlock 释放 a.Lock 获取的锁。
 func (a *Auth) Unlock() { a.mu.Unlock() }
 
+// globalSuffix 判定全球区（global）账号的域名后缀；子域（如 www./api.）也属于全球区。
+const globalSuffix = ".workbuddy.ai"
+
 // Region 返回 "cn" 或 "global"。domain 为空视为 CN（向后兼容）。
 func (a *Auth) Region() string {
 	d := strings.ToLower(strings.TrimSpace(a.Domain))
-	if d == "workbuddy.ai" || strings.HasSuffix(d, ".workbuddy.ai") {
+	if d == strings.TrimPrefix(globalSuffix, ".") || strings.HasSuffix(d, globalSuffix) {
 		return "global"
 	}
 	return "cn"
@@ -119,7 +122,7 @@ func Parse(raw []byte) (*Auth, error) {
 }
 
 // SaveAtomic 以嵌套形原子写回 FilePath（tmp + rename），保持 CPA 插件可读格式。
-// 加锁外壳：防止与 RefreshToken 并发读写 token 字段导致写回半更新。
+// 全程持 a.mu：防止与 RefreshToken 修改 token 字段并发，杜绝写回半更新。
 // 防御：accessToken 为空时拒绝写回，避免误用空凭证覆盖有效文件。
 func (a *Auth) SaveAtomic() error {
 	a.mu.Lock()
@@ -127,12 +130,6 @@ func (a *Auth) SaveAtomic() error {
 	if strings.TrimSpace(a.AccessToken) == "" {
 		return fmt.Errorf("save refused: empty accessToken (uid=%s)", a.UID)
 	}
-	return a.saveAtomicLocked()
-}
-
-// saveAtomicLocked 是 SaveAtomic 的持锁内部版本；调用方必须已持有 a.mu。
-// 供持锁路径（如 RefreshToken 后写回）使用，避免重复加锁。
-func (a *Auth) saveAtomicLocked() error {
 	if a.FilePath == "" {
 		return fmt.Errorf("no FilePath set")
 	}
