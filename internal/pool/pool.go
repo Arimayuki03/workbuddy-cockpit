@@ -201,11 +201,16 @@ func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
 	return p.pick(tried)
 }
 
-// pick 在 healthy 候选集中按 credits 加权随机选出账号，并记录 lastUsed（供防并发撞号）。
+// pick 在 healthy 候选集中按 credits 加权随机选出账号，并记录 lastUsed（防并发撞号）。
+// 候选集仍是 top5 近似：先按 credits 降序取前 5，再在 top5 内做防撞号过滤。
+// 并发防雪崩：跳过 lastUsed 距今 < minPickGap 的账号（除非 top5 全部刚被用过，
+// 此时退回最近最少使用 LRU 账号），迫使高并发请求发散，而不是全部撞同一高分账号。
+// minPickGap=0（测试用）时过滤恒通过，退化为纯加权随机。
 func (p *Pool) pick(tried map[string]bool) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
+
 	var cands []*entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
@@ -228,10 +233,32 @@ func (p *Pool) pick(tried map[string]bool) *auth.Auth {
 	if len(cands) > 5 {
 		cands = cands[:5]
 	}
-	e := p.pickWeighted(cands)
+
+	eligible := make([]*entry, 0, len(cands))
+	for _, e := range cands {
+		if now.Sub(e.lastUsed) >= minPickGap {
+			eligible = append(eligible, e)
+		}
+	}
+	var e *entry
+	if len(eligible) == 0 {
+		// top5 全部刚被用过：LRU 兜底，维持发散且不 starve 任一候选。
+		e = cands[0]
+		for _, c := range cands[1:] {
+			if c.lastUsed.Before(e.lastUsed) {
+				e = c
+			}
+		}
+	} else {
+		e = p.pickWeighted(eligible) // eligible 保序 = top5 降序子集
+	}
 	e.lastUsed = time.Now()
 	return e.a
 }
+
+// minPickGap 防并发撞号窗口：同一账号在该窗口内不重复被选中（除非 top5 全部刚被用过）。
+// 生产默认 100ms；纯加权分布测试可临时置 0 关闭防撞号。
+var minPickGap = 100 * time.Millisecond
 
 // pickWeighted 按 credits 权重随机抽签；权重总和为 0 时退化为均匀随机。
 // 输入假定已按 credits 降序（候选集 = Top5，仍是全量 healthy 的近似）。

@@ -1,16 +1,27 @@
 package pool
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"workbuddy2api/internal/auth"
 )
 
+// withNoPickGap 临时关闭防并发撞号窗口（minPickGap=0），让纯加权分布测试不受影响。
+func withNoPickGap(t *testing.T) {
+	t.Helper()
+	old := minPickGap
+	minPickGap = 0
+	t.Cleanup(func() { minPickGap = old })
+}
+
 func TestPickHighestCredits(t *testing.T) {
+	withNoPickGap(t)
 	// P1-8：Top5 加权随机。积分悬殊时高积分账号应被多数选中（不再是必中）。
 	p := New("")
 	a1 := &auth.Auth{UID: "u1"}
@@ -86,6 +97,7 @@ func TestPickExcluding(t *testing.T) {
 }
 
 func TestPickExcludingStaysWithinHealthy(t *testing.T) {
+	withNoPickGap(t)
 	// 加权随机不能选出冷却/禁用账号。
 	p := New("")
 	p.Add(&auth.Auth{UID: "u-cold"})
@@ -102,6 +114,7 @@ func TestPickExcludingStaysWithinHealthy(t *testing.T) {
 }
 
 func TestPickWeightedSkewTowardHighCredits(t *testing.T) {
+	withNoPickGap(t)
 	// Top5 加权随机：单账号 credits 占比足够高时，多数挑中它。
 	p := New("")
 	for _, u := range []string{"w1", "w2", "w3", "w4", "w5", "w6"} {
@@ -119,6 +132,7 @@ func TestPickWeightedSkewTowardHighCredits(t *testing.T) {
 }
 
 func TestPickWeightedUniformWhenAllZero(t *testing.T) {
+	withNoPickGap(t)
 	// credits 全为 0 → 退化为均匀随机，不能只挑固定一个。
 	p := New("")
 	for _, u := range []string{"z1", "z2", "z3"} {
@@ -134,6 +148,7 @@ func TestPickWeightedUniformWhenAllZero(t *testing.T) {
 }
 
 func TestPickWeightedTopFiveOnly(t *testing.T) {
+	withNoPickGap(t)
 	// 第 6 高 credits 的账号在 Top5 之外，权重抽签永远轮不到它。
 	p := New("")
 	for _, u := range []string{"a1", "a2", "a3", "a4", "a5", "a6"} {
@@ -153,6 +168,7 @@ func TestPickWeightedTopFiveOnly(t *testing.T) {
 }
 
 func TestPickDeterministicViaSetRandomSource(t *testing.T) {
+	withNoPickGap(t)
 	p := New("")
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	p.Add(&auth.Auth{UID: "u1"})
@@ -164,6 +180,72 @@ func TestPickDeterministicViaSetRandomSource(t *testing.T) {
 		if got := p.Pick(); got == nil || got.UID != "u1" {
 			t.Fatalf("iter %d: pick=%+v want u1 (deterministic)", i, got)
 		}
+	}
+}
+
+func TestPickAntiThunderingHerd(t *testing.T) {
+	// 100 goroutine 同时 Pick：防并发撞号窗口内同一账号不应被重复选中。
+	// credits 相同 → 无注入源时加权随机应天然打散；为保证稳定，全部置 0 走均匀随机。
+	p := New("")
+	for i := 0; i < 10; i++ {
+		p.Add(&auth.Auth{UID: fmt.Sprintf("c%02d", i)})
+	}
+	// 关键：验证并发中任意瞬间不会全选同一账号。
+	const N = 100
+	var wg sync.WaitGroup
+	picked := make([]string, N)
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			if a := p.Pick(); a != nil {
+				picked[idx] = a.UID
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	counts := map[string]int{}
+	for _, uid := range picked {
+		if uid != "" {
+			counts[uid]++
+		}
+	}
+	// 选号必须覆盖多个账号，且最热门的账号不超过一半。
+	if len(counts) < 2 {
+		t.Fatalf("anti-thundering-herd failed: all %d picks hit %d account(s) %v", N, len(counts), counts)
+	}
+	for uid, n := range counts {
+		if n > N/2 {
+			t.Errorf("account %s picked %d/%d (>50%%): thundering herd", uid, n, N)
+		}
+	}
+}
+
+func TestPickLRUFallbackWhenTopAllRecentlyUsed(t *testing.T) {
+	// top5 全部刚被选中 → LRU 兜底应挑最近最少使用的那个（= 最早 lastUsed）。
+	old := minPickGap
+	minPickGap = time.Hour // 超大窗口：任何 lastUsed 都在窗口内
+	defer func() { minPickGap = old }()
+
+	p := New("")
+	for i := 0; i < 5; i++ {
+		p.Add(&auth.Auth{UID: fmt.Sprintf("a%d", i)})
+	}
+	// 直接构造 lastUsed：不经过 Pick（避免 Pick 改写 lastUsed）。
+	order := []string{"a4", "a3", "a2", "a1", "a0"}
+	p.mu.Lock()
+	for i, uid := range order {
+		p.byUID[uid].lastUsed = time.Now().Add(-time.Duration(len(order)-i) * time.Second) // a4 最旧
+	}
+	p.mu.Unlock()
+
+	got := p.Pick()
+	if got == nil {
+		t.Fatal("pick returned nil")
+	}
+	if got.UID != "a4" {
+		t.Errorf("LRU fallback picked %s want a4 (oldest lastUsed)", got.UID)
 	}
 }
 
