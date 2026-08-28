@@ -85,8 +85,13 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
+	total, healthy, cooling, disabled := h.cfg.Pool.CountsDetailed()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"accounts": h.cfg.Pool.List(),
+		"total":    total,
+		"healthy":  healthy,
+		"cooling":  cooling,
+		"disabled": disabled,
 	})
 }
 
