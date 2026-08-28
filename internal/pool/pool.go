@@ -262,6 +262,19 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 	}
 }
 
+// CooldownUntilTomorrow4AM 冷却到次日 04:00（本地时区）。
+// 用于 ErrHardCredit 场景：积分耗尽账号等签到任务（09:00/21:00）恢复。
+func (p *Pool) CooldownUntilTomorrow4AM(uid string, reason string) {
+	now := time.Now()
+	p.Cooldown(uid, CoolHard, nextDay4AM(now).Sub(now), reason)
+}
+
+// nextDay4AM 返回 now 所属日期的次日 04:00（与 now 同一时区）。
+// time.Date 对日溢出自动进位（月末→下月 1 号、年末→下年 1 号），天然覆盖跨日/跨月/跨年。
+func nextDay4AM(now time.Time) time.Time {
+	return time.Date(now.Year(), now.Month(), now.Day()+1, 4, 0, 0, 0, now.Location())
+}
+
 // Disable 永久禁用（session 死亡），需人工重登后手工恢复或文件替换。
 func (p *Pool) Disable(uid, reason string) {
 	p.mu.Lock()
