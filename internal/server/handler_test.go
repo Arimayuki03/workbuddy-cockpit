@@ -48,8 +48,13 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+// testPoolWith 构建一个所有账号 credits=1000 的池，并注入确定性随机源：
+// randInt64N 恒返回 0 → pickWeighted 必选候选集中积分最高者（第一个）。
+// 这让依赖"bad 先被选中"的轮转测试（如 TestChatRotatesOnHardCredit）完全确定，
+// 不再受加权随机影响而 flake。
 func testPoolWith(auths ...*auth.Auth) *pool.Pool {
 	p := pool.New("")
+	p.SetRandomSource(func(n int64) int64 { return 0 })
 	for _, a := range auths {
 		p.Add(a)
 		p.SetCredits(a.UID, 1000)

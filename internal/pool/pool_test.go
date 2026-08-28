@@ -10,6 +10,7 @@ import (
 )
 
 func TestPickHighestCredits(t *testing.T) {
+	// P1-8：Top5 加权随机。积分悬殊时高积分账号应被多数选中（不再是必中）。
 	p := New("")
 	a1 := &auth.Auth{UID: "u1"}
 	a2 := &auth.Auth{UID: "u2"}
@@ -18,11 +19,14 @@ func TestPickHighestCredits(t *testing.T) {
 	p.Add(a2)
 	p.Add(a3)
 	p.SetCredits("u1", 100)
-	p.SetCredits("u2", 500)
+	p.SetCredits("u2", 50000)
 	p.SetCredits("u3", 300)
-	got := p.Pick()
-	if got == nil || got.UID != "u2" {
-		t.Fatalf("pick=%+v want u2", got)
+	counts := map[string]int{}
+	for i := 0; i < 300; i++ {
+		counts[p.Pick().UID]++
+	}
+	if counts["u2"] < 240 { // u2 权重 50000/50400 ≈ 99.2%
+		t.Errorf("u2 picked %d/300, want overwhelming majority", counts["u2"])
 	}
 }
 
@@ -77,6 +81,88 @@ func TestPickExcluding(t *testing.T) {
 	tried["u2"] = true
 	if got := p.PickExcluding(tried); got != nil {
 		t.Fatalf("want nil, got %+v", got)
+	}
+}
+
+func TestPickExcludingStaysWithinHealthy(t *testing.T) {
+	// 加权随机不能选出冷却/禁用账号。
+	p := New("")
+	p.Add(&auth.Auth{UID: "u-cold"})
+	p.Add(&auth.Auth{UID: "u-hot"})
+	p.SetCredits("u-cold", 9999)
+	p.SetCredits("u-hot", 1)
+	p.Cooldown("u-cold", CoolHard, time.Hour, "x")
+	for i := 0; i < 20; i++ {
+		got := p.PickExcluding(nil)
+		if got == nil || got.UID != "u-hot" {
+			t.Fatalf("iter %d: picked %+v, want only healthy u-hot", i, got)
+		}
+	}
+}
+
+func TestPickWeightedSkewTowardHighCredits(t *testing.T) {
+	// Top5 加权随机：单账号 credits 占比足够高时，多数挑中它。
+	p := New("")
+	for _, u := range []string{"w1", "w2", "w3", "w4", "w5", "w6"} {
+		p.Add(&auth.Auth{UID: u})
+		p.SetCredits(u, 1)
+	}
+	p.SetCredits("w1", 1000)
+	counts := map[string]int{}
+	for i := 0; i < 500; i++ {
+		counts[p.Pick().UID]++
+	}
+	if counts["w1"] < 300 {
+		t.Errorf("w1 picked %d/500, want majority (weighted)", counts["w1"])
+	}
+}
+
+func TestPickWeightedUniformWhenAllZero(t *testing.T) {
+	// credits 全为 0 → 退化为均匀随机，不能只挑固定一个。
+	p := New("")
+	for _, u := range []string{"z1", "z2", "z3"} {
+		p.Add(&auth.Auth{UID: u})
+	}
+	seen := map[string]bool{}
+	for i := 0; i < 30; i++ {
+		seen[p.Pick().UID] = true
+	}
+	if len(seen) != 3 {
+		t.Errorf("uniform fallback should hit all, seen=%v", seen)
+	}
+}
+
+func TestPickWeightedTopFiveOnly(t *testing.T) {
+	// 第 6 高 credits 的账号在 Top5 之外，权重抽签永远轮不到它。
+	p := New("")
+	for _, u := range []string{"a1", "a2", "a3", "a4", "a5", "a6"} {
+		p.Add(&auth.Auth{UID: u})
+	}
+	p.SetCredits("a1", 1000)
+	p.SetCredits("a2", 1000)
+	p.SetCredits("a3", 1000)
+	p.SetCredits("a4", 1000)
+	p.SetCredits("a5", 1000)
+	p.SetCredits("a6", 5) // Top5 之外
+	for i := 0; i < 2000; i++ {
+		if got := p.Pick(); got == nil || got.UID == "a6" {
+			t.Fatalf("iter %d: picked %+v, a6 must stay outside top-5", i, got)
+		}
+	}
+}
+
+func TestPickDeterministicViaSetRandomSource(t *testing.T) {
+	p := New("")
+	p.SetRandomSource(func(n int64) int64 { return 0 })
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Add(&auth.Auth{UID: "u2"})
+	p.SetCredits("u1", 100)
+	p.SetCredits("u2", 50)
+	// r=0 ∈ [0,50) → 命中 u1。注入源应使选号完全确定。
+	for i := 0; i < 50; i++ {
+		if got := p.Pick(); got == nil || got.UID != "u1" {
+			t.Fatalf("iter %d: pick=%+v want u1 (deterministic)", i, got)
+		}
 	}
 }
 
