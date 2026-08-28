@@ -116,8 +116,8 @@ var staticModels = []map[string]any{
 // dynamicModelsCache 动态模型缓存。
 var dynamicModelsCache struct {
 	sync.RWMutex
-	ids     []upstream.ModelInfo
-	fetched time.Time // 最近一次成功拉取时间
+	ids      []upstream.ModelInfo
+	fetched  time.Time // 最近一次成功拉取时间
 	lastFail time.Time // 最近一次拉取失败时间（负缓存）
 }
 

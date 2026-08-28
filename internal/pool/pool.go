@@ -451,17 +451,17 @@ func (p *Pool) List() []Status {
 func (p *Pool) statusOf(uid string, e *entry) Status {
 	now := time.Now()
 	st := Status{
-		UID:              uid,
-		Nickname:         e.a.Nickname,
-		Credits:          e.credits,
-		Cooling:          !e.until.IsZero() && now.Before(e.until),
-		Reason:           e.reason,
-		Disabled:         e.disabled,
-		SuccessCount:     e.successCount,
-		ErrCount:         e.errCount,
-		LastSuccessTime:  e.lastSuccess,
-		LastErrTime:      e.lastErr,
-		Until:            e.until,
+		UID:             uid,
+		Nickname:        e.a.Nickname,
+		Credits:         e.credits,
+		Cooling:         !e.until.IsZero() && now.Before(e.until),
+		Reason:          e.reason,
+		Disabled:        e.disabled,
+		SuccessCount:    e.successCount,
+		ErrCount:        e.errCount,
+		LastSuccessTime: e.lastSuccess,
+		LastErrTime:     e.lastErr,
+		Until:           e.until,
 	}
 	if st.Cooling {
 		// 冷却剩余秒数（向上取整，避免 0 显示为已到期）。
