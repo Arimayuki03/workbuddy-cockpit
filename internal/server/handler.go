@@ -202,13 +202,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(body, &peek)
 
+	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
+	st := newChatStat(time.Now(), body, peek.Stream)
+	defer st.done()
+
 	tried := map[string]bool{}
 	var lastErr error
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		acct := h.cfg.Pool.PickExcluding(tried)
 		if acct == nil {
+			st.status = http.StatusServiceUnavailable
 			break
 		}
+		st.uid = acct.UID
 		tried[acct.UID] = true
 
 		// token 临近过期 → 先 refresh（失败冷却换号）
@@ -233,10 +239,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if terr != nil {
 			// 网络层抖动：只换号，不累计 errCount（传输层错误对 5 次连坐 10m 冷却过于严苛）。
 			// 上游 client 已打 transport error 日志。
+			st.status = http.StatusServiceUnavailable
 			lastErr = terr
 			continue
 		}
 		if status >= 400 {
+			st.status = status
 			kind := upstream.Classify(status, string(respBody))
 			switch kind {
 			case upstream.ErrHardCredit:
@@ -270,17 +278,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		if peek.Stream {
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
-			_ = upstream.Stream(w, rc)
+			st.status = http.StatusOK
+			stats := newChatStatsReaderSince(rc, st.start)
+			_ = upstream.Stream(w, stats)
+			st.ttfb = stats.TTFB()
+			st.toks, _ = stats.Tokens()
 			rc.Close()
 			return
 		}
 		resp, err := upstream.Aggregate(rc)
 		rc.Close()
 		if err != nil {
+			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
+			st.status = http.StatusBadGateway
 			return
 		}
 		writeJSON(w, http.StatusOK, resp)
+		st.status = http.StatusOK
+		st.toks = completionTokens(resp)
 		return
 	}
 	msg := "all accounts unavailable (cooling/disabled)"
@@ -288,6 +304,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		msg += ": " + lastErr.Error()
 	}
 	writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
+	st.status = http.StatusServiceUnavailable
 }
 
 // ---------------------------------------------------------------------------
