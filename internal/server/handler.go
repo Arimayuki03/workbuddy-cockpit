@@ -80,8 +80,12 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok"))
+	total, healthy := h.cfg.Pool.Counts()
+	status := http.StatusOK
+	if healthy == 0 {
+		status = http.StatusServiceUnavailable
+	}
+	writeJSON(w, status, map[string]any{"healthy": healthy, "total": total})
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {

@@ -570,12 +570,61 @@ func TestStatusPortraitFields(t *testing.T) {
 	}
 }
 
-func TestHealthz(t *testing.T) {
+// TestHealthzEmptyPool 空池（healthy=0）→ 503，表示暂不可服务。
+func TestHealthzEmptyPool(t *testing.T) {
 	h := NewHandler(Config{Pool: pool.New(""), Upstream: upstream.New()})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
-	if rec.Code != 200 {
-		t.Errorf("code=%d", rec.Code)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("code=%d want 503 (healthy=0)", rec.Code)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("healthz not json: %v body=%s", err, rec.Body)
+	}
+	if resp["healthy"] != float64(0) || resp["total"] != float64(0) {
+		t.Errorf("healthz json=%v", resp)
+	}
+}
+
+// TestHealthz503WhenNoHealthy 所有账号禁用/冷却 → 503。
+func TestHealthz503WhenNoHealthy(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
+	p.Disable("u1", "session dead")
+	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code=%d want 503", rec.Code)
+	}
+	ct := rec.Header().Get("Content-Type")
+	if !strings.Contains(ct, "application/json") {
+		t.Errorf("ct=%q want json", ct)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("healthz not json: %v body=%s", err, rec.Body)
+	}
+	if resp["healthy"] != float64(0) || resp["total"] != float64(1) {
+		t.Errorf("healthz json=%v want healthy=0 total=1", resp)
+	}
+}
+
+// TestHealthz200WithHealthy 有健康账号 → 200。
+func TestHealthz200WithHealthy(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d want 200", rec.Code)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("healthz not json: %v body=%s", err, rec.Body)
+	}
+	if resp["healthy"] != float64(1) || resp["total"] != float64(1) {
+		t.Errorf("healthz json=%v want healthy=1 total=1", resp)
 	}
 }
 
