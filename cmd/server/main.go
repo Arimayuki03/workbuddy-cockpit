@@ -41,7 +41,7 @@ func main() {
 	log.Printf("loaded %d %s account(s) from %s", len(auths), cfg.Region, cfg.AuthDir)
 
 	p := pool.New(cfg.StateFile)
-	defer p.Flush() // 进程退出前强制落盘（后台 flush 每 5s 一次，退出时补一次）
+	defer p.Flush()    // 进程退出前强制落盘（后台 flush 每 5s 一次，退出时补一次）
 	p.SyncToDir(auths) // 与 auths 目录对齐：新账号加入、已删除文件账号剔除（状态保留）
 
 	up := upstream.New()

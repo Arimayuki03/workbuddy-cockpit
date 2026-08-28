@@ -15,12 +15,12 @@ import (
 )
 
 type row struct {
-	file    string
-	uid     string
-	nick    string
-	status  string // OK | ALREADY | FAIL | AUTH_INVALID | LOAD_ERR
-	detail  string
-	remain  int64
+	file     string
+	uid      string
+	nick     string
+	status   string // OK | ALREADY | FAIL | AUTH_INVALID | LOAD_ERR
+	detail   string
+	remain   int64
 	hasQuota bool
 }
 

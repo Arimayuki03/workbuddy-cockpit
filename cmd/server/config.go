@@ -19,10 +19,10 @@ type Config struct {
 	Region    string `json:"region"`     // 只收 "cn"
 
 	Cooldown struct {
-		HardCredit  string `json:"hard_credit"`  // "12h"
-		SoftRate    string `json:"soft_rate"`    // "60s"
-		ErrThresh   int    `json:"err_threshold"`// 默认 3
-		ErrCooldown string `json:"err_cooldown"` // "10m"
+		HardCredit  string `json:"hard_credit"`   // "12h"
+		SoftRate    string `json:"soft_rate"`     // "60s"
+		ErrThresh   int    `json:"err_threshold"` // 默认 3
+		ErrCooldown string `json:"err_cooldown"`  // "10m"
 	} `json:"cooldown"`
 
 	Schedule struct {
