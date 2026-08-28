@@ -17,11 +17,14 @@ import (
 
 // Config handler 依赖。
 type Config struct {
-	Pool         *pool.Pool
-	Upstream     *upstream.Client
-	APIKey       string        // 空 = 不鉴权
-	MaxRotate    int           // 单请求最多换号次数，默认 3
-	HardCooldown time.Duration // 余额不足冷却，默认 12h
+	Pool      *pool.Pool
+	Upstream  *upstream.Client
+	APIKey    string // 空 = 不鉴权
+	MaxRotate int    // 单请求最多换号次数，默认 3
+	// HardCooldown 余额不足冷却时长（默认 12h）。仅作历史兼容保留：
+	// config.example.json 的 cooldown.hard_credit 键仍要求存在，但实际行为已由
+	// Pool.CooldownUntilTomorrow4AM 接管（ErrHardCredit 统一冷却到次日 04:00，等签到恢复）。
+	HardCooldown time.Duration
 	SoftCooldown time.Duration // 429 冷却，默认 60s
 	ErrThreshold int           // 连续其他错误冷却阈值，默认 3
 	ErrCooldown  time.Duration // 错误冷却时长，默认 10m
