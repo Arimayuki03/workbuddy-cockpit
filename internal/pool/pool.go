@@ -1,9 +1,10 @@
 // Package pool 账号池：内存索引 + 冷却/禁用状态机 + state.json 持久化。
-// 挑选策略：healthy 账号中剩余积分最多者。
+// 挑选策略：healthy 账号中取 credits Top5 加权随机（全 0 退化为均匀随机）。
 package pool
 
 import (
 	"encoding/json"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"sort"
@@ -85,6 +86,10 @@ type Pool struct {
 	byUID   map[string]*entry
 	stateFp string
 	dirty   atomic.Bool // 内存有变更待落盘
+
+	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
+	// 生产代码不应设置此字段。
+	randInt64N func(n int64) int64
 }
 
 // New 构建池；stateFp 非空时尝试加载旧状态，并启动后台周期性落盘 goroutine。
@@ -95,6 +100,14 @@ func New(stateFp string) *Pool {
 		p.startFlusher()
 	}
 	return p
+}
+
+// SetRandomSource 仅供测试注入确定性随机源；生产代码不应调用。
+// 注入源取 n∈[0,n) 后，pickWeighted 的抽签结果完全可预测。
+func (p *Pool) SetRandomSource(fn func(n int64) int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.randInt64N = fn
 }
 
 // startFlusher 每 flushInterval 检查 dirty 标志，有变更则 saveLocked 落盘。
@@ -164,11 +177,48 @@ func (p *Pool) Pick() *auth.Auth {
 }
 
 // PickExcluding 同上，但跳过 tried 中的 uid（请求级轮换）。
+// 挑选策略：healthy 账号中取 credits 最高的前 5 名，按 credits 为权重随机抽签
+// （credits 全为 0 时退化为均匀随机）。意图是打散热点，避免永远打同一个账号。
 func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
+	top := p.topHealthy(tried, 5)
+	if len(top) == 0 {
+		return nil
+	}
+	return p.pickWeighted(top).a
+}
+
+// pickWeighted 按 credits 权重随机抽签；权重总和为 0 时退化为均匀随机。
+// 输入假定已按 credits 降序（候选集 = Top5，仍是全量 healthy 的近似）。
+// 随机源优先用 p.randInt64N（仅供测试注入确定性），nil 时回退 math/rand/v2 全局源。
+func (p *Pool) pickWeighted(cands []*entry) *entry {
+	var total int64
+	for _, e := range cands {
+		total += e.credits
+	}
+	rnd := rand.Int64N
+	if p.randInt64N != nil {
+		rnd = p.randInt64N
+	}
+	if total <= 0 {
+		return cands[int(rnd(int64(len(cands))))]
+	}
+	r := rnd(total)
+	var acc int64
+	for _, e := range cands {
+		acc += e.credits
+		if r < acc {
+			return e
+		}
+	}
+	return cands[len(cands)-1]
+}
+
+// topHealthy 返回 healthy 账号按 credits 降序的前 n 名（不足 n 取全部，按 uid 稳定排序）。
+func (p *Pool) topHealthy(tried map[string]bool, n int) []*entry {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
-	var best *entry
+	var cands []*entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
 			continue
@@ -176,14 +226,18 @@ func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
 		if !e.healthy(now) {
 			continue
 		}
-		if best == nil || e.credits > best.credits {
-			best = e
+		cands = append(cands, e)
+	}
+	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].credits != cands[j].credits {
+			return cands[i].credits > cands[j].credits
 		}
+		return cands[i].a.UID < cands[j].a.UID
+	})
+	if len(cands) > n {
+		cands = cands[:n]
 	}
-	if best == nil {
-		return nil
-	}
-	return best.a
+	return cands
 }
 
 // SetCredits 更新账号余额。
