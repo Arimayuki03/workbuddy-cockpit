@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -75,20 +76,49 @@ type stateFile struct {
 	} `json:"accounts"`
 }
 
+// flushInterval 后台落盘周期。
+var flushInterval = 5 * time.Second
+
 // Pool 账号池。
 type Pool struct {
 	mu      sync.RWMutex
 	byUID   map[string]*entry
 	stateFp string
+	dirty   atomic.Bool // 内存有变更待落盘
 }
 
-// New 构建池；stateFp 非空时尝试加载旧状态。
+// New 构建池；stateFp 非空时尝试加载旧状态，并启动后台周期性落盘 goroutine。
 func New(stateFp string) *Pool {
 	p := &Pool{byUID: map[string]*entry{}, stateFp: stateFp}
 	if stateFp != "" {
 		p.load()
+		p.startFlusher()
 	}
 	return p
+}
+
+// startFlusher 每 flushInterval 检查 dirty 标志，有变更则 saveLocked 落盘。
+func (p *Pool) startFlusher() {
+	go func() {
+		t := time.NewTicker(flushInterval)
+		defer t.Stop()
+		for range t.C {
+			p.mu.Lock()
+			if p.dirty.Swap(false) {
+				p.saveLocked()
+			}
+			p.mu.Unlock()
+		}
+	}()
+}
+
+// Flush 同步把内存状态落盘（幂等：无变更不写盘）。供进程退出前调用。
+func (p *Pool) Flush() {
+	p.mu.Lock()
+	if p.dirty.Swap(false) {
+		p.saveLocked()
+	}
+	p.mu.Unlock()
 }
 
 // Add 加入账号；已存在则保留原状态、更新凭证。
@@ -162,8 +192,8 @@ func (p *Pool) SetCredits(uid string, credits int64) {
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		e.credits = credits
+		p.dirty.Store(true)
 	}
-	p.saveLocked()
 }
 
 // Cooldown 冷却账号至 now+d。
@@ -174,8 +204,8 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 		e.until = time.Now().Add(d)
 		e.reason = reason
 		e.errCount = 0
+		p.dirty.Store(true)
 	}
-	p.saveLocked()
 }
 
 // Disable 永久禁用（session 死亡），需人工重登后手工恢复或文件替换。
@@ -185,8 +215,8 @@ func (p *Pool) Disable(uid, reason string) {
 	if e, ok := p.byUID[uid]; ok {
 		e.disabled = true
 		e.reason = reason
+		p.dirty.Store(true)
 	}
-	p.saveLocked()
 }
 
 // ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号处于冷却（非禁用）时恢复。
@@ -200,8 +230,8 @@ func (p *Pool) ReenableIfCredits(uid string, remain int64) {
 			e.reason = ""
 			e.errCount = 0
 		}
+		p.dirty.Store(true)
 	}
-	p.saveLocked()
 }
 
 // NoteError 记录一次非余额/非 429 错误；达到 threshold 自动冷却 d 时长。
@@ -215,8 +245,8 @@ func (p *Pool) NoteError(uid string, threshold int, d time.Duration) {
 			e.reason = "consecutive errors"
 			e.errCount = 0
 		}
+		p.dirty.Store(true)
 	}
-	p.saveLocked()
 }
 
 // NoteSuccess 成功请求重置错误计数。

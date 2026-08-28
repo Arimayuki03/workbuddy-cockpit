@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -85,6 +86,7 @@ func TestCooldownPersists(t *testing.T) {
 	p := New(fp)
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Cooldown("u1", CoolHard, time.Hour, "余额不足")
+	p.Flush() // 状态变更走 dirty 标志，落盘由 Flush / 后台 goroutine 负责
 	p2 := New(fp)
 	p2.Add(&auth.Auth{UID: "u1"})
 	if p2.Pick() != nil {
@@ -102,6 +104,7 @@ func TestDisablePersists(t *testing.T) {
 	p := New(fp)
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Disable("u1", "12153 session dead")
+	p.Flush()
 	p2 := New(fp)
 	p2.Add(&auth.Auth{UID: "u1"})
 	if p2.Pick() != nil {
@@ -209,5 +212,60 @@ func TestRemoveMissingFromDir(t *testing.T) {
 	}
 	if _, ok := p.Status("u1"); ok {
 		t.Fatal("u1 should not exist")
+	}
+}
+
+func TestFlushPersistsCredits(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetCredits("u1", 42)
+	p.Flush()
+	p2 := New(fp)
+	p2.Add(&auth.Auth{UID: "u1"})
+	st, ok := p2.Status("u1")
+	if !ok || st.Credits != 42 {
+		t.Fatalf("flush not persisted: %+v ok=%v", st, ok)
+	}
+}
+
+func TestAutoFlush(t *testing.T) {
+	old := flushInterval
+	flushInterval = 20 * time.Millisecond
+	defer func() { flushInterval = old }()
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetCredits("u1", 77)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(fp); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("state.json not written by background flusher")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	p2 := New(fp)
+	p2.Add(&auth.Auth{UID: "u1"})
+	st, ok := p2.Status("u1")
+	if !ok || st.Credits != 77 {
+		t.Fatalf("auto flush not persisted: %+v ok=%v", st, ok)
+	}
+}
+
+func TestFlushIdempotentWhenClean(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Flush() // 无 dirty，不应写盘
+	if _, err := os.Stat(fp); !os.IsNotExist(err) {
+		t.Fatalf("flush on clean pool should not write: %v", err)
 	}
 }
