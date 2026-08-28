@@ -255,13 +255,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 		}
-		defer rc.Close()
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		if peek.Stream {
+			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
 			_ = upstream.Stream(w, rc)
+			rc.Close()
 			return
 		}
 		resp, err := upstream.Aggregate(rc)
+		rc.Close()
 		if err != nil {
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			return
