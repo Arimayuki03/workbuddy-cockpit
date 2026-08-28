@@ -8,11 +8,6 @@ import (
 	"strings"
 )
 
-// PrepareBody 单 pass 改写（默认开启黑名单指纹脱敏）；无法解析时原样返回。
-func PrepareBody(src []byte) []byte {
-	return PrepareBodyOpt(src, true)
-}
-
 // PrepareBodyOpt 单 pass 改写；sanitize=false 时行为完全还原（仅强制 stream + 归一化 tool_choice）。
 func PrepareBodyOpt(src []byte, sanitize bool) []byte {
 	if len(src) == 0 {
