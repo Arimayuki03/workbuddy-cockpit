@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -177,6 +178,64 @@ func TestChatSessionDeadDisables(t *testing.T) {
 	st, _ := p.Status("u1")
 	if !st.Disabled {
 		t.Errorf("account should be disabled: %+v", st)
+	}
+}
+
+func TestChatTransportErrorDoesNotPenalize(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, errors.New("connection refused")
+		})},
+		ChatBaseCN:      "https://fake.example",
+		ChatBaseGlobal:  "https://fake.example",
+		BillingBaseCN:   "https://fake.example",
+		BillingBaseGlob: "https://fake.example",
+	}
+	// threshold=1：若传输错误也累计 errCount，一次就会冷却
+	h := NewHandler(Config{Pool: p, Upstream: up, ErrThreshold: 1, ErrCooldown: time.Hour})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != 503 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	st, _ := p.Status("u1")
+	if st.Cooling || st.ErrCount != 0 {
+		t.Fatalf("transport error should not penalize account: %+v", st)
+	}
+}
+
+func TestChatHTTP5xxPenalizes(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 500, `{"code":500}`, false
+	})
+	h := NewHandler(Config{Pool: p, Upstream: up, ErrThreshold: 1, ErrCooldown: time.Hour})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != 503 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	st, _ := p.Status("u1")
+	if !st.Cooling {
+		t.Fatalf("http 5xx should cool account with threshold=1: %+v", st)
+	}
+}
+
+func TestChatHTTP4xxClientDoesNotPenalize(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 400, `{"code":400,"msg":"bad request"}`, false
+	})
+	h := NewHandler(Config{Pool: p, Upstream: up, ErrThreshold: 1, ErrCooldown: time.Hour})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != 503 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	st, _ := p.Status("u1")
+	if st.Cooling || st.ErrCount != 0 {
+		t.Fatalf("generic 4xx should not penalize account: %+v", st)
 	}
 }
 
