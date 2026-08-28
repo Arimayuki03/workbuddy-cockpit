@@ -358,6 +358,30 @@ func TestModelsDynamicFallsBackToStatic(t *testing.T) {
 	}
 }
 
+func TestModelsFetchFailurePenalizesAccount(t *testing.T) {
+	// 清缓存
+	dynamicModelsCache.Lock()
+	dynamicModelsCache.ids = nil
+	dynamicModelsCache.fetched = time.Time{}
+	dynamicModelsCache.lastFail = time.Time{}
+	dynamicModelsCache.Unlock()
+
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 500, `boom`, false
+	})
+	h := NewHandler(Config{Pool: p, Upstream: up, ErrThreshold: 1, ErrCooldown: time.Hour})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d (static fallback)", rec.Code)
+	}
+	st, _ := p.Status("u1")
+	if !st.Cooling {
+		t.Fatalf("fetch failure should penalize account with threshold=1: %+v", st)
+	}
+}
+
 func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 	// 清缓存
 	dynamicModelsCache.Lock()
