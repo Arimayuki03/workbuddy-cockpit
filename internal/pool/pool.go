@@ -152,15 +152,11 @@ func (p *Pool) Flush() {
 	p.mu.Unlock()
 }
 
-// Add 加入账号；已存在则保留原状态、更新凭证。
+// Add 加入账号；已存在则保留原状态、更新凭证（upsert 单账号，不影响其他账号）。
 func (p *Pool) Add(a *auth.Auth) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if e, ok := p.byUID[a.UID]; ok {
-		e.a = a // 保留 credits/cooling 状态
-		return
-	}
-	p.byUID[a.UID] = &entry{a: a}
+	p.upsertLocked(a)
 }
 
 // SyncToDir 用最新扫描结果对齐池：新账号加入、消失的账号剔除（状态保留）。
@@ -168,14 +164,10 @@ func (p *Pool) Add(a *auth.Auth) {
 func (p *Pool) SyncToDir(auths []*auth.Auth) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	seen := map[string]bool{}
+	seen := make(map[string]bool, len(auths))
 	for _, a := range auths {
 		seen[a.UID] = true
-		if e, ok := p.byUID[a.UID]; ok {
-			e.a = a
-		} else {
-			p.byUID[a.UID] = &entry{a: a}
-		}
+		p.upsertLocked(a)
 	}
 	changed := false
 	for uid := range p.byUID {
@@ -187,6 +179,16 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 	if changed {
 		p.saveLocked()
 	}
+}
+
+// upsertLocked 更新或插入单个账号；已存在则只换凭证、保留 credits/cooling 状态。
+// 调用方必须已持有 p.mu；Add 与 SyncToDir 共用此 upsert 逻辑。
+func (p *Pool) upsertLocked(a *auth.Auth) {
+	if e, ok := p.byUID[a.UID]; ok {
+		e.a = a // 保留 credits/cooling 状态
+		return
+	}
+	p.byUID[a.UID] = &entry{a: a}
 }
 
 // Pick 返回 healthy 中积分最高的账号；无可用返回 nil。
