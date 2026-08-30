@@ -25,6 +25,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		finishReason  = "stop"
 		usage         map[string]any
 		gotAnyContent bool
+		validEvents   int
 		toolCalls     = map[int]map[string]any{}
 		toolOrder     []int
 	)
@@ -37,10 +38,13 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		if strings.HasPrefix(line, "data: ") {
 			payload := strings.TrimPrefix(line, "data: ")
 			if payload == "[DONE]" {
-				// drain nothing; done
+				// 上游显式结束：停止读取，DONE 之后的任何数据一律忽略。
+				break
 			} else {
 				var chunk map[string]any
 				if json.Unmarshal([]byte(payload), &chunk) == nil {
+					// 有效事件计数：仅 JSON 解析成功的数据帧计入（解析失败沿用静默 continue）。
+					validEvents++
 					if v, ok := chunk["id"].(string); ok && id == "" {
 						id = v
 					}
@@ -107,6 +111,11 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		if err == io.EOF {
 			break
 		}
+	}
+	if validEvents == 0 {
+		// 上游返回 200 但没有任何有效数据事件（空流/只有 [DONE]/只有注释行）：
+		// 不再合成空 content 的假成功响应，直接报错，由 handler 映射为 502 upstream_parse。
+		return nil, fmt.Errorf("upstream stream contained no valid data events")
 	}
 	if id == "" {
 		id = fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
@@ -279,13 +288,28 @@ func Stream(w http.ResponseWriter, r io.Reader) error {
 	fl, _ := w.(http.Flusher)
 
 	// writeFrame 把 payload 按规范白名单重建后以 data: 帧写出并 flush。
-	writeFrame := func(payload string) error {
+	// 仅 JSON 解析成功时计数记为一次有效转发（JSON 解析失败照常降级原样写出，但不计数）。
+	writeFrame := func(payload string) (int, error) {
 		var obj map[string]any
+		valid := 0
 		if json.Unmarshal([]byte(payload), &obj) == nil {
 			if raw, err := json.Marshal(normalizeFrame(obj)); err == nil {
 				payload = string(raw)
 			}
+			valid = 1
 		}
+		if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
+			return 0, werr
+		}
+		if fl != nil {
+			fl.Flush()
+		}
+		return valid, nil
+	}
+
+	// writeRaw 原样写出一帧（绕过 normalizeFrame）并 flush。空流错误帧需保留 error 字段，
+	// 不能被白名单剥掉，故不经 writeFrame 规范化。
+	writeRaw := func(payload string) error {
 		if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
 			return werr
 		}
@@ -296,21 +320,20 @@ func Stream(w http.ResponseWriter, r io.Reader) error {
 	}
 
 	br := bufio.NewReaderSize(r, 64*1024)
-	sawDone := false
+	validFrames := 0
+readLoop:
 	for {
 		line, err := br.ReadString('\n')
 		trimmed := strings.TrimRight(line, "\r\n")
 		switch {
 		case strings.HasPrefix(trimmed, "data: [DONE]"):
-			sawDone = true
-			if _, werr := io.WriteString(w, "data: [DONE]\n\n"); werr != nil {
-				return werr
-			}
-			if fl != nil {
-				fl.Flush()
-			}
+			// 上游显式结束：停止读取，DONE 之后的任何数据（含垃圾帧）一律不再透传。
+			// [DONE] 统一在循环结束后写出，保证恰好一个。
+			break readLoop
 		case strings.HasPrefix(trimmed, "data: "):
-			if werr := writeFrame(strings.TrimPrefix(trimmed, "data: ")); werr != nil {
+			n, werr := writeFrame(strings.TrimPrefix(trimmed, "data: "))
+			validFrames += n
+			if werr != nil {
 				return werr
 			}
 		case trimmed != "":
@@ -330,13 +353,20 @@ func Stream(w http.ResponseWriter, r io.Reader) error {
 			return err
 		}
 	}
-	if !sawDone {
-		if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
-			return err
-		}
-		if fl != nil {
-			fl.Flush()
-		}
+	// 空流（0 有效帧）：先写一帧 error（绕过 normalizeFrame 原样保留 error 字段），
+	// 再补 [DONE] 保证客户端能正常收尾，并返回非 nil error 供调用方记录。
+	if validFrames == 0 {
+		_ = writeRaw(`{"error":{"message":"empty upstream stream","type":"upstream_error"}}`)
+	}
+	// 保证恰好写一个 [DONE]（上游漏发时兜底补上）。
+	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
+		return err
+	}
+	if fl != nil {
+		fl.Flush()
+	}
+	if validFrames == 0 {
+		return fmt.Errorf("upstream stream contained no valid data events")
 	}
 	return nil
 }
