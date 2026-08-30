@@ -4,11 +4,11 @@ data/
 *.key
 *.pem
 
-# Binaries
-login
-credit
-wb2api
-signin_bin
+# Binaries (anchored to repo root only — bare "login"/"credit" would also ignore cmd/login/, cmd/credit/)
+/login
+/credit
+/wb2api
+/signin_bin
 
 # Config with secrets (use config.example.json)
 config.json
