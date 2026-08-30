@@ -297,7 +297,7 @@ func TestStreamDoneFallback(t *testing.T) {
 
 	// 已有 [DONE] 时只写一次，不重复
 	rec2 := httptest.NewRecorder()
-	if err := Stream(rec2, strings.NewReader("data: [DONE]\n\n")); err != nil {
+	if err := Stream(rec2, strings.NewReader("data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n")); err != nil {
 		t.Fatal(err)
 	}
 	if n := strings.Count(rec2.Body.String(), "data: [DONE]"); n != 1 {
@@ -324,5 +324,181 @@ func TestStreamPassthrough(t *testing.T) {
 	ct := rec.Header().Get("Content-Type")
 	if !strings.Contains(ct, "text/event-stream") {
 		t.Errorf("content-type=%q", ct)
+	}
+}
+
+// TestAggregateEmptyStreamCases 覆盖空流检测：0 有效事件必须报错、[DONE] 即 break、
+// [DONE] 后垃圾不进聚合、正常聚合回归。
+func TestAggregateEmptyStreamCases(t *testing.T) {
+	// 正常回归基流：content + finish_reason + usage，[DONE] 收尾。
+	valid := "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n\n" +
+		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"total_tokens\":7}}\n\n" +
+		"data: [DONE]\n\n"
+
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr bool
+		// 回归断言（仅在 wantErr=false 时校验）
+		wantContent string
+		wantUsage   float64
+	}{
+		{
+			name:    "空流（EOF 即止）",
+			raw:     "",
+			wantErr: true,
+		},
+		{
+			name:    "只有注释行和空行加 DONE",
+			raw:     ": comment\n\n: another comment\n\ndata: [DONE]\n\n",
+			wantErr: true,
+		},
+		{
+			name:    "DONE 后跟垃圾帧不进聚合",
+			raw:     valid[:len(valid)-len("data: [DONE]\n\n")] + "data: [DONE]\n\ndata: {\"junk\":\"should not aggregate\"}\n\n",
+			wantErr: false,
+			// 与 valid 基流一致的聚合期望
+			wantContent: "hi",
+			wantUsage:   7,
+		},
+		{
+			name:        "正常流回归",
+			raw:         valid,
+			wantErr:     false,
+			wantContent: "hi",
+			wantUsage:   7,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp, err := Aggregate(strings.NewReader(c.raw))
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (resp=%v)", resp)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			msg := resp["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+			if msg["content"] != c.wantContent {
+				t.Errorf("content=%q want %q", msg["content"], c.wantContent)
+			}
+			if u, ok := resp["usage"].(map[string]any); ok {
+				if u["total_tokens"].(float64) != c.wantUsage {
+					t.Errorf("usage=%v want %v", u["total_tokens"], c.wantUsage)
+				}
+			} else {
+				t.Errorf("usage missing")
+			}
+		})
+	}
+}
+
+// TestAggregateEmptyStreamError 校验空流错误信息形如约定文案。
+func TestAggregateEmptyStreamError(t *testing.T) {
+	_, err := Aggregate(strings.NewReader(""))
+	if err == nil || !strings.Contains(err.Error(), "no valid data events") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+// TestStreamEmptyFramesCase 覆盖流式空流检测：0 有效帧时写 error 帧（error 字段存活）,
+// 恰好一个 [DONE]，并返回非 nil error。
+func TestStreamEmptyFramesCase(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"空流", ""},
+		{"只有注释行", ": comment\n\n"},
+		{"只有 DONE", "data: [DONE]\n\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			err := Stream(rec, strings.NewReader(c.raw))
+			if err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			body := rec.Body.String()
+			if n := strings.Count(body, "data: [DONE]"); n != 1 {
+				t.Errorf("[DONE] count=%d want 1: %q", n, body)
+			}
+			// error 帧必须原样保留 error 字段（未被 normalizeFrame 白名单剥掉）
+			var e map[string]any
+			found := false
+			for _, ln := range strings.Split(body, "\n") {
+				ln = strings.TrimSpace(ln)
+				if strings.HasPrefix(ln, "data: ") {
+					payload := strings.TrimPrefix(ln, "data: ")
+					if payload == "[DONE]" {
+						continue
+					}
+					if json.Unmarshal([]byte(payload), &e) == nil {
+						if em, ok := e["error"].(map[string]any); ok && em["message"] == "empty upstream stream" && em["type"] == "upstream_error" {
+							found = true
+						}
+					}
+				}
+			}
+			if !found {
+				t.Errorf("error frame absent or error field stripped: %q", body)
+			}
+		})
+	}
+}
+
+// TestStreamGarbageAfterDone 校验 DONE 之后的垃圾帧不出现在响应里。
+func TestStreamGarbageAfterDone(t *testing.T) {
+	raw := "data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n" +
+		"data: [DONE]\n\n" +
+		"data: {\"should\":\"not appear\"}\n\n"
+	rec := httptest.NewRecorder()
+	if err := Stream(rec, strings.NewReader(raw)); err != nil {
+		t.Fatal(err)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "should") {
+		t.Errorf("garbage after DONE leaked into response: %q", body)
+	}
+	if n := strings.Count(body, "data: [DONE]"); n != 1 {
+		t.Errorf("[DONE] count=%d want 1: %q", n, body)
+	}
+	// 有效帧仍被透传
+	if !strings.Contains(body, "hello") {
+		t.Errorf("valid frame missing: %q", body)
+	}
+}
+
+// TestStreamNormalPassthroughRegression 校验正常透传回归：帧被 normalize 后透传、
+// 末尾恰好一个 [DONE]、无 error 帧；上游漏发 DONE 时自动补。
+func TestStreamNormalPassthroughRegression(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"带 DONE 的正常流", sseFixture},
+		{"漏发 DONE 自动补", "data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			if err := Stream(rec, strings.NewReader(c.raw)); err != nil {
+				t.Fatal(err)
+			}
+			body := rec.Body.String()
+			if strings.Contains(body, `"error"`) {
+				t.Errorf("unexpected error frame: %q", body)
+			}
+			if n := strings.Count(body, "data: [DONE]"); n != 1 {
+				t.Errorf("[DONE] count=%d want 1: %q", n, body)
+			}
+			// 帧被规范化：含 "id" 且有标准 object 字段
+			if !strings.Contains(body, `"object":"chat.completion.chunk"`) {
+				t.Errorf("frame not normalized: %q", body)
+			}
+		})
 	}
 }
