@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -147,6 +148,51 @@ func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
 	}
 	if !bytes.Contains(gotBody, []byte(`"stream":true`)) {
 		t.Errorf("stream not forced: %s", gotBody)
+	}
+}
+
+func TestFetchModelsEffortsDriveBodyDowngrade(t *testing.T) {
+	var outbound []byte
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/console/enterprises/personal/models"):
+			return jsonResp(200, `{"code":0,"data":{"models":[
+				{"id":"glm-5.2","name":"GLM-5.2","maxInputTokens":131072,"maxOutputTokens":8192,"reasoning":{"effort":"high","supportedEfforts":["low","high"]}}
+			],"agents":[{"name":"cli","models":["glm-5.2"]}]}}`), nil
+		default:
+			outbound, _ = io.ReadAll(r.Body)
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+			}, nil
+		}
+	})
+	a := &auth.Auth{AccessToken: "at", UID: "u1"}
+	infos, err := c.FetchModels(a)
+	if err != nil {
+		t.Fatalf("fetch models: %v", err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("infos=%+v", infos)
+	}
+	// ModelInfo.Efforts 应携带 supportedEfforts
+	if len(infos[0].Efforts) != 2 || infos[0].Efforts[0] != "low" {
+		t.Errorf("infos[0].Efforts=%v", infos[0].Efforts)
+	}
+
+	// glm-5.2 只支持 low/high，请求 max → 降级为 high
+	rc, status, _, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","reasoning_effort":"max","messages":[]}`))
+	if err != nil || status != 200 {
+		t.Fatalf("chat: status=%d err=%v", status, err)
+	}
+	rc.Close()
+	var m map[string]any
+	if err := json.Unmarshal(outbound, &m); err != nil {
+		t.Fatalf("outbound unmarshal: %v (%s)", err, outbound)
+	}
+	if got, _ := m["reasoning_effort"].(string); got != "high" {
+		t.Errorf("reasoning_effort=%v want high (outbound=%s)", m["reasoning_effort"], outbound)
 	}
 }
 

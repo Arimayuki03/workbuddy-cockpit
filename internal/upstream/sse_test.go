@@ -148,6 +148,163 @@ data: [DONE]
 	}
 }
 
+// streamFrames 把原始 SSE 输入经 Stream 处理后解析出所有 JSON 帧及 [DONE] 计数。
+func streamFrames(t *testing.T, raw string) (frames []map[string]any, doneCount int) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	if err := Stream(rec, strings.NewReader(raw)); err != nil {
+		t.Fatal(err)
+	}
+	body := rec.Body.String()
+	for _, ln := range strings.Split(body, "\n") {
+		ln = strings.TrimSpace(ln)
+		if strings.HasPrefix(ln, "data: [DONE]") {
+			doneCount++
+			continue
+		}
+		if strings.HasPrefix(ln, "data: ") {
+			var obj map[string]any
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(ln, "data: ")), &obj); err != nil {
+				t.Fatalf("bad frame %q: %v", ln, err)
+			}
+			frames = append(frames, obj)
+		}
+	}
+	return frames, doneCount
+}
+
+func TestNormalizeFrame(t *testing.T) {
+	cases := []struct {
+		name string
+		in   map[string]any
+		want string // 规范化后 marshal 的期望 JSON（Go map 键按字典序输出）
+	}{
+		{"empty content/refusal and finish_reason empty string",
+			map[string]any{"id": "x", "choices": []any{
+				map[string]any{"index": 0, "delta": map[string]any{"content": "", "refusal": ""}, "finish_reason": ""},
+			}},
+			`{"choices":[{"delta":{},"finish_reason":null,"index":0}],"id":"x","object":"chat.completion.chunk","usage":null}`},
+		{"non-empty tool_calls kept",
+			map[string]any{"choices": []any{
+				map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{map[string]any{"id": "c1", "type": "function"}}}},
+			}},
+			`{"choices":[{"delta":{"tool_calls":[{"id":"c1","type":"function"}]},"finish_reason":null,"index":0}],"id":"chatcmpl-wb2api","object":"chat.completion.chunk","usage":null}`},
+		{"empty tool_calls list dropped",
+			map[string]any{"choices": []any{
+				map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{}, "content": "hi"}},
+			}},
+			`{"choices":[{"delta":{"content":"hi"},"finish_reason":null,"index":0}],"id":"chatcmpl-wb2api","object":"chat.completion.chunk","usage":null}`},
+		{"empty placeholder function_call dropped",
+			map[string]any{"choices": []any{
+				map[string]any{"index": 0, "delta": map[string]any{"function_call": map[string]any{"name": "", "arguments": ""}}},
+			}},
+			`{"choices":[{"delta":{},"finish_reason":null,"index":0}],"id":"chatcmpl-wb2api","object":"chat.completion.chunk","usage":null}`},
+		{"top-level unknown fields dropped, usage null when absent",
+			map[string]any{"id": "x", "object": "chat.completion.chunk", "created": 1, "junk": "noise", "choices": []any{
+				map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"},
+			}},
+			`{"choices":[{"delta":{},"finish_reason":"stop","index":0}],"created":1,"id":"x","object":"chat.completion.chunk","usage":null}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			raw, err := json.Marshal(normalizeFrame(c.in))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(raw) != c.want {
+				t.Errorf("got  %s\nwant %s", raw, c.want)
+			}
+		})
+	}
+}
+
+func TestStreamNormalizesFrames(t *testing.T) {
+	// 混合噪声帧：空 content/reasoning/refusal/function_call + 空 tool_calls + 顶层非标字段，
+	// 随后非空 content + tool_calls 帧，最后 finish/usage 帧。
+	raw := "data: {\"id\":\"x1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"\",\"refusal\":\"\",\"tool_calls\":[],\"function_call\":{\"name\":\"\",\"arguments\":\"\"}},\"finish_reason\":\"\"}],\"extra_field\":\"junk\"}\n\n" +
+		"data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\",\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"北京\\\"}\"},\"index\":0}]},\"finish_reason\":\"\"}]}\n\n" +
+		"data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"total_tokens\":7}}\n\n" +
+		"data: [DONE]\n\n"
+
+	frames, done := streamFrames(t, raw)
+	if done != 1 {
+		t.Fatalf("done frames=%d want 1", done)
+	}
+	if len(frames) != 3 {
+		t.Fatalf("frames=%d want 3", len(frames))
+	}
+
+	// 帧 1：噪声全剔除，finish_reason ""→null，usage 缺失→null，顶层非标字段剥除
+	f0 := frames[0]
+	if _, ok := f0["extra_field"]; ok {
+		t.Error("top-level extra_field should be dropped")
+	}
+	if f0["usage"] != nil {
+		t.Errorf("usage should be null when absent, got %v", f0["usage"])
+	}
+	ch0 := f0["choices"].([]any)[0].(map[string]any)
+	if ch0["finish_reason"] != nil {
+		t.Errorf("frame1 finish_reason=%v want null", ch0["finish_reason"])
+	}
+	d := ch0["delta"].(map[string]any)
+	// role 是合法白名单键保留；空 content/reasoning/refusal/tool_calls/function_call 噪声全剔除
+	if len(d) != 1 || d["role"] != "assistant" {
+		t.Errorf("frame1 delta should only keep role, got %#v", d)
+	}
+	for _, noise := range []string{"content", "reasoning_content", "refusal", "tool_calls", "function_call"} {
+		if _, ok := d[noise]; ok {
+			t.Errorf("frame1 delta should drop %q, got %#v", noise, d)
+		}
+	}
+
+	// 帧 2：非空 content 与 tool_calls 保留，finish_reason ""→null
+	f1 := frames[1]
+	ch1 := f1["choices"].([]any)[0].(map[string]any)
+	d1 := ch1["delta"].(map[string]any)
+	if d1["content"] != "hello" {
+		t.Errorf("frame2 content=%v", d1["content"])
+	}
+	tcs, ok := d1["tool_calls"].([]any)
+	if !ok || len(tcs) != 1 {
+		t.Fatalf("frame2 tool_calls=%#v", d1["tool_calls"])
+	}
+	if ch1["finish_reason"] != nil {
+		t.Errorf("frame2 finish_reason=%v want null (input empty string)", ch1["finish_reason"])
+	}
+
+	// 帧 3：finish_reason 非空保留，usage 保留
+	f2 := frames[2]
+	ch2 := f2["choices"].([]any)[0].(map[string]any)
+	if ch2["finish_reason"] != "stop" {
+		t.Errorf("frame3 finish_reason=%v want stop", ch2["finish_reason"])
+	}
+	if f2["usage"].(map[string]any)["total_tokens"].(float64) != 7 {
+		t.Errorf("frame3 usage=%v", f2["usage"])
+	}
+}
+
+func TestStreamDoneFallback(t *testing.T) {
+	// 上游流在无 [DONE] 时 EOF，Stream 必须兜底写一个 [DONE]
+	rec := httptest.NewRecorder()
+	err := Stream(rec, strings.NewReader("data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := rec.Body.String()
+	if !strings.HasSuffix(strings.TrimRight(body, "\n"), "data: [DONE]") {
+		t.Errorf("missing [DONE] fallback: %q", body)
+	}
+
+	// 已有 [DONE] 时只写一次，不重复
+	rec2 := httptest.NewRecorder()
+	if err := Stream(rec2, strings.NewReader("data: [DONE]\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(rec2.Body.String(), "data: [DONE]"); n != 1 {
+		t.Errorf("[DONE] count=%d want 1: %q", n, rec2.Body.String())
+	}
+}
+
 func TestStreamPassthrough(t *testing.T) {
 	rec := httptest.NewRecorder()
 	err := Stream(rec, strings.NewReader(sseFixture))

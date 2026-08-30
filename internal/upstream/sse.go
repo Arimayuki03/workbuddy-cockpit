@@ -189,8 +189,87 @@ func sortInts(a []int) {
 	}
 }
 
-// Stream 透传上游 SSE 到 w（每行 flush），保证至少写一个 [DONE]。
+// normalizeFrame 以 OpenAI 流式规范白名单重建帧：仅保留标准字段，
+// 剔除上游噪声（finish_reason:"" → null、空 content/refusal、空 tool_calls 列表、
+// 空占位 function_call、顶层未知字段），空 delta 键一律省略，
+// usage 缺失 → null，保证任意标准客户端按规范解析。
+func normalizeFrame(obj map[string]any) map[string]any {
+	out := map[string]any{}
+	for _, k := range []string{"id", "object", "created", "model", "system_fingerprint", "service_tier"} {
+		if v, ok := obj[k]; ok && v != nil {
+			out[k] = v
+		}
+	}
+	if _, ok := out["object"]; !ok {
+		out["object"] = "chat.completion.chunk"
+	}
+	if _, ok := out["id"]; !ok {
+		out["id"] = "chatcmpl-wb2api"
+	}
+	if chs, ok := obj["choices"].([]any); ok {
+		nchs := make([]any, 0, len(chs))
+		for _, ci := range chs {
+			c, ok := ci.(map[string]any)
+			if !ok {
+				continue
+			}
+			nc := map[string]any{}
+			if idx, ok := c["index"]; ok {
+				nc["index"] = idx
+			}
+			delta := map[string]any{}
+			if d, ok := c["delta"].(map[string]any); ok {
+				if v, ok := d["role"].(string); ok && v != "" {
+					delta["role"] = v
+				}
+				if v, ok := d["content"].(string); ok && v != "" {
+					delta["content"] = v
+				}
+				if v, ok := d["reasoning_content"].(string); ok && v != "" {
+					delta["reasoning_content"] = v
+				}
+				if v, ok := d["refusal"].(string); ok && v != "" {
+					delta["refusal"] = v
+				}
+				if tcs, ok := d["tool_calls"].([]any); ok && len(tcs) > 0 {
+					delta["tool_calls"] = tcs
+				}
+				if fc, ok := d["function_call"]; ok && fc != nil {
+					// 空占位 function_call（name/arguments 全空）视为噪声剔除
+					keep := false
+					if fcm, ok2 := fc.(map[string]any); ok2 {
+						n, _ := fcm["name"].(string)
+						a, _ := fcm["arguments"].(string)
+						keep = n != "" || a != ""
+					} else {
+						keep = true
+					}
+					if keep {
+						delta["function_call"] = fc
+					}
+				}
+			}
+			nc["delta"] = delta
+			if fr, ok := c["finish_reason"].(string); ok && fr != "" {
+				nc["finish_reason"] = fr
+			} else {
+				nc["finish_reason"] = nil
+			}
+			nchs = append(nchs, nc)
+		}
+		out["choices"] = nchs
+	}
+	if u, ok := obj["usage"]; ok {
+		out["usage"] = u
+	} else {
+		out["usage"] = nil
+	}
+	return out
+}
+
+// Stream 透传上游 SSE 到 w（逐帧规范化后 flush），保证至少写一个 [DONE]。
 // 调用方必须先设置过 status 200；本函数自设 SSE headers。
+// 流式策略：逐帧透传（规范化已剥空 content 噪声），恢复与上游一致的平滑流式。
 func Stream(w http.ResponseWriter, r io.Reader) error {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
@@ -198,14 +277,44 @@ func Stream(w http.ResponseWriter, r io.Reader) error {
 	h.Set("Connection", "keep-alive")
 	h.Set("X-Accel-Buffering", "no")
 	fl, _ := w.(http.Flusher)
+
+	// writeFrame 把 payload 按规范白名单重建后以 data: 帧写出并 flush。
+	writeFrame := func(payload string) error {
+		var obj map[string]any
+		if json.Unmarshal([]byte(payload), &obj) == nil {
+			if raw, err := json.Marshal(normalizeFrame(obj)); err == nil {
+				payload = string(raw)
+			}
+		}
+		if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
+			return werr
+		}
+		if fl != nil {
+			fl.Flush()
+		}
+		return nil
+	}
+
 	br := bufio.NewReaderSize(r, 64*1024)
 	sawDone := false
 	for {
 		line, err := br.ReadString('\n')
-		if line != "" {
-			if strings.HasPrefix(strings.TrimRight(line, "\r\n"), "data: [DONE]") {
-				sawDone = true
+		trimmed := strings.TrimRight(line, "\r\n")
+		switch {
+		case strings.HasPrefix(trimmed, "data: [DONE]"):
+			sawDone = true
+			if _, werr := io.WriteString(w, "data: [DONE]\n\n"); werr != nil {
+				return werr
 			}
+			if fl != nil {
+				fl.Flush()
+			}
+		case strings.HasPrefix(trimmed, "data: "):
+			if werr := writeFrame(strings.TrimPrefix(trimmed, "data: ")); werr != nil {
+				return werr
+			}
+		case trimmed != "":
+			// 注释/其他行：原样透传
 			if _, werr := io.WriteString(w, line); werr != nil {
 				return werr
 			}
@@ -213,6 +322,7 @@ func Stream(w http.ResponseWriter, r io.Reader) error {
 				fl.Flush()
 			}
 		}
+		// 空行（帧分隔）吞掉：本函数自产 "\n\n"
 		if err != nil {
 			if err == io.EOF {
 				break
