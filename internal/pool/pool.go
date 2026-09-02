@@ -471,14 +471,26 @@ func (p *Pool) pick(tried map[string]bool) *auth.Auth {
 			maxCredits = e.credits
 		}
 	}
-	sort.Slice(cands, func(i, j int) bool {
-		wi := p.weightOf(cands[i], maxCredits, now)
-		wj := p.weightOf(cands[j], maxCredits, now)
-		if wi != wj {
-			return wi > wj
+	// 权重只算一次：顶 5 截断要排序，若在 sort 比较器里现算 weightOf 会翻成 O(n log n) 次
+	// 冗余浮点计算（46 账号约 500 次）。先做 O(n) 预计算，再按 (权重, uid) 排序。
+	type weighted struct {
+		e *entry
+		w float64
+	}
+	ws := make([]weighted, len(cands))
+	for i, e := range cands {
+		ws[i] = weighted{e: e, w: p.weightOf(e, maxCredits, now)}
+	}
+	sort.Slice(ws, func(i, j int) bool {
+		if ws[i].w != ws[j].w {
+			return ws[i].w > ws[j].w
 		}
-		return cands[i].a.UID < cands[j].a.UID
+		return ws[i].e.a.UID < ws[j].e.a.UID
 	})
+	cands = cands[:0]
+	for _, c := range ws {
+		cands = append(cands, c.e)
+	}
 	if len(cands) > 5 {
 		cands = cands[:5]
 	}
