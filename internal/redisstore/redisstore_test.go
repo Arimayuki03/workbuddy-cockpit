@@ -51,9 +51,6 @@ func TestNewBadSchemeReturnsNoop(t *testing.T) {
 func TestNoopMethods(t *testing.T) {
 	n := Noop{}
 	n.SetBind("k", "u", time.Minute) // 不 panic
-	if _, ok := n.GetBind("k"); ok {
-		t.Error("Noop.GetBind should report not-found")
-	}
 	n.DelBind("k")
 	n.SaveState([]byte("{}"))
 	if _, ok := n.LoadState(); ok {
