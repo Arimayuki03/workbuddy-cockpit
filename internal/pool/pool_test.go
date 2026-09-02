@@ -70,12 +70,13 @@ func TestPickExpiredCooldownReturnsToHealthy(t *testing.T) {
 	}
 }
 
-func TestPickNilWhenAllCooling(t *testing.T) {
+func TestPickNilWhenAllDisabled(t *testing.T) {
+	// 全禁用 → 兜底不参与（禁用账号永不参与兜底）→ 返回 nil。
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	p.Cooldown("u1", CoolHard, time.Hour, "x")
+	p.Disable("u1", "session dead")
 	if got := p.Pick(); got != nil {
-		t.Fatalf("want nil, got %+v", got)
+		t.Fatalf("want nil (all disabled), got %+v", got)
 	}
 }
 
@@ -258,12 +259,9 @@ func TestCooldownPersists(t *testing.T) {
 	p.Flush() // 状态变更走 dirty 标志，落盘由 Flush / 后台 goroutine 负责
 	p2 := New(fp)
 	p2.Add(&auth.Auth{UID: "u1"})
-	if p2.Pick() != nil {
-		t.Fatal("cooldown lost after reload")
-	}
 	st, ok := p2.Status("u1")
-	if !ok || st.Reason != "余额不足" {
-		t.Errorf("status=%+v ok=%v", st, ok)
+	if !ok || !st.Cooling || st.Reason != "余额不足" {
+		t.Fatalf("cooldown lost after reload: %+v ok=%v", st, ok)
 	}
 }
 
@@ -301,7 +299,8 @@ func TestReenableZeroCreditsKeepsCooling(t *testing.T) {
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Cooldown("u1", CoolHard, time.Hour, "余额不足")
 	p.ReenableIfCredits("u1", 0)
-	if p.Pick() != nil {
+	st, _ := p.Status("u1")
+	if !st.Cooling {
 		t.Fatal("zero credits should stay cooling")
 	}
 }
@@ -321,13 +320,15 @@ func TestNoteErrorThreshold(t *testing.T) {
 	p.Add(&auth.Auth{UID: "u1"})
 	for i := 0; i < 2; i++ {
 		p.NoteError("u1", 3, 10*time.Minute)
-		if p.Pick() == nil {
+		st, _ := p.Status("u1")
+		if st.Cooling {
 			t.Fatalf("cooling too early at %d", i+1)
 		}
 	}
 	p.NoteError("u1", 3, 10*time.Minute)
-	if p.Pick() != nil {
-		t.Fatal("threshold 3 should cool the account")
+	st, _ := p.Status("u1")
+	if !st.Cooling {
+		t.Fatalf("threshold 3 should cool the account: %+v", st)
 	}
 }
 
@@ -509,9 +510,9 @@ func TestCooldownUntilTomorrow4AM(t *testing.T) {
 	if d := st.Until.Sub(after); d > 24*time.Hour {
 		t.Errorf("until %v is more than 24h out: %v", st.Until, d)
 	}
-	// 冷却拒选。
-	if p.Pick() != nil {
-		t.Fatal("cooling account should not be picked")
+	// 全冷却时不再返回 nil，而是兜底选该冷却账号（熔断/冷却兜底语义）。
+	if got := p.Pick(); got == nil || got.UID != "u1" {
+		t.Fatalf("all-cooling fallback should pick u1, got %+v", got)
 	}
 }
 
@@ -524,9 +525,6 @@ func TestCooldownUntilTomorrow4AMPersists(t *testing.T) {
 	p.Flush()
 	p2 := New(fp)
 	p2.Add(&auth.Auth{UID: "u1"})
-	if p2.Pick() != nil {
-		t.Fatal("4am cooldown lost after reload")
-	}
 	st, ok := p2.Status("u1")
 	if !ok || st.Until.Hour() != 4 || st.Reason != "余额不足" {
 		t.Errorf("status after reload=%+v ok=%v", st, ok)
@@ -625,5 +623,134 @@ func TestFlushIdempotentWhenClean(t *testing.T) {
 	p.Flush() // 无 dirty，不应写盘
 	if _, err := os.Stat(fp); !os.IsNotExist(err) {
 		t.Fatalf("flush on clean pool should not write: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// T2 熔断器 + 全冷却兜底 + 指数退避
+// ---------------------------------------------------------------------------
+
+// breakerUntil 曝露内部运行态供测试断言（包内私有 helper）。
+func (p *Pool) breakerUntil(uid string) (time.Time, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return time.Time{}, false
+	}
+	return e.breakerUntil, true
+}
+
+// internalHealthy 曝露 entry.healthy 供测试断言（包内私有 helper）。
+func (p *Pool) internalHealthy(uid string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	return e.healthy(time.Now())
+}
+
+func TestBreakerTripsAtThreshold(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetBreaker(3, time.Hour, 6*time.Hour)
+	for i := 0; i < 2; i++ {
+		p.NoteError("u1", 99, time.Hour) // threshold=99 让 err 冷却不触发，只驱动熔断
+		if bt, ok := p.breakerUntil("u1"); ok && !bt.IsZero() {
+			t.Fatalf("breaker tripped too early at %d: %v", i+1, bt)
+		}
+	}
+	p.NoteError("u1", 99, time.Hour)
+	bt, ok := p.breakerUntil("u1")
+	if !ok || bt.IsZero() {
+		t.Fatalf("breaker should trip at threshold: until=%v ok=%v", bt, ok)
+	}
+}
+
+func TestBreakerSuccessClears(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetBreaker(3, time.Hour, 6*time.Hour)
+	p.NoteError("u1", 99, time.Hour)
+	p.NoteError("u1", 99, time.Hour)
+	p.NoteError("u1", 99, time.Hour) // 触发熔断
+	if bt, _ := p.breakerUntil("u1"); bt.IsZero() {
+		t.Fatal("breaker should be open")
+	}
+	p.NoteSuccess("u1")
+	if bt, _ := p.breakerUntil("u1"); !bt.IsZero() {
+		t.Fatalf("success should clear breaker, until=%v", bt)
+	}
+	if !p.internalHealthy("u1") {
+		t.Fatal("account should be healthy after success clears breaker")
+	}
+}
+
+func TestBreakerExponentialBackoffCapped(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetBreaker(3, time.Minute, 4*time.Minute) // threshold=3：连续 3 次失败熔断一次
+	// 连续 9 次失败（无成功）→ 熔断 3 次，retryCount 1→2→3，退避 1m→2m→4m(封顶)。
+	for i := 0; i < 3; i++ {
+		for j := 0; j < 3; j++ {
+			p.NoteError("u1", 99, time.Hour) // err threshold=99 不触发 until，只驱动熔断
+		}
+	}
+	bt, ok := p.breakerUntil("u1")
+	if !ok || bt.IsZero() {
+		t.Fatal("breaker should be open")
+	}
+	d := time.Until(bt)
+	// 第 3 次熔断：d = min(1m * 2^2, 4m) = 4m
+	if d < 4*time.Minute-time.Second || d > 4*time.Minute+time.Second {
+		t.Errorf("backoff should cap at max=4m, got %v", d)
+	}
+
+	// 对比第 1 次熔断（新账号重新来）：退避应更短。
+	p2 := New("")
+	p2.Add(&auth.Auth{UID: "u1"})
+	p2.SetBreaker(3, time.Minute, 4*time.Minute)
+	for j := 0; j < 3; j++ {
+		p2.NoteError("u1", 99, time.Hour)
+	}
+	bt1, _ := p2.breakerUntil("u1")
+	if d1 := time.Until(bt1); d1 > time.Minute+time.Second {
+		t.Errorf("first trip should be ~1m, got %v", d1)
+	}
+}
+
+func TestFallbackPicksEarliestExpiry(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "late"})
+	p.Add(&auth.Auth{UID: "early"})
+	// 两个都冷却；early 更早到期 → 兜底选 early。
+	p.Cooldown("late", CoolHard, 2*time.Hour, "x")
+	p.Cooldown("early", CoolHard, time.Hour, "x")
+	got := p.Pick()
+	if got == nil || got.UID != "early" {
+		t.Fatalf("fallback should pick earliest expiry (early), got %+v", got)
+	}
+}
+
+func TestFallbackSkipsDisabled(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "cooled"})
+	p.Add(&auth.Auth{UID: "dead"})
+	p.Cooldown("cooled", CoolHard, time.Hour, "x")
+	p.Disable("dead", "session dead") // 禁用不参与兜底
+	got := p.Pick()
+	if got == nil || got.UID != "cooled" {
+		t.Fatalf("fallback should skip disabled, got %+v", got)
+	}
+}
+
+func TestFallbackNilWhenAllDisabled(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Disable("u1", "session dead")
+	if got := p.Pick(); got != nil {
+		t.Fatalf("want nil when all disabled, got %+v", got)
 	}
 }

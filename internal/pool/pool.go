@@ -4,6 +4,7 @@ package pool
 
 import (
 	"encoding/json"
+	"log"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -61,12 +62,19 @@ type entry struct {
 	lastErr      time.Time // 最近一次错误时间
 	lastSuccess  time.Time // 最近一次成功时间
 	coolKind     CoolKind
-	until        time.Time // 冷却截止
+	until        time.Time // 冷却截止（hard/soft/err 三类）
 	disabled     bool
 	reason       string
 	lastUsed     time.Time // 最近被选中时刻（防并发撞号）
+
+	// breakerUntil / fails / retryCount 为熔断器运行态（不持久化）。
+	// fails 与 errCount 独立：errCount 驱动 CoolErr 冷却，fails 驱动熔断器的指数退避。
+	breakerUntil time.Time // 熔断截止（指数退避）
+	fails        int       // 连续失败计数（熔断用）
+	retryCount   int       // 已熔断次数（指数退避的指数）
 }
 
+// healthy 报告账号当前是否可选（未禁用、未处于任一冷却/熔断期）。
 func (e *entry) healthy(now time.Time) bool {
 	if e.disabled {
 		return false
@@ -74,7 +82,25 @@ func (e *entry) healthy(now time.Time) bool {
 	if !e.until.IsZero() && now.Before(e.until) {
 		return false
 	}
+	if !e.breakerUntil.IsZero() && now.Before(e.breakerUntil) {
+		return false
+	}
 	return true
+}
+
+// expiry 返回账号当前仍在生效的最近冷却/熔断截止时间（两个截止取较早者）；不在冷却期返回零值。
+// 供全冷却兜底选取"最早到期"账号用。
+func (e *entry) expiry(now time.Time) time.Time {
+	var t time.Time
+	if !e.until.IsZero() && now.Before(e.until) {
+		t = e.until
+	}
+	if !e.breakerUntil.IsZero() && now.Before(e.breakerUntil) {
+		if t.IsZero() || e.breakerUntil.Before(t) {
+			t = e.breakerUntil
+		}
+	}
+	return t
 }
 
 // stateAccount 单个账号的持久化状态（JSON tag 全小写下划线，向后兼容：缺字段零值）。
@@ -105,19 +131,52 @@ type Pool struct {
 	stateFp string
 	dirty   atomic.Bool // 内存有变更待落盘
 
+	// 熔断器调优（SetBreaker 注入；默认值见 defaultBreaker*）。
+	breakerThreshold   int
+	breakerCooldown    time.Duration
+	breakerCooldownMax time.Duration
+
 	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
 	// 生产代码不应设置此字段。
 	randInt64N func(n int64) int64
 }
 
+// defaultBreaker* 熔断器默认参数（FreeBuff2API 参考口径）。
+const (
+	defaultBreakerThreshold   = 3
+	defaultBreakerCooldown    = 30 * time.Minute
+	defaultBreakerCooldownMax = 6 * time.Hour
+)
+
 // New 构建池；stateFp 非空时尝试加载旧状态，并启动后台周期性落盘 goroutine。
 func New(stateFp string) *Pool {
-	p := &Pool{byUID: map[string]*entry{}, stateFp: stateFp}
+	p := &Pool{
+		byUID:              map[string]*entry{},
+		stateFp:            stateFp,
+		breakerThreshold:   defaultBreakerThreshold,
+		breakerCooldown:    defaultBreakerCooldown,
+		breakerCooldownMax: defaultBreakerCooldownMax,
+	}
 	if stateFp != "" {
 		p.load()
 		p.startFlusher()
 	}
 	return p
+}
+
+// SetBreaker 注入熔断器参数（main 从 config 解析后调用）。非正值保留原值（用默认）。
+func (p *Pool) SetBreaker(threshold int, cooldown, cooldownMax time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if threshold > 0 {
+		p.breakerThreshold = threshold
+	}
+	if cooldown > 0 {
+		p.breakerCooldown = cooldown
+	}
+	if cooldownMax > 0 {
+		p.breakerCooldownMax = cooldownMax
+	}
 }
 
 // SetRandomSource 仅供测试注入确定性随机源；生产代码不应调用。
@@ -224,7 +283,9 @@ func (p *Pool) pick(tried map[string]bool) *auth.Auth {
 		cands = append(cands, e)
 	}
 	if len(cands) == 0 {
-		return nil
+		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
+		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
+		return p.pickEarliestExpiryLocked(tried, now)
 	}
 	sort.Slice(cands, func(i, j int) bool {
 		if cands[i].credits != cands[j].credits {
@@ -256,6 +317,33 @@ func (p *Pool) pick(tried map[string]bool) *auth.Auth {
 	}
 	e.lastUsed = time.Now()
 	return e.a
+}
+
+// pickEarliestExpiryLocked 全冷却兜底：在非禁用的冷却/熔断账号中选截止最早的一个。
+// 被 tried 排除的账号同样跳过（维持请求级轮换语义）。无任何可用返回 nil。
+func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time) *auth.Auth {
+	var best *entry
+	for uid, e := range p.byUID {
+		if tried != nil && tried[uid] {
+			continue
+		}
+		if e.disabled {
+			continue // 禁用的账号永不参与兜底
+		}
+		exp := e.expiry(now)
+		if exp.IsZero() {
+			continue
+		}
+		if best == nil || exp.Before(best.expiry(now)) {
+			best = e
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	log.Printf("pool: fallback_earliest_expiry uid=%s until=%s", best.a.UID, best.expiry(now).Format(time.RFC3339))
+	best.lastUsed = time.Now()
+	return best.a
 }
 
 // minPickGap 防并发撞号窗口：同一账号在该窗口内不重复被选中（除非 top5 全部刚被用过）。
@@ -307,8 +395,31 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 		e.coolKind = kind
 		e.reason = reason
 		e.errCount = 0
+		p.recordBreakerFailureLocked(e) // 冷却入口也是熔断器的失败信号
 		p.dirty.Store(true)
 	}
+}
+
+// recordBreakerFailureLocked 累计一次熔断失败；达到阈值则按指数退避熔断。
+// 熔断与冷却（until）解耦：冷却按错误类别给固定时长，熔断则对"反复失败"逐次加长封禁。
+// 调用方必须已持有 p.mu。
+func (p *Pool) recordBreakerFailureLocked(e *entry) {
+	e.fails++
+	if e.fails < p.breakerThreshold {
+		return
+	}
+	d := p.breakerCooldown
+	for i := 0; i < e.retryCount; i++ {
+		d *= 2
+		if d >= p.breakerCooldownMax {
+			d = p.breakerCooldownMax
+			break
+		}
+	}
+	// 触发熔断：重置失败计数供下一轮重新累计；retryCount 递增放大退避指数。
+	e.fails = 0
+	e.retryCount++
+	e.breakerUntil = time.Now().Add(d)
 }
 
 // CooldownUntilTomorrow4AM 冷却到次日 04:00（本地时区）。
@@ -352,6 +463,7 @@ func (p *Pool) ReenableIfCredits(uid string, remain int64) {
 }
 
 // NoteError 记录一次非余额/非 429 错误；达到 threshold 自动冷却 d 时长。
+// 同时接入熔断器失败计数。
 func (p *Pool) NoteError(uid string, threshold int, d time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -364,11 +476,12 @@ func (p *Pool) NoteError(uid string, threshold int, d time.Duration) {
 			e.reason = "consecutive errors"
 			e.errCount = 0
 		}
+		p.recordBreakerFailureLocked(e)
 		p.dirty.Store(true)
 	}
 }
 
-// NoteSuccess 成功请求累加成功计数、刷新 lastSuccess，并重置连续错误。
+// NoteSuccess 成功请求累加成功计数、刷新 lastSuccess，并重置连续错误与熔断失败计数。
 func (p *Pool) NoteSuccess(uid string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -376,6 +489,9 @@ func (p *Pool) NoteSuccess(uid string) {
 		e.successCount++
 		e.lastSuccess = time.Now()
 		e.errCount = 0
+		e.fails = 0
+		e.retryCount = 0
+		e.breakerUntil = time.Time{}
 		p.dirty.Store(true)
 	}
 }
