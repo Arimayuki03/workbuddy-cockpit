@@ -259,6 +259,46 @@ func TestChatStickySuccessKeepsBinding(t *testing.T) {
 	}
 }
 
+// TestChatStickyFullFallsBackToRotation 端到端验证 C3 语义：粘性号满载不可用时，
+// 请求在同一轮内解绑并回落普通轮换选中健康账号，绑定收敛到最终成功号——而非空耗一轮。
+func TestChatStickyFullFallsBackToRotation(t *testing.T) {
+	st := newBindStore()
+	sess := session.New(session.Config{
+		TTL:       time.Minute,
+		Store:     st,
+		Available: func() []string { return []string{"bad", "good"} },
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	// bad 占满唯一在途名额：PickByUID 将返回 nil（healthy 但 inFlight 满）→ 解绑 + 回落轮换。
+	p.SetMaxInFlight(1)
+	p.Acquire("bad")
+
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 200, sseOK, true
+	})
+	h := NewHandler(Config{
+		Pool:         p,
+		Upstream:     up,
+		Session:      sess,
+		SoftCooldown: time.Minute,
+	})
+	sess.Bind("conv-1", "bad")
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-1"}}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	// 满载粘性号被解绑，绑定收敛到最终成功号 good。
+	if uid, ok := st.lastUID("conv-1"); !ok || uid != "good" {
+		t.Fatalf("sticky binding should fall back to good, got %s ok=%v (binds=%v)", uid, ok, st.binds)
+	}
+	p.Release("bad")
+}
+
 func TestChatHardCreditCooldownUntilNextDay4AM(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		if authz == "Bearer at-bad" {
