@@ -176,6 +176,57 @@ func TestPickWeightedTopFiveOnly(t *testing.T) {
 	}
 }
 
+func TestPickTopFiveBySuccessRateNotCredits(t *testing.T) {
+	withNoPickGap(t)
+	// C1 回归：top5 短名单必须按三因子权重（含成功率）而非纯 credits 截断。
+	// a1..a5 credits=100 但成功率极低（1/100），a6 credits=90 但成功率 100%。
+	// 纯 credits 排序时 a6（90 < 100）是第 6 名，永远进不了 top5；
+	// 三因子权重下 a6 权重最高，首轮必被选中。仅断言首轮（后续 a6 闲置补偿衰减会合法发散）。
+	p := New("")
+	p.SetRandomSource(func(n int64) int64 { return 0 }) // r=0 → 选权重最高的候选
+	for _, u := range []string{"a1", "a2", "a3", "a4", "a5"} {
+		p.Add(&auth.Auth{UID: u})
+		p.SetCredits(u, 100)
+		for i := 0; i < 99; i++ {
+			p.NoteError(u) // 成功率 1/(1+99)≈0.03
+		}
+		p.NoteSuccess(u)
+	}
+	p.Add(&auth.Auth{UID: "a6"})
+	p.SetCredits("a6", 90)
+	p.NoteSuccess("a6") // 成功率 100%
+
+	if got := p.Pick(); got == nil || got.UID != "a6" {
+		t.Fatalf("pick=%v, want a6 (high-success low-credit must enter top5 by weight)", got)
+	}
+}
+
+func TestPickTopFiveByIdleNotCredits(t *testing.T) {
+	withNoPickGap(t)
+	// C1 回归：闲置补偿同样影响短名单。a1..a5 credits=100 但刚被用过（闲置 0），
+	// a6 credits=90 但从未使用（闲置满分）。纯 credits 排序时 a6 进不了 top5；
+	// 三因子权重下 a6 权重最高，首轮必被选中。仅断言首轮。
+	p := New("")
+	now := time.Now()
+	for _, u := range []string{"a1", "a2", "a3", "a4", "a5"} {
+		p.Add(&auth.Auth{UID: u})
+		p.SetCredits(u, 100)
+	}
+	p.Add(&auth.Auth{UID: "a6"})
+	p.SetCredits("a6", 90)
+	p.SetRandomSource(func(n int64) int64 { return 0 })
+	// a1..a5 全部"刚被用过"，闲置补偿归零；a6 从未使用 → 闲置满分。
+	p.mu.Lock()
+	for _, u := range []string{"a1", "a2", "a3", "a4", "a5"} {
+		p.byUID[u].lastUsed = now
+	}
+	p.mu.Unlock()
+
+	if got := p.Pick(); got == nil || got.UID != "a6" {
+		t.Fatalf("pick=%v, want a6 (idle low-credit must enter top5 by weight)", got)
+	}
+}
+
 func TestPickDeterministicViaSetRandomSource(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
