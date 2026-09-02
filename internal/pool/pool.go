@@ -1,5 +1,5 @@
-// Package pool 账号池：内存索引 + 冷却/禁用状态机 + state.json 持久化。
-// 挑选策略：healthy 账号中取 credits Top5 加权随机（全 0 退化为均匀随机）。
+// Package pool 账号池：内存索引 + 冷却/禁用状态机 + 熔断器 + state.json 持久化。
+// 挑选策略：healthy 账号中取 credits Top5，按三因子（credits 占比 ×10 + 闲置补偿 + 成功率 ×3）加权随机。
 package pool
 
 import (
@@ -345,8 +345,8 @@ func (p *Pool) Pick() *auth.Auth {
 }
 
 // PickExcluding 同上，但跳过 tried 中的 uid（请求级轮换）。
-// 挑选策略：healthy 账号中取 credits 最高的前 5 名，按 credits 为权重随机抽签
-// （credits 全为 0 时退化为均匀随机）。意图是打散热点，避免永远打同一个账号。
+// 挑选策略：healthy 账号中取 credits 最高的前 5 名，按三因子加权随机抽签，
+// 意图是打散热点，避免永远打同一个账号。
 func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
 	return p.pick(tried)
 }
