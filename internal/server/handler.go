@@ -317,7 +317,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			st.status = status
 			kind := upstream.Classify(status, string(respBody))
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
-			h.applyErrorPolicy(acct.UID, kind, status, respBody)
+			h.applyErrorPolicy(acct.UID, kind)
 			fail(acct.UID)
 			continue
 		}
@@ -359,18 +359,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 }
 
 // applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。
+// kind 是唯一权威分类（来自 upstream.Classify），此处不再按原始 status 二次判断。
 // 仅在 chatCompletions 轮转循环内调用：调用方已准备好 lastErr 并打算 continue 换号。
 //
-// 四条路径，各司其职：
+// 五条路径，各司其职：
 //   - ErrHardCredit → CooldownUntilTomorrow4AM：即时硬冷却到次日 04:00（等签到恢复）。
 //   - ErrSoftRate / ErrNotFound → Cooldown(CoolSoft)：即时软冷却（429/404）。
 //   - ErrSessionDead → Disable：session 死亡，永久禁用（需人工重登）。
-//   - 其他（default）→ NoteError：喂单一连续失败计数器 fails + 累计错误 errTotal，
-//     达到 breakerThreshold 触发熔断（指数退避）。anything 冷却入口也都喂 fails（见 pool.Cooldown）。
+//   - ErrServer → NoteError：喂单一连续失败计数器 fails + 累计错误 errTotal，
+//     达到 breakerThreshold 触发熔断（指数退避）。
+//   - 其他（default：ErrClient/ErrNone）→ 只换号不罚（防雪崩），不喂熔断。
 //
 // 恢复出口：CoolSoft/CoolHard 各自到期自动恢复；熔断按其指数退避截止到期；
 // 成功（NoteSuccess）清 fails/熔断；签到解冻（ReenableIfCredits→reviveCoolingLocked）只清冷却，不动熔断。
-func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, status int, body []byte) {
+func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind) {
 	switch kind {
 	case upstream.ErrHardCredit:
 		// 402 + 余额关键词即积分耗尽：同步冷却到次日 04:00（签到任务 09/21 点恢复），
@@ -383,13 +385,12 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, status int
 	case upstream.ErrNotFound:
 		// 404 短冷却（软冷却），防雪崩。
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown, "upstream 404")
+	case upstream.ErrServer:
+		// 5xx 上游故障：Classify 已把 ≥500 判为 ErrServer，在此喂熔断计数（不再手写 status>=500）。
+		h.cfg.Pool.NoteError(uid)
 	default:
-		// 仅 HTTP 5xx（ErrServer）喂熔断计数；其他 4xx 只换号（防雪崩）。
-		if status >= 500 {
-			h.cfg.Pool.NoteError(uid)
-		}
+		// 其余（ErrClient/ErrNone）：只换号不罚（防雪崩），不喂熔断。
 	}
-	// body 仅透传保持签名对称；分类用的 Msg 已在调用方构建进 lastErr。
 }
 
 // ---------------------------------------------------------------------------
