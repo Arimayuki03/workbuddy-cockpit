@@ -24,8 +24,6 @@ const keyTTL = 7 * 24 * time.Hour
 type Store interface {
 	// SetBind 异步镜像粘性会话绑定（key→uid），带 TTL。
 	SetBind(key, uid string, ttl time.Duration)
-	// GetBind 读取粘性会话绑定；仅在启动时调用（同步）。
-	GetBind(key string) (string, bool)
 	// DelBind 异步删除粘性会话绑定。
 	DelBind(key string)
 	// LoadBinds 全量读取粘性会话绑定（key→uid，key 已剥前缀）；仅在启动时调用（同步）。
@@ -111,17 +109,6 @@ func (u *Upstash) SetBind(key, uid string, ttl time.Duration) {
 	}()
 }
 
-// GetBind 同步读粘性会话绑定。
-func (u *Upstash) GetBind(key string) (string, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
-	defer cancel()
-	v, err := u.client.Get(ctx, bindKey(key)).Result()
-	if err != nil {
-		return "", false
-	}
-	return v, true
-}
-
 // DelBind 异步删除粘性会话绑定。
 func (u *Upstash) DelBind(key string) {
 	go func() {
@@ -176,7 +163,6 @@ func (u *Upstash) LoadBinds() map[string]string {
 type Noop struct{}
 
 func (Noop) SetBind(string, string, time.Duration) {}
-func (Noop) GetBind(string) (string, bool)         { return "", false }
 func (Noop) DelBind(string)                        {}
 func (Noop) LoadBinds() map[string]string          { return nil }
 func (Noop) SaveState([]byte)                      {}
