@@ -76,16 +76,18 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
-	total, healthy, _, _ := h.cfg.Pool.CountsDetailed()
+	total, healthy, _, _, _ := h.cfg.Pool.CountsDetailed()
+	// 用 ServableNow 判定：healthy>0 但全占满在途时 chat 会 503，探活必须同口径，
+	// 否则负载均衡器会把流量持续打进无法受理的实例。
 	status := http.StatusOK
-	if healthy == 0 {
+	if !h.cfg.Pool.ServableNow() {
 		status = http.StatusServiceUnavailable
 	}
 	writeJSON(w, status, map[string]any{"healthy": healthy, "total": total})
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
-	total, healthy, cooling, disabled := h.cfg.Pool.CountsDetailed()
+	total, healthy, cooling, disabled, inFlightFull := h.cfg.Pool.CountsDetailed()
 	sticky := 0
 	if h.cfg.StickyCount != nil {
 		sticky = h.cfg.StickyCount()
@@ -100,6 +102,7 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		"healthy":         healthy,
 		"cooling":         cooling,
 		"disabled":        disabled,
+		"in_flight_full":  inFlightFull,
 		"sticky_sessions": sticky,
 		"redis_mode":      redisMode,
 	})
