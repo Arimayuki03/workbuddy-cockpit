@@ -7,7 +7,8 @@
 //  2. 并发维度：inFlight（在途租约，运行态）
 //  3. 统计维度：successCount / errTotal（累计，供成功率权重）/ lastUsed / lastSuccess / lastErr
 //
-// 挑选策略：healthy 账号中取 credits Top5，按三因子（credits 占比 ×10 + 闲置补偿 + 成功率 ×3）加权随机。
+// 挑选策略：healthy 账号中按三因子权重（credits 占比 ×10 + 闲置补偿 + 成功率 ×3）取 Top5，
+// 再在 Top5 内按同一三因子权重加权随机（credits 只是权重的一个因子，不单独决定短名单）。
 package pool
 
 import (
@@ -427,14 +428,15 @@ func (p *Pool) Pick() *auth.Auth {
 }
 
 // PickExcluding 同上，但跳过 tried 中的 uid（请求级轮换）。
-// 挑选策略：healthy 账号中取 credits 最高的前 5 名，按三因子加权随机抽签，
+// 挑选策略：healthy 账号中按三因子权重取前 5 名，再在 Top5 内按同一权重加权随机抽签，
 // 意图是打散热点，避免永远打同一个账号。
 func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
 	return p.pick(tried)
 }
 
-// pick 在 healthy 候选集中按 credits 加权随机选出账号，并记录 lastUsed（防并发撞号）。
-// 候选集仍是 top5 近似：先按 credits 降序取前 5，再在 top5 内做防撞号过滤。
+// pick 在 healthy 候选集中按三因子权重加权随机选出账号，并记录 lastUsed（防并发撞号）。
+// 候选集是 top5 近似：先按三因子权重（weightOf）降序取前 5（credits 只是权重的一个因子，
+// 闲置补偿与成功率同样决定谁进短名单），再在 top5 内做防撞号过滤。
 // 并发防雪崩：跳过 lastUsed 距今 < minPickGap 的账号（除非 top5 全部刚被用过，
 // 此时退回最近最少使用 LRU 账号），迫使高并发请求发散，而不是全部撞同一高分账号。
 // minPickGap=0（测试用）时过滤恒通过，退化为纯加权随机。
@@ -461,9 +463,19 @@ func (p *Pool) pick(tried map[string]bool) *auth.Auth {
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
 		return p.pickEarliestExpiryLocked(tried, now)
 	}
+	// top5 短名单按三因子权重降序截断（而非 credits 单纯降序）：否则闲置补偿 + 成功率
+	// 根本进不了短名单决策，低 credits 但高成功率/久置的账号会永远排不进 top5。
+	var maxCredits int64
+	for _, e := range cands {
+		if e.credits > maxCredits {
+			maxCredits = e.credits
+		}
+	}
 	sort.Slice(cands, func(i, j int) bool {
-		if cands[i].credits != cands[j].credits {
-			return cands[i].credits > cands[j].credits
+		wi := p.weightOf(cands[i], maxCredits, now)
+		wj := p.weightOf(cands[j], maxCredits, now)
+		if wi != wj {
+			return wi > wj
 		}
 		return cands[i].a.UID < cands[j].a.UID
 	})
