@@ -96,7 +96,6 @@ func main() {
 		Session:      sessRouter,
 		StickyCount:  sessCount,
 		RedisMode:    redisMode,
-		HardCooldown: cfg.HardCreditDur,
 		SoftCooldown: cfg.SoftRateDur,
 		ErrThreshold: cfg.Cooldown.ErrThresh,
 		ErrCooldown:  cfg.ErrCooldownDur,

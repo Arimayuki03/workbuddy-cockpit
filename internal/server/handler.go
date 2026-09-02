@@ -28,11 +28,7 @@ type Config struct {
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
 	StickyCount func() int
 	// RedisMode 观测字段（"upstash" / "noop"），供 /status 透出。
-	RedisMode string
-	// HardCooldown 余额不足冷却时长（默认 12h）。仅作历史兼容保留：
-	// config.example.json 的 cooldown.hard_credit 键仍要求存在，但实际行为已由
-	// Pool.CooldownUntilTomorrow4AM 接管（ErrHardCredit 统一冷却到次日 04:00，等签到恢复）。
-	HardCooldown time.Duration
+	RedisMode    string
 	SoftCooldown time.Duration // 429 冷却，默认 60s
 	ErrThreshold int           // 连续其他错误冷却阈值，默认 3
 	ErrCooldown  time.Duration // 错误冷却时长，默认 10m
@@ -49,9 +45,6 @@ type Handler struct {
 func NewHandler(cfg Config) *Handler {
 	if cfg.MaxRotate <= 0 {
 		cfg.MaxRotate = 3
-	}
-	if cfg.HardCooldown <= 0 {
-		cfg.HardCooldown = 12 * time.Hour
 	}
 	if cfg.SoftCooldown <= 0 {
 		cfg.SoftCooldown = 60 * time.Second
