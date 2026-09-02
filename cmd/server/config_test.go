@@ -14,9 +14,6 @@ func TestDefault(t *testing.T) {
 	if err := c.normalize(); err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
-	if c.HardCreditDur.Hours() != 12 {
-		t.Errorf("hard=%v", c.HardCreditDur)
-	}
 	if c.SoftRateDur.Seconds() != 60 {
 		t.Errorf("soft=%v", c.SoftRateDur)
 	}
@@ -50,9 +47,23 @@ func TestEnvOverride(t *testing.T) {
 func TestBadDuration(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"cooldown":{"hard_credit":"not-a-duration"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"cooldown":{"soft_rate":"not-a-duration"}}`), 0o600)
 	if _, err := Load(fp); err == nil {
 		t.Fatal("want error for bad duration")
+	}
+}
+
+func TestHardCreditKeyIgnored(t *testing.T) {
+	// 退役的 hard_credit 键作为 JSON 未知字段被自然忽略，不报错。
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"cooldown":{"hard_credit":"not-a-duration","soft_rate":"30s"}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatalf("hard_credit must be ignored (not validated): %v", err)
+	}
+	if c.SoftRateDur.Seconds() != 30 {
+		t.Errorf("soft_rate=%v want 30s", c.SoftRateDur)
 	}
 }
 

@@ -19,9 +19,8 @@ type Config struct {
 	Region    string `json:"region"`     // 只收 "cn"
 
 	Cooldown struct {
-		// hard_credit 时长键仍在（D6/U4 才删除），但已无消费者：实际硬冷却走 CooldownUntilTomorrow4AM。
-		HardCredit string `json:"hard_credit"` // "12h"（历史键，见 D6）
-		// err_threshold / err_cooldown 已随 CoolErr 退役（U1/D1）：连续错误语义并入熔断器。
+		// hard_credit / err_threshold / err_cooldown 三个历史键已退役：
+		// 硬冷却固定为次日 04:00（CooldownUntilTomorrow4AM），连续错误语义并入熔断器。
 		// 旧 config 中的这些键因 JSON 未知字段而自然忽略，不报错。
 		SoftRate string `json:"soft_rate"` // "60s"
 	} `json:"cooldown"`
@@ -61,7 +60,6 @@ type Config struct {
 	} `json:"session_sticky"`
 
 	// 解析后
-	HardCreditDur       time.Duration `json:"-"`
 	SoftRateDur         time.Duration `json:"-"`
 	BreakerCooldownDur  time.Duration `json:"-"`
 	BreakerCooldownMaxD time.Duration `json:"-"`
@@ -78,7 +76,6 @@ func Default() *Config {
 		StateFile: "./data/state.json",
 		Region:    "cn",
 	}
-	c.Cooldown.HardCredit = "12h"
 	c.Cooldown.SoftRate = "60s"
 	c.Schedule.CheckinHours = []int{9, 21}
 	c.Schedule.KeepaliveHours = []int{22}
@@ -131,9 +128,6 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_REGION"); v != "" {
 		c.Region = v
 	}
-	if v := os.Getenv("WB2A_HARD_CREDIT"); v != "" {
-		c.Cooldown.HardCredit = v
-	}
 	if v := os.Getenv("WB2A_SOFT_RATE"); v != "" {
 		c.Cooldown.SoftRate = v
 	}
@@ -151,10 +145,6 @@ func applyEnv(c *Config) {
 
 func (c *Config) normalize() error {
 	var err error
-	// HardCreditDur 仍解析但仅供启动校验（D6 才删除）——消费方已切到 CooldownUntilTomorrow4AM。
-	if c.HardCreditDur, err = time.ParseDuration(c.Cooldown.HardCredit); err != nil {
-		return fmt.Errorf("cooldown.hard_credit: %w", err)
-	}
 	if c.SoftRateDur, err = time.ParseDuration(c.Cooldown.SoftRate); err != nil {
 		return fmt.Errorf("cooldown.soft_rate: %w", err)
 	}

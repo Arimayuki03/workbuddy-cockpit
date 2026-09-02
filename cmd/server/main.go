@@ -42,17 +42,19 @@ func main() {
 	}
 	log.Printf("loaded %d %s account(s) from %s", len(auths), cfg.Region, cfg.AuthDir)
 
+	// redisstore：未配置/连接失败 → Noop（纯内存模式，一切功能照常）。
+	store := redisstore.New(cfg.Upstash.URL, cfg.Upstash.Token)
+
 	p := pool.New(cfg.StateFile)
-	defer p.Flush()    // 进程退出前强制落盘（后台 flush 每 5s 一次，退出时补一次）
-	p.SyncToDir(auths) // 与 auths 目录对齐：新账号加入、已删除文件账号剔除（状态保留）
+	defer p.Flush() // 进程退出前强制落盘（后台 flush 每 5s 一次，退出时补一次）
+	p.SetStore(store)
+	p.RestoreFromSnapshot() // 择新恢复：Redis 快照比本地新才采用，否则本地优先
+	p.SyncToDir(auths)      // 与 auths 目录对齐：新账号加入、已删除文件账号剔除（状态保留）
 
 	// 熔断器 + 在途上限 + 三因子加权调优（从 config 注入，非正值回退默认）。
 	p.SetBreaker(cfg.Pool.BreakerThreshold, cfg.BreakerCooldownDur, cfg.BreakerCooldownMaxD)
 	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
-
-	// redisstore：未配置/连接失败 → Noop（纯内存模式，一切功能照常）。
-	store := redisstore.New(cfg.Upstash.URL, cfg.Upstash.Token)
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router

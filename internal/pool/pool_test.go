@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1086,6 +1087,114 @@ func TestLoadLegacyStateFile(t *testing.T) {
 	// 运行态新字段默认零值。
 	if st.InFlight != 0 || st.BreakerFails != 0 || !st.BreakerUntil.IsZero() {
 		t.Errorf("runtime fields should be zero for legacy load: %+v", st)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// T7 D5: Redis 状态快照镜像 + 择新恢复
+// ---------------------------------------------------------------------------
+
+// memStore 内存假 Store：记录 SaveState（模拟 Redis 快照）并可按需返回 LoadState。
+type memStore struct {
+	mu       sync.Mutex
+	saved    []byte
+	loadData []byte
+	loadOK   bool
+}
+
+func (m *memStore) SaveState(data []byte) {
+	m.mu.Lock()
+	m.saved = append([]byte(nil), data...)
+	m.mu.Unlock()
+}
+func (m *memStore) LoadState() ([]byte, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.loadOK {
+		return nil, false
+	}
+	return append([]byte(nil), m.loadData...), true
+}
+
+func TestSaveMirrorsSnapshot(t *testing.T) {
+	// Flush 落盘时同步 fire-and-forget SaveState（带 saved_at）。
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	ms := &memStore{}
+	p.SetStore(ms)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetCredits("u1", 42)
+	p.Flush()
+	ms.mu.Lock()
+	raw := string(ms.saved)
+	ms.mu.Unlock()
+	if !strings.Contains(raw, `"saved_at"`) {
+		t.Fatalf("snapshot should carry saved_at: %s", raw)
+	}
+	if !strings.Contains(raw, `"credits":42`) {
+		t.Fatalf("snapshot should carry account state: %s", raw)
+	}
+}
+
+func TestRestoreUsesRedisWhenNewer(t *testing.T) {
+	// Redis 快照比本地 state.json 新 → 采用 Redis。
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	// 本地较旧
+	if err := os.WriteFile(fp, []byte(`{"accounts":{"u1":{"credits":1}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 把本地 mtime 设到过去
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(fp, old, old); err != nil {
+		t.Fatal(err)
+	}
+	ms := &memStore{loadOK: true}
+	snap := snapshot{stateFile: stateFile{Accounts: map[string]stateAccount{"u1": {Credits: 999}}}, SavedAt: time.Now()}
+	ms.loadData, _ = json.Marshal(snap)
+	p := New(fp)
+	p.SetStore(ms)
+	p.RestoreFromSnapshot()
+	st, ok := p.Status("u1")
+	if !ok || st.Credits != 999 {
+		t.Fatalf("should restore from Redis snapshot: %+v ok=%v", st, ok)
+	}
+}
+
+func TestRestoreUsesLocalWhenNewer(t *testing.T) {
+	// 本地 state.json 比 Redis 快照新 → 本地优先。
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(fp, []byte(`{"accounts":{"u1":{"credits":77}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ms := &memStore{loadOK: true}
+	snap := snapshot{stateFile: stateFile{Accounts: map[string]stateAccount{"u1": {Credits: 999}}}, SavedAt: time.Now().Add(-time.Hour)}
+	ms.loadData, _ = json.Marshal(snap)
+	p := New(fp)
+	p.SetStore(ms)
+	p.RestoreFromSnapshot()
+	st, ok := p.Status("u1")
+	if !ok || st.Credits != 77 {
+		t.Fatalf("should keep local (newer): %+v ok=%v", st, ok)
+	}
+}
+
+func TestRestoreNoRedisUsesLocal(t *testing.T) {
+	// 无 Redis 快照 → 本地优先。
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(fp, []byte(`{"accounts":{"u1":{"credits":55}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ms := &memStore{loadOK: false}
+	p := New(fp)
+	p.SetStore(ms)
+	p.RestoreFromSnapshot()
+	st, ok := p.Status("u1")
+	if !ok || st.Credits != 55 {
+		t.Fatalf("no redis → use local: %+v ok=%v", st, ok)
 	}
 }
 
