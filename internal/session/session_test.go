@@ -11,10 +11,10 @@ import (
 // countingStore 记录镜像调用次数的假 Store（不联网）。
 type countingStore struct {
 	redisstore.Noop
-	mu        sync.Mutex
-	setBinds  int
-	delBinds  int
-	binds     map[string]string
+	mu       sync.Mutex
+	setBinds int
+	delBinds int
+	binds    map[string]string
 }
 
 func newCountingStore() *countingStore {
@@ -114,10 +114,10 @@ func TestExtractKeyPriority(t *testing.T) {
 		want string
 	}{
 		{`{"metadata":{"conversation_id":"mc","user_id":"mu"},"conversation_id":"top"}`, "mc"}, // metadata.conversation_id 优先
-		{`{"conversation_id":"top"}`, "top"},                                                  // 顶层 conversation_id
-		{`{"metadata":{"user_id":"mu"}}`, "mu"},                                               // metadata.user_id 兜底
-		{`{"metadata":{"conversation_id":123}}`, ""},                                          // 非字符串 → 空
-		{`not-json`, ""},                                                                       // 非法 JSON → 空
+		{`{"conversation_id":"top"}`, "top"},                                                   // 顶层 conversation_id
+		{`{"metadata":{"user_id":"mu"}}`, "mu"},                                                // metadata.user_id 兜底
+		{`{"metadata":{"conversation_id":123}}`, ""},                                           // 非字符串 → 空
+		{`not-json`, ""}, // 非法 JSON → 空
 	}
 	for _, c := range cases {
 		if got := ExtractKey([]byte(c.body)); got != c.want {
@@ -160,6 +160,79 @@ func TestConcurrentSameKeyAssignsOnce(t *testing.T) {
 	}
 	if r.Count() != 1 {
 		t.Errorf("count=%d want 1 (single binding)", r.Count())
+	}
+}
+
+// boundUID 直接读绑定 uid（不触发 Resolve 的重分配），供 Bind 系列测试断言用（包内私有 helper）。
+func (r *Router) boundUID(key string) (string, bool) {
+	r.mu.RLock()
+	e, ok := r.entries[key]
+	r.mu.RUnlock()
+	return e.uid, ok
+}
+
+func TestBindOverridesAndMirrors(t *testing.T) {
+	// Bind 幂等覆盖旧值，并异步镜像 SetBind。
+	st := newCountingStore()
+	r := routerWith(st, []string{"a1", "a2"}, time.Minute)
+	r.Bind("c1", "a1")
+	if u, ok := r.boundUID("c1"); !ok || u != "a1" {
+		t.Fatalf("bind c1->a1 then bound=%s ok=%v", u, ok)
+	}
+	// 覆盖到 a2
+	r.Bind("c1", "a2")
+	if u, _ := r.boundUID("c1"); u != "a2" {
+		t.Fatalf("bind override should map c1->a2, got %s", u)
+	}
+	if r.Count() != 1 {
+		t.Errorf("bind override must not duplicate entries, count=%d", r.Count())
+	}
+	st.mu.Lock()
+	n := st.setBinds
+	binds := map[string]string{}
+	for k, v := range st.binds {
+		binds[k] = v
+	}
+	st.mu.Unlock()
+	if n != 2 {
+		t.Errorf("SetBind mirror count=%d want 2", n)
+	}
+	if binds["c1"] != "a2" {
+		t.Errorf("mirrored bind should be a2, got %s", binds["c1"])
+	}
+}
+
+func TestBindIgnoresEmptyKey(t *testing.T) {
+	st := newCountingStore()
+	r := routerWith(st, []string{"a1"}, time.Minute)
+	r.Bind("", "a1")
+	r.Bind("c1", "")
+	if r.Count() != 0 {
+		t.Errorf("Bind with empty key/uid must be no-op, count=%d", r.Count())
+	}
+	st.mu.Lock()
+	n := st.setBinds
+	st.mu.Unlock()
+	if n != 0 {
+		t.Errorf("empty-key Bind must not mirror, setBinds=%d", n)
+	}
+}
+
+func TestBindThenUnbindLifecycle(t *testing.T) {
+	st := newCountingStore()
+	r := routerWith(st, []string{"a1"}, time.Minute)
+	r.Bind("c1", "a1")
+	if !r.Unbind("c1") {
+		t.Fatal("Unbind should report found")
+	}
+	if r.Count() != 0 {
+		t.Errorf("count after unbind=%d want 0", r.Count())
+	}
+	st.mu.Lock()
+	del := st.delBinds
+	st.mu.Unlock()
+	if del != 1 {
+		t.Errorf("DelBind mirror count=%d want 1", del)
 	}
 }
 

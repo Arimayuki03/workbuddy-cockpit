@@ -8,11 +8,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/pool"
+	"workbuddy2api/internal/redisstore"
+	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
 )
 
@@ -55,6 +58,43 @@ func newFakeUpstream(t *testing.T, behavior func(auth string) (status int, body 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// bindStore 记录粘性绑定镜像调用（不联网），供 D4 端到端断言绑定收敛到最终成功号。
+type bindStore struct {
+	redisstore.Noop
+	mu     sync.Mutex
+	binds  map[string]string
+	delCnt int
+}
+
+func newBindStore() *bindStore { return &bindStore{binds: map[string]string{}} }
+
+func (b *bindStore) SetBind(key, uid string, ttl time.Duration) {
+	b.mu.Lock()
+	b.binds[key] = uid
+	b.mu.Unlock()
+}
+func (b *bindStore) DelBind(key string) {
+	b.mu.Lock()
+	b.delCnt++
+	delete(b.binds, key)
+	b.mu.Unlock()
+}
+func (b *bindStore) LoadBinds() map[string]string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := map[string]string{}
+	for k, v := range b.binds {
+		out[k] = v
+	}
+	return out
+}
+func (b *bindStore) lastUID(key string) (string, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	u, ok := b.binds[key]
+	return u, ok
+}
 
 // testPoolWith 构建一个所有账号 credits=1000 的池，并注入确定性随机源：
 // randInt64N 恒返回 0 → pickWeighted 必选候选集中积分最高者（第一个）。
@@ -152,6 +192,70 @@ func TestChatRotatesOnHardCredit(t *testing.T) {
 	st, _ := p.Status("bad")
 	if !st.Cooling || st.Reason == "" {
 		t.Errorf("bad account should be cooling: %+v", st)
+	}
+}
+
+// TestChatStickyFollowsFinalSuccess 端到端验证 D4：粘性号失败换号成功后，会话绑定收敛到成功号。
+func TestChatStickyFollowsFinalSuccess(t *testing.T) {
+	st := newBindStore()
+	sess := session.New(session.Config{
+		TTL:       time.Minute,
+		Store:     st,
+		Available: func() []string { return []string{"bad", "good"} },
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	// 先把会话预绑定到 bad（模拟历史粘性），bad 失败、good 成功 → 绑定应切到 good。
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		if authz == "Bearer at-bad" {
+			return 500, `{"code":500}`, false
+		}
+		return 200, sseOK, true
+	})
+	h := NewHandler(Config{
+		Pool:         p,
+		Upstream:     up,
+		Session:      sess,
+		SoftCooldown: time.Minute,
+	})
+	// 预绑定：sess.Bind("conv-1", "bad")，然后请求体带同 conversation_id。
+	sess.Bind("conv-1", "bad")
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-1"}}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	// 绑定必须收敛到最终成功的 good。
+	if uid, ok := st.lastUID("conv-1"); !ok || uid != "good" {
+		t.Fatalf("sticky binding should follow final success to good, got %s ok=%v (binds=%v)", uid, ok, st.binds)
+	}
+}
+
+// TestChatStickySuccessKeepsBinding 粘性号直接成功 → 绑定不变（仍为该号）。
+func TestChatStickySuccessKeepsBinding(t *testing.T) {
+	st := newBindStore()
+	sess := session.New(session.Config{
+		TTL:       time.Minute,
+		Store:     st,
+		Available: func() []string { return []string{"good"} },
+	})
+	p := testPoolWith(&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999})
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 200, sseOK, true
+	})
+	h := NewHandler(Config{Pool: p, Upstream: up, Session: sess, SoftCooldown: time.Minute})
+	sess.Bind("conv-1", "good")
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-1"}}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	if uid, ok := st.lastUID("conv-1"); !ok || uid != "good" {
+		t.Fatalf("binding should stay good after success, got %s ok=%v", uid, ok)
 	}
 }
 
