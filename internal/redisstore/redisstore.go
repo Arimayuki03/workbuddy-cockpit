@@ -176,8 +176,8 @@ func (u *Upstash) LoadBinds() map[string]string {
 type Noop struct{}
 
 func (Noop) SetBind(string, string, time.Duration) {}
-func (Noop) GetBind(string) (string, bool)          { return "", false }
-func (Noop) DelBind(string)                         {}
-func (Noop) LoadBinds() map[string]string           { return nil }
-func (Noop) SaveState([]byte)                       {}
-func (Noop) LoadState() ([]byte, bool)              { return nil, false }
+func (Noop) GetBind(string) (string, bool)         { return "", false }
+func (Noop) DelBind(string)                        {}
+func (Noop) LoadBinds() map[string]string          { return nil }
+func (Noop) SaveState([]byte)                      {}
+func (Noop) LoadState() ([]byte, bool)             { return nil, false }

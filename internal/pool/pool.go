@@ -52,6 +52,11 @@ type Status struct {
 	ErrCount        int       `json:"err_count,omitempty"`
 	LastSuccessTime time.Time `json:"last_success,omitempty"`
 	LastErrTime     time.Time `json:"last_err,omitempty"`
+
+	// 运行态（不持久化）：在途请求数 + 熔断器状态。
+	InFlight     int       `json:"in_flight"`
+	BreakerFails int       `json:"breaker_fails"`
+	BreakerUntil time.Time `json:"breaker_until,omitempty"`
 }
 
 type entry struct {
@@ -451,11 +456,11 @@ var minPickGap = 100 * time.Millisecond
 
 // pickWeighted 三因子加权随机（claude-api selectWeightedRandom 参考口径）：
 //
-//	weight = credits 比例 × 10 + idleWeight + successRate × 3
+//		weight = credits 比例 × 10 + idleWeight + successRate × 3
 //
-//   - credits 比例 = 该号 credits / 候选集内最大 credits（避免量纲爆炸）
-//   - idleWeight = min(距 lastUsed 小时数 × idleWeightPerHour, idleWeightMax)；从未使用给满分
-//   - successRate = successCount/(successCount+errCount)；无请求记录给 1.5（中性偏信任）
+//	  - credits 比例 = 该号 credits / 候选集内最大 credits（避免量纲爆炸）
+//	  - idleWeight = min(距 lastUsed 小时数 × idleWeightPerHour, idleWeightMax)；从未使用给满分
+//	  - successRate = successCount/(successCount+errCount)；无请求记录给 1.5（中性偏信任）
 //
 // credits 全 0 时仍按 idle+successRate 加权（不退化均匀随机）。
 // 权重为浮点，用 int64 定点（×1e6）抽签可保持确定性随机源注入（randInt64N 语义不变）。
@@ -726,6 +731,7 @@ func (p *Pool) Counts() (total, healthy int) {
 }
 
 // CountsDetailed 返回 total/healthy/cooling/disabled 四类计数。
+// cooling 含常规冷却（until）与熔断期（breakerUntil）。
 func (p *Pool) CountsDetailed() (total, healthy, cooling, disabled int) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -735,7 +741,7 @@ func (p *Pool) CountsDetailed() (total, healthy, cooling, disabled int) {
 		switch {
 		case e.disabled:
 			disabled++
-		case !e.until.IsZero() && now.Before(e.until):
+		case !e.healthy(now):
 			cooling++
 		default:
 			healthy++
@@ -766,7 +772,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		UID:             uid,
 		Nickname:        e.a.Nickname,
 		Credits:         e.credits,
-		Cooling:         !e.until.IsZero() && now.Before(e.until),
+		Cooling:         now.Before(e.until) || now.Before(e.breakerUntil),
 		Reason:          e.reason,
 		Disabled:        e.disabled,
 		SuccessCount:    e.successCount,
@@ -774,6 +780,9 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		LastSuccessTime: e.lastSuccess,
 		LastErrTime:     e.lastErr,
 		Until:           e.until,
+		InFlight:        int(e.inFlight.Load()),
+		BreakerFails:    e.fails,
+		BreakerUntil:    e.breakerUntil,
 	}
 	if st.Cooling {
 		// 冷却剩余秒数（向上取整，避免 0 显示为已到期）。

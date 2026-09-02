@@ -13,8 +13,10 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/pool"
+	"workbuddy2api/internal/redisstore"
 	"workbuddy2api/internal/scheduler"
 	"workbuddy2api/internal/server"
+	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
 )
 
@@ -44,6 +46,38 @@ func main() {
 	defer p.Flush()    // 进程退出前强制落盘（后台 flush 每 5s 一次，退出时补一次）
 	p.SyncToDir(auths) // 与 auths 目录对齐：新账号加入、已删除文件账号剔除（状态保留）
 
+	// 熔断器 + 在途上限 + 三因子加权调优（从 config 注入，非正值回退默认）。
+	p.SetBreaker(cfg.Pool.BreakerThreshold, cfg.BreakerCooldownDur, cfg.BreakerCooldownMaxD)
+	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
+	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
+
+	// redisstore：未配置/连接失败 → Noop（纯内存模式，一切功能照常）。
+	store := redisstore.New(cfg.Upstash.URL, cfg.Upstash.Token)
+
+	// 会话粘性路由（可配关闭）。
+	var sessRouter *session.Router
+	redisMode := "noop"
+	if _, ok := store.(redisstore.Noop); !ok {
+		redisMode = "upstash"
+	}
+	if cfg.SessionSticky.Enabled {
+		sessRouter = session.New(session.Config{
+			TTL:        cfg.SessionTTL,
+			GCInterval: cfg.SessionGCInterval,
+			Store:      store,
+			Available:  p.AvailableUIDs,
+		})
+		sessRouter.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
+		sessRouter.StartGC()
+		defer sessRouter.StopGC()
+	}
+	sessCount := func() int {
+		if sessRouter != nil {
+			return sessRouter.Count()
+		}
+		return 0
+	}
+
 	up := upstream.New()
 	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	up.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
@@ -59,6 +93,9 @@ func main() {
 		Pool:         p,
 		Upstream:     up,
 		APIKey:       cfg.APIKey,
+		Session:      sessRouter,
+		StickyCount:  sessCount,
+		RedisMode:    redisMode,
 		HardCooldown: cfg.HardCreditDur,
 		SoftCooldown: cfg.SoftRateDur,
 		ErrThreshold: cfg.Cooldown.ErrThresh,

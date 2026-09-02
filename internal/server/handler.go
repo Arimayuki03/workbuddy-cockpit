@@ -25,6 +25,10 @@ type Config struct {
 	MaxRotate int    // 单请求最多换号次数，默认 3
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
+	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
+	StickyCount func() int
+	// RedisMode 观测字段（"upstash" / "noop"），供 /status 透出。
+	RedisMode string
 	// HardCooldown 余额不足冷却时长（默认 12h）。仅作历史兼容保留：
 	// config.example.json 的 cooldown.hard_credit 键仍要求存在，但实际行为已由
 	// Pool.CooldownUntilTomorrow4AM 接管（ErrHardCredit 统一冷却到次日 04:00，等签到恢复）。
@@ -97,12 +101,22 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	total, healthy, cooling, disabled := h.cfg.Pool.CountsDetailed()
+	sticky := 0
+	if h.cfg.StickyCount != nil {
+		sticky = h.cfg.StickyCount()
+	}
+	redisMode := h.cfg.RedisMode
+	if redisMode == "" {
+		redisMode = "noop"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"accounts": h.cfg.Pool.List(),
-		"total":    total,
-		"healthy":  healthy,
-		"cooling":  cooling,
-		"disabled": disabled,
+		"accounts":        h.cfg.Pool.List(),
+		"total":           total,
+		"healthy":         healthy,
+		"cooling":         cooling,
+		"disabled":        disabled,
+		"sticky_sessions": sticky,
+		"redis_mode":      redisMode,
 	})
 }
 

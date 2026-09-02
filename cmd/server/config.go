@@ -45,12 +45,12 @@ type Config struct {
 	} `json:"upstash"`
 
 	Pool struct {
-		MaxInFlight          int     `json:"max_in_flight"`           // 单账号最大在途请求数，0 = 不限
-		BreakerThreshold     int     `json:"breaker_threshold"`       // 连续失败次数触发熔断，默认 3
-		BreakerCooldown      string  `json:"breaker_cooldown"`        // 基础熔断时长，默认 "30m"
-		BreakerCooldownMax   string  `json:"breaker_cooldown_max"`    // 指数退避封顶，默认 "6h"
-		IdleWeightPerHour    float64 `json:"idle_weight_per_hour"`    // 闲置补偿：每小时未用 +0.5 权重
-		IdleWeightMax        float64 `json:"idle_weight_max"`         // 闲置补偿封顶，默认 5.0
+		MaxInFlight        int     `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
+		BreakerThreshold   int     `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
+		BreakerCooldown    string  `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
+		BreakerCooldownMax string  `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
+		IdleWeightPerHour  float64 `json:"idle_weight_per_hour"` // 闲置补偿：每小时未用 +0.5 权重
+		IdleWeightMax      float64 `json:"idle_weight_max"`      // 闲置补偿封顶，默认 5.0
 	} `json:"pool"`
 
 	SessionSticky struct {
