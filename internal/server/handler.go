@@ -11,7 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/pool"
+	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
 )
 
@@ -21,6 +23,8 @@ type Config struct {
 	Upstream  *upstream.Client
 	APIKey    string // 空 = 不鉴权
 	MaxRotate int    // 单请求最多换号次数，默认 3
+	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
+	Session *session.Router
 	// HardCooldown 余额不足冷却时长（默认 12h）。仅作历史兼容保留：
 	// config.example.json 的 cooldown.hard_credit 键仍要求存在，但实际行为已由
 	// Pool.CooldownUntilTomorrow4AM 接管（ErrHardCredit 统一冷却到次日 04:00，等签到恢复）。
@@ -216,6 +220,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	tried := map[string]bool{}
 	var lastErr error
 
+	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
+	sessKey := ""
+	stickyUID := ""
+	if h.cfg.Session != nil {
+		sessKey = session.ExtractKey(body)
+		if sessKey != "" {
+			if uid, ok := h.cfg.Session.Resolve(sessKey); ok {
+				stickyUID = uid
+			}
+		}
+	}
+
 	// 在途租约：成功选中即占名额；函数出口（含成功 return 与 panic）统一释放。
 	var heldUID string
 	defer func() {
@@ -229,9 +245,29 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			heldUID = ""
 		}
 	}
+	// fail 在轮转失败分支统一：释放租约 + 若失败号正是粘性号则解绑（下次请求重新分配）。
+	fail := func(uid string) {
+		releaseHeld()
+		if stickyUID != "" && uid == stickyUID {
+			h.cfg.Session.Unbind(sessKey)
+			stickyUID = ""
+		}
+	}
 
 	for i := 0; i < h.cfg.MaxRotate; i++ {
-		acct := h.cfg.Pool.PickExcluding(tried)
+		// 选号：粘性号优先（PickByUID 已校验 health + 在途未满），否则普通轮换。
+		var acct *auth.Auth
+		if stickyUID != "" {
+			acct = h.cfg.Pool.PickByUID(stickyUID)
+			if acct == nil {
+				// 粘性号当前不可用（冷却/占满）→ 解绑，本次回落普通轮换。
+				h.cfg.Session.Unbind(sessKey)
+				stickyUID = ""
+			}
+		}
+		if acct == nil {
+			acct = h.cfg.Pool.PickExcluding(tried)
+		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
 			break
@@ -255,7 +291,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				} else {
 					h.cfg.Pool.Cooldown(acct.UID, pool.CoolErr, h.cfg.ErrCooldown, "refresh: "+err.Error())
 				}
-				releaseHeld()
+				fail(acct.UID)
 				continue
 			}
 			if err := acct.SaveAtomic(); err != nil {
@@ -270,7 +306,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 上游 client 已打 transport error 日志。
 			st.status = http.StatusServiceUnavailable
 			lastErr = terr
-			releaseHeld()
+			fail(acct.UID)
 			continue
 		}
 		if status >= 400 {
@@ -278,7 +314,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			kind := upstream.Classify(status, string(respBody))
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
 			h.applyErrorPolicy(acct.UID, kind, status, respBody)
-			releaseHeld()
+			fail(acct.UID)
 			continue
 		}
 		h.cfg.Pool.NoteSuccess(acct.UID)
