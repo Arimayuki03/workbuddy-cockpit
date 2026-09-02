@@ -716,20 +716,6 @@ func (p *Pool) PickByUID(uid string) *auth.Auth {
 	return e.a
 }
 
-// Counts 返回总数与 healthy 数（健康 = 未禁用且未处于冷却期）。
-func (p *Pool) Counts() (total, healthy int) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	now := time.Now()
-	for _, e := range p.byUID {
-		total++
-		if e.healthy(now) {
-			healthy++
-		}
-	}
-	return total, healthy
-}
-
 // CountsDetailed 返回 total/healthy/cooling/disabled 四类计数。
 // cooling 含常规冷却（until）与熔断期（breakerUntil）。
 func (p *Pool) CountsDetailed() (total, healthy, cooling, disabled int) {
