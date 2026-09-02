@@ -24,7 +24,7 @@ const (
 	ErrHardCredit                 // 余额不足（402 或 body 关键词）→ 长冷却
 	ErrSoftRate                   // 429 软限流 → 短冷却
 	ErrSessionDead                // 401 + 12153 offline session 失效 → 禁用
-	ErrNotFound                   // 404 上游偶发 → 短冷却不累计 errCount（防雪崩）
+	ErrNotFound                   // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
 	ErrServer                     // 5xx 上游故障
 	ErrClient                     // 其他 4xx / 业务错误
 )
