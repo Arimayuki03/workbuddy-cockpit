@@ -67,10 +67,12 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 ## 配置说明
 
+> **权威字段定义见 [`config.example.json`](config.example.json)**：它是当前 schema 的唯一权威，下方样例与之保持一致。`cp config.example.json config.json` 即可得到完整默认配置。
+
 ```json
 {
   "listen": ":7863",
-  "api_key": "your-api-key",
+  "api_key": "your-api-key-here",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "region": "cn",
@@ -83,6 +85,26 @@ curl -s http://localhost:7863/v1/chat/completions \
   },
   "upstream": {
     "timeout_seconds": 120
+  },
+  "features": {
+    "sanitize_blacklist_fingerprints": true
+  },
+  "upstash": {
+    "url": "",
+    "token": ""
+  },
+  "pool": {
+    "max_in_flight": 3,
+    "breaker_threshold": 3,
+    "breaker_cooldown": "30m",
+    "breaker_cooldown_max": "6h",
+    "idle_weight_per_hour": 0.5,
+    "idle_weight_max": 5.0
+  },
+  "session_sticky": {
+    "enabled": true,
+    "ttl": "30m",
+    "gc_interval": "5m"
   }
 }
 ```
