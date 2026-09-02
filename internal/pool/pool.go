@@ -839,9 +839,12 @@ func (p *Pool) PickByUID(uid string) *auth.Auth {
 	return e.a
 }
 
-// CountsDetailed 返回 total/healthy/cooling/disabled 四类计数。
+// CountsDetailed 返回 total/healthy/cooling/disabled/inFlightFull 五类计数。
 // cooling 含常规冷却（until）与熔断期（breakerUntil）。
-func (p *Pool) CountsDetailed() (total, healthy, cooling, disabled int) {
+// 注意：healthy 口径不含 inFlight 维度（是状态机权威判定，只看 disabled/until/breakerUntil）；
+// inFlightFull 是 healthy 的子集——healthy 里已达在途上限的账号数，供 /status 透出满载度。
+// 与 ServableNow 的区别见该函数注释。
+func (p *Pool) CountsDetailed() (total, healthy, cooling, disabled, inFlightFull int) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
@@ -854,9 +857,28 @@ func (p *Pool) CountsDetailed() (total, healthy, cooling, disabled int) {
 			cooling++
 		default:
 			healthy++
+			if p.inFlightFull(e) {
+				inFlightFull++
+			}
 		}
 	}
-	return total, healthy, cooling, disabled
+	return total, healthy, cooling, disabled, inFlightFull
+}
+
+// ServableNow 报告池当前是否可服务：存在至少一个 healthy 且未占满在途名额的账号。
+// 与 CountsDetailed 的 healthy 口径不同：healthy 只看 disabled/until/breakerUntil（状态机权威判定），
+// 不看 inFlight；ServableNow 额外叠加在途维度，与 chat 的真实可达性（Pick 会跳过 inFlightFull 账号）对齐。
+// 专供 /healthz 用，避免"全账号 healthy 但都占满"时探活误报 200 而 chat 返回 503 的口径裂缝。
+func (p *Pool) ServableNow() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	for _, e := range p.byUID {
+		if e.healthy(now) && !p.inFlightFull(e) {
+			return true
+		}
+	}
+	return false
 }
 
 // List 返回所有账号状态（按 UID 排序，稳定输出）。

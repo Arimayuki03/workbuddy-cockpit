@@ -680,8 +680,9 @@ func TestStatusEndpoint(t *testing.T) {
 		t.Fatalf("status not json: %v", err)
 	}
 	if statusBody["total"] != float64(1) || statusBody["healthy"] != float64(1) ||
-		statusBody["cooling"] != float64(0) || statusBody["disabled"] != float64(0) {
-		t.Errorf("summary=%v want total=1 healthy=1 cooling=0 disabled=0", statusBody)
+		statusBody["cooling"] != float64(0) || statusBody["disabled"] != float64(0) ||
+		statusBody["in_flight_full"] != float64(0) {
+		t.Errorf("summary=%v want total=1 healthy=1 cooling=0 disabled=0 in_flight_full=0", statusBody)
 	}
 	// Phase v3：池级 sticky_sessions + redis_mode。
 	if statusBody["sticky_sessions"] != float64(0) {
@@ -689,6 +690,34 @@ func TestStatusEndpoint(t *testing.T) {
 	}
 	if statusBody["redis_mode"] != "noop" {
 		t.Errorf("redis_mode=%v want noop", statusBody["redis_mode"])
+	}
+}
+
+// TestStatusInFlightFull /status 透出满载计数：healthy 且占满在途的账号数。
+func TestStatusInFlightFull(t *testing.T) {
+	p := testPoolWith(
+		&auth.Auth{UID: "full", AccessToken: "at", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "free", AccessToken: "at", ExpiresAt: 9999999999},
+	)
+	p.SetMaxInFlight(1)
+	p.Acquire("full")
+	defer p.Release("full")
+
+	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	var statusBody map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &statusBody); err != nil {
+		t.Fatalf("status not json: %v", err)
+	}
+	if statusBody["in_flight_full"] != float64(1) {
+		t.Errorf("in_flight_full=%v want 1", statusBody["in_flight_full"])
+	}
+	if statusBody["healthy"] != float64(2) {
+		t.Errorf("healthy=%v want 2 (full is still healthy by state-machine semantics)", statusBody["healthy"])
 	}
 }
 
@@ -772,7 +801,34 @@ func TestHealthz503WhenNoHealthy(t *testing.T) {
 	}
 }
 
-// TestHealthz200WithHealthy 有健康账号 → 200。
+// TestHealthz503WhenAllInFlightFull 全部账号 healthy 但都占满在途 → 503（与 chat 同口径），
+// 且 healthy 语义未变（仍为 1）：满载不是状态机健康维度的变化，是探活口径单独叠加。
+func TestHealthz503WhenAllInFlightFull(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
+	p.SetMaxInFlight(1)
+	p.Acquire("u1") // 占满唯一在途名额
+	defer p.Release("u1")
+
+	if p.ServableNow() {
+		t.Fatal("servable should be false when the only healthy account is in-flight full")
+	}
+	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code=%d want 503 (healthy but all in-flight full)", rec.Code)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("healthz not json: %v body=%s", err, rec.Body)
+	}
+	// healthy 语义未变：账号仍是 healthy（只占满在途，非冷却/禁用）。
+	if resp["healthy"] != float64(1) || resp["total"] != float64(1) {
+		t.Errorf("healthz json=%v want healthy=1 total=1 (healthy semantics unchanged)", resp)
+	}
+}
+
+// TestHealthz200WhenHealthy 有健康账号 → 200。
 func TestHealthz200WithHealthy(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
