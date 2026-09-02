@@ -322,33 +322,42 @@ func TestReenableDoesNotTouchDisabled(t *testing.T) {
 	}
 }
 
-func TestNoteErrorThreshold(t *testing.T) {
+func TestNoteErrorAccumulatesErrTotal(t *testing.T) {
+	// NoteError 语义变更：不再有独立的 err 冷却（CoolErr 已并入熔断器），
+	// 只累计 errTotal（不清零，供成功率权重）并喂熔断器 fails。
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	for i := 0; i < 2; i++ {
-		p.NoteError("u1", 3, 10*time.Minute)
-		st, _ := p.Status("u1")
-		if st.Cooling {
-			t.Fatalf("cooling too early at %d", i+1)
-		}
-	}
-	p.NoteError("u1", 3, 10*time.Minute)
+	p.NoteError("u1")
+	p.NoteError("u1")
 	st, _ := p.Status("u1")
-	if !st.Cooling {
-		t.Fatalf("threshold 3 should cool the account: %+v", st)
+	if st.ErrTotal != 2 {
+		t.Errorf("err_total=%d want 2", st.ErrTotal)
+	}
+	if st.Cooling {
+		t.Errorf("NoteError alone must not set cooling (no CoolErr): %+v", st)
+	}
+	if st.LastErrTime.IsZero() {
+		t.Error("last_err not set")
 	}
 }
 
-func TestNoteSuccessResetsCounter(t *testing.T) {
+func TestNoteSuccessResetsBreakerNotErrTotal(t *testing.T) {
+	// NoteSuccess 清 fails/熔断（运行态），但不清 errTotal（累计值）。
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	p.NoteError("u1", 3, time.Hour)
-	p.NoteError("u1", 3, time.Hour)
+	p.SetBreaker(2, time.Hour, 2*time.Hour)
+	p.NoteError("u1")
+	p.NoteError("u1") // 触发熔断
+	if p.internalHealthy("u1") {
+		t.Fatal("breaker should be open (unhealthy) after 2 failures")
+	}
 	p.NoteSuccess("u1")
-	p.NoteError("u1", 3, time.Hour)
-	p.NoteError("u1", 3, time.Hour)
-	if p.Pick() == nil {
-		t.Fatal("success should reset error counter")
+	st, _ := p.Status("u1")
+	if st.ErrTotal != 2 {
+		t.Errorf("err_total=%d want 2 (cumulative, not cleared by success)", st.ErrTotal)
+	}
+	if st.Cooling {
+		t.Errorf("success should clear breaker: %+v", st)
 	}
 }
 
@@ -370,26 +379,49 @@ func TestNoteSuccessIncrementsAndRecords(t *testing.T) {
 	}
 }
 
-func TestNoteErrorRecordsAndKind(t *testing.T) {
+func TestReviveLockedClearsAll(t *testing.T) {
+	// reviveLocked 全清矩阵：until/coolKind/reason/fails/retryCount/breakerUntil 全部归零 + 更新 credits。
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	p.NoteError("u1", 3, time.Hour)
+	p.CooldownUntilTomorrow4AM("u1", "余额不足") // 硬冷却（也喂 fails）
+	p.SetBreaker(1, time.Hour, time.Hour)
+	p.NoteError("u1") // 触发熔断（fails=1→阈值1→resets fails=0, retryCount=1, breakerUntil 非零）
+	p.ReenableIfCredits("u1", 500)
 	st, _ := p.Status("u1")
-	if st.ErrCount != 1 {
-		t.Errorf("err_count=%d want 1", st.ErrCount)
+	if st.Cooling {
+		t.Errorf("revive should clear cooling: %+v", st)
 	}
-	if st.LastErrTime.IsZero() {
-		t.Error("last_err not set")
+	if st.Reason != "" || st.Credits != 500 {
+		t.Errorf("revive should clear reason + set credits=500: %+v", st)
 	}
-	// 次次累积两笔，第三笔触发冷却 → cool_kind=error_threshold
-	p.NoteError("u1", 3, time.Hour)
-	p.NoteError("u1", 3, time.Hour)
-	st, _ = p.Status("u1")
-	if !st.Cooling || st.CoolKind != "error_threshold" {
-		t.Errorf("cooling portrait=%+v", st)
+	if st.BreakerFails != 0 || !st.BreakerUntil.IsZero() {
+		t.Errorf("revive should clear breaker runtime: %+v", st)
 	}
-	if st.CoolRemaining <= 0 {
-		t.Errorf("cool_remaining=%d want >0", st.CoolRemaining)
+	// disabler 不参与（revive 不清 disabled——见 RunKeepalive 语义，这里只验证非禁用被清空）。
+	if !p.internalHealthy("u1") {
+		t.Errorf("u1 should be healthy after revive: breaker_until=%v", st.BreakerUntil)
+	}
+}
+
+func TestReenableClearsBreakerRegression(t *testing.T) {
+	// B5 回归：签到解冻必须连熔断态一起清。修复前 ReenableIfCredits 只清 until/coolKind/errCount，
+	// breakerUntil 残留会让 healthy() 判定失败，签到解冻失效（此测试修复前会 FAIL）。
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetBreaker(1, time.Hour, time.Hour)
+	p.NoteError("u1") // 触发熔断
+	if bt, _ := p.breakerUntil("u1"); bt.IsZero() {
+		t.Fatal("precondition: breaker should be open")
+	}
+	p.ReenableIfCredits("u1", 500)
+	if bt, _ := p.breakerUntil("u1"); !bt.IsZero() {
+		t.Fatalf("reenable should clear breakerUntil, still=%v", bt)
+	}
+	if !p.internalHealthy("u1") {
+		t.Fatal("account should be healthy after reenable")
+	}
+	if got := p.Pick(); got == nil || got.UID != "u1" {
+		t.Fatalf("reenable should let account be picked, got %+v", got)
 	}
 }
 
@@ -398,7 +430,7 @@ func TestCoolKindPersistsAcrossReload(t *testing.T) {
 	fp := filepath.Join(dir, "state.json")
 	p := New(fp)
 	p.Add(&auth.Auth{UID: "u1"})
-	p.Cooldown("u1", CoolErr, time.Hour, "consecutive errors")
+	p.Cooldown("u1", CoolHard, time.Hour, "余额不足")
 	p.Flush()
 
 	// 旧文件缺新字段时零值 → 冷却应仍工作（向后兼容）。
@@ -408,8 +440,8 @@ func TestCoolKindPersistsAcrossReload(t *testing.T) {
 	if !ok || !st.Cooling {
 		t.Fatalf("cooldown state lost after reload: %+v ok=%v", st, ok)
 	}
-	if st.CoolKind != "error_threshold" {
-		t.Errorf("cool_kind after reload=%q want error_threshold", st.CoolKind)
+	if st.CoolKind != "hard_credit" {
+		t.Errorf("cool_kind after reload=%q want hard_credit", st.CoolKind)
 	}
 }
 
@@ -419,20 +451,23 @@ func TestStateRoundTripExtendedFields(t *testing.T) {
 	p := New(fp)
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Cooldown("u1", CoolHard, time.Hour, "余额不足")
-	p.NoteSuccess("u1")              // successCount=1，last_success 非零
-	p.NoteSuccess("u1")              // successCount=2
-	p.NoteError("u1", 99, time.Hour) // errCount=1（未达阈值），last_err 非零
+	p.NoteSuccess("u1") // successCount=1，last_success 非零
+	p.NoteSuccess("u1") // successCount=2
+	p.NoteError("u1")   // errTotal=1（累计），last_err 非零
 	p.Flush()
 
 	raw, err := os.ReadFile(fp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// JSON tag 全小写下划线；err_count 此时 =1 所以也会落盘。
-	for _, want := range []string{`"cool_kind"`, `"success_count"`, `"err_count"`, `"last_success"`, `"last_err"`} {
+	// JSON tag 全小写下划线；err_total 落盘，err_count 不再落盘。
+	for _, want := range []string{`"cool_kind"`, `"success_count"`, `"err_total"`, `"last_success"`, `"last_err"`} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("state.json missing %s:\n%s", want, raw)
 		}
+	}
+	if strings.Contains(string(raw), `"err_count"`) {
+		t.Errorf("state.json should not write legacy err_count:\n%s", raw)
 	}
 
 	// 重载后字段保留
@@ -445,8 +480,40 @@ func TestStateRoundTripExtendedFields(t *testing.T) {
 	if st.SuccessCount != 2 || st.CoolKind != "hard_credit" {
 		t.Errorf("reloaded portrait=%+v", st)
 	}
+	if st.ErrTotal != 1 {
+		t.Errorf("reloaded err_total=%d want 1", st.ErrTotal)
+	}
 	if st.LastSuccessTime.IsZero() || st.LastErrTime.IsZero() {
 		t.Error("last_success/last_err lost after reload")
+	}
+}
+
+func TestLoadLegacyErrCountMigratesToErrTotal(t *testing.T) {
+	// 迁移测试：旧 state.json 只含 err_count（连续错误）→ 加载后 err_total 正确。
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	legacy := `{"accounts":{"u1":{"credits":100,"err_count":7}}}`
+	if err := os.WriteFile(fp, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	st, ok := p.Status("u1")
+	if !ok {
+		t.Fatal("legacy account should load")
+	}
+	if st.ErrTotal != 7 {
+		t.Errorf("err_total=%d want 7 (migrated from legacy err_count)", st.ErrTotal)
+	}
+	// 新字段优先：二者并存时取较大者。
+	both := `{"accounts":{"u1":{"credits":100,"err_count":3,"err_total":9}}}`
+	if err := os.WriteFile(fp, []byte(both), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p2 := New(fp)
+	p2.Add(&auth.Auth{UID: "u1"})
+	if st2, _ := p2.Status("u1"); st2.ErrTotal != 9 {
+		t.Errorf("err_total=%d want 9 (new field wins over legacy)", st2.ErrTotal)
 	}
 }
 
@@ -664,12 +731,12 @@ func TestBreakerTripsAtThreshold(t *testing.T) {
 	p.Add(&auth.Auth{UID: "u1"})
 	p.SetBreaker(3, time.Hour, 6*time.Hour)
 	for i := 0; i < 2; i++ {
-		p.NoteError("u1", 99, time.Hour) // threshold=99 让 err 冷却不触发，只驱动熔断
+		p.NoteError("u1") // NoteError 只驱动熔断（不再有单独 err 冷却）
 		if bt, ok := p.breakerUntil("u1"); ok && !bt.IsZero() {
 			t.Fatalf("breaker tripped too early at %d: %v", i+1, bt)
 		}
 	}
-	p.NoteError("u1", 99, time.Hour)
+	p.NoteError("u1")
 	bt, ok := p.breakerUntil("u1")
 	if !ok || bt.IsZero() {
 		t.Fatalf("breaker should trip at threshold: until=%v ok=%v", bt, ok)
@@ -680,9 +747,9 @@ func TestBreakerSuccessClears(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.SetBreaker(3, time.Hour, 6*time.Hour)
-	p.NoteError("u1", 99, time.Hour)
-	p.NoteError("u1", 99, time.Hour)
-	p.NoteError("u1", 99, time.Hour) // 触发熔断
+	p.NoteError("u1")
+	p.NoteError("u1")
+	p.NoteError("u1") // 触发熔断
 	if bt, _ := p.breakerUntil("u1"); bt.IsZero() {
 		t.Fatal("breaker should be open")
 	}
@@ -702,7 +769,7 @@ func TestBreakerExponentialBackoffCapped(t *testing.T) {
 	// 连续 9 次失败（无成功）→ 熔断 3 次，retryCount 1→2→3，退避 1m→2m→4m(封顶)。
 	for i := 0; i < 3; i++ {
 		for j := 0; j < 3; j++ {
-			p.NoteError("u1", 99, time.Hour) // err threshold=99 不触发 until，只驱动熔断
+			p.NoteError("u1") // 连续失败只驱动熔断
 		}
 	}
 	bt, ok := p.breakerUntil("u1")
@@ -720,7 +787,7 @@ func TestBreakerExponentialBackoffCapped(t *testing.T) {
 	p2.Add(&auth.Auth{UID: "u1"})
 	p2.SetBreaker(3, time.Minute, 4*time.Minute)
 	for j := 0; j < 3; j++ {
-		p2.NoteError("u1", 99, time.Hour)
+		p2.NoteError("u1")
 	}
 	bt1, _ := p2.breakerUntil("u1")
 	if d1 := time.Until(bt1); d1 > time.Minute+time.Second {
@@ -815,8 +882,8 @@ func TestWeightLowSuccessRateDowngrades(t *testing.T) {
 	p.SetCredits("good", 100)
 	p.SetCredits("bad", 100)
 	p.NoteSuccess("good")
-	p.NoteError("bad", 99, time.Hour)
-	p.NoteError("bad", 99, time.Hour)
+	p.NoteError("bad")
+	p.NoteError("bad")
 	wGood, wBad := p.entryWeight("good"), p.entryWeight("bad")
 	if wBad >= wGood {
 		t.Errorf("low success rate should weigh less: good=%v bad=%v", wGood, wBad)
@@ -992,7 +1059,7 @@ func TestStatusExposesRuntimeFields(t *testing.T) {
 		t.Errorf("in_flight=%d want 1", st.InFlight)
 	}
 	p.SetBreaker(2, time.Hour, 2*time.Hour)
-	p.NoteError("u1", 99, time.Hour) // breaker_fails=1
+	p.NoteError("u1") // breaker_fails=1
 	st, _ = p.Status("u1")
 	if st.BreakerFails != 1 {
 		t.Errorf("breaker_fails=%d want 1", st.BreakerFails)

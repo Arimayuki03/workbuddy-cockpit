@@ -30,8 +30,6 @@ type Config struct {
 	// RedisMode 观测字段（"upstash" / "noop"），供 /status 透出。
 	RedisMode    string
 	SoftCooldown time.Duration // 429 冷却，默认 60s
-	ErrThreshold int           // 连续其他错误冷却阈值，默认 3
-	ErrCooldown  time.Duration // 错误冷却时长，默认 10m
 	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
 }
 
@@ -48,12 +46,6 @@ func NewHandler(cfg Config) *Handler {
 	}
 	if cfg.SoftCooldown <= 0 {
 		cfg.SoftCooldown = 60 * time.Second
-	}
-	if cfg.ErrThreshold <= 0 {
-		cfg.ErrThreshold = 3
-	}
-	if cfg.ErrCooldown <= 0 {
-		cfg.ErrCooldown = 10 * time.Minute
 	}
 	if cfg.RefreshSkew <= 0 {
 		cfg.RefreshSkew = 10 * time.Minute
@@ -194,7 +186,7 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 	infos, err := h.cfg.Upstream.FetchModels(acct)
 	if err != nil || len(infos) == 0 {
 		// 拉取失败惩罚该账号，避免下次 Pick 又选中同一个反复失败；lastFail 保持全局负缓存。
-		h.cfg.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
+		h.cfg.Pool.NoteError(acct.UID)
 		dynamicModelsCache.Lock()
 		dynamicModelsCache.lastFail = time.Now()
 		dynamicModelsCache.Unlock()
@@ -295,7 +287,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
 					h.cfg.Pool.Disable(acct.UID, "refresh session dead")
 				} else {
-					h.cfg.Pool.Cooldown(acct.UID, pool.CoolErr, h.cfg.ErrCooldown, "refresh: "+err.Error())
+					h.cfg.Pool.NoteError(acct.UID)
 				}
 				fail(acct.UID)
 				continue
@@ -308,7 +300,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		rc, status, respBody, terr := h.cfg.Upstream.ChatStream(acct, body)
 		if terr != nil {
-			// 网络层抖动：只换号，不累计 errCount（传输层错误对 5 次连坐 10m 冷却过于严苛）。
+			// 网络层抖动：只换号，不喂熔断计数（传输层错误对连续失败连坐熔断过于严苛）。
 			// 上游 client 已打 transport error 日志。
 			st.status = http.StatusServiceUnavailable
 			lastErr = terr
@@ -355,14 +347,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	st.status = http.StatusServiceUnavailable
 }
 
-// applyErrorPolicy 按错误分类对账号施加冷却/禁用策略。
+// applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。
 // 仅在 chatCompletions 轮转循环内调用：调用方已准备好 lastErr 并打算 continue 换号。
-// 行为等价于原先内联在 switch 各 case 的策略：
-//   - ErrHardCredit   → 积分耗尽，冷却到次日 04:00（签到任务 09/21 点恢复）
-//   - ErrSoftRate     → 429 短冷却
-//   - ErrSessionDead  → 永久禁用（session 死亡，需人工重登）
-//   - ErrNotFound     → 404 短冷却不累计 errCount（防雪崩）
-//   - 其他            → 仅 HTTP 5xx（ErrServer）累计 errCount；其他 4xx 只换号（防雪崩）
+//
+// 四条路径，各司其职：
+//   - ErrHardCredit → CooldownUntilTomorrow4AM：即时硬冷却到次日 04:00（等签到恢复）。
+//   - ErrSoftRate / ErrNotFound → Cooldown(CoolSoft)：即时软冷却（429/404）。
+//   - ErrSessionDead → Disable：session 死亡，永久禁用（需人工重登）。
+//   - 其他（default）→ NoteError：喂单一连续失败计数器 fails + 累计错误 errTotal，
+//     达到 breakerThreshold 触发熔断（指数退避）。anything 冷却入口也都喂 fails（见 pool.Cooldown）。
+//
+// 恢复出口：CoolSoft/CoolHard 各自到期自动恢复；熔断按其指数退避截止到期；
+// 成功（NoteSuccess）清 fails/熔断；签到解冻（ReenableIfCredits→reviveLocked）清全部。
 func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, status int, body []byte) {
 	switch kind {
 	case upstream.ErrHardCredit:
@@ -374,12 +370,12 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, status int
 	case upstream.ErrSessionDead:
 		h.cfg.Pool.Disable(uid, "12153 session dead")
 	case upstream.ErrNotFound:
-		// P2: 404 短冷却不累计 errCount（防雪崩）
+		// 404 短冷却（软冷却），防雪崩。
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown, "upstream 404")
 	default:
-		// 仅 HTTP 5xx（ErrServer）累计 errCount；其他 4xx 只换号（防雪崩）
+		// 仅 HTTP 5xx（ErrServer）喂熔断计数；其他 4xx 只换号（防雪崩）。
 		if status >= 500 {
-			h.cfg.Pool.NoteError(uid, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
+			h.cfg.Pool.NoteError(uid)
 		}
 	}
 	// body 仅透传保持签名对称；分类用的 Msg 已在调用方构建进 lastErr。

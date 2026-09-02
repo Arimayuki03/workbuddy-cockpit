@@ -17,6 +17,9 @@ func TestDefault(t *testing.T) {
 	if c.HardCreditDur.Hours() != 12 {
 		t.Errorf("hard=%v", c.HardCreditDur)
 	}
+	if c.SoftRateDur.Seconds() != 60 {
+		t.Errorf("soft=%v", c.SoftRateDur)
+	}
 }
 
 func TestLoadFile(t *testing.T) {

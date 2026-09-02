@@ -1,4 +1,12 @@
-// Package pool 账号池：内存索引 + 冷却/禁用状态机 + 熔断器 + state.json 持久化。
+// Package pool 账号池：单一状态机（健康/冷却/熔断）+ 在途租约 + 三因子加权挑选 + state.json 持久化。
+//
+// 每个账号只有三个正交状态维度：
+//  1. 健康维度（唯一权威）：healthy = !disabled && !until 生效 && !breakerUntil 生效
+//     - until：按错误类型的即时冷却（CoolSoft 429 / CoolHard 余额耗尽）
+//     - breakerUntil：连续失败（fails）累计触发熔断的指数退避截止
+//  2. 并发维度：inFlight（在途租约，运行态）
+//  3. 统计维度：successCount / errTotal（累计，供成功率权重）/ lastUsed / lastSuccess / lastErr
+//
 // 挑选策略：healthy 账号中取 credits Top5，按三因子（credits 占比 ×10 + 闲置补偿 + 成功率 ×3）加权随机。
 package pool
 
@@ -20,9 +28,8 @@ import (
 type CoolKind int
 
 const (
-	CoolHard CoolKind = iota // 余额不足 → 长冷却
+	CoolHard CoolKind = iota // 余额不足 → 冷却到次日 04:00（等签到恢复）
 	CoolSoft                 // 429 → 短冷却
-	CoolErr                  // 连续错误 → 中冷却
 )
 
 func (k CoolKind) String() string {
@@ -31,8 +38,6 @@ func (k CoolKind) String() string {
 		return "hard_credit"
 	case CoolSoft:
 		return "soft_rate"
-	case CoolErr:
-		return "error_threshold"
 	}
 	return "unknown"
 }
@@ -49,7 +54,7 @@ type Status struct {
 	Reason          string    `json:"reason,omitempty"`
 	Disabled        bool      `json:"disabled"`
 	SuccessCount    int64     `json:"success_count,omitempty"`
-	ErrCount        int       `json:"err_count,omitempty"`
+	ErrTotal        int64     `json:"err_total,omitempty"`
 	LastSuccessTime time.Time `json:"last_success,omitempty"`
 	LastErrTime     time.Time `json:"last_err,omitempty"`
 
@@ -63,19 +68,20 @@ type entry struct {
 	a            *auth.Auth
 	credits      int64
 	successCount int64     // 累计成功
-	errCount     int       // 连续错误
+	errTotal     int64     // 累计错误（供成功率权重 successRate = successCount/(successCount+errTotal)，不清零）
 	lastErr      time.Time // 最近一次错误时间
 	lastSuccess  time.Time // 最近一次成功时间
 	coolKind     CoolKind
-	until        time.Time // 冷却截止（hard/soft/err 三类）
+	until        time.Time // 冷却截止（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）
 	disabled     bool
 	reason       string
 	lastUsed     time.Time // 最近被选中时刻（防并发撞号）
 
 	// breakerUntil / fails / retryCount 为熔断器运行态（不持久化）。
-	// fails 与 errCount 独立：errCount 驱动 CoolErr 冷却，fails 驱动熔断器的指数退避。
+	// fails 是唯一的"连续失败"计数器：任何错误喂入，达到 breakerThreshold 触发熔断（指数退避），
+	// 跨入口累计，成功/熔断/统一复活时清零（保留 retryCount 驱动退避指数）。
 	breakerUntil time.Time // 熔断截止（指数退避）
-	fails        int       // 连续失败计数（熔断用）
+	fails        int       // 连续失败计数（熔断用，唯一权威）
 	retryCount   int       // 已熔断次数（指数退避的指数）
 
 	// inFlight 单账号在途请求数（运行态，不持久化）。用 atomic 避免 Pick 热路径拿写锁。
@@ -119,9 +125,12 @@ type stateAccount struct {
 	Until        time.Time `json:"until,omitempty"`
 	CoolKind     CoolKind  `json:"cool_kind"`
 	SuccessCount int64     `json:"success_count,omitempty"`
-	ErrCount     int       `json:"err_count,omitempty"`
-	LastSuccess  time.Time `json:"last_success,omitempty"`
-	LastErr      time.Time `json:"last_err,omitempty"`
+	// err_total 累计错误计数。旧版 err_count（连续错误）仍可读：加载时映射到 err_total，
+	// 仅作一次性迁移，不再回写 err_count。
+	ErrTotal    int64     `json:"err_total,omitempty"`
+	ErrCount    int       `json:"err_count,omitempty"` // 兼容旧文件的迁移源，仅读取
+	LastSuccess time.Time `json:"last_success,omitempty"`
+	LastErr     time.Time `json:"last_err,omitempty"`
 }
 
 // stateFile 持久化格式。
@@ -278,8 +287,9 @@ func (p *Pool) SetRandomSource(fn func(n int64) int64) {
 
 // startFlusher 每 flushInterval 检查 dirty 标志，有变更则 saveLocked 落盘。
 func (p *Pool) startFlusher() {
+	interval := flushInterval // 在启动 goroutine 前同步读取，避免与测试对 flushInterval 的恢复写竞争
 	go func() {
-		t := time.NewTicker(flushInterval)
+		t := time.NewTicker(interval)
 		defer t.Stop()
 		for range t.C {
 			p.mu.Lock()
@@ -460,7 +470,7 @@ var minPickGap = 100 * time.Millisecond
 //
 //	  - credits 比例 = 该号 credits / 候选集内最大 credits（避免量纲爆炸）
 //	  - idleWeight = min(距 lastUsed 小时数 × idleWeightPerHour, idleWeightMax)；从未使用给满分
-//	  - successRate = successCount/(successCount+errCount)；无请求记录给 1.5（中性偏信任）
+//	  - successRate = successCount/(successCount+errTotal)；无请求记录给 1.5（中性偏信任）
 //
 // credits 全 0 时仍按 idle+successRate 加权（不退化均匀随机）。
 // 权重为浮点，用 int64 定点（×1e6）抽签可保持确定性随机源注入（randInt64N 语义不变）。
@@ -526,7 +536,7 @@ func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
 	}
 
 	// 3. 成功率 ×3。
-	totalReq := e.successCount + int64(e.errCount)
+	totalReq := e.successCount + e.errTotal
 	if totalReq > 0 {
 		w += float64(e.successCount) / float64(totalReq) * 3
 	} else {
@@ -545,7 +555,8 @@ func (p *Pool) SetCredits(uid string, credits int64) {
 	}
 }
 
-// Cooldown 冷却账号至 now+d。
+// Cooldown 冷却账号至 now+d（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）。
+// 冷却入口同时是熔断器的失败信号：喂入 fails，达到阈值按指数退避熔断（与 until 正交）。
 func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -553,7 +564,6 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 		e.until = time.Now().Add(d)
 		e.coolKind = kind
 		e.reason = reason
-		e.errCount = 0
 		p.recordBreakerFailureLocked(e) // 冷却入口也是熔断器的失败信号
 		p.dirty.Store(true)
 	}
@@ -605,49 +615,55 @@ func (p *Pool) Disable(uid, reason string) {
 	}
 }
 
-// ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号处于冷却（非禁用）时恢复。
+// reviveLocked 统一复活出口：清空全部冷却/熔断运行态，并更新 credits。
+// 所有"主动恢复"路径必须走这里（签到解冻、未来任何恢复路径），杜绝"清一半"的畸形状态。
+// 注意：NoteSuccess 不调用 revive——它是运行中的成功，只清 fails/熔断（语义不同，见 NoteSuccess）。
+// 调用方必须已持有 p.mu。
+func (p *Pool) reviveLocked(e *entry, credits int64) {
+	e.credits = credits
+	e.until = time.Time{}
+	e.coolKind = 0
+	e.reason = ""
+	e.fails = 0
+	e.retryCount = 0
+	e.breakerUntil = time.Time{}
+}
+
+// ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号非禁用时，走统一复活清空全部冷却/熔断态。
 func (p *Pool) ReenableIfCredits(uid string, remain int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
-		e.credits = remain
 		if remain > 0 && !e.disabled {
-			e.until = time.Time{}
-			e.coolKind = 0
-			e.reason = ""
-			e.errCount = 0
+			p.reviveLocked(e, remain)
+		} else {
+			e.credits = remain
 		}
 		p.dirty.Store(true)
 	}
 }
 
-// NoteError 记录一次非余额/非 429 错误；达到 threshold 自动冷却 d 时长。
-// 同时接入熔断器失败计数。
-func (p *Pool) NoteError(uid string, threshold int, d time.Duration) {
+// NoteError 记录一次错误：喂入唯一的连续失败计数器 fails + 累计错误 errTotal。
+// 达到 breakerThreshold 触发熔断（指数退避），连续失败语义整体并入熔断器（不再有独立的 err 冷却）。
+func (p *Pool) NoteError(uid string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
-		e.errCount++
+		e.errTotal++
 		e.lastErr = time.Now()
-		if e.errCount >= threshold {
-			e.until = time.Now().Add(d)
-			e.coolKind = CoolErr
-			e.reason = "consecutive errors"
-			e.errCount = 0
-		}
 		p.recordBreakerFailureLocked(e)
 		p.dirty.Store(true)
 	}
 }
 
-// NoteSuccess 成功请求累加成功计数、刷新 lastSuccess，并重置连续错误与熔断失败计数。
+// NoteSuccess 成功请求累加成功计数、刷新 lastSuccess，并清空连续失败与熔断运行态。
+// 二进制模型：清 fails + retryCount + breakerUntil；不碰 until/coolKind（那些是即时冷却，各自到期）。
 func (p *Pool) NoteSuccess(uid string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		e.successCount++
 		e.lastSuccess = time.Now()
-		e.errCount = 0
 		e.fails = 0
 		e.retryCount = 0
 		e.breakerUntil = time.Time{}
@@ -762,7 +778,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Reason:          e.reason,
 		Disabled:        e.disabled,
 		SuccessCount:    e.successCount,
-		ErrCount:        e.errCount,
+		ErrTotal:        e.errTotal,
 		LastSuccessTime: e.lastSuccess,
 		LastErrTime:     e.lastErr,
 		Until:           e.until,
@@ -795,6 +811,12 @@ func (p *Pool) load() {
 		return
 	}
 	for uid, s := range sf.Accounts {
+		// err_total 优先；旧文件的 err_count（连续错误）作一次性迁移源映射进来（二者取较大者，
+		// 尽最大可能保留历史观测信号——旧语义下 err_count 也真实发生过错误，不应丢）。
+		errTotal := s.ErrTotal
+		if int64(s.ErrCount) > errTotal {
+			errTotal = int64(s.ErrCount)
+		}
 		p.byUID[uid] = &entry{
 			a:            &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
 			credits:      s.Credits,
@@ -803,7 +825,7 @@ func (p *Pool) load() {
 			until:        s.Until,
 			coolKind:     s.CoolKind,
 			successCount: s.SuccessCount,
-			errCount:     s.ErrCount,
+			errTotal:     errTotal,
 			lastErr:      s.LastErr,
 			lastSuccess:  s.LastSuccess,
 		}
@@ -823,7 +845,7 @@ func (p *Pool) saveLocked() {
 			Until:        e.until,
 			CoolKind:     e.coolKind,
 			SuccessCount: e.successCount,
-			ErrCount:     e.errCount,
+			ErrTotal:     e.errTotal,
 			LastSuccess:  e.lastSuccess,
 			LastErr:      e.lastErr,
 		}

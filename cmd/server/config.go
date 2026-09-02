@@ -19,10 +19,11 @@ type Config struct {
 	Region    string `json:"region"`     // 只收 "cn"
 
 	Cooldown struct {
-		HardCredit  string `json:"hard_credit"`   // "12h"
-		SoftRate    string `json:"soft_rate"`     // "60s"
-		ErrThresh   int    `json:"err_threshold"` // 默认 3
-		ErrCooldown string `json:"err_cooldown"`  // "10m"
+		// hard_credit 时长键仍在（D6/U4 才删除），但已无消费者：实际硬冷却走 CooldownUntilTomorrow4AM。
+		HardCredit string `json:"hard_credit"` // "12h"（历史键，见 D6）
+		// err_threshold / err_cooldown 已随 CoolErr 退役（U1/D1）：连续错误语义并入熔断器。
+		// 旧 config 中的这些键因 JSON 未知字段而自然忽略，不报错。
+		SoftRate string `json:"soft_rate"` // "60s"
 	} `json:"cooldown"`
 
 	Schedule struct {
@@ -62,7 +63,6 @@ type Config struct {
 	// 解析后
 	HardCreditDur       time.Duration `json:"-"`
 	SoftRateDur         time.Duration `json:"-"`
-	ErrCooldownDur      time.Duration `json:"-"`
 	BreakerCooldownDur  time.Duration `json:"-"`
 	BreakerCooldownMaxD time.Duration `json:"-"`
 	SessionTTL          time.Duration `json:"-"`
@@ -80,8 +80,6 @@ func Default() *Config {
 	}
 	c.Cooldown.HardCredit = "12h"
 	c.Cooldown.SoftRate = "60s"
-	c.Cooldown.ErrThresh = 3
-	c.Cooldown.ErrCooldown = "10m"
 	c.Schedule.CheckinHours = []int{9, 21}
 	c.Schedule.KeepaliveHours = []int{22}
 	c.Upstream.TimeoutSeconds = 120
@@ -139,14 +137,6 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_SOFT_RATE"); v != "" {
 		c.Cooldown.SoftRate = v
 	}
-	if v := os.Getenv("WB2A_ERR_THRESHOLD"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			c.Cooldown.ErrThresh = n
-		}
-	}
-	if v := os.Getenv("WB2A_ERR_COOLDOWN"); v != "" {
-		c.Cooldown.ErrCooldown = v
-	}
 	if v := os.Getenv("WB2A_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Upstream.TimeoutSeconds = n
@@ -161,14 +151,12 @@ func applyEnv(c *Config) {
 
 func (c *Config) normalize() error {
 	var err error
+	// HardCreditDur 仍解析但仅供启动校验（D6 才删除）——消费方已切到 CooldownUntilTomorrow4AM。
 	if c.HardCreditDur, err = time.ParseDuration(c.Cooldown.HardCredit); err != nil {
 		return fmt.Errorf("cooldown.hard_credit: %w", err)
 	}
 	if c.SoftRateDur, err = time.ParseDuration(c.Cooldown.SoftRate); err != nil {
 		return fmt.Errorf("cooldown.soft_rate: %w", err)
-	}
-	if c.ErrCooldownDur, err = time.ParseDuration(c.Cooldown.ErrCooldown); err != nil {
-		return fmt.Errorf("cooldown.err_cooldown: %w", err)
 	}
 	if c.BreakerCooldownDur, err = time.ParseDuration(c.Pool.BreakerCooldown); err != nil {
 		return fmt.Errorf("pool.breaker_cooldown: %w", err)
@@ -181,9 +169,6 @@ func (c *Config) normalize() error {
 	}
 	if c.SessionGCInterval, err = time.ParseDuration(c.SessionSticky.GCInterval); err != nil {
 		return fmt.Errorf("session_sticky.gc_interval: %w", err)
-	}
-	if c.Cooldown.ErrThresh <= 0 {
-		c.Cooldown.ErrThresh = 3
 	}
 	if c.Pool.BreakerThreshold <= 0 {
 		c.Pool.BreakerThreshold = 3

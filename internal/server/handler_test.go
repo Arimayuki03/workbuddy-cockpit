@@ -139,7 +139,7 @@ func TestChatRotatesOnHardCredit(t *testing.T) {
 	// 让 bad 积分更高被先选中
 	p.SetCredits("bad", 2000)
 	p.SetCredits("good", 1000)
-	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute, ErrThreshold: 3, ErrCooldown: 10 * time.Minute})
+	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute})
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -246,25 +246,27 @@ func TestChatTransportErrorDoesNotPenalize(t *testing.T) {
 		BillingBaseCN:   "https://fake.example",
 		BillingBaseGlob: "https://fake.example",
 	}
-	// threshold=1：若传输错误也累计 errCount，一次就会冷却
-	h := NewHandler(Config{Pool: p, Upstream: up, ErrThreshold: 1, ErrCooldown: time.Hour})
+	// 传输错误不喂熔断计数：一次 transport error 不应累计 errTotal 也不应熔断。
+	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
 	if rec.Code != 503 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	st, _ := p.Status("u1")
-	if st.Cooling || st.ErrCount != 0 {
+	if st.Cooling || st.ErrTotal != 0 {
 		t.Fatalf("transport error should not penalize account: %+v", st)
 	}
 }
 
 func TestChatHTTP5xxPenalizes(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	// 熔断阈值 1：一次 5xx 即触发熔断（连续失败语义并入熔断器）。
+	p.SetBreaker(1, time.Hour, time.Hour)
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 500, `{"code":500}`, false
 	})
-	h := NewHandler(Config{Pool: p, Upstream: up, ErrThreshold: 1, ErrCooldown: time.Hour})
+	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
 	if rec.Code != 503 {
@@ -272,7 +274,7 @@ func TestChatHTTP5xxPenalizes(t *testing.T) {
 	}
 	st, _ := p.Status("u1")
 	if !st.Cooling {
-		t.Fatalf("http 5xx should cool account with threshold=1: %+v", st)
+		t.Fatalf("http 5xx should trip breaker (cooling) with threshold=1: %+v", st)
 	}
 }
 
@@ -281,14 +283,14 @@ func TestChatHTTP4xxClientDoesNotPenalize(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 400, `{"code":400,"msg":"bad request"}`, false
 	})
-	h := NewHandler(Config{Pool: p, Upstream: up, ErrThreshold: 1, ErrCooldown: time.Hour})
+	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
 	if rec.Code != 503 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	st, _ := p.Status("u1")
-	if st.Cooling || st.ErrCount != 0 {
+	if st.Cooling || st.ErrTotal != 0 {
 		t.Fatalf("generic 4xx should not penalize account: %+v", st)
 	}
 }
@@ -421,10 +423,11 @@ func TestModelsFetchFailurePenalizesAccount(t *testing.T) {
 	dynamicModelsCache.Unlock()
 
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	p.SetBreaker(1, time.Hour, time.Hour) // 熔断阈值 1：一次 fetch 失败即熔断
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 500, `boom`, false
 	})
-	h := NewHandler(Config{Pool: p, Upstream: up, ErrThreshold: 1, ErrCooldown: time.Hour})
+	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
 	if rec.Code != 200 {
@@ -432,7 +435,7 @@ func TestModelsFetchFailurePenalizesAccount(t *testing.T) {
 	}
 	st, _ := p.Status("u1")
 	if !st.Cooling {
-		t.Fatalf("fetch failure should penalize account with threshold=1: %+v", st)
+		t.Fatalf("fetch failure should trip breaker with threshold=1: %+v", st)
 	}
 }
 
@@ -550,8 +553,8 @@ func TestStatusPortraitFields(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", Nickname: "nick", AccessToken: "at", ExpiresAt: 9999999999})
 	p.NoteSuccess("u1")
 	p.NoteSuccess("u1")
-	p.NoteError("u1", 3, time.Hour) // 记录 last_err；CoolErr 冷却由 Cooldown 显式触发
-	p.Cooldown("u1", pool.CoolErr, time.Hour, "consecutive errors")
+	p.NoteError("u1") // 记录 last_err + err_total（累计，不冷却）
+	p.Cooldown("u1", pool.CoolSoft, time.Hour, "429 rate limit")
 	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
@@ -568,14 +571,14 @@ func TestStatusPortraitFields(t *testing.T) {
 		t.Fatalf("accounts=%d", len(body.Accounts))
 	}
 	st := body.Accounts[0]
-	if !st.Cooling || st.CoolKind != "error_threshold" || st.CoolRemaining <= 0 {
+	if !st.Cooling || st.CoolKind != "soft_rate" || st.CoolRemaining <= 0 {
 		t.Errorf("cooling portrait=%+v", st)
 	}
 	if st.SuccessCount != 2 {
 		t.Errorf("success_count=%d want 2", st.SuccessCount)
 	}
-	if st.ErrCount != 0 {
-		t.Errorf("err_count=%d want 0 (cleared by cooldown)", st.ErrCount)
+	if st.ErrTotal != 1 {
+		t.Errorf("err_total=%d want 1", st.ErrTotal)
 	}
 	if st.LastSuccessTime.IsZero() {
 		t.Error("last_success should be set")
