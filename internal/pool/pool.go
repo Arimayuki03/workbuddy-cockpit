@@ -153,12 +153,23 @@ type stateFile struct {
 // flushInterval 后台落盘周期。
 var flushInterval = 5 * time.Second
 
+// snapshot 池状态快照（Redis 镜像用）。与本地 state.json 同源（stateFile），
+// 额外带 savedAt 时间戳供"择新恢复"（比较本地与 Redis 快照的新旧）。
+type snapshot struct {
+	stateFile
+	SavedAt time.Time `json:"saved_at"`
+}
+
 // Pool 账号池。
 type Pool struct {
 	mu      sync.RWMutex
 	byUID   map[string]*entry
 	stateFp string
 	dirty   atomic.Bool // 内存有变更待落盘
+
+	// store 池状态快照镜像（redisstore.Store）；nil = 无需镜像（未配置 Redis / Noop 之外也可能 nil）。
+	// SaveState/LoadState 经它接线，与本地 state.json 并存作启动恢复备份。
+	store StoreSnapshotter
 
 	// 熔断器调优（SetBreaker 注入；默认值见 defaultBreaker*）。
 	breakerThreshold   int
@@ -183,6 +194,13 @@ const (
 	defaultBreakerCooldown    = 30 * time.Minute
 	defaultBreakerCooldownMax = 6 * time.Hour
 )
+
+// StoreSnapshotter 池状态快照镜像的最小接口（redisstore.Store 满足；Noop 空实现安全）。
+// 与本地 state.json 并存，作启动恢复备份：快照比本地新才采用，否则本地优先。
+type StoreSnapshotter interface {
+	SaveState(data []byte)
+	LoadState() ([]byte, bool)
+}
 
 // defaultIdle* 闲置补偿默认参数（claude-api selectWeightedRandom 参考口径）。
 const (
@@ -242,6 +260,48 @@ func (p *Pool) SetMaxInFlight(n int) {
 	if n >= 0 {
 		p.maxInFlight = n
 	}
+}
+
+// SetStore 注入池状态快照镜像（redisstore.Store）。nil 表示不镜像（纯本地恢复）。
+// 必须在 SyncToDir 之前调用，使"择新恢复"发生在账号对齐之前。
+func (p *Pool) SetStore(s StoreSnapshotter) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.store = s
+}
+
+// RestoreFromSnapshot 择新恢复：比较本地 state.json 与 Redis 快照，采用较新者。
+// 无快照、快照无 savedAt、或本地不存在/不可读时，都会被判定为"本地优先/跳过快照"，
+// 同时打一条恢复来源日志。必须在 SyncToDir 之前调用（SyncToDir 只增删不入值）。
+func (p *Pool) RestoreFromSnapshot() {
+	store := p.store
+	if store == nil || p.stateFp == "" {
+		return
+	}
+	localInfo, localErr := os.Stat(p.stateFp)
+	raw, ok := store.LoadState()
+	if !ok {
+		if localErr == nil {
+			log.Printf("pool: 恢复来源=本地 state.json（无 Redis 快照）")
+		}
+		return
+	}
+	var snap snapshot
+	if json.Unmarshal(raw, &snap) != nil || snap.SavedAt.IsZero() {
+		// 快照无 savedAt：无法比较新旧，本地优先。
+		log.Printf("pool: 恢复来源=本地 state.json（Redis 快照无 saved_at）")
+		return
+	}
+	if localErr == nil && !localInfo.ModTime().After(snap.SavedAt) {
+		// 快照不早于本地 → 采用快照。
+		p.mu.Lock()
+		p.applySnapshotLocked(snap)
+		p.mu.Unlock()
+		p.dirty.Store(true)
+		log.Printf("pool: 恢复来源=Redis 快照 (saved_at=%s)", snap.SavedAt.Format(time.RFC3339))
+		return
+	}
+	log.Printf("pool: 恢复来源=本地 state.json（较新于 Redis 快照 %s）", snap.SavedAt.Format(time.RFC3339))
 }
 
 // Acquire 为账号占一个在途名额；false 表示该账号已达上限（或不存在）。
@@ -827,7 +887,13 @@ func (p *Pool) load() {
 	if json.Unmarshal(raw, &sf) != nil {
 		return
 	}
-	for uid, s := range sf.Accounts {
+	p.applyAccountsLocked(sf.Accounts)
+}
+
+// applyAccountsLocked 用持久化账号状态覆盖/插入 byUID（placeholder 凭证，Add 时换全）。
+// 本地 load() 与 Redis 快照恢复共用；调用方必须已持有 p.mu。
+func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
+	for uid, s := range accounts {
 		// err_total 优先；旧文件的 err_count（连续错误）作一次性迁移源映射进来（二者取较大者，
 		// 尽最大可能保留历史观测信号——旧语义下 err_count 也真实发生过错误，不应丢）。
 		errTotal := s.ErrTotal
@@ -849,10 +915,41 @@ func (p *Pool) load() {
 	}
 }
 
+// applySnapshotLocked 用 Redis 快照覆盖内存状态（已在择新判定后采用）。调用方必须已持有 p.mu。
+func (p *Pool) applySnapshotLocked(s snapshot) {
+	p.byUID = map[string]*entry{}
+	p.applyAccountsLocked(s.Accounts)
+}
+
 func (p *Pool) saveLocked() {
 	if p.stateFp == "" {
 		return
 	}
+	sf := p.stateOverviewLocked()
+	raw, err := json.MarshalIndent(sf, "", "  ")
+	if err != nil {
+		return
+	}
+	if dir := filepath.Dir(p.stateFp); dir != "" {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+	tmp := p.stateFp + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, p.stateFp)
+
+	// 同步镜像一份快照到 Redis（fire-and-forget），与本地 state.json 并存作恢复备份。
+	if p.store != nil {
+		snapRaw, err := json.Marshal(snapshot{stateFile: sf, SavedAt: time.Now()})
+		if err == nil {
+			p.store.SaveState(snapRaw)
+		}
+	}
+}
+
+// stateOverviewLocked 收集当前内存状态为 stateFile（供落盘 + 快照镜像复用）。调用方必须已持 p.mu。
+func (p *Pool) stateOverviewLocked() stateFile {
 	sf := stateFile{Accounts: map[string]stateAccount{}}
 	for uid, e := range p.byUID {
 		sf.Accounts[uid] = stateAccount{
@@ -867,16 +964,5 @@ func (p *Pool) saveLocked() {
 			LastErr:      e.lastErr,
 		}
 	}
-	raw, err := json.MarshalIndent(sf, "", "  ")
-	if err != nil {
-		return
-	}
-	if dir := filepath.Dir(p.stateFp); dir != "" {
-		_ = os.MkdirAll(dir, 0o755)
-	}
-	tmp := p.stateFp + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, p.stateFp)
+	return sf
 }
