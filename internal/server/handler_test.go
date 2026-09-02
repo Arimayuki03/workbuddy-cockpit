@@ -139,7 +139,7 @@ func TestChatRotatesOnHardCredit(t *testing.T) {
 	// 让 bad 积分更高被先选中
 	p.SetCredits("bad", 2000)
 	p.SetCredits("good", 1000)
-	h := NewHandler(Config{Pool: p, Upstream: up, HardCooldown: time.Hour, SoftCooldown: time.Minute, ErrThreshold: 3, ErrCooldown: 10 * time.Minute})
+	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute, ErrThreshold: 3, ErrCooldown: 10 * time.Minute})
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
