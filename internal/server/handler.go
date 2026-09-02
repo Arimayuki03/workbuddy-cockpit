@@ -84,7 +84,7 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
-	total, healthy := h.cfg.Pool.Counts()
+	total, healthy, _, _ := h.cfg.Pool.CountsDetailed()
 	status := http.StatusOK
 	if healthy == 0 {
 		status = http.StatusServiceUnavailable
