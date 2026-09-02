@@ -154,6 +154,10 @@ type stateFile struct {
 // flushInterval 后台落盘周期。
 var flushInterval = 5 * time.Second
 
+// persistLogEvery 连续落盘失败每 N 次打一条提醒（flusher 5s 一把 ≈ 1 分钟一次），
+// 避免磁盘持续满/权限丢失时日志刷屏。
+const persistLogEvery = 12
+
 // snapshot 池状态快照（Redis 镜像用）。与本地 state.json 同源（stateFile），
 // 额外带 savedAt 时间戳供"择新恢复"（比较本地与 Redis 快照的新旧）。
 type snapshot struct {
@@ -187,6 +191,10 @@ type Pool struct {
 	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
 	// 生产代码不应设置此字段。
 	randInt64N func(n int64) int64
+
+	// persistFails 本地 state.json 连续落盘失败计数（仅 saveLocked 在持锁下读写，无需 atomic）。
+	// 用于落盘失败的日志节流：首败/每 N 次提醒/恢复各打一条，避免磁盘满时刷屏。
+	persistFails int
 }
 
 // defaultBreaker* 熔断器默认参数（FreeBuff2API 参考口径）。
@@ -950,6 +958,7 @@ func (p *Pool) saveLocked() {
 	sf := p.stateOverviewLocked()
 	raw, err := json.MarshalIndent(sf, "", "  ")
 	if err != nil {
+		p.notePersistFail(err)
 		return
 	}
 	if dir := filepath.Dir(p.stateFp); dir != "" {
@@ -957,9 +966,18 @@ func (p *Pool) saveLocked() {
 	}
 	tmp := p.stateFp + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		p.notePersistFail(err)
 		return
 	}
-	_ = os.Rename(tmp, p.stateFp)
+	if err := os.Rename(tmp, p.stateFp); err != nil {
+		p.notePersistFail(err)
+		return
+	}
+	if p.persistFails > 0 {
+		// 从连续失败中恢复：打一条恢复日志，避免"错误打完却无人知道已恢复"。
+		log.Printf("pool: state.json 落盘恢复（此前连续失败 %d 次）", p.persistFails)
+		p.persistFails = 0
+	}
 
 	// 同步镜像一份快照到 Redis（fire-and-forget），与本地 state.json 并存作恢复备份。
 	if p.store != nil {
@@ -968,6 +986,20 @@ func (p *Pool) saveLocked() {
 			p.store.SaveState(snapRaw)
 		}
 	}
+}
+
+// notePersistFail 记录一次本地 state.json 落盘失败，并按节流规则决定是否打日志：
+// 首败（状态成功→失败）打完整错误、每 persistLogEvery 次连续失败打一条提醒、
+// 其余连续失败静默（flusher 5s 一把，磁盘持续满时不刷屏）。
+// 恢复成功的日志由 saveLocked 在成功路径统一打。与 redisstore 三处异步写的
+// "失败仅打日志、不向上抛"范式对齐，但落盘失败对运维是盲区，故多一层节流（notification）。
+func (p *Pool) notePersistFail(err error) {
+	if p.persistFails == 0 {
+		log.Printf("pool: state.json 落盘失败: %v", err)
+	} else if p.persistFails%persistLogEvery == 0 {
+		log.Printf("pool: state.json 连续落盘失败 %d 次: %v", p.persistFails, err)
+	}
+	p.persistFails++
 }
 
 // stateOverviewLocked 收集当前内存状态为 stateFile（供落盘 + 快照镜像复用）。调用方必须已持 p.mu。
