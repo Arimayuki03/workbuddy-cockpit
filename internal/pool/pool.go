@@ -117,6 +117,18 @@ func (e *entry) expiry(now time.Time) time.Time {
 	return t
 }
 
+// fallbackKind 报告兜底账号属于哪一类冷却（soft：即时软冷却；breaker：熔断期）。
+// 只对参与兜底的账号调用（CoolHard 已被 pickEarliestExpiryLocked 排除）。判定口径：
+// 若熔断截止是当前生效的最近截止（含"仅有熔断无软冷却"），记为 breaker；否则记为 soft。
+func (e *entry) fallbackKind(now time.Time) string {
+	if !e.breakerUntil.IsZero() && now.Before(e.breakerUntil) {
+		if e.until.IsZero() || !now.Before(e.until) || e.breakerUntil.Before(e.until) {
+			return "breaker"
+		}
+	}
+	return "soft"
+}
+
 // stateAccount 单个账号的持久化状态（JSON tag 全小写下划线，向后兼容：缺字段零值）。
 type stateAccount struct {
 	Credits      int64     `json:"credits"`
@@ -421,7 +433,9 @@ func (p *Pool) pick(tried map[string]bool) *auth.Auth {
 	return e.a
 }
 
-// pickEarliestExpiryLocked 全冷却兜底：在非禁用的冷却/熔断账号中选截止最早的一个。
+// pickEarliestExpiryLocked 全冷却兜底：在非禁用的软冷却/熔断账号中选截止最早的一个。
+// 分级：disabled 永不参与；CoolHard（余额耗尽，等签到的号）同样排除——调了必 402，浪费轮换并产生噪音日志；
+// CoolSoft 与熔断号允许参与（可能已恢复，失败成本仅一轮换）。
 // 被 tried 排除、在途占满的账号同样跳过（维持请求级轮换 + 租约语义）。无任何可用返回 nil。
 func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time) *auth.Auth {
 	var best *entry
@@ -431,6 +445,9 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time) *a
 		}
 		if e.disabled {
 			continue // 禁用的账号永不参与兜底
+		}
+		if e.coolKind == CoolHard && !e.until.IsZero() && now.Before(e.until) {
+			continue // 余额耗尽号（处于有效 hard 冷却期）不参与兜底：等签到恢复，调了必 402
 		}
 		if p.inFlightFull(e) {
 			continue
@@ -446,7 +463,7 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time) *a
 	if best == nil {
 		return nil
 	}
-	log.Printf("pool: fallback_earliest_expiry uid=%s until=%s", best.a.UID, best.expiry(now).Format(time.RFC3339))
+	log.Printf("pool: fallback_earliest_expiry uid=%s until=%s kind=%s", best.a.UID, best.expiry(now).Format(time.RFC3339), best.fallbackKind(now))
 	best.lastUsed = time.Now()
 	return best.a
 }
