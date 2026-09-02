@@ -5,7 +5,7 @@
 ## 功能特性
 
 - 🔐 **OAuth 登录** — 通过 `/v2/plugin/auth/state` 设备授权流程获取凭证，支持 token 自动刷新
-- 🔄 **多账号轮转** — 加权随机选号（credits 权重），防热点 + 防惊群（100ms 窗口）
+- 🔄 **多账号轮转** — 三因子加权随机选号（credits ×闲置×成功率），防热点 + 防惊群（100ms 窗口）
 - 🛠 **工具调用** — 完整支持 OpenAI tools/tool_choice，流式 `tool_calls` 按 index 合并
 - 📡 **流式 + 非流式** — 上游 SSE 透传；非流式本地聚合（上游拒绝非流式请求）
 - ⏰ **定时签到** — 每日 09:00 / 21:00 自动签到 + 积分查询，积分耗尽账号次日 04:00 自动恢复
@@ -112,16 +112,16 @@ Disabled ←────┘ (session 死亡，永久)
 
 ### 挑选策略
 
-1. **状态过滤**：Disabled / Cooling / 在途占满 不选
-2. **Top-5 候选**：按 credits 降序取前 5
+1. **状态过滤**：Disabled / Cooling / 熔断 / 在途占满 不选
+2. **Top-5 候选**：按三因子权重降序取前 5（credits 只是权重的一个因子，闲置补偿与成功率同样决定谁进短名单）
 3. **三因子加权随机**：权重 = credits 比例 ×10 + 闲置补偿 + 成功率 ×3（credits 全 0 仍按闲置+成功率加权）
-4. **防惊群**：跳过 100ms 内刚被选中的账号（除非只剩 1 个）
+4. **防惊群**：跳过 100ms 内刚被选中的账号（除非 top5 全部刚被用过，退回 LRU）
 
 ## 账号池 v3
 
 在 v2 基础上吸收外部项目成熟设计，引入四块能力：
 
-- **熔断器（指数退避）**：连续 `pool.breaker_threshold` 次失败熔断，退避 `breaker_cooldown × 2^retryCount` 封顶 `breaker_cooldown_max`；成功清零。单一连续失败计数器 `fails`，签到解冻走统一复活清全部。
+- **熔断器（指数退避）**：连续 `pool.breaker_threshold` 次失败熔断，退避 `breaker_cooldown × 2^retryCount` 封顶 `breaker_cooldown_max`；成功清零。单一连续失败计数器 `fails`，签到解冻只清冷却（余额恢复）不动熔断——熔断作为"连续 5xx"信号要到退避到期或下次 chat 成功才恢复。
 - **三因子加权选取**：`credits 比例 ×10 + idleWeight + successRate ×3`。闲置补偿每小时 `+idle_weight_per_hour`（封顶 `idle_weight_max`），成功率无记录给中性 1.5。
 - **在途租约**：单账号并发上限 `pool.max_in_flight`（0 = 不限），`Pick` 跳过占满账号。
 - **会话粘性路由**：同一 `metadata.conversation_id`/`conversation_id`/`metadata.user_id` 尽量绑定同一账号，TTL 滚动续期；请求失败自动解绑回落轮换，请求成功后会话绑定**跟随最终成功号**。
@@ -168,8 +168,8 @@ Disabled ←────┘ (session 死亡，永久)
 
 ## 稳定性设计
 
-- **防雪崩**：上游 4xx/5xx 轮转重试（不直接返回），404 短冷却 60s 不累计 errCount
-- **错误分流**：网络层错误不累计 errCount（避免抖动连坐）；HTTP 5xx 累计 errCount 阈值 5 触发冷却
+- **防雪崩**：上游 4xx/5xx 轮转重试（不直接返回），404 短冷却 60s 不累计失败
+- **错误分流**：网络层错误不计失败（避免抖动连坐）；HTTP 5xx 喂单一连续失败计数器，达 `breaker_threshold`（默认 3）触发指数退避熔断
 - **请求日志**：表格日志（seq/TTFB/uid/tokens/latency）便于排查慢请求
 - **连接池**：`MaxIdleConnsPerHost=20` 减少 TLS 握手
 - **凭证续期**：token 临近过期自动 refresh，失败禁用账号
