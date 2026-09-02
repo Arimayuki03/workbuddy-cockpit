@@ -369,7 +369,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 //     达到 breakerThreshold 触发熔断（指数退避）。anything 冷却入口也都喂 fails（见 pool.Cooldown）。
 //
 // 恢复出口：CoolSoft/CoolHard 各自到期自动恢复；熔断按其指数退避截止到期；
-// 成功（NoteSuccess）清 fails/熔断；签到解冻（ReenableIfCredits→reviveLocked）清全部。
+// 成功（NoteSuccess）清 fails/熔断；签到解冻（ReenableIfCredits→reviveCoolingLocked）只清冷却，不动熔断。
 func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, status int, body []byte) {
 	switch kind {
 	case upstream.ErrHardCredit:
