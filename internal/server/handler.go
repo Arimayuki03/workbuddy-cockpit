@@ -171,7 +171,6 @@ func (h *Handler) modelList() []map[string]any {
 	return staticModels
 }
 
-// fetchDynamicModels 从池中任一健康账号拉模型列表，缓存 1h。
 // fetchDynamicModels 从池中任一健康账号拉模型列表（含 contextWindow/maxTokens），缓存 1h。
 // 拉取失败记录时间戳进入 5min 负缓存，冷却期内直接用静态表，避免反复打上游。
 func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
