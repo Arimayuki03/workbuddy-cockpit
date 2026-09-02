@@ -28,6 +28,9 @@ type Store interface {
 	GetBind(key string) (string, bool)
 	// DelBind 异步删除粘性会话绑定。
 	DelBind(key string)
+	// LoadBinds 全量读取粘性会话绑定（key→uid，key 已剥前缀）；仅在启动时调用（同步）。
+	// 供冷启动恢复粘性映射（防重启丢粘性）。
+	LoadBinds() map[string]string
 	// SaveState 异步写池状态 JSON 快照（与本地 state.json 并存，仅作恢复备份）。
 	SaveState(data []byte)
 	// LoadState 读池状态快照；仅在启动时调用（同步）。
@@ -152,11 +155,29 @@ func (u *Upstash) LoadState() ([]byte, bool) {
 	return v, true
 }
 
+// LoadBinds 全量读取粘性会话绑定（SCAN bind:* 前缀）。
+func (u *Upstash) LoadBinds() map[string]string {
+	out := map[string]string{}
+	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
+	defer cancel()
+	iter := u.client.Scan(ctx, 0, bindPrefix+"*", 200).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		v, err := u.client.Get(ctx, key).Result()
+		if err != nil {
+			continue
+		}
+		out[strings.TrimPrefix(key, bindPrefix)] = v
+	}
+	return out
+}
+
 // Noop 纯内存降级：所有方法空实现。
 type Noop struct{}
 
 func (Noop) SetBind(string, string, time.Duration) {}
 func (Noop) GetBind(string) (string, bool)          { return "", false }
 func (Noop) DelBind(string)                         {}
+func (Noop) LoadBinds() map[string]string           { return nil }
 func (Noop) SaveState([]byte)                       {}
 func (Noop) LoadState() ([]byte, bool)              { return nil, false }
