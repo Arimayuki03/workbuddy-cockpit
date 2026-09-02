@@ -431,33 +431,34 @@ func TestNoteSuccessIncrementsAndRecords(t *testing.T) {
 	}
 }
 
-func TestReviveLockedClearsAll(t *testing.T) {
-	// reviveLocked 全清矩阵：until/coolKind/reason/fails/retryCount/breakerUntil 全部归零 + 更新 credits。
+func TestReenableClearsCoolingNotBreaker(t *testing.T) {
+	// C5：签到解冻只清冷却（until/coolKind/reason）+ 更新 credits，不清熔断
+	// （fails/retryCount/breakerUntil）。签到成功只证明余额与 billing 通道恢复，
+	// 不证明 chat 通道健康——熔断仍按 breakerUntil 退避到期或 NoteSuccess 恢复。
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	p.CooldownUntilTomorrow4AM("u1", "余额不足") // 硬冷却（也喂 fails）
+	p.CooldownUntilTomorrow4AM("u1", "余额不足") // 硬冷却（喂 fails，但此时阈值默认 3，不熔断）
 	p.SetBreaker(1, time.Hour, time.Hour)
-	p.NoteError("u1") // 触发熔断（fails=1→阈值1→resets fails=0, retryCount=1, breakerUntil 非零）
+	p.NoteError("u1") // 触发熔断（fails→阈值1→fails=0, retryCount=1, breakerUntil 非零）
 	p.ReenableIfCredits("u1", 500)
 	st, _ := p.Status("u1")
-	if st.Cooling {
-		t.Errorf("revive should clear cooling: %+v", st)
-	}
 	if st.Reason != "" || st.Credits != 500 {
-		t.Errorf("revive should clear reason + set credits=500: %+v", st)
+		t.Errorf("signin should clear reason + set credits=500: %+v", st)
 	}
-	if st.BreakerFails != 0 || !st.BreakerUntil.IsZero() {
-		t.Errorf("revive should clear breaker runtime: %+v", st)
+	if st.Until != (time.Time{}) {
+		t.Errorf("signin should clear hard-cooling until: %+v", st.Until)
 	}
-	// disabler 不参与（revive 不清 disabled——见 RunKeepalive 语义，这里只验证非禁用被清空）。
-	if !p.internalHealthy("u1") {
-		t.Errorf("u1 should be healthy after revive: breaker_until=%v", st.BreakerUntil)
+	if st.BreakerUntil.IsZero() {
+		t.Fatal("signin must NOT clear breakerUntil (chat health unresolved)")
+	}
+	// 熔断仍在 → 账号仍不可选（直至 breakerUntil 到期）。
+	if p.internalHealthy("u1") {
+		t.Fatal("account should stay unhealthy while breaker active after signin")
 	}
 }
 
-func TestReenableClearsBreakerRegression(t *testing.T) {
-	// B5 回归：签到解冻必须连熔断态一起清。修复前 ReenableIfCredits 只清 until/coolKind/errCount，
-	// breakerUntil 残留会让 healthy() 判定失败，签到解冻失效（此测试修复前会 FAIL）。
+func TestReenableKeepsBreaker(t *testing.T) {
+	// C5 回归锁定新语义：仅熔断（无冷却）的账号，签到解冻不得清熔断。
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.SetBreaker(1, time.Hour, time.Hour)
@@ -466,14 +467,11 @@ func TestReenableClearsBreakerRegression(t *testing.T) {
 		t.Fatal("precondition: breaker should be open")
 	}
 	p.ReenableIfCredits("u1", 500)
-	if bt, _ := p.breakerUntil("u1"); !bt.IsZero() {
-		t.Fatalf("reenable should clear breakerUntil, still=%v", bt)
+	if bt, _ := p.breakerUntil("u1"); bt.IsZero() {
+		t.Fatal("signin must not clear breakerUntil")
 	}
-	if !p.internalHealthy("u1") {
-		t.Fatal("account should be healthy after reenable")
-	}
-	if got := p.Pick(); got == nil || got.UID != "u1" {
-		t.Fatalf("reenable should let account be picked, got %+v", got)
+	if p.internalHealthy("u1") {
+		t.Fatal("account should stay unhealthy while breaker active after signin")
 	}
 }
 

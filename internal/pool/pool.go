@@ -704,27 +704,25 @@ func (p *Pool) Disable(uid, reason string) {
 	}
 }
 
-// reviveLocked 统一复活出口：清空全部冷却/熔断运行态，并更新 credits。
-// 所有"主动恢复"路径必须走这里（签到解冻、未来任何恢复路径），杜绝"清一半"的畸形状态。
-// 注意：NoteSuccess 不调用 revive——它是运行中的成功，只清 fails/熔断（语义不同，见 NoteSuccess）。
+// reviveCoolingLocked 只清冷却（until/coolKind/reason）并更新 credits，不动熔断器
+// （fails/retryCount/breakerUntil）。签到解冻走这里：签到成功只证明余额恢复与
+// billing 通道健康，不证明 chat 通道健康，熔断（连续 5xx 信号）不应被签到覆盖。
 // 调用方必须已持有 p.mu。
-func (p *Pool) reviveLocked(e *entry, credits int64) {
+func (p *Pool) reviveCoolingLocked(e *entry, credits int64) {
 	e.credits = credits
 	e.until = time.Time{}
 	e.coolKind = 0
 	e.reason = ""
-	e.fails = 0
-	e.retryCount = 0
-	e.breakerUntil = time.Time{}
 }
 
-// ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号非禁用时，走统一复活清空全部冷却/熔断态。
+// ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号非禁用时，清冷却（余额恢复）。
+// 注意：不碰熔断器——熔断到期（breakerUntil 过期）或下次 chat 成功（NoteSuccess）才恢复。
 func (p *Pool) ReenableIfCredits(uid string, remain int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		if remain > 0 && !e.disabled {
-			p.reviveLocked(e, remain)
+			p.reviveCoolingLocked(e, remain)
 		} else {
 			e.credits = remain
 		}
