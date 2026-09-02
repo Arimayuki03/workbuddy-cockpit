@@ -750,6 +750,36 @@ func TestFlushIdempotentWhenClean(t *testing.T) {
 	}
 }
 
+func TestSaveFailureRecordedAndRecovers(t *testing.T) {
+	// stateFp 的父路径是一个普通文件（非目录）→ MkdirAll/WriteFile 必失败，
+	// root 也不可绕过，可靠地触发落盘失败路径。
+	dir := t.TempDir()
+	block := filepath.Join(dir, "block")
+	if err := os.WriteFile(block, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := New(filepath.Join(block, "state.json"))
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetCredits("u1", 42)
+	p.Flush()
+	if p.persistFails == 0 {
+		t.Fatal("persist failure should be recorded (visible), got 0")
+	}
+
+	// 换回可写目录 → 成功后 persistFails 归零（恢复日志由零值门槛触发）。
+	good := filepath.Join(t.TempDir(), "state.json")
+	p2 := New(good)
+	p2.Add(&auth.Auth{UID: "u1"})
+	p2.SetCredits("u1", 42)
+	p2.Flush()
+	if p2.persistFails != 0 {
+		t.Fatalf("successful save should reset persistFails, got %d", p2.persistFails)
+	}
+	if raw, err := os.ReadFile(good); err != nil || !strings.Contains(string(raw), `"credits": 42`) {
+		t.Fatalf("state.json not written on success: %v %s", err, raw)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // T2 熔断器 + 全冷却兜底 + 指数退避
 // ---------------------------------------------------------------------------
