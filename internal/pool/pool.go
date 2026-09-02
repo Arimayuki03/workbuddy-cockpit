@@ -136,6 +136,10 @@ type Pool struct {
 	breakerCooldown    time.Duration
 	breakerCooldownMax time.Duration
 
+	// 三因子加权调优（SetWeights 注入；默认值见 defaultIdle*）。
+	idleWeightPerHour float64
+	idleWeightMax     float64
+
 	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
 	// 生产代码不应设置此字段。
 	randInt64N func(n int64) int64
@@ -148,6 +152,12 @@ const (
 	defaultBreakerCooldownMax = 6 * time.Hour
 )
 
+// defaultIdle* 闲置补偿默认参数（claude-api selectWeightedRandom 参考口径）。
+const (
+	defaultIdleWeightPerHour = 0.5
+	defaultIdleWeightMax     = 5.0
+)
+
 // New 构建池；stateFp 非空时尝试加载旧状态，并启动后台周期性落盘 goroutine。
 func New(stateFp string) *Pool {
 	p := &Pool{
@@ -156,6 +166,8 @@ func New(stateFp string) *Pool {
 		breakerThreshold:   defaultBreakerThreshold,
 		breakerCooldown:    defaultBreakerCooldown,
 		breakerCooldownMax: defaultBreakerCooldownMax,
+		idleWeightPerHour:  defaultIdleWeightPerHour,
+		idleWeightMax:      defaultIdleWeightMax,
 	}
 	if stateFp != "" {
 		p.load()
@@ -176,6 +188,18 @@ func (p *Pool) SetBreaker(threshold int, cooldown, cooldownMax time.Duration) {
 	}
 	if cooldownMax > 0 {
 		p.breakerCooldownMax = cooldownMax
+	}
+}
+
+// SetWeights 注入三因子加权的闲置补偿参数。非正值保留原值（用默认）。
+func (p *Pool) SetWeights(idlePerHour, idleMax float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if idlePerHour > 0 {
+		p.idleWeightPerHour = idlePerHour
+	}
+	if idleMax > 0 {
+		p.idleWeightMax = idleMax
 	}
 }
 
@@ -350,14 +374,35 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time) *a
 // 生产默认 100ms；纯加权分布测试可临时置 0 关闭防撞号。
 var minPickGap = 100 * time.Millisecond
 
-// pickWeighted 按 credits 权重随机抽签；权重总和为 0 时退化为均匀随机。
-// 输入假定已按 credits 降序（候选集 = Top5，仍是全量 healthy 的近似）。
+// pickWeighted 三因子加权随机（claude-api selectWeightedRandom 参考口径）：
+//
+//	weight = credits 比例 × 10 + idleWeight + successRate × 3
+//
+//   - credits 比例 = 该号 credits / 候选集内最大 credits（避免量纲爆炸）
+//   - idleWeight = min(距 lastUsed 小时数 × idleWeightPerHour, idleWeightMax)；从未使用给满分
+//   - successRate = successCount/(successCount+errCount)；无请求记录给 1.5（中性偏信任）
+//
+// credits 全 0 时仍按 idle+successRate 加权（不退化均匀随机）。
+// 权重为浮点，用 int64 定点（×1e6）抽签可保持确定性随机源注入（randInt64N 语义不变）。
 // 随机源优先用 p.randInt64N（仅供测试注入确定性），nil 时回退 math/rand/v2 全局源。
 func (p *Pool) pickWeighted(cands []*entry) *entry {
-	var total int64
+	now := time.Now()
+	var maxCredits int64
 	for _, e := range cands {
-		total += e.credits
+		if e.credits > maxCredits {
+			maxCredits = e.credits
+		}
 	}
+
+	const scale = 1_000_000 // 定点放大：int64 累加权重大整数抽签
+	weights := make([]int64, len(cands))
+	var total int64
+	for i, e := range cands {
+		w := p.weightOf(e, maxCredits, now)
+		weights[i] = int64(w * scale)
+		total += weights[i]
+	}
+
 	rnd := rand.Int64N
 	if p.randInt64N != nil {
 		rnd = p.randInt64N
@@ -367,13 +412,47 @@ func (p *Pool) pickWeighted(cands []*entry) *entry {
 	}
 	r := rnd(total)
 	var acc int64
-	for _, e := range cands {
-		acc += e.credits
+	for i, e := range cands {
+		acc += weights[i]
 		if r < acc {
 			return e
 		}
 	}
 	return cands[len(cands)-1]
+}
+
+// weightOf 计算单个账号的三因子权重。
+func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
+	w := 1.0
+
+	// 1. credits 比例 ×10（会计入 mid-credit 锚点，避免全员 0 时 credits 项为 0）。
+	if maxCredits > 0 {
+		w += float64(e.credits) / float64(maxCredits) * 10
+	}
+
+	// 2. 闲置补偿。
+	if e.lastUsed.IsZero() {
+		w += p.idleWeightMax // 从未使用 → 满分
+	} else {
+		hours := now.Sub(e.lastUsed).Hours()
+		idleW := hours * p.idleWeightPerHour
+		if idleW > p.idleWeightMax {
+			idleW = p.idleWeightMax
+		}
+		if idleW < 0 {
+			idleW = 0 // lastUsed 在未来（时钟回拨）时钳 0
+		}
+		w += idleW
+	}
+
+	// 3. 成功率 ×3。
+	totalReq := e.successCount + int64(e.errCount)
+	if totalReq > 0 {
+		w += float64(e.successCount) / float64(totalReq) * 3
+	} else {
+		w += 1.5 // 无请求记录 → 中性偏信任
+	}
+	return w
 }
 
 // SetCredits 更新账号余额。
