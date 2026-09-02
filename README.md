@@ -115,10 +115,26 @@ Disabled ←────┘ (session 死亡，永久)
 
 ### 挑选策略
 
-1. **状态过滤**：Disabled / Cooling 不选
+1. **状态过滤**：Disabled / Cooling / 在途占满 不选
 2. **Top-5 候选**：按 credits 降序取前 5
-3. **加权随机**：按 credits 为权重抽签（credits 全 0 时均匀随机）
+3. **三因子加权随机**：权重 = credits 比例 ×10 + 闲置补偿 + 成功率 ×3（credits 全 0 仍按闲置+成功率加权）
 4. **防惊群**：跳过 100ms 内刚被选中的账号（除非只剩 1 个）
+
+## 账号池 v3
+
+在 v2 基础上吸收外部项目成熟设计，引入四块能力：
+
+- **熔断器（指数退避）**：连续 `pool.breaker_threshold` 次失败熔断，退避 `breaker_cooldown × 2^retryCount` 封顶 `breaker_cooldown_max`；成功清零。
+- **三因子加权选取**：`credits 比例 ×10 + idleWeight + successRate ×3`。闲置补偿每小时 `+idle_weight_per_hour`（封顶 `idle_weight_max`），成功率无记录给中性 1.5。
+- **在途租约**：单账号并发上限 `pool.max_in_flight`（0 = 不限），`Pick` 跳过占满账号。
+- **会话粘性路由**：同一 `metadata.conversation_id`/`conversation_id`/`metadata.user_id` 尽量绑定同一账号，TTL 滚动续期；请求失败自动解绑回落轮换。
+- **全冷却兜底**：无 healthy 账号时从冷却账号选最早到期者顶班（禁用永不参与）。
+
+### Redis（Upstash）镜像
+
+- 配置 `upstash.url/token`（空 = 纯内存模式，一切功能照常，只打一条启动警告）。
+- Redis 仅做异步镜像（粘性会话映射防重启丢失）+ 启动恢复备份，**不在请求热路径同步调用**。
+- `/status` 透出 `redis_mode`（`upstash`/`noop`）与池级 `sticky_sessions`。
 
 ### 请求级日志
 

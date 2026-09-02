@@ -954,3 +954,48 @@ func TestInFlightCountNotExceedLimit(t *testing.T) {
 		t.Fatalf("in-flight should be 0 after all releases, got %d", n)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// T6 向后兼容 + 运行态 Status 扩展
+// ---------------------------------------------------------------------------
+
+func TestLoadLegacyStateFile(t *testing.T) {
+	// 旧 state.json 只含 credits/until/disabled 等老字段，缺熔断/在途/成功率新字段。
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	legacy := `{"accounts":{"legacy":{"credits":123,"until":"2027-01-01T04:00:00+08:00","cool_kind":1,"reason":"余额不足"}}}`
+	if err := os.WriteFile(fp, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "legacy"})
+	st, ok := p.Status("legacy")
+	if !ok {
+		t.Fatal("legacy account should load")
+	}
+	if st.Credits != 123 || !st.Cooling || st.Reason != "余额不足" {
+		t.Errorf("legacy state misloaded: %+v", st)
+	}
+	// 运行态新字段默认零值。
+	if st.InFlight != 0 || st.BreakerFails != 0 || !st.BreakerUntil.IsZero() {
+		t.Errorf("runtime fields should be zero for legacy load: %+v", st)
+	}
+}
+
+func TestStatusExposesRuntimeFields(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetMaxInFlight(2)
+	p.Acquire("u1") // in_flight=1
+	st, _ := p.Status("u1")
+	if st.InFlight != 1 {
+		t.Errorf("in_flight=%d want 1", st.InFlight)
+	}
+	p.SetBreaker(2, time.Hour, 2*time.Hour)
+	p.NoteError("u1", 99, time.Hour) // breaker_fails=1
+	st, _ = p.Status("u1")
+	if st.BreakerFails != 1 {
+		t.Errorf("breaker_fails=%d want 1", st.BreakerFails)
+	}
+	p.Release("u1")
+}

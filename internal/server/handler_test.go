@@ -536,6 +536,13 @@ func TestStatusEndpoint(t *testing.T) {
 		statusBody["cooling"] != float64(0) || statusBody["disabled"] != float64(0) {
 		t.Errorf("summary=%v want total=1 healthy=1 cooling=0 disabled=0", statusBody)
 	}
+	// Phase v3：池级 sticky_sessions + redis_mode。
+	if statusBody["sticky_sessions"] != float64(0) {
+		t.Errorf("sticky_sessions=%v want 0", statusBody["sticky_sessions"])
+	}
+	if statusBody["redis_mode"] != "noop" {
+		t.Errorf("redis_mode=%v want noop", statusBody["redis_mode"])
+	}
 }
 
 func TestStatusPortraitFields(t *testing.T) {
