@@ -22,7 +22,8 @@ func withNoPickGap(t *testing.T) {
 
 func TestPickHighestCredits(t *testing.T) {
 	withNoPickGap(t)
-	// P1-8：Top5 加权随机。积分悬殊时高积分账号应被多数选中（不再是必中）。
+	// 三因子加权（credits 比例×10 + 闲置 + 成功率）：积分悬殊时高积分账号应被多数选中，
+	// 但不再像纯 credits 加权那样接近 99%（闲置补偿 + 成功率中性 1.5 拉平了基线）。
 	p := New("")
 	a1 := &auth.Auth{UID: "u1"}
 	a2 := &auth.Auth{UID: "u2"}
@@ -34,11 +35,11 @@ func TestPickHighestCredits(t *testing.T) {
 	p.SetCredits("u2", 50000)
 	p.SetCredits("u3", 300)
 	counts := map[string]int{}
-	for i := 0; i < 300; i++ {
+	for i := 0; i < 3000; i++ {
 		counts[p.Pick().UID]++
 	}
-	if counts["u2"] < 240 { // u2 权重 50000/50400 ≈ 99.2%
-		t.Errorf("u2 picked %d/300, want overwhelming majority", counts["u2"])
+	if counts["u2"] <= counts["u1"] || counts["u2"] <= counts["u3"] {
+		t.Errorf("u2 (highest credits) should be picked most: %v", counts)
 	}
 }
 
@@ -116,7 +117,7 @@ func TestPickExcludingStaysWithinHealthy(t *testing.T) {
 
 func TestPickWeightedSkewTowardHighCredits(t *testing.T) {
 	withNoPickGap(t)
-	// Top5 加权随机：单账号 credits 占比足够高时，多数挑中它。
+	// Top5 三因子加权：单账号 credits 占比足够高时，多数挑中它。
 	p := New("")
 	for _, u := range []string{"w1", "w2", "w3", "w4", "w5", "w6"} {
 		p.Add(&auth.Auth{UID: u})
@@ -124,11 +125,17 @@ func TestPickWeightedSkewTowardHighCredits(t *testing.T) {
 	}
 	p.SetCredits("w1", 1000)
 	counts := map[string]int{}
-	for i := 0; i < 500; i++ {
+	for i := 0; i < 5000; i++ {
 		counts[p.Pick().UID]++
 	}
-	if counts["w1"] < 300 {
-		t.Errorf("w1 picked %d/500, want majority (weighted)", counts["w1"])
+	mx, mxUID := 0, ""
+	for uid, n := range counts {
+		if n > mx {
+			mx, mxUID = n, uid
+		}
+	}
+	if mxUID != "w1" {
+		t.Errorf("w1 (highest credits) should be picked most: %v", counts)
 	}
 }
 
@@ -752,5 +759,100 @@ func TestFallbackNilWhenAllDisabled(t *testing.T) {
 	p.Disable("u1", "session dead")
 	if got := p.Pick(); got != nil {
 		t.Fatalf("want nil when all disabled, got %+v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// T3 三因子加权选取
+// ---------------------------------------------------------------------------
+
+// idleWeightOf 曝露 weightOf 的单因子拆解不便，改用完整权重断言（包内私有 helper）。
+func (p *Pool) entryWeight(uid string) float64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e := p.byUID[uid]
+	var maxCredits int64
+	for _, x := range p.byUID {
+		if x.credits > maxCredits {
+			maxCredits = x.credits
+		}
+	}
+	return p.weightOf(e, maxCredits, time.Now())
+}
+
+func TestWeightHighCreditsDominates(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "hi"})
+	p.Add(&auth.Auth{UID: "lo"})
+	p.SetCredits("hi", 1000)
+	p.SetCredits("lo", 10)
+	wHi, wLo := p.entryWeight("hi"), p.entryWeight("lo")
+	if wHi <= wLo {
+		t.Errorf("high credits should weigh more: hi=%v lo=%v", wHi, wLo)
+	}
+}
+
+func TestWeightIdleCompensation(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "used"})
+	p.Add(&auth.Auth{UID: "idle"})
+	p.SetCredits("used", 100)
+	p.SetCredits("idle", 100)
+	// used 1 小时前被选中过、idle 从未使用 → idle 权重更高（闲置补偿）。
+	p.mu.Lock()
+	p.byUID["used"].lastUsed = time.Now().Add(-1 * time.Hour)
+	p.mu.Unlock()
+	wUsed, wIdle := p.entryWeight("used"), p.entryWeight("idle")
+	if wIdle <= wUsed {
+		t.Errorf("idle should weigh more: used=%v idle=%v", wUsed, wIdle)
+	}
+}
+
+func TestWeightLowSuccessRateDowngrades(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "good"})
+	p.Add(&auth.Auth{UID: "bad"})
+	p.SetCredits("good", 100)
+	p.SetCredits("bad", 100)
+	p.NoteSuccess("good")
+	p.NoteError("bad", 99, time.Hour)
+	p.NoteError("bad", 99, time.Hour)
+	wGood, wBad := p.entryWeight("good"), p.entryWeight("bad")
+	if wBad >= wGood {
+		t.Errorf("low success rate should weigh less: good=%v bad=%v", wGood, wBad)
+	}
+}
+
+func TestWeightAllZeroCreditsStillWeighted(t *testing.T) {
+	// credits 全 0：权重完全由 idle+successRate 决定，不退化均匀随机（仍可选出更高分者）。
+	p := New("")
+	p.Add(&auth.Auth{UID: "idle"})
+	p.Add(&auth.Auth{UID: "bursty"})
+	// idle 从未使用、bursty 半分钟前刚用过 → idle 权重更高。
+	p.mu.Lock()
+	p.byUID["bursty"].lastUsed = time.Now().Add(-30 * time.Second)
+	p.mu.Unlock()
+	wIdle, wBursty := p.entryWeight("idle"), p.entryWeight("bursty")
+	if wIdle <= wBursty {
+		t.Errorf("idle should outweigh recently-used when credits all zero: idle=%v bursty=%v", wIdle, wBursty)
+	}
+}
+
+func TestWeightTopFiveSelectionChanges(t *testing.T) {
+	withNoPickGap(t)
+	// credits 相差不大时，闲置补偿可让"低分但久置"的账号权重反超"高分但刚用"的账号，
+	// 即使 credits 排序里 b 在前（Top5 内权重排序可与 credits 排序不同）。
+	p := New("")
+	for _, u := range []string{"a", "b"} {
+		p.Add(&auth.Auth{UID: u})
+	}
+	p.SetCredits("a", 90) // a credits 略低，但久置
+	p.SetCredits("b", 100)
+	p.mu.Lock()
+	p.byUID["b"].lastUsed = time.Now()
+	p.byUID["a"].lastUsed = time.Now().Add(-48 * time.Hour)
+	p.mu.Unlock()
+	if wA, wB := p.entryWeight("a"), p.entryWeight("b"); wA <= wB {
+		t.Errorf("idle a should outweigh busy higher-credit b: a=%v b=%v", wA, wB)
 	}
 }
