@@ -215,6 +215,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	tried := map[string]bool{}
 	var lastErr error
+
+	// 在途租约：成功选中即占名额；函数出口（含成功 return 与 panic）统一释放。
+	var heldUID string
+	defer func() {
+		if heldUID != "" {
+			h.cfg.Pool.Release(heldUID)
+		}
+	}()
+	releaseHeld := func() {
+		if heldUID != "" {
+			h.cfg.Pool.Release(heldUID)
+			heldUID = ""
+		}
+	}
+
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		acct := h.cfg.Pool.PickExcluding(tried)
 		if acct == nil {
@@ -223,6 +238,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		st.uid = acct.UID
 		tried[acct.UID] = true
+
+		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。
+		if !h.cfg.Pool.Acquire(acct.UID) {
+			continue // 最后一个名额被并发抢走 → 换号
+		}
+		heldUID = acct.UID
 
 		// token 临近过期 → 先 refresh（失败冷却换号）
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
@@ -234,6 +255,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				} else {
 					h.cfg.Pool.Cooldown(acct.UID, pool.CoolErr, h.cfg.ErrCooldown, "refresh: "+err.Error())
 				}
+				releaseHeld()
 				continue
 			}
 			if err := acct.SaveAtomic(); err != nil {
@@ -248,6 +270,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 上游 client 已打 transport error 日志。
 			st.status = http.StatusServiceUnavailable
 			lastErr = terr
+			releaseHeld()
 			continue
 		}
 		if status >= 400 {
@@ -255,6 +278,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			kind := upstream.Classify(status, string(respBody))
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
 			h.applyErrorPolicy(acct.UID, kind, status, respBody)
+			releaseHeld()
 			continue
 		}
 		h.cfg.Pool.NoteSuccess(acct.UID)

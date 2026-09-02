@@ -72,6 +72,9 @@ type entry struct {
 	breakerUntil time.Time // 熔断截止（指数退避）
 	fails        int       // 连续失败计数（熔断用）
 	retryCount   int       // 已熔断次数（指数退避的指数）
+
+	// inFlight 单账号在途请求数（运行态，不持久化）。用 atomic 避免 Pick 热路径拿写锁。
+	inFlight atomic.Int64
 }
 
 // healthy 报告账号当前是否可选（未禁用、未处于任一冷却/熔断期）。
@@ -140,6 +143,9 @@ type Pool struct {
 	idleWeightPerHour float64
 	idleWeightMax     float64
 
+	// maxInFlight 单账号最大在途请求数；0 = 不限（租约关闭）。
+	maxInFlight int
+
 	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
 	// 生产代码不应设置此字段。
 	randInt64N func(n int64) int64
@@ -200,6 +206,60 @@ func (p *Pool) SetWeights(idlePerHour, idleMax float64) {
 	}
 	if idleMax > 0 {
 		p.idleWeightMax = idleMax
+	}
+}
+
+// SetMaxInFlight 注入单账号最大在途请求数；0 = 不限。负值保留原值。
+func (p *Pool) SetMaxInFlight(n int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if n >= 0 {
+		p.maxInFlight = n
+	}
+}
+
+// Acquire 为账号占一个在途名额；false 表示该账号已达上限（或不存在）。
+// 必须在成功 Pick 后调用；调用方负责 defer Release。
+func (p *Pool) Acquire(uid string) bool {
+	p.mu.RLock()
+	e, ok := p.byUID[uid]
+	limit := p.maxInFlight
+	p.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	if limit <= 0 {
+		// 不限：计数仍累加（供状态观测），但永不拒绝。
+		e.inFlight.Add(1)
+		return true
+	}
+	for {
+		cur := e.inFlight.Load()
+		if cur >= int64(limit) {
+			return false
+		}
+		if e.inFlight.CompareAndSwap(cur, cur+1) {
+			return true
+		}
+	}
+}
+
+// Release 释放一个在途名额。幂等减到 0 为止（防重复释放扣成负数）。
+func (p *Pool) Release(uid string) {
+	p.mu.RLock()
+	e, ok := p.byUID[uid]
+	p.mu.RUnlock()
+	if !ok {
+		return
+	}
+	for {
+		cur := e.inFlight.Load()
+		if cur <= 0 {
+			return
+		}
+		if e.inFlight.CompareAndSwap(cur, cur-1) {
+			return
+		}
 	}
 }
 
@@ -304,6 +364,9 @@ func (p *Pool) pick(tried map[string]bool) *auth.Auth {
 		if !e.healthy(now) {
 			continue
 		}
+		if p.inFlightFull(e) {
+			continue // 在途占满：跳过（max=0 不限时不触发）
+		}
 		cands = append(cands, e)
 	}
 	if len(cands) == 0 {
@@ -344,7 +407,7 @@ func (p *Pool) pick(tried map[string]bool) *auth.Auth {
 }
 
 // pickEarliestExpiryLocked 全冷却兜底：在非禁用的冷却/熔断账号中选截止最早的一个。
-// 被 tried 排除的账号同样跳过（维持请求级轮换语义）。无任何可用返回 nil。
+// 被 tried 排除、在途占满的账号同样跳过（维持请求级轮换 + 租约语义）。无任何可用返回 nil。
 func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time) *auth.Auth {
 	var best *entry
 	for uid, e := range p.byUID {
@@ -353,6 +416,9 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time) *a
 		}
 		if e.disabled {
 			continue // 禁用的账号永不参与兜底
+		}
+		if p.inFlightFull(e) {
+			continue
 		}
 		exp := e.expiry(now)
 		if exp.IsZero() {
@@ -368,6 +434,15 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time) *a
 	log.Printf("pool: fallback_earliest_expiry uid=%s until=%s", best.a.UID, best.expiry(now).Format(time.RFC3339))
 	best.lastUsed = time.Now()
 	return best.a
+}
+
+// inFlightFull 报告账号是否已占满在途名额（max=0 不限 → 恒 false）。
+// 调用方需已持 p.mu（读锁或写锁均可，本方法只读 p.maxInFlight）。
+func (p *Pool) inFlightFull(e *entry) bool {
+	if p.maxInFlight <= 0 {
+		return false
+	}
+	return e.inFlight.Load() >= int64(p.maxInFlight)
 }
 
 // minPickGap 防并发撞号窗口：同一账号在该窗口内不重复被选中（除非 top5 全部刚被用过）。
