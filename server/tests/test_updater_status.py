@@ -66,5 +66,45 @@ class UpdateLanded(unittest.TestCase):
         self.assertFalse(updater._update_landed({'logs': []}))
 
 
+class VersionCompare(unittest.TestCase):
+    """版本比较必须是「严格更新」，否则回滚场景会冒出降级提示。
+
+    真实事故：更新到 v1.0.5 后，6 小时缓存里还存着 v1.0.4，
+    旧逻辑用「不相等」判断，于是界面显示「管理端：v1.0.5 → v1.0.4」。
+    """
+
+    def test_newer_detected(self) -> None:
+        for remote, current in [
+            ('v1.0.5', 'v1.0.4'),
+            ('1.0.10', '1.0.9'),   # 数字段按数值比，不能按字符串
+            ('v1.1.0', 'v1.0.99'),
+            ('v2.0.0', 'v1.99.99'),
+            ('v1.0.1', 'v1.0'),
+        ]:
+            self.assertTrue(updater._version_newer(remote, current), f'{remote} > {current}')
+
+    def test_equal_is_not_an_update(self) -> None:
+        for a, b in [('v1.0.5', '1.0.5'), ('1.0.5', 'v1.0.5'), ('v1.0', 'v1.0.0')]:
+            self.assertFalse(updater._version_newer(a, b), f'{a} == {b}')
+
+    def test_older_is_not_an_update(self) -> None:
+        """降级（当前版本领先于远端）不能提示更新——这就是本次事故。"""
+        for remote, current in [
+            ('v1.0.4', 'v1.0.5'),
+            ('v1.0.9', 'v1.0.10'),
+            ('v1.0', 'v1.1'),
+        ]:
+            self.assertFalse(updater._version_newer(remote, current), f'{remote} < {current}')
+
+    def test_unparseable_never_claims_update(self) -> None:
+        self.assertFalse(updater._version_newer('latest', 'v1.0.5'))
+        self.assertFalse(updater._version_newer('v1.0.5', 'unknown'))
+        self.assertFalse(updater._version_newer('', 'v1.0.5'))
+
+    def test_prerelease_suffix_ignored(self) -> None:
+        self.assertTrue(updater._version_newer('v1.0.6-rc1', 'v1.0.5'))
+        self.assertFalse(updater._version_newer('v1.0.5-rc1', 'v1.0.5'))
+
+
 if __name__ == '__main__':
     unittest.main()

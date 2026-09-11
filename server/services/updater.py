@@ -312,6 +312,35 @@ def _local_upstream_head() -> str:
     return ''
 
 
+def _parse_version(v: str) -> tuple[int, ...] | None:
+    """把 v1.2.3 / 1.2 解析成可比较的数字元组；含非数字段则返回 None。"""
+    s = re.split(r'[-+]', str(v or '').strip().lstrip('vV'), 1)[0]
+    parts = [p for p in s.split('.') if p != '']
+    if not parts:
+        return None
+    out: list[int] = []
+    for p in parts:
+        if not p.isdigit():
+            return None
+        out.append(int(p))
+    return tuple(out)
+
+
+def _version_newer(remote: str, current: str) -> bool:
+    """remote 是否**严格新于** current。
+
+    这里必须是「大于」而不是「不相等」：低于或等于当前版本都不能提示更新，
+    否则回滚/降级场景会冒出「v1.0.5 → v1.0.4」这种把降级当更新的提示。
+    两端有一个解析不了时返回 False——宁可不提示，也不误报。
+    """
+    r = _parse_version(remote)
+    c = _parse_version(current)
+    if r is None or c is None:
+        return False
+    n = max(len(r), len(c))
+    return r + (0,) * (n - len(r)) > c + (0,) * (n - len(c))
+
+
 def _read_cache() -> dict:
     if not _VERSION_CACHE_FILE.is_file():
         return {}
@@ -384,11 +413,10 @@ def check_updates(force: bool = False) -> dict:
     current_manager = current_version()
     local_head = _local_upstream_head()
 
-    def norm(v: str) -> str:
-        return str(v or '').strip().lstrip('vV')
-
     m_latest = str(cache.get('manager', {}).get('latest') or '')
-    manager_has = bool(m_latest) and norm(m_latest) != norm(current_manager)
+    # 只有远端确实更新才提示；不能只判「不相等」，否则当前版本领先于缓存里的
+    # 旧 latest 时会冒出降级提示（如 v1.0.5 → v1.0.4）
+    manager_has = bool(m_latest) and _version_newer(m_latest, current_manager)
 
     u_latest = str(cache.get('upstream', {}).get('latest') or '')
     # 有本地 HEAD 时按 commit 比较；否则仅展示远端最新

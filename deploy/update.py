@@ -354,6 +354,16 @@ def update_manager(rep: Reporter) -> None:
         run([py, '-m', 'pip', 'install', '-q', '-r', str(req)], rep=rep, check=False)
 
     rep.log(f'管理端已更新到 {tag}，重启服务以生效')
+
+    # 清掉版本检测缓存：缓存里存的是「更新前」查到的 latest，留着会让界面
+    # 拿旧 latest 跟新版本比较，出现「v1.0.5 → v1.0.4」这类把降级当更新的提示，
+    # 也会让刚发布的新版本最长 6 小时才被发现。
+    try:
+        (DATA_DIR / 'version-check.json').unlink(missing_ok=True)
+        rep.log('已清除版本检测缓存')
+    except Exception:  # noqa: BLE001
+        pass
+
     # 先把终态落盘，再重启：systemd 默认 KillMode=control-group，restart 会连同
     # 本进程一起终止（start_new_session 只脱离终端会话，并未脱离 service 的 cgroup），
     # 若等重启之后再写状态就永远写不到了。
