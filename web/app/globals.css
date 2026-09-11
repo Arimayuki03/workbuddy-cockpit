@@ -155,51 +155,26 @@ button {
   }
 }
 
-/* Toast 图标着色样式 */
-[data-sonner-toast] [data-icon] {
-  margin-inline-end: 8px;
+/* ── 提示（toast）────────────────────────────────────────
+   通知卡片由 lib/toast.tsx 自定义渲染：motion 弹簧入场、语义色图标、
+   悬停关闭按钮、底部倒计时线。这里只负责两件事：
+
+   1) 中和 sonner 给外层 li 的默认背景/边框/内边距
+      （否则会与自定义卡片叠加，形成难看的「双层边框」）
+   2) 提供底部进度条动画
+
+   非自定义 toast（如 loading）不受影响，仍用 sonner 默认外观。 */
+
+[data-sonner-toast]:has(> [data-wb-toast]) {
+  width: auto;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  border-radius: 0;
+  box-shadow: none;
 }
 
-/* ── 提示气泡：Q 弹入场 + 语义色描边 ─────────────────────
-   sonner 默认只是淡入；这里加了带轻微回弹的弹跳，让提醒更醒目。
-   颜色按类型区分，与图标共同强化语义。 */
-@keyframes wb-toast-pop {
-  0% {
-    opacity: 0;
-    transform: translateY(14px) scale(0.86);
-  }
-
-  55% {
-    opacity: 1;
-    transform: translateY(-5px) scale(1.035);
-  }
-
-  75% {
-    transform: translateY(2px) scale(0.992);
-  }
-
-  100% {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes wb-toast-icon-bounce {
-  0%,
-  100% {
-    transform: translateY(0) scale(1);
-  }
-
-  30% {
-    transform: translateY(-4px) scale(1.18) rotate(-8deg);
-  }
-
-  60% {
-    transform: translateY(0) scale(0.96) rotate(4deg);
-  }
-}
-
-@keyframes wb-toast-progress {
+@keyframes wb-toast-bar {
   from {
     transform: scaleX(1);
   }
@@ -209,85 +184,37 @@ button {
   }
 }
 
-[data-sonner-toast] {
-  animation: wb-toast-pop 520ms cubic-bezier(0.2, 0.9, 0.25, 1.25) both;
-  border-width: 1px !important;
-  box-shadow: 0 10px 34px rgb(0 0 0 / 10%), 0 2px 6px rgb(0 0 0 / 6%) !important;
-  position: relative;
-  overflow: hidden;
-}
-
-[data-sonner-toast] [data-icon] {
-  animation: wb-toast-icon-bounce 900ms cubic-bezier(0.2, 0.9, 0.25, 1.3) 120ms both;
-}
-
-/* 顶部语义色进度条，提示即将自动消失 */
-[data-sonner-toast]::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  height: 2.5px;
-  width: 100%;
-  transform-origin: left center;
-  background: var(--wb-toast-accent, var(--border));
-  animation: wb-toast-progress var(--wb-toast-duration, 3.4s) linear both;
-}
-
-[data-sonner-toast][data-type="success"] {
-  --wb-toast-accent: #10b981;
-  border-color: color-mix(in srgb, #10b981 45%, var(--border)) !important;
-}
-
-[data-sonner-toast][data-type="error"] {
-  --wb-toast-accent: #ef4444;
-  border-color: color-mix(in srgb, #ef4444 45%, var(--border)) !important;
-}
-
-[data-sonner-toast][data-type="warning"] {
-  --wb-toast-accent: #f59e0b;
-  border-color: color-mix(in srgb, #f59e0b 45%, var(--border)) !important;
-}
-
-[data-sonner-toast][data-type="info"] {
-  --wb-toast-accent: #3b82f6;
-  border-color: color-mix(in srgb, #3b82f6 45%, var(--border)) !important;
-}
-
 @media (prefers-reduced-motion: reduce) {
-  [data-sonner-toast],
-  [data-sonner-toast] [data-icon],
-  [data-sonner-toast]::before {
+  [data-wb-toast] [aria-hidden] {
     animation: none !important;
   }
 }
 
-/* 成功类型 - 绿色图标 */
+/* 非自定义 toast 的图标着色（loading 等） */
+[data-sonner-toast] [data-icon] {
+  margin-inline-end: 8px;
+}
+
 [data-sonner-toast][data-type="success"] [data-icon] {
   color: #10b981;
 }
 
-/* 错误类型 - 红色图标 */
 [data-sonner-toast][data-type="error"] [data-icon] {
   color: #ef4444;
 }
 
-/* 警告类型 - 黄色图标 */
 [data-sonner-toast][data-type="warning"] [data-icon] {
   color: #f59e0b;
 }
 
-/* 信息类型 - 蓝色图标 */
 [data-sonner-toast][data-type="info"] [data-icon] {
   color: #3b82f6;
 }
 
-/* 加载类型 - 灰色图标 */
 [data-sonner-toast][data-type="loading"] [data-icon] {
   color: #6b7280;
 }
 
-/* 深色模式下的图标颜色调整 */
 .dark [data-sonner-toast][data-type="success"] [data-icon] {
   color: #34d399;
 }

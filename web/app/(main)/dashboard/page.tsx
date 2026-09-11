@@ -1,7 +1,7 @@
 'use client';
 
 import {useCallback, useEffect, useState} from 'react';
-import {Users, CircleCheck, TriangleAlert, Activity, Server, RefreshCw} from 'lucide-react';
+import {Users, CircleCheck, TriangleAlert, Activity, Server, RefreshCw, Coins} from 'lucide-react';
 import {
   Area,
   AreaChart,
@@ -50,6 +50,10 @@ export default function DashboardPage() {
 
   const valid = accounts.filter((a) => !a.is_expired).length;
   const expiring = accounts.filter((a) => a.remain_seconds > 0 && a.remain_seconds < 3600).length;
+  // 积分余额合计（仅统计已同步到的账号）
+  const creditsKnown = accounts.filter((a) => typeof a.credits === 'number');
+  const totalCredits = creditsKnown.reduce((sum, a) => sum + (a.credits || 0), 0);
+  const creditsLow = creditsKnown.filter((a) => (a.credits || 0) < 200).length;
 
   const chartData = daily.map((d) => ({
     day: d.day.slice(5),
@@ -70,7 +74,7 @@ export default function DashboardPage() {
         }
       />
 
-      <section className="grid grid-cols-2 gap-3 lg:grid-cols-4 md:gap-4">
+      <section className="grid grid-cols-2 gap-3 lg:grid-cols-5 md:gap-4">
         <StatCard
           label="账号总数"
           value={fmtNumber(accounts.length)}
@@ -98,12 +102,27 @@ export default function DashboardPage() {
           delay={0.1}
         />
         <StatCard
+          label="积分余额"
+          value={creditsKnown.length ? fmtNumber(totalCredits) : '—'}
+          hint={
+            !creditsKnown.length
+              ? '等待上游同步'
+              : creditsLow > 0
+                ? `${creditsLow} 个账号低于 200`
+                : `覆盖 ${creditsKnown.length} 个账号`
+          }
+          icon={Coins}
+          tone={!creditsKnown.length ? 'neutral' : creditsLow > 0 ? 'warning' : 'accent'}
+          hintTone={creditsLow > 0 ? 'warning' : undefined}
+          delay={0.15}
+        />
+        <StatCard
           label="今日 Token"
           value={fmtCompact(summary?.today_tokens)}
           hint={`${fmtNumber(summary?.today_requests)} 次请求`}
           icon={Activity}
           tone="info"
-          delay={0.15}
+          delay={0.2}
         />
       </section>
 
@@ -217,8 +236,25 @@ export default function DashboardPage() {
                       style={{width: `${pct}%`, background: vis.barColor}}
                     />
                   </div>
-                  <div className={'mt-1.5 text-[11px] tabular-nums ' + vis.textClass}>
-                    {fmtRemain(a.remain_seconds)}
+                  <div className="mt-1.5 flex items-center justify-between gap-2">
+                    <span className={'text-[11px] tabular-nums ' + vis.textClass}>
+                      {fmtRemain(a.remain_seconds)}
+                    </span>
+                    <span
+                      className={
+                        'text-[11px] font-medium tabular-nums ' +
+                        (typeof a.credits !== 'number'
+                          ? 'text-muted-foreground'
+                          : a.credits <= 0
+                            ? 'text-red-600 dark:text-red-400'
+                            : a.credits < 200
+                              ? 'text-amber-600 dark:text-amber-400'
+                              : 'text-foreground')
+                      }
+                      title="积分余额"
+                    >
+                      {typeof a.credits === 'number' ? `${fmtNumber(a.credits)} 积分` : ''}
+                    </span>
                   </div>
                 </div>
               );

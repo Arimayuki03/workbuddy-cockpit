@@ -17,7 +17,7 @@ import {
 import {notify} from '@/lib/toast';
 import {accountApi, upstreamApi, errText} from '@/lib/api';
 import type {Account, CheckinLog, UpstreamStatus} from '@/lib/types';
-import {expiryVisual, fmtDateTime, fmtRemain} from '@/lib/format';
+import {expiryVisual, fmtDateTime, fmtNumber, fmtRemain} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
@@ -194,6 +194,7 @@ export default function AccountsPage() {
               <TableHead className="pl-4 text-[11px] text-muted-foreground">昵称</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">UID</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">状态</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">积分余额</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">Token 有效期</TableHead>
               {isAdmin && <TableHead className="pr-4 text-right text-[11px] text-muted-foreground">操作</TableHead>}
             </TableRow>
@@ -236,6 +237,30 @@ export default function AccountsPage() {
                       <Badge variant="secondary" className="rounded-full text-amber-600 dark:text-amber-400">● 冷却中</Badge>
                     ) : (
                       <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">● 在线</Badge>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {a.credits === null || a.credits === undefined ? (
+                      <span
+                        className="text-xs text-muted-foreground"
+                        title="上游尚未返回该账号的积分（可能是刚添加、或上游不可达）"
+                      >
+                        —
+                      </span>
+                    ) : (
+                      <span
+                        className={
+                          'text-xs font-medium tabular-nums ' +
+                          (a.credits <= 0
+                            ? 'text-red-600 dark:text-red-400'
+                            : a.credits < 200
+                              ? 'text-amber-600 dark:text-amber-400'
+                              : 'text-foreground')
+                        }
+                        title="当前可花费积分余额（所有套餐剩余额度合计）"
+                      >
+                        {fmtNumber(a.credits)}
+                      </span>
                     )}
                   </TableCell>
                   <TableCell>
