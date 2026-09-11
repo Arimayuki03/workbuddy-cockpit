@@ -15,6 +15,10 @@
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-22c55e)
 
+[![Release](https://img.shields.io/github/v/release/ithtelab/workbuddy-manager?color=22c55e&label=Release)](https://github.com/ithtelab/workbuddy-manager/releases)
+[![Changelog](https://img.shields.io/badge/更新日志-CHANGELOG-blue)](CHANGELOG.md)
+[![Issues](https://img.shields.io/github/issues/ithtelab/workbuddy-manager?color=f59e0b&label=反馈)](https://github.com/ithtelab/workbuddy-manager/issues)
+
 <img src="docs/images/dashboard.png" alt="WorkBuddy Manager 仪表盘" width="100%" />
 
 </div>
@@ -371,6 +375,30 @@ workbuddy-manager/
 - **出站 IP 池未包含**：当前仅做**入站** IP 管控。若要为每个腾讯账号绑定独立**出口 IP / 代理**（上游请求由 workbuddy2api 发出），需要在其 Go 服务侧增加代理池支持，不在本仓库范围内。
 - 请求的**请求体 / 响应体内容不做留存**，仅记录元数据（模型、状态、Token、延迟、来源），以保护隐私。
 - 用量统计按「天 × 密钥 × 模型」聚合；如需小时粒度可扩展 `usage_daily` 表。
+
+---
+
+## 更新日志与反馈
+
+- **更新日志**：[CHANGELOG.md](CHANGELOG.md) —— 各版本的新增、修复与变更
+- **下载发布包**：[Releases](https://github.com/ithtelab/workbuddy-manager/releases) —— 每个版本提供可直接部署的
+  `.tar.gz` / `.zip`（含已构建的前端产物），解压后执行 `sudo bash deploy/install.sh` 即可
+- **反馈问题**：[提交 Bug](https://github.com/ithtelab/workbuddy-manager/issues/new?template=bug_report.yml) ·
+  [功能建议](https://github.com/ithtelab/workbuddy-manager/issues/new?template=feature_request.yml)
+
+> 反馈时请附上版本号与错误日志，并**先移除其中的密钥、Token 等敏感信息**。
+> 上游 workbuddy2api 自身的问题请在其[仓库](https://github.com/Sliverkiss/workbuddy2api)反馈。
+
+### 版本发布流程
+
+维护者打 tag 即可自动构建并发布：
+
+```bash
+git tag v1.0.1 && git push origin v1.0.1
+```
+
+CI 会构建前端、打包产物、从 CHANGELOG 提取对应版本段落作为发布说明，
+并创建 Release 附带压缩包。
 
 ---
 
