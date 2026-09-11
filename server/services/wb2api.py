@@ -109,35 +109,75 @@ async def restart_container() -> tuple[bool, str]:
         return False, str(exc)
 
 
-def load_upstream_config() -> dict:
-    """读取 workbuddy2api 的 config.json，API Key 做掩码。"""
-    try:
-        cfg = json.loads(config.UPSTREAM_CONFIG.read_text(encoding='utf-8'))
-    except Exception:
-        return {}
+def _mask(v: str) -> str:
+    if not v:
+        return ''
+    return v[:6] + '*' * max(0, len(v) - 10) + v[-4:] if len(v) > 12 else '******'
 
-    def mask(v: str) -> str:
-        if not v:
-            return ''
-        return v[:6] + '*' * max(0, len(v) - 10) + v[-4:] if len(v) > 12 else '******'
+
+def load_upstream_config() -> dict:
+    """读取 workbuddy2api 的 config.json，API Key 做掩码。
+
+    读不到时返回 available=False 并附带原因，供前端明确提示并禁止保存，
+    避免把空配置写回真实文件。
+    """
+    path = config.UPSTREAM_CONFIG
+    cfg: dict | None = None
+    error: str | None = None
+
+    if not path.is_file():
+        error = f'未找到上游配置文件 {path}'
+    else:
+        try:
+            loaded = json.loads(path.read_text(encoding='utf-8'))
+            if isinstance(loaded, dict):
+                cfg = loaded
+            else:
+                error = f'上游配置文件不是合法的 JSON 对象: {path}'
+        except Exception as exc:  # noqa: BLE001
+            error = f'上游配置文件解析失败: {exc}'
+
+    if cfg is None:
+        return {
+            'available': False,
+            'config_path': str(path),
+            'auth_dir': str(config.AUTH_DIR),
+            'error': error or '无法读取上游配置',
+        }
 
     view = dict(cfg)
     if 'api_key' in view:
-        view['api_key_masked'] = mask(str(view.pop('api_key') or ''))
-    view.setdefault('auth_dir', str(config.AUTH_DIR))
+        view['api_key_masked'] = _mask(str(view.pop('api_key') or ''))
+    # 账号列表实际读取的是管理端自己的 AUTH_DIR，以此为准；上游若声明了不同目录则一并暴露
+    upstream_auth_dir = cfg.get('auth_dir')
+    view['auth_dir'] = str(config.AUTH_DIR)
+    if upstream_auth_dir and str(upstream_auth_dir) != str(config.AUTH_DIR):
+        view['upstream_auth_dir'] = str(upstream_auth_dir)
+    view['available'] = True
+    view['config_path'] = str(path)
     view['raw'] = cfg
     return view
 
 
 def save_upstream_config(patch: dict) -> dict:
-    """仅允许改写 schedule / pool / cooldown / features 等非敏感段。"""
+    """仅允许改写 schedule / pool / cooldown / features 等非敏感段。
+
+    配置读不到时直接拒绝，绝不基于空 dict 生成新文件覆盖真实配置。
+    """
+    path = config.UPSTREAM_CONFIG
+    if not path.is_file():
+        raise FileNotFoundError(f'未找到上游配置文件 {path}，已取消保存')
+
     try:
-        cfg = json.loads(config.UPSTREAM_CONFIG.read_text(encoding='utf-8'))
-    except Exception:
-        cfg = {}
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f'上游配置文件解析失败，已取消保存: {exc}') from exc
+    if not isinstance(cfg, dict):
+        raise ValueError('上游配置文件不是合法的 JSON 对象，已取消保存')
+
     for field in ('schedule', 'pool', 'cooldown', 'features'):
         if field in patch and isinstance(patch[field], dict):
             cfg.setdefault(field, {})
             cfg[field].update(patch[field])
-    config.UPSTREAM_CONFIG.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding='utf-8')
+    path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding='utf-8')
     return load_upstream_config()

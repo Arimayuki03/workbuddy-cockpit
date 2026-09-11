@@ -135,9 +135,17 @@ export interface UserItem {
 }
 
 export interface UpstreamConfig {
+  /** 是否成功读取到上游配置文件；false 时前端应提示并禁止保存 */
+  available?: boolean;
+  /** 上游配置文件路径 */
+  config_path?: string;
+  /** 读取失败原因 */
+  error?: string;
   listen?: string;
   api_key_masked?: string;
   auth_dir?: string;
+  /** 上游 config.json 中声明的 auth_dir，与管理端不一致时出现 */
+  upstream_auth_dir?: string;
   schedule?: Record<string, unknown>;
   pool?: Record<string, unknown>;
   cooldown?: Record<string, unknown>;
