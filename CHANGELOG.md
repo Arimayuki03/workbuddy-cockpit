@@ -9,6 +9,14 @@
 
 ## [未发布]
 
+### 计划中
+- 出站 IP 池：为每个腾讯账号绑定独立出口代理（需在上游 workbuddy2api 侧支持）
+- 用量统计支持小时级粒度
+
+---
+
+## [1.0.1] - 2026-09-12
+
 ### 安全（详见 [安全审查报告](docs/SECURITY-AUDIT.md)）
 
 - **修复高危：伪造 `X-Forwarded-For` 可绕过 IP 管控与登录锁定**
@@ -45,12 +53,7 @@
 - 账号页与仪表盘新增 30 秒自动轮询，避免长时间停留时展示陈旧数据
 - 图标 / 字体等静态资源改为缓存一天（此前每次回源校验）
 
-### 计划中
-- 出站 IP 池：为每个腾讯账号绑定独立出口代理（需在上游 workbuddy2api 侧支持）
-- 用量统计支持小时级粒度
-
 ---
-
 ## [1.0.0] - 2026-09-11
 
 首个正式版本：为 [`workbuddy2api`](https://github.com/Sliverkiss/workbuddy2api)
@@ -148,3 +151,10 @@
 - 本项目**不修改** workbuddy2api 的 Go 代码，管理端与其独立部署
 - 由于上游仅在进程启动时读取配置与扫描账号目录（且不处理 SIGHUP），
   配置变更与账号增删需要通过重启容器生效，本项目已将其自动化
+
+---
+
+## 版本对比
+
+- [v1.0.0 → v1.0.1](https://github.com/ithtelab/workbuddy-manager/compare/v1.0.0...v1.0.1)
+- [全部提交](https://github.com/ithtelab/workbuddy-manager/commits/main)
