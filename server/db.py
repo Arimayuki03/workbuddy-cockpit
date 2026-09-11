@@ -161,7 +161,8 @@ def set_setting(key: str, value: Any) -> None:
     )
 
 
-# ── 用量累计 ─────────────────────────────────────────────def bump_usage(key_id: int, model: str, prompt_tokens: int, completion_tokens: int) -> None:
+# ── 用量累计 ─────────────────────────────────────────────
+def bump_usage(key_id: int, model: str, prompt_tokens: int, completion_tokens: int) -> None:
     day = time.strftime('%Y-%m-%d')
     execute(
         'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, completion_tokens) '
