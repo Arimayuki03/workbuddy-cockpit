@@ -19,7 +19,8 @@ import {
 } from 'lucide-react';
 import {useThemeUtils} from '@/hooks/use-theme-utils';
 import {useAuth} from '@/lib/auth-context';
-import {accountApi} from '@/lib/api';
+import {accountApi, systemApi} from '@/lib/api';
+import {notify} from '@/lib/toast';
 import {CountingNumber} from '@/components/animate-ui/text/counting-number';
 import {Button} from '@/components/ui/button';
 import Link from 'next/link';
@@ -219,6 +220,27 @@ export function ManagementBar() {
       window.removeEventListener('workbuddy-manager:accounts-changed', fetchCount);
     };
   }, []);
+
+  // 每个浏览器会话检测一次新版本，有更新则弹出提醒（避免打扰不重复提示）
+  useEffect(() => {
+    if (!mounted || typeof window === 'undefined') return;
+    const KEY = 'workbuddy-manager:update-notified';
+    if (window.sessionStorage.getItem(KEY) === '1') return;
+    window.sessionStorage.setItem(KEY, '1');
+
+    (async () => {
+      try {
+        const c = await systemApi.checkUpdate();
+        if (!c.has_any) return;
+        const parts: string[] = [];
+        if (c.manager.has_update) parts.push(`管理端 ${c.manager.latest}`);
+        if (c.upstream.has_update) parts.push(`上游 ${c.upstream.latest}`);
+        notify.warn('发现新版本可更新', `${parts.join(' · ')}　到「设置 → 系统更新」一键升级`);
+      } catch {
+        /* 检测失败静默：不打扰用户（如服务器访问 GitHub 受限） */
+      }
+    })();
+  }, [mounted]);
 
   useEffect(() => {
     if (!mounted || typeof window === 'undefined') return;

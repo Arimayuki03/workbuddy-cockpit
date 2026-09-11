@@ -16,8 +16,11 @@ import type {
   UpstreamConfig,
   UpstreamStatus,
   UsageBreakdown,
+  UpdateCheck,
+  UpdateStatus,
   UsagePoint,
   UserItem,
+  Versions,
 } from './types';
 
 export const http = axios.create({
@@ -176,3 +179,14 @@ export const settingsApi = {
 };
 
 export type {Account};
+
+/* ── 系统维护（一键更新）──────────────────────────────── */
+export const systemApi = {
+  updateStatus: () => get<UpdateStatus>('/api/system/update-status'),
+  /** 检测新版本；force=true 绕过 6 小时缓存 */
+  checkUpdate: (force = false) => get<UpdateCheck>('/api/system/check-update', {force}),
+  versions: () => get<Versions>('/api/system/versions'),
+  /** 启动一键更新；target: manager | upstream | both */
+  startUpdate: (target: 'manager' | 'upstream' | 'both') =>
+    post<{ok: boolean; message: string}>('/api/system/update', {target}),
+};
