@@ -2,7 +2,7 @@
 
 import {useCallback, useEffect, useState} from 'react';
 import {ShieldCheck, Plus, Trash2, RefreshCw, Ban, CircleCheck, Network} from 'lucide-react';
-import {toast} from 'sonner';
+import {notify} from '@/lib/toast';
 import {securityApi, errText} from '@/lib/api';
 import type {IpAccessLog, IpRule, SecurityConfig} from '@/lib/types';
 import {fmtDateTime} from '@/lib/format';
@@ -64,26 +64,26 @@ export default function SecurityPage() {
     setConfig(next);
     try {
       await securityApi.saveConfig(next);
-      toast.success('安全配置已保存');
+      notify.ok('安全配置已保存');
     } catch (e) {
-      toast.error(errText(e));
+      notify.err(errText(e));
     }
   }
 
   async function addRule() {
     if (!newCidr.trim()) {
-      toast.error('请输入 IP 或 CIDR');
+      notify.err('请输入 IP 或 CIDR');
       return;
     }
     setBusy(true);
     try {
       await securityApi.addRule({kind: newKind, cidr: newCidr.trim(), note: newNote.trim()});
-      toast.success('规则已添加');
+      notify.ok('规则已添加');
       setNewCidr('');
       setNewNote('');
       load();
     } catch (e) {
-      toast.error(errText(e));
+      notify.err(errText(e));
     } finally {
       setBusy(false);
     }
@@ -204,10 +204,10 @@ export default function SecurityPage() {
                           onClick={async () => {
                             try {
                               await securityApi.removeRule(r.id);
-                              toast.success('已删除');
+                              notify.ok('已删除');
                               load();
                             } catch (e) {
-                              toast.error(errText(e));
+                              notify.err(errText(e));
                             }
                           }}
                         >
@@ -237,7 +237,7 @@ export default function SecurityPage() {
               destructive
               onConfirm={async () => {
                 await securityApi.logsClear();
-                toast.success('已清空');
+                notify.ok('已清空');
                 load();
               }}
               trigger={

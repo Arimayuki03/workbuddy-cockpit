@@ -2,7 +2,7 @@
 
 import {useCallback, useEffect, useState} from 'react';
 import {ScrollText, RefreshCw, Search, Trash2, ChevronLeft, ChevronRight} from 'lucide-react';
-import {toast} from 'sonner';
+import {notify} from '@/lib/toast';
 import {keyApi, logApi, errText} from '@/lib/api';
 import type {ApiKey, RequestLog} from '@/lib/types';
 import {fmtDateTime, fmtLatency, fmtNumber} from '@/lib/format';
@@ -69,7 +69,7 @@ export default function LogsPage() {
       setLogs(res.items);
       setTotal(res.total);
     } catch (e) {
-      toast.error(errText(e));
+      notify.err(errText(e));
     } finally {
       setLoading(false);
     }
@@ -110,7 +110,7 @@ export default function LogsPage() {
                 destructive
                 onConfirm={async () => {
                   await logApi.clear();
-                  toast.success('已清空');
+                  notify.ok('已清空');
                   setPage(1);
                   load();
                 }}
@@ -210,13 +210,30 @@ export default function LogsPage() {
                 <TableCell>
                   {l.status >= 200 && l.status < 300 ? (
                     <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">{l.status}</Badge>
+                  ) : l.status >= 400 && l.status < 500 ? (
+                    <Badge variant="secondary" className="rounded-full bg-amber-500/12 text-amber-600 dark:text-amber-400">
+                      {l.status || 'ERR'}
+                    </Badge>
                   ) : (
                     <Badge variant="destructive" className="rounded-full">{l.status || 'ERR'}</Badge>
                   )}
                 </TableCell>
-                <TableCell className="text-xs tabular-nums text-muted-foreground">{fmtLatency(l.latency_ms)}</TableCell>
+                <TableCell
+                  className={
+                    'text-xs tabular-nums ' +
+                    (l.latency_ms >= 3000
+                      ? 'font-medium text-amber-600 dark:text-amber-400'
+                      : 'text-muted-foreground')
+                  }
+                >
+                  {fmtLatency(l.latency_ms)}
+                </TableCell>
                 <TableCell className="pr-4 text-xs tabular-nums">
-                  {fmtNumber(l.prompt_tokens + l.completion_tokens)}
+                  {l.prompt_tokens + l.completion_tokens > 0 ? (
+                    fmtNumber(l.prompt_tokens + l.completion_tokens)
+                  ) : (
+                    <span className="text-muted-foreground/70">—</span>
+                  )}
                   {l.stream && <span className="ml-1 text-[10px] text-muted-foreground">流</span>}
                 </TableCell>
               </TableRow>

@@ -33,7 +33,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import {toast} from 'sonner';
+import {notify} from '@/lib/toast';
 
 const CHART_COLORS = [
   'var(--chart-1)',
@@ -64,7 +64,7 @@ export default function StatsPage() {
     if (results[1].status === 'fulfilled') setDaily(results[1].value);
     if (results[2].status === 'fulfilled') setByModel(results[2].value);
     if (results[3].status === 'fulfilled') setByKey(results[3].value);
-    if (results.some((r) => r.status === 'rejected')) toast.error(errText((results.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason));
+    if (results.some((r) => r.status === 'rejected')) notify.err(errText((results.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason));
     setLoading(false);
   }, [days]);
 
@@ -107,6 +107,7 @@ export default function StatsPage() {
           value={fmtNumber(summary?.today_requests)}
           hint={`${fmtCompact(summary?.today_tokens)} Token`}
           icon={Activity}
+          tone="info"
           delay={0}
         />
         <StatCard
@@ -114,6 +115,7 @@ export default function StatsPage() {
           value={fmtNumber(summary?.week_requests)}
           hint={`${fmtCompact(summary?.week_tokens)} Token`}
           icon={TrendingUp}
+          tone="accent"
           delay={0.05}
         />
         <StatCard
@@ -121,6 +123,7 @@ export default function StatsPage() {
           value={fmtCompact(summary?.total_requests)}
           hint={`${fmtCompact(summary?.total_tokens)} Token`}
           icon={Activity}
+          tone="neutral"
           delay={0.1}
         />
         <StatCard
@@ -128,6 +131,7 @@ export default function StatsPage() {
           value={fmtNumber(summary?.active_keys)}
           hint={summary?.top_model ? `主力模型 ${summary.top_model}` : '分布中'}
           icon={KeyRound}
+          tone="success"
           delay={0.15}
         />
       </section>

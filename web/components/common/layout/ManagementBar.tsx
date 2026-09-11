@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import {useThemeUtils} from '@/hooks/use-theme-utils';
 import {useAuth} from '@/lib/auth-context';
+import {accountApi} from '@/lib/api';
 import {CountingNumber} from '@/components/animate-ui/text/counting-number';
 import {Button} from '@/components/ui/button';
 import Link from 'next/link';
@@ -34,13 +35,15 @@ import {
   DialogTrigger,
 } from '@/components/animate-ui/radix/dialog';
 import {Avatar, AvatarFallback} from '@/components/ui/avatar';
+import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {AddAccountDialog} from '@/components/common/accounts/AddAccountDialog';
 
 const IconOptions = {
   className: 'h-4 w-4',
 } as const;
 
-const DOCK_STORAGE_KEY = 'workbuddy-manager:dock-position';
+// v2：坐标语义由「左边缘」改为「水平中心」，旧版本存储的位置不再兼容
+const DOCK_STORAGE_KEY = 'workbuddy-manager:dock-position-v2';
 const DOCK_TIP_STORAGE_KEY = 'workbuddy-manager:dock-tip-dismissed';
 const DOCK_MARGIN = 16;
 const DOCK_LONG_PRESS_MS = 180;
@@ -76,6 +79,8 @@ export function ManagementBar() {
   const [dockPosition, setDockPosition] = useState<DockPosition | null>(null);
   const [showDockTip, setShowDockTip] = useState(false);
   const [dockTipStep, setDockTipStep] = useState(0);
+  /** 受管账号数量（真实数据，供个人信息面板展示） */
+  const [accountCount, setAccountCount] = useState<number | null>(null);
   const dockRef = useRef<HTMLDivElement>(null);
   const dockViewportRef = useRef<DockViewport>('desktop');
   const dragOffsetRef = useRef({x: 0, y: 0});
@@ -120,15 +125,23 @@ export function ManagementBar() {
     };
   }, []);
 
+  /**
+   * 这里的坐标是「底栏水平中心」而非左边缘。
+   * 容器通过 transform: translateX(-50%) 以中心对齐，
+   * 这样鼠标悬停导致图标放大、底栏总宽变化时，会向两侧对称扩展，
+   * 视觉上不会发生位移。
+   */
   const clampDockPosition = useCallback((position: DockPosition): DockPosition => {
     if (typeof window === 'undefined') return position;
 
     const {width, height} = getDockRect();
-    const maxX = Math.max(DOCK_MARGIN, window.innerWidth - width - DOCK_MARGIN);
+    const halfW = width / 2;
+    const minX = DOCK_MARGIN + halfW;
+    const maxX = Math.max(minX, window.innerWidth - DOCK_MARGIN - halfW);
     const maxY = Math.max(DOCK_MARGIN, window.innerHeight - height - DOCK_MARGIN);
 
     return {
-      x: Math.min(Math.max(position.x, DOCK_MARGIN), maxX),
+      x: Math.min(Math.max(position.x, minX), maxX),
       y: Math.min(Math.max(position.y, DOCK_MARGIN), maxY),
     };
   }, [getDockRect]);
@@ -139,11 +152,11 @@ export function ManagementBar() {
     const {width, height} = getDockRect();
     const basePosition = viewport === 'desktop' ?
       {
-        x: (window.innerWidth - width) / 2,
+        x: window.innerWidth / 2,
         y: window.innerHeight - height - DOCK_MARGIN,
       } :
       {
-        x: window.innerWidth - width - DOCK_MARGIN,
+        x: window.innerWidth - DOCK_MARGIN - width / 2,
         y: window.innerHeight - height - DOCK_MARGIN,
       };
 
@@ -156,15 +169,18 @@ export function ManagementBar() {
     }
 
     const {width, height} = getDockRect();
-    const oldMaxX = Math.max(DOCK_MARGIN, position.viewportWidth - width - DOCK_MARGIN);
+    const halfW = width / 2;
+    const oldMinX = DOCK_MARGIN + halfW;
+    const oldMaxX = Math.max(oldMinX, position.viewportWidth - DOCK_MARGIN - halfW);
     const oldMaxY = Math.max(DOCK_MARGIN, position.viewportHeight - height - DOCK_MARGIN);
-    const nextMaxX = Math.max(DOCK_MARGIN, window.innerWidth - width - DOCK_MARGIN);
+    const nextMinX = DOCK_MARGIN + halfW;
+    const nextMaxX = Math.max(nextMinX, window.innerWidth - DOCK_MARGIN - halfW);
     const nextMaxY = Math.max(DOCK_MARGIN, window.innerHeight - height - DOCK_MARGIN);
-    const xRatio = oldMaxX === DOCK_MARGIN ? 0 : (position.x - DOCK_MARGIN) / (oldMaxX - DOCK_MARGIN);
+    const xRatio = oldMaxX === oldMinX ? 0.5 : (position.x - oldMinX) / (oldMaxX - oldMinX);
     const yRatio = oldMaxY === DOCK_MARGIN ? 0 : (position.y - DOCK_MARGIN) / (oldMaxY - DOCK_MARGIN);
 
     return clampDockPosition({
-      x: DOCK_MARGIN + xRatio * (nextMaxX - DOCK_MARGIN),
+      x: nextMinX + xRatio * (nextMaxX - nextMinX),
       y: DOCK_MARGIN + yRatio * (nextMaxY - DOCK_MARGIN),
     });
   }, [clampDockPosition, getDockRect]);
@@ -183,6 +199,25 @@ export function ManagementBar() {
 
   useEffect(() => {
     setMounted(true);
+  }, []);
+
+  // 拉取受管账号数量；账号页增删后通过自定义事件刷新
+  useEffect(() => {
+    let alive = true;
+    const fetchCount = async () => {
+      try {
+        const data = await accountApi.list();
+        if (alive) setAccountCount(data.total);
+      } catch {
+        if (alive) setAccountCount(null);
+      }
+    };
+    fetchCount();
+    window.addEventListener('workbuddy-manager:accounts-changed', fetchCount);
+    return () => {
+      alive = false;
+      window.removeEventListener('workbuddy-manager:accounts-changed', fetchCount);
+    };
   }, []);
 
   useEffect(() => {
@@ -278,6 +313,7 @@ export function ManagementBar() {
 
     const viewport = getViewport();
     dockViewportRef.current = viewport;
+    // dockPosition.x 是底栏中心点，因此偏移量相对中心计算
     dragOffsetRef.current = {
       x: clientX - dockPosition.x,
       y: clientY - dockPosition.y,
@@ -404,13 +440,17 @@ export function ManagementBar() {
               </div>
             </DialogTrigger>
             <DialogContent
-              showCloseButton={false}
+              showCloseButton
               className="max-w-[520px]"
+              onOpenAutoFocus={(event) => {
+                // 阻止自动聚焦到「退出登录」，否则按钮会出现焦点圈，易被误触
+                event.preventDefault();
+              }}
             >
               <DialogHeader>
                 <DialogTitle>个人信息</DialogTitle>
                 <DialogDescription>
-                  管理账户信息、主题偏好与登录会话
+                  管理账户信息、主题偏好与登录会话 · 点击空白处或按 Esc 关闭
                 </DialogDescription>
               </DialogHeader>
               <DialogBody className="max-h-[min(72vh,560px)]">
@@ -439,15 +479,23 @@ export function ManagementBar() {
                               </div>
                             </div>
                           </div>
-                          <Button
-                            onClick={handleLogout}
-                            variant="ghost"
-                            size="sm"
-                            className="h-8 rounded-full"
-                            title="退出登录"
-                          >
-                            <LogOutIcon className="size-3.5" />
-                          </Button>
+                          <ConfirmDialog
+                            title="确认退出登录？"
+                            description="退出后需要重新输入用户名与密码才能进入管理端。"
+                            confirmText="退出登录"
+                            destructive
+                            onConfirm={handleLogout}
+                            trigger={
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-8 shrink-0 rounded-full text-muted-foreground hover:text-red-600"
+                              >
+                                <LogOutIcon className="size-3.5" />
+                                退出登录
+                              </Button>
+                            }
+                          />
                         </div>
 
                         <Separator />
@@ -458,8 +506,17 @@ export function ManagementBar() {
                             <div className="inline-flex items-center gap-2 rounded-full bg-muted px-3 py-2">
                               <Users className="size-3.5 text-foreground/60" />
                               <span className="text-xs font-medium text-foreground">受管账号</span>
-                              <span className="text-xs font-medium text-foreground">
-                                <CountingNumber number={0} fromNumber={0} inView={true} />
+                              <span className="text-xs font-semibold tabular-nums text-foreground">
+                                {accountCount === null ? (
+                                  '—'
+                                ) : (
+                                  <CountingNumber
+                                    number={accountCount}
+                                    fromNumber={0}
+                                    inView={true}
+                                    transition={{stiffness: 200, damping: 25}}
+                                  />
+                                )}
                               </span>
                             </div>
                           </div>
@@ -551,12 +608,16 @@ export function ManagementBar() {
     <>
       <div
         ref={dockRef}
-        className="fixed z-50 select-none touch-none"
+        className="fixed z-40 select-none touch-none"
         onPointerDown={handleDockPointerDown}
         onPointerUp={handleDockPointerEnd}
         onPointerCancel={handleDockPointerEnd}
         onClickCapture={handleDockClickCapture}
-        style={dockPosition ? {left: dockPosition.x, top: dockPosition.y} : {visibility: 'hidden'}}
+        style={
+          dockPosition ?
+            {left: dockPosition.x, top: dockPosition.y, transform: 'translateX(-50%)'} :
+            {visibility: 'hidden'}
+        }
       >
         {showDockTip && (
           <div
