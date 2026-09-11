@@ -8,6 +8,7 @@ venv/
 
 # 敏感数据与运行时数据
 data/
+.devdata/
 .env
 .env.local
 *.db
