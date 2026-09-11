@@ -97,7 +97,8 @@ export default function AccountsPage() {
     setRestarting(true);
     try {
       const res = await accountApi.restart();
-      (res.ok ? notify.ok : notify.err)(res.message || '重启指令已发送');
+      (res.ok ? notify.ok : notify.err)(res.message || '已重启上游');
+      await load();
     } catch (e) {
       notify.err(errText(e));
     } finally {
@@ -118,8 +119,8 @@ export default function AccountsPage() {
             </Button>
             {isAdmin && (
               <ConfirmDialog
-                title="重启反代容器？"
-                description="将执行 docker restart workbuddy2api，新增或删除账号后通常需要重启才能生效。"
+                title="重启上游容器？"
+                description="通常无需手动执行：添加或删除账号后会自动重载。仅当上游状态异常、需要强制重载时才使用。重启约 0.5 秒，在途请求会正常完成。"
                 confirmText="重启"
                 onConfirm={restartUpstream}
                 trigger={
@@ -239,7 +240,7 @@ export default function AccountsPage() {
                         </Button>
                         <ConfirmDialog
                           title={`删除账号「${a.nickname || a.uid}」？`}
-                          description="将删除本地授权文件并需要重启上游容器，此操作不可撤销。"
+                          description="将删除本地授权文件，并自动重载上游使其生效。此操作不可撤销。"
                           confirmText="删除"
                           destructive
                           onConfirm={() => run(a.file, () => accountApi.remove(a.file), '已删除')}

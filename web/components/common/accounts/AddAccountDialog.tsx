@@ -59,7 +59,7 @@ export function AddAccountDialog({
             setMessage(`账号「${res.nickname || res.uid}」授权成功${res.updated ? '（已更新）' : ''}`);
             notify.ok(
               `账号「${res.nickname || res.uid}」授权成功`,
-              res.updated ? '已更新该账号的登录令牌' : '已自动完成签到并加入账号池',
+              res.updated ? '已更新该账号的登录令牌，正在自动应用' : '已自动完成签到，正在加入账号池',
             );
             window.dispatchEvent(new Event('workbuddy-manager:accounts-changed'));
             onSuccess?.();

@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import security
-from ..services import tencent, wb2api
+from ..services import reload, tencent, wb2api
 
 router = APIRouter(prefix='/api', tags=['accounts'])
 
@@ -50,8 +50,8 @@ async def auth_poll(state: str, user: dict = Depends(security.require_admin)) ->
 
     filename, existed = tencent.write_auth_file(result)
 
-    # 异步重启容器加载新账号
-    await wb2api.restart_container()
+    # 自动重载上游以加载新账号（后台合并执行，不阻塞本次响应）
+    reload.request_restart()
 
     return {
         'status': 'success',
@@ -96,7 +96,7 @@ async def account_refresh(filename: str, user: dict = Depends(security.require_a
     raw = _load(filename)
     if not (raw.get('auth') or {}).get('accessToken'):
         return {'ok': False, 'message': '该账号无有效 accessToken'}
-    ok, message = await wb2api.restart_container()
+    ok, message = await reload.restart_now()
     return {'ok': ok, 'message': '已触发上游重载以刷新 Token' if ok else message}
 
 
@@ -108,11 +108,11 @@ async def account_delete(filename: str, user: dict = Depends(security.require_ad
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not removed:
         raise HTTPException(status_code=404, detail='账号文件不存在')
-    await wb2api.restart_container()
+    reload.request_restart()
     return {'success': True}
 
 
 @router.post('/restart')
 async def restart(user: dict = Depends(security.require_admin)) -> dict:
-    ok, message = await wb2api.restart_container()
+    ok, message = await reload.restart_now()
     return {'ok': ok, 'message': message}

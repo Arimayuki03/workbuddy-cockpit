@@ -162,6 +162,18 @@ export interface UpstreamConfig {
   upstash?: UpstashConfig;
 }
 
+export interface ReloadState {
+  /** 正在执行重启 */
+  running: boolean;
+  /** 有重启在排队（短时间内多次改动的合并） */
+  pending: boolean;
+  /** 上次重启完成时间（秒） */
+  last_at: number;
+  last_ok: boolean | null;
+  last_message: string;
+  restart_count: number;
+}
+
 export interface Page<T> {
   total: number;
   items: T[];
