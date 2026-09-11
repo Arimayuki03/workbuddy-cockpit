@@ -34,12 +34,12 @@ export function errText(e: unknown): string {
 http.interceptors.response.use(
   (r) => r,
   (error: AxiosError) => {
-    if (
-      error.response?.status === 401 &&
-      typeof window !== 'undefined' &&
-      !window.location.pathname.startsWith('/login')
-    ) {
-      window.location.href = '/login';
+    if (error.response?.status === 401 && typeof window !== 'undefined') {
+      // 会话失效：清掉缓存的登录态，避免仍显示管理员入口
+      window.sessionStorage.removeItem('wb-me');
+      if (!window.location.pathname.startsWith('/login')) {
+        window.location.href = '/login';
+      }
     }
     return Promise.reject(error);
   },

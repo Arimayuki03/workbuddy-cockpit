@@ -1,8 +1,31 @@
 'use client';
 
-import {createContext, useCallback, useContext, useEffect, useState, type ReactNode} from 'react';
-import {authApi, http} from '@/lib/api';
+import {createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode} from 'react';
+import {authApi} from '@/lib/api';
 import type {Me, Role} from '@/lib/types';
+
+const ME_CACHE_KEY = 'wb-me';
+
+/** 缓存登录态，避免每次整页加载都先空一下再填充 */
+function readCachedMe(): Me | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.sessionStorage.getItem(ME_CACHE_KEY);
+    return raw ? (JSON.parse(raw) as Me) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedMe(me: Me | null): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (me) window.sessionStorage.setItem(ME_CACHE_KEY, JSON.stringify(me));
+    else window.sessionStorage.removeItem(ME_CACHE_KEY);
+  } catch {
+    /* 隐私模式下 sessionStorage 可能不可用，忽略 */
+  }
+}
 
 interface AuthContextValue {
   me: Me | null;
@@ -18,14 +41,18 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({children}: {children: ReactNode}) {
   const [me, setMe] = useState<Me | null>(null);
+  // 有缓存时直接视为已就绪，页面无需为登录校验停留
   const [loading, setLoading] = useState(true);
+  const hydrated = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
       const data = await authApi.me();
       setMe(data);
+      writeCachedMe(data);
     } catch {
       setMe(null);
+      writeCachedMe(null);
     } finally {
       setLoading(false);
     }
@@ -33,7 +60,10 @@ export function AuthProvider({children}: {children: ReactNode}) {
 
   const login = useCallback(async (username: string, password: string) => {
     const res = await authApi.login(username, password);
-    setMe({username: res.username, role: res.role as Role});
+    const next = {username: res.username, role: res.role as Role};
+    setMe(next);
+    writeCachedMe(next);
+    setLoading(false);
   }, []);
 
   const logout = useCallback(async () => {
@@ -43,15 +73,21 @@ export function AuthProvider({children}: {children: ReactNode}) {
       /* 忽略登出异常 */
     }
     setMe(null);
+    writeCachedMe(null);
     if (typeof window !== 'undefined') window.location.href = '/login';
   }, []);
 
   useEffect(() => {
-    // 仅在同一会话内拉取一次，避免多页面重复请求
-    if (http.defaults.headers.common['x-me-loaded'] === '1' && me) return;
+    if (hydrated.current) return;
+    hydrated.current = true;
+    // 先用缓存立即还原界面，再后台校验一次
+    const cached = readCachedMe();
+    if (cached) {
+      setMe(cached);
+      setLoading(false);
+    }
     refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [refresh]);
 
   return (
     <AuthContext.Provider
