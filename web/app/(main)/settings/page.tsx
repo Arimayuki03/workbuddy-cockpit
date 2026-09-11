@@ -14,6 +14,9 @@ import {
   TriangleAlert,
   ChevronDown,
   RotateCcw,
+  PlugZap,
+  Power,
+  Loader2,
 } from 'lucide-react';
 import {notify} from '@/lib/toast';
 import {settingsApi, upstreamApi, errText} from '@/lib/api';
@@ -208,6 +211,10 @@ export default function SettingsPage() {
   const [users, setUsers] = useState<UserItem[]>([]);
   const [newUser, setNewUser] = useState({username: '', password: '', role: 'viewer'});
   const [busy, setBusy] = useState(false);
+  /** Upstash（Redis 持久化）表单 */
+  const [upstashForm, setUpstashForm] = useState({url: '', token: ''});
+  const [upstashBusy, setUpstashBusy] = useState(false);
+  const [restarting, setRestarting] = useState(false);
 
   const load = useCallback(async () => {
     // 本地数据很快（配置/映射/用户），先取到即渲染，不被上游探测拖慢
@@ -231,6 +238,8 @@ export default function SettingsPage() {
         };
         setSchedText(JSON.stringify(v.schedule ?? {}, null, 2));
         setPoolText(JSON.stringify(v.pool ?? {}, null, 2));
+        // url 可回显；token 不回显明文，留空表示不修改
+        setUpstashForm({url: v.upstash?.url || '', token: ''});
       }
     }
     if (mm.status === 'fulfilled') setModelMap(mm.value);
@@ -253,6 +262,32 @@ export default function SettingsPage() {
 
   const upstreamReady = !!cfg && cfg.available !== false;
   const upstreamError = cfg && cfg.available === false ? cfg.error : undefined;
+  /** 配置文件中是否已保存 Upstash 地址 */
+  const upstashConfigured = !!cfg?.upstash?.url;
+
+  /** 保存 Upstash 配置（token 留空表示保持原值） */
+  async function saveUpstash() {
+    if (!upstashForm.url.trim()) {
+      notify.err('请填写 Upstash 地址');
+      return;
+    }
+    setUpstashBusy(true);
+    try {
+      await settingsApi.saveUpstream({
+        upstash: {
+          url: upstashForm.url.trim(),
+          ...(upstashForm.token.trim() ? {token: upstashForm.token.trim()} : {}),
+        },
+      });
+      notify.ok('Upstash 配置已保存', '需重启上游容器使其生效');
+      setUpstashForm((f) => ({...f, token: ''}));
+      await load();
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setUpstashBusy(false);
+    }
+  }
 
   function setField(group: Group, key: string, value: boolean | number) {
     setForm((prev) => ({...prev, [group]: {...prev[group], [key]: value}}));
@@ -510,6 +545,148 @@ export default function SettingsPage() {
               </div>
             );
           })}
+
+          {/* Redis / Upstash 持久化 */}
+          <div className="rounded-[20px] bg-muted p-4">
+            <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  Redis 持久化（Upstash）
+                  {upstashConfigured ? (
+                    <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">
+                      已配置
+                    </Badge>
+                  ) : (
+                    <Badge variant="secondary" className="rounded-full text-muted-foreground">
+                      未配置
+                    </Badge>
+                  )}
+                </div>
+                <div className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
+                  {upstashConfigured
+                    ? '会话粘性与账号状态由 Upstash 共享存储，多实例部署时状态一致'
+                    : '当前为纯内存模式（noop）：状态仅存于容器内。单实例下属正常状态；扩展到多实例或希望重启后保留状态时再配置'}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="rounded-full"
+                  disabled={!isAdmin || upstashBusy}
+                  onClick={async () => {
+                    setUpstashBusy(true);
+                    try {
+                      const r = await settingsApi.testUpstash(upstashForm.url, upstashForm.token || undefined);
+                      (r.ok ? notify.ok : notify.err)(r.message, r.ok ? 'Upstash 可用' : undefined);
+                    } catch (e) {
+                      notify.err(errText(e));
+                    } finally {
+                      setUpstashBusy(false);
+                    }
+                  }}
+                >
+                  {upstashBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PlugZap className="h-3.5 w-3.5" />}
+                  测试连接
+                </Button>
+                <Button
+                  size="sm"
+                  className="rounded-full"
+                  disabled={!isAdmin || upstashBusy || !upstreamReady}
+                  onClick={saveUpstash}
+                >
+                  <Save className="h-3.5 w-3.5" />
+                  保存
+                </Button>
+              </div>
+            </div>
+
+            <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label className="text-[11px] text-muted-foreground">Upstash 地址</Label>
+                <Input
+                  value={upstashForm.url}
+                  disabled={!isAdmin || !upstreamReady}
+                  onChange={(e) => setUpstashForm({...upstashForm, url: e.target.value})}
+                  placeholder="https://xxx-12345.upstash.io"
+                  className="bg-background font-mono text-xs"
+                />
+                <div className="text-[11px] text-muted-foreground">
+                  在 Upstash 控制台 <span className="font-mono">REST API</span> 一栏复制端点地址
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-[11px] text-muted-foreground">Upstash Token</Label>
+                <Input
+                  type="password"
+                  value={upstashForm.token}
+                  disabled={!isAdmin || !upstreamReady}
+                  onChange={(e) => setUpstashForm({...upstashForm, token: e.target.value})}
+                  placeholder={cfg?.upstash?.has_token ? `已保存：${cfg.upstash.token_masked}（留空则不修改）` : '粘贴 REST API Token'}
+                  className="bg-background font-mono text-xs"
+                />
+                <div className="text-[11px] text-muted-foreground">
+                  {cfg?.upstash?.has_token
+                    ? '出于安全考虑不回显明文；留空即保持原值不变'
+                    : '与上面的地址配套的 Token'}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                className="rounded-full"
+                disabled={!isAdmin || upstashBusy}
+                onClick={async () => {
+                  setRestarting(true);
+                  try {
+                    const r = await settingsApi.reloadUpstream();
+                    (r.ok ? notify.ok : notify.err)(r.message || '重启指令已发送');
+                  } catch (e) {
+                    notify.err(errText(e));
+                  } finally {
+                    setRestarting(false);
+                  }
+                }}
+              >
+                <Power className={restarting ? 'animate-spin' : 'h-3.5 w-3.5'} />
+                重启上游使配置生效
+              </Button>
+              {upstashConfigured && (
+                <ConfirmDialog
+                  title="关闭 Redis 持久化？"
+                  description="将清空 Upstash 地址与 Token，上游会退回纯内存模式（noop）。建议清空后重启上游容器。"
+                  confirmText="清空配置"
+                  destructive
+                  onConfirm={async () => {
+                    setUpstashBusy(true);
+                    try {
+                      await settingsApi.saveUpstream({upstash: {clear: true}});
+                      setUpstashForm({url: '', token: ''});
+                      notify.ok('已关闭 Redis 持久化', '建议重启上游容器使其生效');
+                      await load();
+                    } catch (e) {
+                      notify.err(errText(e));
+                    } finally {
+                      setUpstashBusy(false);
+                    }
+                  }}
+                  trigger={
+                    <Button size="sm" variant="ghost" className="rounded-full text-red-500" disabled={!isAdmin || upstashBusy}>
+                      <Trash2 className="h-3.5 w-3.5" />
+                      清空配置
+                    </Button>
+                  }
+                />
+              )}
+            </div>
+            <div className="mt-2 text-[11px] leading-4 text-muted-foreground">
+              修改后需重启上游容器才会生效（Upstash 在启动时连接）。
+              配置错误时上游会自行降级为 noop 并打印警告，不会导致服务不可用。
+            </div>
+          </div>
 
           {/* 高级模式：直接编辑 JSON */}
           <div className="rounded-[20px] bg-muted p-4">
