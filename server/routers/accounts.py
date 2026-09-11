@@ -166,10 +166,15 @@ def upstream_logs(limit: int = 200, user: dict = Depends(security.current_user))
 @router.post('/accounts/{filename}/test')
 async def account_test(filename: str, user: dict = Depends(security.require_admin)) -> dict:
     raw = _load(filename)
-    token = (raw.get('auth') or {}).get('accessToken', '')
-    if not token:
-        return {'ok': False, 'message': '该账号无有效 accessToken'}
-    ok, message = await tencent.probe_account(token)
+    acct = raw.get('account') or {}
+    auth = raw.get('auth') or {}
+    # 探测需要 uid / enterpriseId / domain 以复刻上游请求头
+    ok, message = await tencent.probe_account({
+        'access_token': auth.get('accessToken', ''),
+        'uid': acct.get('uid', ''),
+        'enterprise_id': acct.get('enterpriseId', ''),
+        'domain': auth.get('domain', ''),
+    })
     return {'ok': ok, 'message': message}
 
 
