@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .. import db, security
-from ..services import wb2api
+from ..services import reload, wb2api
 
 router = APIRouter(prefix='/api', tags=['settings'])
 
@@ -17,13 +17,24 @@ def get_upstream(user: dict = Depends(security.current_user)) -> dict:
 
 
 @router.post('/settings/upstream')
-def save_upstream(body: dict, user: dict = Depends(security.require_admin)) -> dict:
+async def save_upstream(body: dict, user: dict = Depends(security.require_admin)) -> dict:
+    # 必须是 async：同步路由会被 FastAPI 放进线程池执行，那里没有事件循环，
+    # 无法调度后台重载任务（request_restart 将拿不到 running loop）。
     try:
-        return wb2api.save_upstream_config(body)
+        result = wb2api.save_upstream_config(body)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # 上游只在启动时读 config.json，保存后自动重载使其生效
+    result['reload_scheduled'] = reload.request_restart()
+    return result
+
+
+@router.get('/upstream/reload-state')
+def reload_state(user: dict = Depends(security.current_user)) -> dict:
+    """上游重载状态，供前端展示「正在应用配置」。"""
+    return reload.state()
 
 
 class UpstashTestIn(BaseModel):
@@ -41,8 +52,8 @@ async def test_upstash(body: UpstashTestIn, user: dict = Depends(security.requir
 
 @router.post('/settings/upstash/reload')
 async def reload_upstream(user: dict = Depends(security.require_admin)) -> dict:
-    """重启上游容器，使 upstash 等启动期配置生效。"""
-    ok, message = await wb2api.restart_container()
+    """立即重启上游容器（等待结果）。一般无需手动调用——保存配置会自动重载。"""
+    ok, message = await reload.restart_now()
     return {'ok': ok, 'message': message}
 
 

@@ -279,7 +279,7 @@ export default function SettingsPage() {
           ...(upstashForm.token.trim() ? {token: upstashForm.token.trim()} : {}),
         },
       });
-      notify.ok('Upstash 配置已保存', '需重启上游容器使其生效');
+      notify.ok('Upstash 配置已保存', '正在自动应用到上游…');
       setUpstashForm((f) => ({...f, token: ''}));
       await load();
     } catch (e) {
@@ -315,7 +315,7 @@ export default function SettingsPage() {
     setBusy(true);
     try {
       await settingsApi.saveUpstream({[group]: patch});
-      notify.ok('设置已保存');
+      notify.ok('设置已保存', '正在自动应用到上游…');
       await load();
     } catch (e) {
       notify.err(errText(e));
@@ -344,7 +344,7 @@ export default function SettingsPage() {
     setBusy(true);
     try {
       await settingsApi.saveUpstream({[field]: parsed});
-      notify.ok('设置已保存');
+      notify.ok('设置已保存', '正在自动应用到上游…');
       await load();
     } catch (e) {
       notify.err(errText(e));
@@ -643,7 +643,7 @@ export default function SettingsPage() {
                   setRestarting(true);
                   try {
                     const r = await settingsApi.reloadUpstream();
-                    (r.ok ? notify.ok : notify.err)(r.message || '重启指令已发送');
+                    (r.ok ? notify.ok : notify.err)(r.message || '已重启上游');
                   } catch (e) {
                     notify.err(errText(e));
                   } finally {
@@ -651,13 +651,13 @@ export default function SettingsPage() {
                   }
                 }}
               >
-                <Power className={restarting ? 'animate-spin' : 'h-3.5 w-3.5'} />
-                重启上游使配置生效
+                <Power className={restarting ? 'animate-spin' : ''} />
+                立即重启上游
               </Button>
               {upstashConfigured && (
                 <ConfirmDialog
                   title="关闭 Redis 持久化？"
-                  description="将清空 Upstash 地址与 Token，上游会退回纯内存模式（noop）。建议清空后重启上游容器。"
+                  description="将清空 Upstash 地址与 Token，上游会退回纯内存模式（noop）。保存后会自动重载上游。"
                   confirmText="清空配置"
                   destructive
                   onConfirm={async () => {
@@ -665,7 +665,7 @@ export default function SettingsPage() {
                     try {
                       await settingsApi.saveUpstream({upstash: {clear: true}});
                       setUpstashForm({url: '', token: ''});
-                      notify.ok('已关闭 Redis 持久化', '建议重启上游容器使其生效');
+                      notify.ok('已关闭 Redis 持久化', '正在自动应用到上游');
                       await load();
                     } catch (e) {
                       notify.err(errText(e));
@@ -683,8 +683,9 @@ export default function SettingsPage() {
               )}
             </div>
             <div className="mt-2 text-[11px] leading-4 text-muted-foreground">
-              修改后需重启上游容器才会生效（Upstash 在启动时连接）。
-              配置错误时上游会自行降级为 noop 并打印警告，不会导致服务不可用。
+              保存后会自动重启上游使其生效（约 0.5 秒，在途请求会正常完成）。
+              Upstash 在容器启动时连接，因此无需手动重启；
+              配置有误时上游会自动降级为 noop 并打印警告，不会导致服务不可用。
             </div>
           </div>
 
