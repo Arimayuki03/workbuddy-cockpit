@@ -218,3 +218,56 @@ def list_checkin_logs(limit: int = 200, uid: str | None = None) -> list[dict]:
 
 def clear_checkin_logs() -> None:
     execute('DELETE FROM checkin_logs')
+
+
+# ── 用量回填 ─────────────────────────────────────────────
+def backfill_usage_from_logs() -> dict:
+    """把 request_logs 里尚未计入 usage_daily 的用量补进统计。
+
+    用途：修复历史缺陷（曾因统计函数缺失，导致部分调用的用量没有累计）。
+    以「已记录的调用」推算应有用量，再把差额写入 usage_daily，
+    因此可重复执行而不会重复计数。
+    """
+    # 应有用量（按天 × 密钥 × 模型）
+    expected = query(
+        "SELECT date(ts,'unixepoch') AS day, key_id, COALESCE(model,'') AS model, "
+        "COUNT(*) AS requests, COALESCE(SUM(prompt_tokens),0) AS pt, COALESCE(SUM(completion_tokens),0) AS ct "
+        "FROM request_logs WHERE key_id IS NOT NULL GROUP BY day, key_id, model"
+    )
+    current = {
+        (r['day'], r['key_id'], r['model']): r
+        for r in query('SELECT day, key_id, model, requests, prompt_tokens, completion_tokens FROM usage_daily')
+    }
+
+    fixed = 0
+    added_requests = added_tokens = 0
+    for row in expected:
+        key = (row['day'], row['key_id'], row['model'])
+        cur = current.get(key)
+        cur_req = int(cur['requests']) if cur else 0
+        cur_pt = int(cur['prompt_tokens']) if cur else 0
+        cur_ct = int(cur['completion_tokens']) if cur else 0
+
+        d_req = int(row['requests']) - cur_req
+        d_pt = int(row['pt']) - cur_pt
+        d_ct = int(row['ct']) - cur_ct
+        if d_req <= 0 and d_pt <= 0 and d_ct <= 0:
+            continue
+        execute(
+            'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, completion_tokens) '
+            'VALUES(?, ?, ?, ?, ?, ?) '
+            'ON CONFLICT(day, key_id, model) DO UPDATE SET '
+            '  requests = MAX(requests, excluded.requests), '
+            '  prompt_tokens = MAX(prompt_tokens, excluded.prompt_tokens), '
+            '  completion_tokens = MAX(completion_tokens, excluded.completion_tokens)',
+            (row['day'], row['key_id'], row['model'], int(row['requests']), int(row['pt']), int(row['ct'])),
+        )
+        fixed += 1
+        added_requests += max(0, d_req)
+        added_tokens += max(0, d_pt) + max(0, d_ct)
+
+    return {
+        'repaired': fixed,
+        'requests': added_requests,
+        'tokens': added_tokens,
+    }

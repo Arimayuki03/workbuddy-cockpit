@@ -119,6 +119,9 @@ export const statsApi = {
   daily: (days = 30) => get<UsagePoint[]>('/api/stats/daily', {days}),
   byModel: (days = 30) => get<UsageBreakdown[]>('/api/stats/by-model', {days}),
   byKey: (days = 30) => get<UsageBreakdown[]>('/api/stats/by-key', {days}),
+  /** 按请求日志回填用量缺口（幂等） */
+  repairUsage: () =>
+    post<{repaired: number; requests: number; tokens: number}>('/api/stats/repair-usage'),
 };
 
 /* ── 安全 / IP ──────────────────────────────────────── */
