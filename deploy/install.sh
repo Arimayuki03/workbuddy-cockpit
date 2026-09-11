@@ -184,6 +184,13 @@ else
   die "缺少前端产物 web/out，请使用 Release 包或先执行 npm run build:export"
 fi
 
+# 写入版本标记（供界面显示当前版本）
+if [ -f "${APP_DIR}/.version" ]; then
+  ok "版本标记：$(cat "${APP_DIR}/.version")"
+elif [ -f "${SRC_DIR}/.version" ]; then
+  cp "${SRC_DIR}/.version" "${APP_DIR}/.version"
+fi
+
 info "安装 Python 依赖"
 "$PY" -m venv "${APP_DIR}/venv" 2>/dev/null || true
 if [ -x "${APP_DIR}/venv/bin/pip" ]; then

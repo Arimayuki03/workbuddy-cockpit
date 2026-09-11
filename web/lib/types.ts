@@ -184,6 +184,75 @@ export interface CheckinLog {
   message: string;
 }
 
+export interface UpdateLogLine {
+  ts: number;
+  level: string;
+  text: string;
+}
+
+export interface UpdateStatus {
+  available: boolean;
+  /** 是否正在更新 */
+  running: boolean;
+  /** 上次更新是否成功（null = 未运行过） */
+  ok: boolean | null;
+  step: string;
+  logs: UpdateLogLine[];
+  /** 当前部署版本 */
+  version: string;
+  updater_found: boolean;
+  upstream_dir: string;
+  started_at?: number;
+  finished_at?: number | null;
+  duration?: number;
+  pid?: number;
+  /** 日志原文（便于复制反馈） */
+  log_tail?: string;
+}
+
+export interface VersionSide {
+  /** 当前版本 */
+  current: string;
+  /** 远端最新 */
+  latest: string;
+  /** 是否有更新可用 */
+  has_update: boolean;
+  /** 检测失败原因 */
+  error: string;
+}
+
+export interface ManagerVersion extends VersionSide {
+  /** Release 页面地址 */
+  url: string;
+  repo: string;
+}
+
+export interface UpstreamVersion extends VersionSide {
+  /** 最新提交时间 */
+  date: string;
+  /** 最新提交说明 */
+  subject: string;
+  repo: string;
+}
+
+export interface UpdateCheck {
+  /** 检测时间（秒） */
+  checked_at: number;
+  /** 是否为缓存结果 */
+  cached: boolean;
+  manager: ManagerVersion;
+  upstream: UpstreamVersion;
+  /** 任一组件有更新 */
+  has_any: boolean;
+}
+
+export interface Versions {
+  manager: string;
+  upstream_connected: boolean;
+  upstream_accounts: number | null;
+  upstream_dir: string;
+}
+
 export interface ReloadState {
   /** 正在执行重启 */
   running: boolean;

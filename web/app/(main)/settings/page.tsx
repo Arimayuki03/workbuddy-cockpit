@@ -16,6 +16,7 @@ import {
   RotateCcw,
   PlugZap,
   Loader2,
+  DownloadCloud,
 } from 'lucide-react';
 import {notify} from '@/lib/toast';
 import {settingsApi, upstreamApi, errText} from '@/lib/api';
@@ -24,6 +25,7 @@ import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {useAuth} from '@/lib/auth-context';
+import {UpdatePanel} from '@/components/common/settings/UpdatePanel';
 import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
 import {Input} from '@/components/ui/input';
@@ -387,6 +389,7 @@ export default function SettingsPage() {
           <TabsTrigger value="upstream"><Server className="mr-1.5 h-3.5 w-3.5" />上游配置</TabsTrigger>
           <TabsTrigger value="models"><Shuffle className="mr-1.5 h-3.5 w-3.5" />模型映射</TabsTrigger>
           <TabsTrigger value="users"><Users className="mr-1.5 h-3.5 w-3.5" />管理用户</TabsTrigger>
+          <TabsTrigger value="system"><DownloadCloud className="mr-1.5 h-3.5 w-3.5" />系统更新</TabsTrigger>
           <TabsTrigger value="about"><Info className="mr-1.5 h-3.5 w-3.5" />关于</TabsTrigger>
         </TabsList>
 
@@ -950,6 +953,11 @@ export default function SettingsPage() {
               />
             )}
           </div>
+        </TabsContent>
+
+        {/* ═══ 系统更新 ═══ */}
+        <TabsContent value="system" className="mt-4 space-y-4">
+          <UpdatePanel />
         </TabsContent>
 
         {/* ═══ 关于 ═══ */}

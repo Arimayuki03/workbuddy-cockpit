@@ -173,7 +173,7 @@ export default function StatsPage() {
         <div className="h-[260px] w-full">
           {chartData.length ? (
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData} margin={{top: 4, right: 8, bottom: 0, left: -8}}>
+              <BarChart data={chartData} margin={{top: 4, right: 8, bottom: 0, left: -8}} barCategoryGap="20%">
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
                 <XAxis dataKey="day" tickLine={false} axisLine={false} fontSize={11} stroke="var(--muted-foreground)" />
                 <YAxis tickLine={false} axisLine={false} fontSize={11} stroke="var(--muted-foreground)" tickFormatter={(v) => fmtCompact(Number(v))} />
@@ -190,7 +190,14 @@ export default function StatsPage() {
                     String(name) === 'tokens' ? 'Token' : '请求数',
                   ]}
                 />
-                <Bar dataKey="tokens" name="tokens" fill="var(--chart-1)" radius={[4, 4, 0, 0]} />
+                <Bar
+                  dataKey="tokens"
+                  name="tokens"
+                  fill="var(--chart-1)"
+                  radius={[4, 4, 0, 0]}
+                  /* 限制柱宽：只有一两天数据时，柱子不会被拉伸占满整个图表 */
+                  maxBarSize={48}
+                />
               </BarChart>
             </ResponsiveContainer>
           ) : (
