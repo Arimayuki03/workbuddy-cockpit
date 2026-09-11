@@ -2,7 +2,7 @@
 
 import {useCallback, useEffect, useRef, useState} from 'react';
 import {QRCodeSVG} from 'qrcode.react';
-import {toast} from 'sonner';
+import {notify} from '@/lib/toast';
 import {Loader2, CheckCircle2, AlertTriangle, ExternalLink} from 'lucide-react';
 import {accountApi, errText} from '@/lib/api';
 import {Button} from '@/components/ui/button';
@@ -57,7 +57,11 @@ export function AddAccountDialog({
             stopPoll();
             setPhase('success');
             setMessage(`账号「${res.nickname || res.uid}」授权成功${res.updated ? '（已更新）' : ''}`);
-            toast.success(`账号「${res.nickname || res.uid}」授权成功`);
+            notify.ok(
+              `账号「${res.nickname || res.uid}」授权成功`,
+              res.updated ? '已更新该账号的登录令牌' : '已自动完成签到并加入账号池',
+            );
+            window.dispatchEvent(new Event('workbuddy-manager:accounts-changed'));
             onSuccess?.();
             window.setTimeout(() => onOpenChange(false), 1600);
           } else if (res.status === 'expired' || res.status === 'invalid') {

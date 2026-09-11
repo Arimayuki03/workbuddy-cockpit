@@ -15,7 +15,7 @@ import {
   ChevronDown,
   RotateCcw,
 } from 'lucide-react';
-import {toast} from 'sonner';
+import {notify} from '@/lib/toast';
 import {settingsApi, upstreamApi, errText} from '@/lib/api';
 import type {ModelInfo, UpstreamConfig, UserItem} from '@/lib/types';
 import {PageHeader} from '@/components/common/layout/PageHeader';
@@ -274,16 +274,16 @@ export default function SettingsPage() {
       if (cur[k] !== org[k]) patch[k] = cur[k];
     }
     if (!Object.keys(patch).length) {
-      toast.info('没有需要保存的改动');
+      notify.info('没有需要保存的改动');
       return;
     }
     setBusy(true);
     try {
       await settingsApi.saveUpstream({[group]: patch});
-      toast.success('设置已保存');
+      notify.ok('设置已保存');
       await load();
     } catch (e) {
-      toast.error(errText(e));
+      notify.err(errText(e));
     } finally {
       setBusy(false);
     }
@@ -299,20 +299,20 @@ export default function SettingsPage() {
     try {
       parsed = JSON.parse(text);
     } catch {
-      toast.error('JSON 格式有误，请检查括号与逗号');
+      notify.err('JSON 格式有误，请检查括号与逗号');
       return;
     }
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      toast.error('需要是一个 JSON 对象，例如 { "checkin_hours": 6 }');
+      notify.err('需要是一个 JSON 对象，例如 { "checkin_hours": 6 }');
       return;
     }
     setBusy(true);
     try {
       await settingsApi.saveUpstream({[field]: parsed});
-      toast.success('设置已保存');
+      notify.ok('设置已保存');
       await load();
     } catch (e) {
-      toast.error(errText(e));
+      notify.err(errText(e));
     } finally {
       setBusy(false);
     }
@@ -322,9 +322,9 @@ export default function SettingsPage() {
     try {
       await settingsApi.saveModelMap(next);
       setModelMap(next);
-      toast.success('模型映射已保存');
+      notify.ok('模型映射已保存');
     } catch (e) {
-      toast.error(errText(e));
+      notify.err(errText(e));
     }
   }
 
@@ -697,17 +697,17 @@ export default function SettingsPage() {
                   disabled={busy}
                   onClick={async () => {
                     if (!newUser.username.trim() || !newUser.password) {
-                      toast.error('请填写用户名与密码');
+                      notify.err('请填写用户名与密码');
                       return;
                     }
                     setBusy(true);
                     try {
                       await settingsApi.addUser(newUser);
-                      toast.success('用户已创建');
+                      notify.ok('用户已创建');
                       setNewUser({username: '', password: '', role: 'viewer'});
                       load();
                     } catch (e) {
-                      toast.error(errText(e));
+                      notify.err(errText(e));
                     } finally {
                       setBusy(false);
                     }
@@ -750,9 +750,9 @@ export default function SettingsPage() {
                               if (!pwd) return;
                               try {
                                 await settingsApi.updateUser(u.username, {password: pwd});
-                                toast.success('密码已更新');
+                                notify.ok('密码已更新');
                               } catch (e) {
-                                toast.error(errText(e));
+                                notify.err(errText(e));
                               }
                             }}
                           >
@@ -766,10 +766,10 @@ export default function SettingsPage() {
                             onConfirm={async () => {
                               try {
                                 await settingsApi.removeUser(u.username);
-                                toast.success('已删除');
+                                notify.ok('已删除');
                                 load();
                               } catch (e) {
-                                toast.error(errText(e));
+                                notify.err(errText(e));
                               }
                             }}
                             trigger={

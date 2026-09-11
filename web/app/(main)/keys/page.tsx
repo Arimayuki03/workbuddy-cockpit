@@ -2,7 +2,7 @@
 
 import {useCallback, useEffect, useState} from 'react';
 import {KeyRound, Plus, Trash2, Copy, RefreshCw, Ban, CircleCheck, Pencil, RotateCcw} from 'lucide-react';
-import {toast} from 'sonner';
+import {notify} from '@/lib/toast';
 import {keyApi, errText} from '@/lib/api';
 import type {ApiKey} from '@/lib/types';
 import {copyText, fmtDateTime, fmtNumber} from '@/lib/format';
@@ -73,7 +73,7 @@ export default function KeysPage() {
     try {
       setKeys(await keyApi.list());
     } catch (e) {
-      toast.error(errText(e));
+      notify.err(errText(e));
     } finally {
       setLoading(false);
     }
@@ -104,7 +104,7 @@ export default function KeysPage() {
 
   async function submit() {
     if (!form.name.trim()) {
-      toast.error('请填写密钥名称');
+      notify.err('请填写密钥名称');
       return;
     }
     setBusy(true);
@@ -121,16 +121,16 @@ export default function KeysPage() {
 
       if (editing) {
         await keyApi.update(editing.id, payload as Partial<ApiKey>);
-        toast.success('密钥已更新');
+        notify.ok('密钥已更新');
       } else {
         const created = await keyApi.create(payload as Partial<ApiKey>);
-        toast.success('密钥已创建');
+        notify.ok('密钥已创建');
         if (created.key) setIssued(created.key);
       }
       setFormOpen(false);
       load();
     } catch (e) {
-      toast.error(errText(e));
+      notify.err(errText(e));
     } finally {
       setBusy(false);
     }
@@ -139,19 +139,19 @@ export default function KeysPage() {
   async function toggle(k: ApiKey) {
     try {
       await keyApi.update(k.id, {enabled: !k.enabled});
-      toast.success(k.enabled ? '已停用' : '已启用');
+      notify.ok(k.enabled ? '已停用' : '已启用');
       load();
     } catch (e) {
-      toast.error(errText(e));
+      notify.err(errText(e));
     }
   }
 
   async function copyKey(text: string) {
     const ok = await copyText(text);
     if (ok) {
-      toast.success('已复制到剪贴板');
+      notify.ok('已复制到剪贴板');
     } else {
-      toast.error('复制失败');
+      notify.err('复制失败');
     }
   }
 
@@ -217,10 +217,30 @@ export default function KeysPage() {
                     {k.models?.length ? `${k.models.length} 模型` : '全部模型'}
                   </TableCell>
                   <TableCell className="text-xs tabular-nums">
-                    {fmtNumber(k.used_tokens)}
-                    {k.quota ? ` / ${fmtNumber(k.quota)}` : ''}
+                    {(() => {
+                      const ratio = k.quota ? k.used_tokens / k.quota : 0;
+                      const tone = !k.quota
+                        ? 'text-muted-foreground'
+                        : ratio >= 1
+                          ? 'text-red-600 dark:text-red-400 font-medium'
+                          : ratio >= 0.8
+                            ? 'text-amber-600 dark:text-amber-400 font-medium'
+                            : 'text-foreground';
+                      return (
+                        <span className={tone}>
+                          {fmtNumber(k.used_tokens)}
+                          {k.quota ? ` / ${fmtNumber(k.quota)}` : ''}
+                        </span>
+                      );
+                    })()}
                   </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{fmtDateTime(k.last_used_at)}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {k.last_used_at ? (
+                      fmtDateTime(k.last_used_at)
+                    ) : (
+                      <span className="text-muted-foreground/70">从未使用</span>
+                    )}
+                  </TableCell>
                   {isAdmin && (
                     <TableCell className="pr-4">
                       <div className="flex justify-end gap-1">
@@ -241,7 +261,7 @@ export default function KeysPage() {
                           description={`将把密钥「${k.name}」的已用 Token 归零。`}
                           onConfirm={async () => {
                             await keyApi.resetUsage(k.id);
-                            toast.success('已重置');
+                            notify.ok('已重置');
                             load();
                           }}
                           trigger={
@@ -257,7 +277,7 @@ export default function KeysPage() {
                           destructive
                           onConfirm={async () => {
                             await keyApi.remove(k.id);
-                            toast.success('已删除');
+                            notify.ok('已删除');
                             load();
                           }}
                           trigger={

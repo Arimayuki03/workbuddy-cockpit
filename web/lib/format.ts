@@ -45,6 +45,59 @@ export function fmtLatency(ms: number): string {
   return `${(ms / 1000).toFixed(2)}s`;
 }
 
+/** Token 有效期的语义分档，账号列表与仪表盘共用同一套规则 */
+export type ExpiryTier = 'expired' | 'urgent' | 'soon' | 'healthy';
+
+export interface ExpiryVisual {
+  tier: ExpiryTier;
+  /** 文字颜色 class */
+  textClass: string;
+  /** 进度条颜色（CSS 色值） */
+  barColor: string;
+  /** 状态短标签 */
+  label: string;
+}
+
+/**
+ * 按剩余有效期分档：
+ * - expired 已过期      → 红（destructive）
+ * - urgent  < 1 小时     → 琥珀
+ * - soon    < 6 小时     → 蓝
+ * - healthy 其余         → 绿
+ */
+export function expiryVisual(remainSeconds: number): ExpiryVisual {
+  if (remainSeconds <= 0) {
+    return {
+      tier: 'expired',
+      textClass: 'text-red-600 dark:text-red-400',
+      barColor: 'var(--destructive)',
+      label: '已过期',
+    };
+  }
+  if (remainSeconds < 3600) {
+    return {
+      tier: 'urgent',
+      textClass: 'text-amber-600 dark:text-amber-400',
+      barColor: '#f59e0b',
+      label: '即将过期',
+    };
+  }
+  if (remainSeconds < 6 * 3600) {
+    return {
+      tier: 'soon',
+      textClass: 'text-blue-600 dark:text-blue-400',
+      barColor: '#3b82f6',
+      label: '偏紧',
+    };
+  }
+  return {
+    tier: 'healthy',
+    textClass: 'text-emerald-600 dark:text-emerald-400',
+    barColor: '#10b981',
+    label: '在线',
+  };
+}
+
 /** 相对时间：3 分钟前 */
 export function fmtAgo(ts: number | null | undefined): string {
   if (!ts) return '从未';

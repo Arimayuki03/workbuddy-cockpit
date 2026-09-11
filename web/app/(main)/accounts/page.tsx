@@ -11,10 +11,10 @@ import {
   Users,
   Power,
 } from 'lucide-react';
-import {toast} from 'sonner';
+import {notify} from '@/lib/toast';
 import {accountApi, upstreamApi, errText} from '@/lib/api';
 import type {Account, UpstreamStatus} from '@/lib/types';
-import {fmtRemain} from '@/lib/format';
+import {expiryVisual, fmtRemain} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
@@ -22,7 +22,6 @@ import {AddAccountDialog} from '@/components/common/accounts/AddAccountDialog';
 import {useAuth} from '@/lib/auth-context';
 import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
-import {Progress} from '@/components/ui/progress';
 import {
   Table,
   TableBody,
@@ -46,7 +45,7 @@ export default function AccountsPage() {
     setLoading(true);
     const [accRes, upRes] = await Promise.allSettled([accountApi.list(), upstreamApi.status()]);
     if (accRes.status === 'fulfilled') setAccounts(accRes.value.accounts);
-    else toast.error(errText(accRes.reason));
+    else notify.err(errText(accRes.reason));
     if (upRes.status === 'fulfilled') setUpstream(upRes.value);
     setLoading(false);
   }, []);
@@ -76,17 +75,33 @@ export default function AccountsPage() {
     });
   }, [accounts, upstream]);
 
+  /** 执行单账号操作（签到 / 测活 / 刷新 / 删除），成功后同步底栏计数 */
   async function run(file: string, fn: () => Promise<unknown>, okMsg: string) {
     setBusyFile(file);
     try {
       const res = (await fn()) as {message?: string; ok?: boolean};
       const ok = res.ok !== false;
-      (ok ? toast.success : toast.error)(res.message || okMsg);
-      if (file === '__refresh__') load();
+      (ok ? notify.ok : notify.err)(res.message || okMsg);
+      await load();
+      window.dispatchEvent(new Event('workbuddy-manager:accounts-changed'));
     } catch (e) {
-      toast.error(errText(e));
+      notify.err(errText(e));
     } finally {
       setBusyFile(null);
+    }
+  }
+
+  /** 仅重启上游容器，不涉及单个账号，因此单独处理 */
+  const [restarting, setRestarting] = useState(false);
+  async function restartUpstream() {
+    setRestarting(true);
+    try {
+      const res = await accountApi.restart();
+      (res.ok ? notify.ok : notify.err)(res.message || '重启指令已发送');
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setRestarting(false);
     }
   }
 
@@ -106,12 +121,10 @@ export default function AccountsPage() {
                 title="重启反代容器？"
                 description="将执行 docker restart workbuddy2api，新增或删除账号后通常需要重启才能生效。"
                 confirmText="重启"
-                onConfirm={() =>
-                  run('__refresh__', () => accountApi.restart(), '重启指令已发送')
-                }
+                onConfirm={restartUpstream}
                 trigger={
-                  <Button variant="outline" size="sm" className="rounded-full">
-                    <Power />
+                  <Button variant="outline" size="sm" className="rounded-full" disabled={restarting}>
+                    <Power className={restarting ? 'animate-spin' : ''} />
                     重启上游
                   </Button>
                 }
@@ -143,14 +156,27 @@ export default function AccountsPage() {
               const pct = Math.min(100, Math.max(0, (a.remain_seconds / TOKEN_TTL) * 100));
               const disabled = a.disabled === true;
               const busy = busyFile === a.file;
+              // 有效期分档改用共享规则（与仪表盘一致）
+              const vis = expiryVisual(a.remain_seconds);
+              const remainTone = vis.textClass;
+              const barTone = vis.barColor;
               return (
                 <TableRow key={a.file} className="border-b border-border/40">
                   <TableCell className="pl-4">
                     <div className="flex items-center gap-2.5">
-                      <div className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-primary text-[11px] font-semibold text-primary-foreground">
+                      <div
+                        className={
+                          'grid h-7 w-7 shrink-0 place-items-center rounded-full text-[11px] font-semibold ' +
+                          (a.is_expired
+                            ? 'bg-muted-foreground/20 text-muted-foreground'
+                            : 'bg-primary text-primary-foreground')
+                        }
+                      >
                         {(a.nickname || '?').charAt(0)}
                       </div>
-                      <span className="truncate text-sm font-medium">{a.nickname || '未命名'}</span>
+                      <span className={'truncate text-sm font-medium ' + (a.is_expired ? 'text-muted-foreground' : '')}>
+                        {a.nickname || '未命名'}
+                      </span>
                     </div>
                   </TableCell>
                   <TableCell className="font-mono text-xs text-muted-foreground">{a.uid}</TableCell>
@@ -167,13 +193,15 @@ export default function AccountsPage() {
                   </TableCell>
                   <TableCell>
                     <div className="w-[150px]">
-                      <div className="mb-1 text-[11px] tabular-nums text-muted-foreground">
+                      <div className={'mb-1 text-[11px] font-medium tabular-nums ' + remainTone}>
                         {fmtRemain(a.remain_seconds)}
                       </div>
-                      <Progress
-                        value={pct}
-                        className={'h-1.5 ' + (a.is_expired ? 'bg-border' : 'bg-border')}
-                      />
+                      <div className="h-1.5 overflow-hidden rounded-full bg-border">
+                        <div
+                          className="h-full rounded-full transition-all"
+                          style={{width: `${pct}%`, background: barTone}}
+                        />
+                      </div>
                     </div>
                   </TableCell>
                   {isAdmin && (

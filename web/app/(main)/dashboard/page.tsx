@@ -13,14 +13,13 @@ import {
 } from 'recharts';
 import {accountApi, statsApi, upstreamApi} from '@/lib/api';
 import type {Account, StatsSummary, UpstreamStatus, UsagePoint} from '@/lib/types';
-import {fmtCompact, fmtNumber, fmtRemain} from '@/lib/format';
+import {expiryVisual, fmtCompact, fmtNumber, fmtRemain} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {StatCard} from '@/components/common/layout/StatCard';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
-import {Progress} from '@/components/ui/progress';
-import {toast} from 'sonner';
+import {notify} from '@/lib/toast';
 
 export default function DashboardPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -41,7 +40,7 @@ export default function DashboardPage() {
     if (results[1].status === 'fulfilled') setSummary(results[1].value);
     if (results[2].status === 'fulfilled') setDaily(results[2].value);
     if (results[3].status === 'fulfilled') setUpstream(results[3].value);
-    if (results.some((r) => r.status === 'rejected')) toast.error('部分数据加载失败');
+    if (results.some((r) => r.status === 'rejected')) notify.err('部分数据加载失败');
     setLoading(false);
   }, []);
 
@@ -72,21 +71,30 @@ export default function DashboardPage() {
       />
 
       <section className="grid grid-cols-2 gap-3 lg:grid-cols-4 md:gap-4">
-        <StatCard label="账号总数" value={fmtNumber(accounts.length)} hint="已纳管账号" icon={Users} delay={0} />
+        <StatCard
+          label="账号总数"
+          value={fmtNumber(accounts.length)}
+          hint="已纳管账号"
+          icon={Users}
+          tone="neutral"
+          delay={0}
+        />
         <StatCard
           label="有效期内"
           value={fmtNumber(valid)}
-          hint="Token 正常"
+          hint={valid === accounts.length ? '全部正常' : `${accounts.length - valid} 个异常`}
           icon={CircleCheck}
-          valueClassName="text-emerald-500 dark:text-emerald-400"
+          tone="success"
+          hintTone={valid === accounts.length ? 'success' : 'warning'}
           delay={0.05}
         />
         <StatCard
           label="即将过期"
           value={fmtNumber(expiring)}
-          hint="<1h 需刷新"
+          hint={expiring > 0 ? '<1h 需刷新' : '暂无风险'}
           icon={TriangleAlert}
-          valueClassName="text-amber-500 dark:text-amber-400"
+          tone={expiring > 0 ? 'warning' : 'success'}
+          hintTone={expiring > 0 ? 'warning' : 'neutral'}
           delay={0.1}
         />
         <StatCard
@@ -94,6 +102,7 @@ export default function DashboardPage() {
           value={fmtCompact(summary?.today_tokens)}
           hint={`${fmtNumber(summary?.today_requests)} 次请求`}
           icon={Activity}
+          tone="info"
           delay={0.15}
         />
       </section>
@@ -186,22 +195,29 @@ export default function DashboardPage() {
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {accounts.slice(0, 9).map((a) => {
               const pct = Math.min(100, Math.max(0, (a.remain_seconds / (72 * 3600)) * 100));
+              const vis = expiryVisual(a.remain_seconds);
               return (
                 <div key={a.file} className="rounded-2xl bg-background/60 p-3">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="truncate text-sm font-medium">{a.nickname || a.uid}</span>
                     <span
                       className={
-                        'text-[10px] ' + (a.is_expired ? 'text-red-500' : 'text-emerald-600 dark:text-emerald-400')
+                        'truncate text-sm font-medium ' +
+                        (vis.tier === 'expired' ? 'text-muted-foreground' : '')
                       }
                     >
-                      {a.is_expired ? '已过期' : '在线'}
+                      {a.nickname || a.uid}
+                    </span>
+                    <span className={'shrink-0 text-[10px] font-medium ' + vis.textClass}>
+                      {vis.label}
                     </span>
                   </div>
-                  <div className="mt-2">
-                    <Progress value={pct} className="h-1.5 bg-border" />
+                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-border">
+                    <div
+                      className="h-full rounded-full transition-all"
+                      style={{width: `${pct}%`, background: vis.barColor}}
+                    />
                   </div>
-                  <div className="mt-1.5 text-[11px] text-muted-foreground tabular-nums">
+                  <div className={'mt-1.5 text-[11px] tabular-nums ' + vis.textClass}>
                     {fmtRemain(a.remain_seconds)}
                   </div>
                 </div>
