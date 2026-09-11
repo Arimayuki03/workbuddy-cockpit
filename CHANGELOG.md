@@ -9,6 +9,18 @@
 
 ## [未发布]
 
+### 改进
+- **部署大幅简化**：`deploy/install.sh` 升级为一键脚本，自动检测并安装上游
+  workbuddy2api（克隆、生成随机 api_key、修正目录属主、构建并启动容器、
+  等待就绪），随后安装管理端并注册 systemd 服务。解决「clone 本仓库后
+  因缺少上游而无法运行」的问题
+  - 已存在上游时自动跳过，不覆盖其配置与账号（含 `--skip-upstream` 参数）
+  - 支持 `APP_DIR` / `UPSTREAM_DIR` / `MANAGER_PORT` 等环境变量自定义
+  - 含环境预检（Python 版本、Docker、端口占用）与非 root 拒绝
+- 新增 [deploy/README.md](deploy/README.md)：完整部署指南
+  （Release 包与 git clone 两种方式、Nginx 配置示例、加固建议、常见问题）
+- 发布包纳入 `docs/`（此前只含顶层文件，导致缺少安全审查报告）
+
 ### 计划中
 - 出站 IP 池：为每个腾讯账号绑定独立出口代理（需在上游 workbuddy2api 侧支持）
 - 用量统计支持小时级粒度
