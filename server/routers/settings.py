@@ -26,6 +26,26 @@ def save_upstream(body: dict, user: dict = Depends(security.require_admin)) -> d
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+class UpstashTestIn(BaseModel):
+    url: str = ''
+    # 留空则使用配置文件中已保存的 token
+    token: str | None = None
+
+
+@router.post('/settings/upstash/test')
+async def test_upstash(body: UpstashTestIn, user: dict = Depends(security.require_admin)) -> dict:
+    """探测 Upstash 是否可用（走其 REST 接口 PING）。"""
+    ok, message = await wb2api.test_upstash(body.url, body.token)
+    return {'ok': ok, 'message': message}
+
+
+@router.post('/settings/upstash/reload')
+async def reload_upstream(user: dict = Depends(security.require_admin)) -> dict:
+    """重启上游容器，使 upstash 等启动期配置生效。"""
+    ok, message = await wb2api.restart_container()
+    return {'ok': ok, 'message': message}
+
+
 # ── 模型别名映射 ─────────────────────────────────────────
 @router.get('/settings/model-map')
 def get_model_map(user: dict = Depends(security.current_user)) -> dict:

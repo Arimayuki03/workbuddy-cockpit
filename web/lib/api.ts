@@ -128,6 +128,12 @@ export const settingsApi = {
   upstream: () => get<UpstreamConfig>('/api/settings/upstream'),
   saveUpstream: (body: Record<string, unknown>) =>
     post<UpstreamConfig>('/api/settings/upstream', body),
+  /** 探测 Upstash 连通性；token 留空表示使用已保存的值 */
+  testUpstash: (url: string, token?: string) =>
+    post<{ok: boolean; message: string}>('/api/settings/upstash/test', {url, token}),
+  /** 重启上游容器，使 upstash 等启动期配置生效 */
+  reloadUpstream: () =>
+    post<{ok: boolean; message: string}>('/api/settings/upstash/reload'),
   modelMap: () => get<Record<string, string>>('/api/settings/model-map'),
   saveModelMap: (body: Record<string, string>) =>
     post<Record<string, string>>('/api/settings/model-map', body),

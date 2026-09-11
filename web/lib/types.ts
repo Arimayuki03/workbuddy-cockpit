@@ -134,6 +134,15 @@ export interface UserItem {
   role: Role;
 }
 
+export interface UpstashConfig {
+  /** Upstash 地址，支持 https://xxx.upstash.io 或 xxx.upstash.io */
+  url: string;
+  /** 是否已配置 token（内容不回传） */
+  has_token: boolean;
+  /** token 掩码，仅用于展示 */
+  token_masked: string;
+}
+
 export interface UpstreamConfig {
   /** 是否成功读取到上游配置文件；false 时前端应提示并禁止保存 */
   available?: boolean;
@@ -150,7 +159,7 @@ export interface UpstreamConfig {
   pool?: Record<string, unknown>;
   cooldown?: Record<string, unknown>;
   features?: Record<string, unknown>;
-  raw?: Record<string, unknown>;
+  upstash?: UpstashConfig;
 }
 
 export interface Page<T> {

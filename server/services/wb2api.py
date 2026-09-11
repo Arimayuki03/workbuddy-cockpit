@@ -124,10 +124,13 @@ def _mask(v: str) -> str:
 
 
 def load_upstream_config() -> dict:
-    """读取 workbuddy2api 的 config.json，API Key 做掩码。
+    """读取 workbuddy2api 的 config.json，敏感字段一律掩码。
 
     读不到时返回 available=False 并附带原因，供前端明确提示并禁止保存，
     避免把空配置写回真实文件。
+
+    注意：不返回原始配置对象。原始配置含上游 API Key 与 Upstash token 的
+    明文，前端并不需要它们，不应通过接口下发。
     """
     path = config.UPSTREAM_CONFIG
     cfg: dict | None = None
@@ -161,14 +164,24 @@ def load_upstream_config() -> dict:
     view['auth_dir'] = str(config.AUTH_DIR)
     if upstream_auth_dir and str(upstream_auth_dir) != str(config.AUTH_DIR):
         view['upstream_auth_dir'] = str(upstream_auth_dir)
+
+    # Upstash：token 属敏感信息，只回传「是否已配置」，不回传内容
+    up = cfg.get('upstash')
+    up = up if isinstance(up, dict) else {}
+    token = str(up.get('token') or '')
+    view['upstash'] = {
+        'url': str(up.get('url') or ''),
+        'has_token': bool(token),
+        'token_masked': _mask(token) if token else '',
+    }
+
     view['available'] = True
     view['config_path'] = str(path)
-    view['raw'] = cfg
     return view
 
 
 def save_upstream_config(patch: dict) -> dict:
-    """仅允许改写 schedule / pool / cooldown / features 等非敏感段。
+    """仅允许改写 schedule / pool / cooldown / features / upstash 等非敏感段。
 
     配置读不到时直接拒绝，绝不基于空 dict 生成新文件覆盖真实配置。
     """
@@ -187,5 +200,85 @@ def save_upstream_config(patch: dict) -> dict:
         if field in patch and isinstance(patch[field], dict):
             cfg.setdefault(field, {})
             cfg[field].update(patch[field])
+
+    if 'upstash' in patch and isinstance(patch['upstash'], dict):
+        incoming = patch['upstash']
+        current = cfg.get('upstash')
+        current = current if isinstance(current, dict) else {}
+
+        if incoming.get('clear'):
+            # 显式关闭：清空 url 与 token
+            current = {'url': '', 'token': ''}
+        else:
+            if 'url' in incoming:
+                current['url'] = str(incoming.get('url') or '').strip()
+            # token 只在传入非空值时替换：前端回显的是掩码，
+            # 留空即表示「保持不变」，避免误清空已配置的凭据
+            if str(incoming.get('token') or '').strip():
+                current['token'] = str(incoming['token']).strip()
+
+        cfg['upstash'] = {
+            'url': str(current.get('url') or ''),
+            'token': str(current.get('token') or ''),
+        }
+
     path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding='utf-8')
     return load_upstream_config()
+
+
+# ── Upstash 连通性检测 ───────────────────────────────────
+def _upstash_rest_base(url: str) -> str | None:
+    """把各种写法归一化为 Upstash REST 根地址。
+
+    支持：https://xxx.upstash.io / xxx.upstash.io / rediss://default:tok@xxx.upstash.io:6379
+    与 workbuddy2api 的 normalizeURL 保持一致的思路。
+    """
+    raw = (url or '').strip()
+    if not raw:
+        return None
+    # 去掉 scheme
+    if '://' in raw:
+        scheme, rest = raw.split('://', 1)
+        if scheme.lower() in ('rediss', 'redis'):
+            # rediss://user:pass@host:port -> 取 host
+            host = rest.rsplit('@', 1)[-1]
+            host = host.split(':', 1)[0]
+            return f'https://{host}' if host else None
+        # https://host/... -> 取 host
+        host = rest.split('/', 1)[0].split(':', 1)[0]
+        return f'https://{host}' if host else None
+    host = raw.split('/', 1)[0].split(':', 1)[0]
+    return f'https://{host}' if host else None
+
+
+async def test_upstash(url: str, token: str | None = None) -> tuple[bool, str]:
+    """用 Upstash REST 接口探测连通性（PING）。token 留空时取配置文件中的值。"""
+    base = _upstash_rest_base(url)
+    if not base:
+        return False, '请先填写 Upstash 地址'
+
+    if not token:
+        try:
+            cfg = json.loads(config.UPSTREAM_CONFIG.read_text(encoding='utf-8'))
+            token = str((cfg.get('upstash') or {}).get('token') or '')
+        except Exception:  # noqa: BLE001
+            token = ''
+    if not token:
+        return False, '缺少 Upstash Token'
+
+    try:
+        async with config.http_client(10, connect=5) as client:
+            resp = await client.post(
+                f'{base}/ping',
+                headers={'Authorization': f'Bearer {token}'},
+            )
+        if resp.status_code == 401:
+            return False, 'Token 无效（401）'
+        if resp.status_code >= 400:
+            return False, f'Upstash 返回 {resp.status_code}'
+        body = resp.text.strip()
+        if 'PONG' in body.upper():
+            return True, '连接正常（PONG）'
+        return True, f'已连通，响应：{body[:60]}'
+    except Exception as exc:  # noqa: BLE001
+        return False, f'无法连接：{_err_text(exc)}'
