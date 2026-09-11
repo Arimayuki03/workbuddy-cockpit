@@ -61,14 +61,19 @@ def delete_auth_account(filename: str) -> bool:
     return False
 
 
+ASYNC_HEADERS = {'Content-Type': 'application/json'}
+
+
 def _auth_headers() -> dict:
     key = config.upstream_api_key()
     return {'Authorization': f'Bearer {key}'} if key else {}
 
 
 async def get_status() -> dict:
+    # 连接超时短一些：上游未运行时快速失败，避免拖慢管理端页面
+    timeout = httpx.Timeout(10, connect=3)
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with config.http_client(timeout, connect=3) as client:
             resp = await client.get(f'{config.WB2API_BASE}/status', headers=_auth_headers())
         if resp.status_code >= 400:
             return {'connected': False, 'error': f'上游返回 {resp.status_code}'}
@@ -80,8 +85,9 @@ async def get_status() -> dict:
 
 
 async def get_models() -> tuple[bool, list | dict]:
+    timeout = httpx.Timeout(15, connect=3)
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with config.http_client(timeout, connect=3) as client:
             resp = await client.get(f'{config.WB2API_BASE}/v1/models', headers=_auth_headers())
         if resp.status_code >= 400:
             return False, {'error': f'上游返回 {resp.status_code}'}

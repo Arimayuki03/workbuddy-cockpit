@@ -128,7 +128,7 @@ async def list_models(request: Request):
         return err
     started = time.time()
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with config.http_client(30, connect=3) as client:
             resp = await client.get(f'{config.WB2API_BASE}/v1/models', headers=_upstream_headers())
         latency = int((time.time() - started) * 1000)
         _record(key, ip, '', '', resp.status_code, 0, 0, latency, request.headers.get('user-agent'), None, False)
@@ -168,7 +168,7 @@ async def _chat(request: Request, upstream_path: str):
 
     if not stream:
         try:
-            async with httpx.AsyncClient(timeout=config.UPSTREAM_TIMEOUT) as client:
+            async with config.http_client(config.UPSTREAM_TIMEOUT, connect=5) as client:
                 resp = await client.post(url, json=body, headers=_upstream_headers())
             latency = int((time.time() - started) * 1000)
             usage = {}
@@ -190,7 +190,7 @@ async def _chat(request: Request, upstream_path: str):
             return _oai_error(f'上游不可用: {exc}', 502, 'api_error', 'upstream_unavailable')
 
     # 流式转发
-    client = httpx.AsyncClient(timeout=config.UPSTREAM_TIMEOUT)
+    client = config.http_client(config.UPSTREAM_TIMEOUT, connect=5)
     try:
         req = client.build_request('POST', url, json=body, headers=_upstream_headers())
         resp = await client.send(req, stream=True)
@@ -243,7 +243,7 @@ async def chat_v2(request: Request):
 @router.get('/healthz')
 async def gateway_health() -> dict:
     try:
-        async with httpx.AsyncClient(timeout=5) as client:
+        async with config.http_client(5, connect=2) as client:
             resp = await client.get(f'{config.WB2API_BASE}/healthz')
         body = resp.json() if resp.headers.get('content-type', '').startswith('application/json') else {}
         return {'service': 'workbuddy-manager', 'upstream_ok': resp.status_code == 200, **body}

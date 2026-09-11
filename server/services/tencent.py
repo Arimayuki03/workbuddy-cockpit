@@ -25,7 +25,7 @@ def _envelope(resp: httpx.Response) -> tuple[int, Any]:
 
 
 async def start_login() -> dict:
-    async with httpx.AsyncClient(timeout=config.TENCENT_TIMEOUT) as client:
+    async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
         resp = await client.post(
             f'{config.TENCENT_BASE}/v2/plugin/auth/state',
             params={'platform': 'CLI'},
@@ -58,7 +58,7 @@ async def poll_login(state: str) -> dict:
         drop_state(state)
         return {'status': 'expired'}
 
-    async with httpx.AsyncClient(timeout=config.TENCENT_TIMEOUT) as client:
+    async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
         resp = await client.get(
             f'{config.TENCENT_BASE}/v2/plugin/auth/token',
             params={'state': state},
@@ -123,7 +123,7 @@ def write_auth_file(account: dict) -> tuple[str, bool]:
 async def checkin(access_token: str) -> tuple[int, str]:
     """每日签到。10001 = 今日已签到，属正常幂等。"""
     try:
-        async with httpx.AsyncClient(timeout=config.TENCENT_TIMEOUT) as client:
+        async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
             resp = await client.post(
                 config.TENCENT_CHECKIN,
                 json={},
@@ -143,7 +143,7 @@ async def probe_account(access_token: str, model: str = 'glm-5.2') -> tuple[bool
     """以最小对话请求探测账号可用性。"""
     payload = {'model': model, 'messages': [{'role': 'user', 'content': 'ping'}], 'max_tokens': 1}
     try:
-        async with httpx.AsyncClient(timeout=config.TENCENT_TIMEOUT) as client:
+        async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
             resp = await client.post(
                 f'{config.TENCENT_BASE}/v2/chat/completions',
                 json=payload,
