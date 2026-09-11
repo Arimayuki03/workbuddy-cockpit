@@ -81,6 +81,16 @@ class Reporter:
         self.state['duration'] = round(time.time() - self.start, 1)
         self.flush()
 
+    def set_target_version(self, tag: str) -> None:
+        """记录本次要更新到的版本。
+
+        管理端重启会把本进程一并终止（见 update_manager 的说明），
+        管理端读到「运行中但进程已不在」时，用这个版本号核对代码是否已就位，
+        从而区分「更新成功、只是被重启带走」与「真的崩了」。
+        """
+        self.state['target_version'] = str(tag or '').strip().lstrip('vV')
+        self.flush()
+
     def flush(self) -> None:
         try:
             DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -269,6 +279,7 @@ def update_manager(rep: Reporter) -> None:
 
     tag = rel.get('tag_name') or ''
     rep.log(f'最新版本：{tag or "(未知)"}')
+    rep.set_target_version(tag)
 
     current = read_local_version()
     if current and tag and current == tag.lstrip('v'):
@@ -328,6 +339,13 @@ def update_manager(rep: Reporter) -> None:
             shutil.copytree(new_root / 'deploy', INSTALL_DIR / 'deploy', dirs_exist_ok=True)
             rep.log('同步 deploy/')
 
+        # 版本标记：界面「当前版本」与更新提醒都以它为准，必须一并替换，
+        # 否则更新后仍显示旧版本，并一直提示「发现新版本可用」
+        new_marker = new_root / '.version'
+        if new_marker.is_file():
+            shutil.copyfile(new_marker, INSTALL_DIR / '.version')
+            rep.log(f'更新版本标记：{new_marker.read_text(encoding="utf-8").strip()}')
+
     # 4) 依赖有变化则重装
     req = INSTALL_DIR / 'server' / 'requirements.txt'
     if req.is_file():
@@ -336,7 +354,13 @@ def update_manager(rep: Reporter) -> None:
         run([py, '-m', 'pip', 'install', '-q', '-r', str(req)], rep=rep, check=False)
 
     rep.log(f'管理端已更新到 {tag}，重启服务以生效')
-    run(['systemctl', 'restart', SERVICE_NAME], rep=rep, check=False)
+    # 先把终态落盘，再重启：systemd 默认 KillMode=control-group，restart 会连同
+    # 本进程一起终止（start_new_session 只脱离终端会话，并未脱离 service 的 cgroup），
+    # 若等重启之后再写状态就永远写不到了。
+    rep.finish(True)
+    rc, _ = run(['systemctl', 'restart', SERVICE_NAME], rep=rep, check=False)
+    if rc != 0:
+        raise RuntimeError(f'重启服务失败（systemctl 返回 {rc}），请手动执行 systemctl status {SERVICE_NAME}')
     rep.log('服务已重启')
 
 

@@ -16,6 +16,8 @@ data/
 *.db-shm
 users.json
 config.json
+# 部署时写入的版本标记（运行期生成，不提交）
+.version
 
 # 开发参考仓库（不提交）
 .ref/

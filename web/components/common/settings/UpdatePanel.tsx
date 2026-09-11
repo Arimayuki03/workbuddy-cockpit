@@ -334,7 +334,8 @@ export function UpdatePanel() {
             <div className="text-xs font-medium">{status?.ok ? '更新完成' : '更新未完成'}</div>
             <div className="text-[11px] text-muted-foreground">
               {status?.ok
-                ? `耗时 ${status?.duration ?? 0} 秒。建议刷新页面确认版本号。`
+                ? (status?.duration ? `耗时 ${status.duration} 秒。` : '') +
+                  '服务已重启，建议刷新页面确认版本号。'
                 : '请查看下方日志排查；账号与配置未受影响。'}
             </div>
           </div>
