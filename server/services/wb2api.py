@@ -117,6 +117,26 @@ async def restart_container() -> tuple[bool, str]:
         return False, str(exc)
 
 
+def read_container_logs(limit: int = 200) -> list[str]:
+    """读取上游容器日志（同步、失败返回空列表）。
+
+    上游的自动签到只在失败时打日志、成功静默，因此这些日志主要
+    用于呈现「失败」与「保活」记录。
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ['docker', 'logs', '--tail', str(max(1, min(2000, limit))), config.WB2API_CONTAINER],
+            capture_output=True, text=True, timeout=20,
+        )
+        # docker logs 把应用日志写到 stderr
+        raw = (proc.stdout or '') + (proc.stderr or '')
+        return [ln for ln in raw.splitlines() if ln.strip()]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _mask(v: str) -> str:
     if not v:
         return ''

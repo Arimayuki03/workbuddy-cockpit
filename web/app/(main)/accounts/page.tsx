@@ -10,11 +10,14 @@ import {
   Plus,
   Users,
   Power,
+  History,
+  CalendarCheck,
+  TriangleAlert,
 } from 'lucide-react';
 import {notify} from '@/lib/toast';
 import {accountApi, upstreamApi, errText} from '@/lib/api';
-import type {Account, UpstreamStatus} from '@/lib/types';
-import {expiryVisual, fmtRemain} from '@/lib/format';
+import type {Account, CheckinLog, UpstreamStatus} from '@/lib/types';
+import {expiryVisual, fmtDateTime, fmtRemain} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
@@ -40,18 +43,49 @@ export default function AccountsPage() {
   const [loading, setLoading] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
   const [busyFile, setBusyFile] = useState<string | null>(null);
+  const [checkinLogs, setCheckinLogs] = useState<CheckinLog[]>([]);
+  const [checkinAllBusy, setCheckinAllBusy] = useState(false);
+  const [upstreamLines, setUpstreamLines] = useState<string[]>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [accRes, upRes] = await Promise.allSettled([accountApi.list(), upstreamApi.status()]);
+    const [accRes, upRes, logRes, ulRes] = await Promise.allSettled([
+      accountApi.list(),
+      upstreamApi.status(),
+      accountApi.checkinLogs(100),
+      accountApi.upstreamLogs(200),
+    ]);
     if (accRes.status === 'fulfilled') setAccounts(accRes.value.accounts);
     else notify.err(errText(accRes.reason));
     if (upRes.status === 'fulfilled') setUpstream(upRes.value);
+    if (logRes.status === 'fulfilled') setCheckinLogs(logRes.value);
+    if (ulRes.status === 'fulfilled') setUpstreamLines(ulRes.value.lines);
     setLoading(false);
   }, []);
 
   useEffect(() => {
     load();
+  }, [load]);
+
+  /** 批量签到：逐账号记录结果 */
+  const checkinAll = useCallback(async () => {
+    setCheckinAllBusy(true);
+    try {
+      const r = await accountApi.checkinAll();
+      const failed = r.total - r.succeeded;
+      if (r.total === 0) {
+        notify.info('没有可签到的账号');
+      } else if (failed === 0) {
+        notify.ok(`全部签到完成`, `${r.succeeded}/${r.total} 个账号成功`);
+      } else {
+        notify.warn(`签到完成，${failed} 个失败`, `${r.succeeded}/${r.total} 个账号成功，详见下方签到记录`);
+      }
+      await load();
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setCheckinAllBusy(false);
+    }
   }, [load]);
 
   /** 将本地 auths 文件与上游账号池状态按 uid 合并 */
@@ -130,6 +164,18 @@ export default function AccountsPage() {
                   </Button>
                 }
               />
+            )}
+            {isAdmin && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="rounded-full"
+                onClick={checkinAll}
+                disabled={checkinAllBusy || !merged.length}
+              >
+                <CalendarCheck className={checkinAllBusy ? 'animate-pulse' : ''} />
+                全部签到
+              </Button>
             )}
             {isAdmin && (
               <Button size="sm" className="rounded-full" onClick={() => setAddOpen(true)}>
@@ -282,6 +328,102 @@ export default function AccountsPage() {
         {loading && !merged.length && (
           <div className="py-16 text-center text-xs text-muted-foreground">加载中…</div>
         )}
+      </section>
+
+      {/* 签到记录：上游自动签到成功时静默、失败才打日志，
+          因此这里同时呈现「本端触发记录」与「上游容器签到/保活日志」 */}
+      <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="overflow-hidden rounded-[20px] bg-muted">
+          <div className="flex items-center justify-between px-4 py-3">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <CalendarCheck className="h-4 w-4" />
+              签到记录
+              <span className="text-[11px] font-normal text-muted-foreground">
+                （本端触发：手动 / 批量 / 添加账号）
+              </span>
+            </div>
+            {isAdmin && checkinLogs.length > 0 && (
+              <ConfirmDialog
+                title="清空签到记录？"
+                description="仅删除本端的签到历史记录，不影响账号与上游数据。"
+                confirmText="清空"
+                destructive
+                onConfirm={async () => {
+                  await accountApi.clearCheckinLogs();
+                  notify.ok('已清空');
+                  await load();
+                }}
+                trigger={
+                  <Button variant="ghost" size="sm" className="h-7 rounded-full text-red-500">
+                    <Trash2 className="h-3.5 w-3.5" />
+                    清空
+                  </Button>
+                }
+              />
+            )}
+          </div>
+          <Table>
+            <TableHeader>
+              <TableRow className="border-b border-border/60 hover:bg-transparent">
+                <TableHead className="pl-4 text-[11px] text-muted-foreground">时间</TableHead>
+                <TableHead className="text-[11px] text-muted-foreground">账号</TableHead>
+                <TableHead className="text-[11px] text-muted-foreground">来源</TableHead>
+                <TableHead className="pr-4 text-[11px] text-muted-foreground">结果</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {checkinLogs.slice(0, 20).map((l) => (
+                <TableRow key={l.id} className="border-b border-border/40">
+                  <TableCell className="pl-4 text-xs text-muted-foreground">{fmtDateTime(l.ts)}</TableCell>
+                  <TableCell className="max-w-[120px] truncate text-xs">{l.nickname || l.uid || '—'}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {{'manual': '手动', 'manual-batch': '批量', 'add': '添加账号'}[l.source] || l.source}
+                  </TableCell>
+                  <TableCell className="pr-4">
+                    {l.success ? (
+                      <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">
+                        {l.message || '成功'}
+                      </Badge>
+                    ) : (
+                      <Badge variant="destructive" className="rounded-full" title={l.message}>
+                        {l.message || '失败'}
+                      </Badge>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+          {!checkinLogs.length && (
+            <div className="py-10 text-center text-xs text-muted-foreground">
+              暂无签到记录。点「全部签到」或单个账号的 🎁 会在此留痕。
+            </div>
+          )}
+        </div>
+
+        <div className="overflow-hidden rounded-[20px] bg-muted">
+          <div className="flex items-center justify-between px-4 py-3">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <History className="h-4 w-4" />
+              上游签到 / 保活日志
+            </div>
+            <span className="text-[11px] text-muted-foreground">来自容器日志</span>
+          </div>
+          {upstreamLines.length ? (
+            <div className="max-h-[300px] overflow-auto px-4 pb-3">
+              <pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-muted-foreground">
+                {upstreamLines.slice(-40).join('\n')}
+              </pre>
+            </div>
+          ) : (
+            <div className="px-4 py-10 text-center text-xs leading-5 text-muted-foreground">
+              <TriangleAlert className="mx-auto mb-2 h-4 w-4 text-amber-500" />
+              上游自动签到<b>成功时不会打日志</b>（源码里仅在失败时记录），
+              因此这里通常是空的 —— 没有记录即代表没有失败。
+              想看成功记录，请用上方的「全部签到」，结果会记入左侧列表。
+            </div>
+          )}
+        </div>
       </section>
 
       <AddAccountDialog open={addOpen} onOpenChange={setAddOpen} onSuccess={load} />

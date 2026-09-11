@@ -162,6 +162,20 @@ export interface UpstreamConfig {
   upstash?: UpstashConfig;
 }
 
+export interface CheckinLog {
+  id: number;
+  ts: number;
+  uid: string;
+  nickname: string;
+  /** 触发来源：manual 手动 / manual-batch 批量 / add 添加账号时 */
+  source: string;
+  /** 类型：checkin 签到 / keepalive 保活 */
+  kind: string;
+  success: boolean;
+  code: number | null;
+  message: string;
+}
+
 export interface ReloadState {
   /** 正在执行重启 */
   running: boolean;
