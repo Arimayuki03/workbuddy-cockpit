@@ -56,6 +56,9 @@ workbuddy-manager/
 ## 本地开发
 
 ```bash
+# 0) 可选：没有真实 workbuddy2api 时，起一个模拟上游（含模型列表与示例账号）
+python dev/mock_upstream.py        # 监听 127.0.0.1:7863
+
 # 1) 后端（终端 A）
 python -m pip install -r server/requirements.txt
 WB_ADMIN_PASSWORD=admin123 \
@@ -71,6 +74,11 @@ npm run dev            # http://localhost:3000
 ```
 
 首次启动会在 `WB_DATA_DIR` 生成 `users.json` 与随机签名密钥；若未设 `WB_ADMIN_PASSWORD`，会打印一次随机管理员密码。
+
+> **代理注意事项**：若本机装有代理软件（Clash / V2Ray 等），特别是 **TUN 模式**，
+> 访问 `127.0.0.1:7863` 可能被代理劫持，表现为接口长时间超时。
+> 管理端默认对所有请求 `trust_env=False`（不读系统代理）；确需走代理时设置 `WB_HTTP_PROXY`。
+> TUN 模式下请在代理软件中把 `127.0.0.1` 加入直连/绕过列表。
 
 ---
 

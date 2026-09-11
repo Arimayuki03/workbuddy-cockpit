@@ -43,6 +43,10 @@ STATIC_DIR = Path(_env('WB_STATIC_DIR', str(ROOT / 'web' / 'out')))
 UPSTREAM_TIMEOUT = _env_int('WB_UPSTREAM_TIMEOUT', 120)
 TENCENT_TIMEOUT = _env_int('WB_TENCENT_TIMEOUT', 15)
 TRUST_PROXY = _env('WB_TRUST_PROXY', '1') == '1'
+# 显式出口代理（可选，如 http://127.0.0.1:7890）。
+# 留空时所有请求都不使用任何代理：httpx 默认 trust_env=True 会读取系统/环境代理，
+# 会把内网请求（如 127.0.0.1:7863）也交给系统代理，导致连接被劫持或长时间超时。
+HTTP_PROXY = _env('WB_HTTP_PROXY', '')
 SESSION_DAYS = _env_int('WB_SESSION_DAYS', 7)
 COOKIE_NAME = 'wb_session'
 SECURE_COOKIE = _env('WB_SECURE_COOKIE', 'auto')  # auto | true | false
@@ -81,3 +85,20 @@ def upstream_api_key() -> str:
 
 def new_secret() -> str:
     return secrets.token_urlsafe(48)
+
+
+def http_client(timeout, *, connect: float | None = None):
+    """统一的 httpx 客户端：默认忽略系统/环境代理，避免内网请求被代理劫持。
+
+    需要走代理时显式设置 WB_HTTP_PROXY。
+    """
+    import httpx
+
+    if connect is not None:
+        tmo = httpx.Timeout(timeout, connect=connect)
+    else:
+        tmo = httpx.Timeout(timeout)
+    kwargs = {'timeout': tmo, 'trust_env': False}
+    if HTTP_PROXY:
+        kwargs['proxy'] = HTTP_PROXY
+    return httpx.AsyncClient(**kwargs)
