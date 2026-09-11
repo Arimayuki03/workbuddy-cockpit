@@ -10,9 +10,18 @@ router = APIRouter(prefix='/api', tags=['accounts'])
 
 
 @router.get('/accounts')
-def list_accounts(user: dict = Depends(security.current_user)) -> dict:
+async def list_accounts(user: dict = Depends(security.current_user)) -> dict:
+    """账号列表：本地授权信息 + 上游运行时状态（含积分余额）。"""
     accounts = wb2api.list_auth_accounts()
-    return {'total': len(accounts), 'accounts': accounts}
+    status = await wb2api.get_status()
+    wb2api.merge_pool_status(accounts, status)
+    synced = sum(1 for a in accounts if a.get('credits') is not None)
+    return {
+        'total': len(accounts),
+        'accounts': accounts,
+        'pool_synced': synced,
+        'pool_available': bool(status.get('connected')),
+    }
 
 
 @router.get('/status')

@@ -28,13 +28,13 @@ MODELS = [
 # 模拟几个账号，便于查看账号页与仪表盘（uid 与演示 auth 文件名对应）
 ACCOUNTS = [
     {'uid': '89374120', 'nickname': '黑天鹅', 'healthy': True, 'disabled': False,
-     'in_flight': 0, 'cooling': False, 'success_count': 4128, 'err_total': 6},
+     'in_flight': 0, 'cooling': False, 'success_count': 4128, 'err_total': 6, 'credits': 1300},
     {'uid': '91203877', 'nickname': '测试号', 'healthy': True, 'disabled': False,
-     'in_flight': 0, 'cooling': False, 'success_count': 236, 'err_total': 11},
+     'in_flight': 0, 'cooling': False, 'success_count': 236, 'err_total': 11, 'credits': 148},
     {'uid': '88110234', 'nickname': '运营小组', 'healthy': True, 'disabled': False,
-     'in_flight': 1, 'cooling': False, 'success_count': 1873, 'err_total': 4},
+     'in_flight': 1, 'cooling': False, 'success_count': 1873, 'err_total': 4, 'credits': 2600},
     {'uid': '87120988', 'nickname': '备用账号', 'healthy': False, 'disabled': False,
-     'in_flight': 0, 'cooling': True, 'success_count': 96, 'err_total': 23},
+     'in_flight': 0, 'cooling': True, 'success_count': 96, 'err_total': 23, 'credits': 0},
 ]
 
 

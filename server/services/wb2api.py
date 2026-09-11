@@ -51,6 +51,34 @@ def list_auth_accounts() -> list[dict]:
     return out
 
 
+def merge_pool_status(accounts: list[dict], status: dict) -> list[dict]:
+    """把 /status 的运行时状态合并进账号列表（含积分余额）。
+
+    credits：账号当前可花费积分余额，由上游聚合所有套餐的
+    CycleCapacityRemain 得出（见 upstream.UserResource）。
+    """
+    pool: dict[str, dict] = {}
+    for item in (status or {}).get('accounts') or []:
+        if isinstance(item, dict) and item.get('uid'):
+            pool[str(item['uid'])] = item
+
+    for a in accounts:
+        p = pool.get(a['uid'])
+        if not p:
+            # 上游未返回该账号（可能刚添加尚未重载），保持字段为 None
+            a.setdefault('credits', None)
+            continue
+        credits = p.get('credits')
+        a['credits'] = int(credits) if isinstance(credits, (int, float)) else None
+        a['cooling'] = bool(p.get('cooling'))
+        a['disabled'] = bool(p.get('disabled'))
+        a['success_count'] = p.get('success_count')
+        a['in_flight'] = p.get('in_flight')
+        a['breaker_fails'] = p.get('breaker_fails')
+        a['last_success'] = p.get('last_success')
+    return accounts
+
+
 def delete_auth_account(filename: str) -> bool:
     target = _safe_file(filename)
     if target.exists():

@@ -13,6 +13,8 @@ export interface Account {
   expires_at: number;
   is_expired: boolean;
   remain_seconds: number;
+  /** 当前可花费积分余额（上游聚合套餐剩余额度），null 表示尚未同步 */
+  credits?: number | null;
   /** 来自 workbuddy2api /status 的运行时字段，可能为空 */
   healthy?: boolean | null;
   disabled?: boolean | null;
@@ -20,6 +22,8 @@ export interface Account {
   cooling?: boolean | null;
   success_count?: number | null;
   err_total?: number | null;
+  breaker_fails?: number | null;
+  last_success?: string | null;
   last_used?: number | null;
   source: 'file' | 'pool';
 }
@@ -27,6 +31,10 @@ export interface Account {
 export interface AccountsResponse {
   total: number;
   accounts: Account[];
+  /** 已从上游同步到运行时状态的账号数 */
+  pool_synced?: number;
+  /** 上游是否可达 */
+  pool_available?: boolean;
 }
 
 export interface UpstreamStatus {
