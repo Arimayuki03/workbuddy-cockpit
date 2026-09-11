@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 
@@ -228,6 +229,38 @@ def load_upstream_config() -> dict:
     return view
 
 
+# 上游 config.json 的可视化字段类型约束：
+#   *_hours 是 []int（整点数组），cooldown.* 是时长字符串（30s/10m/2h/1d）
+_HOURS_KEYS = ('checkin_hours', 'travel_hours', 'activity_hours', 'keepalive_hours')
+_DURATION_RE = re.compile(r'^\d+\s*(s|m|h|d)$', re.IGNORECASE)
+
+
+def _sanitize_section(section: str, incoming: dict) -> dict:
+    """校验并归一化要写入的字段，挡住会把配置写坏的非法值。
+
+    前端已经做了校验，这里再做一层兜底：错的数据宁可拒绝（抛错），
+    也不要写进上游配置触发容器启动失败。
+    """
+    out = dict(incoming)
+    for key, raw in incoming.items():
+        if key in _HOURS_KEYS:
+            if not isinstance(raw, list) or not all(
+                isinstance(x, int) and not isinstance(x, bool) and 0 <= x <= 23 for x in raw
+            ):
+                raise ValueError(f'{key} 必须是 0-23 的整点数组，例如 [9, 21]')
+            if not raw:
+                raise ValueError(f'{key} 至少要有一个时刻')
+            out[key] = sorted({int(x) for x in raw})
+        elif isinstance(raw, str) and (
+            key.endswith(('_rate', '_rate_max', '_cooldown', '_cooldown_max'))
+            or key in ('ttl', 'gc_interval')
+        ):
+            if not _DURATION_RE.match(raw.strip()):
+                raise ValueError(f'{key} 时长格式有误，应为 30s / 10m / 2h / 1d')
+            out[key] = raw.strip()
+    return out
+
+
 def save_upstream_config(patch: dict) -> dict:
     """仅允许改写 schedule / pool / cooldown / features / upstash 等非敏感段。
 
@@ -244,10 +277,10 @@ def save_upstream_config(patch: dict) -> dict:
     if not isinstance(cfg, dict):
         raise ValueError('上游配置文件不是合法的 JSON 对象，已取消保存')
 
-    for field in ('schedule', 'pool', 'cooldown', 'features'):
+    for field in ('schedule', 'pool', 'cooldown', 'features', 'session_sticky'):
         if field in patch and isinstance(patch[field], dict):
             cfg.setdefault(field, {})
-            cfg[field].update(patch[field])
+            cfg[field].update(_sanitize_section(field, patch[field]))
 
     if 'upstash' in patch and isinstance(patch['upstash'], dict):
         incoming = patch['upstash']
