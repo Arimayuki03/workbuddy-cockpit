@@ -110,7 +110,9 @@ jobs:
           )
           m = pattern.search(text)
           if m and m.group(1).strip():
-              print(m.group(1).strip())
+              # 去掉段落末尾的分隔线（CHANGELOG 里版本之间以 --- 分隔）
+              body = re.sub(r'\n*-{3,}\s*$', '', m.group(1).strip()).strip()
+              print(body)
           else:
               print('## 变更\n')
               log = subprocess.run(
