@@ -1,0 +1,29 @@
+node_modules/
+.next/
+out/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 敏感数据与运行时数据
+data/
+.env
+.env.local
+*.db
+*.db-wal
+*.db-shm
+users.json
+config.json
+
+# 开发参考仓库（不提交）
+.ref/
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+.zcode/
+*.log
+next-env.d.ts
+*.tsbuildinfo

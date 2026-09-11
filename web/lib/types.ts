@@ -1,0 +1,151 @@
+export type Role = 'admin' | 'viewer';
+
+export interface Me {
+  username: string;
+  role: Role;
+}
+
+export interface Account {
+  file: string;
+  uid: string;
+  nickname: string;
+  enterprise_id: string;
+  expires_at: number;
+  is_expired: boolean;
+  remain_seconds: number;
+  /** 来自 workbuddy2api /status 的运行时字段，可能为空 */
+  healthy?: boolean | null;
+  disabled?: boolean | null;
+  in_flight?: number | null;
+  cooling?: boolean | null;
+  success_count?: number | null;
+  err_total?: number | null;
+  last_used?: number | null;
+  source: 'file' | 'pool';
+}
+
+export interface AccountsResponse {
+  total: number;
+  accounts: Account[];
+}
+
+export interface UpstreamStatus {
+  connected: boolean;
+  accounts?: Record<string, unknown>[];
+  cooling?: number;
+  disabled?: number;
+  healthy?: number;
+  total?: number;
+  in_flight_full?: number;
+  redis_mode?: string;
+  sticky_sessions?: number;
+  error?: string;
+}
+
+export interface ModelInfo {
+  id: string;
+  owned_by?: string;
+  context_window?: number;
+}
+
+export interface ApiKey {
+  id: number;
+  name: string;
+  prefix: string;
+  enabled: boolean;
+  expires_at: number | null;
+  max_ips: number;
+  ip_allowlist: string[];
+  models: string[];
+  quota: number | null;
+  used_tokens: number;
+  created_at: number;
+  last_used_at: number | null;
+  /** 仅在创建时返回一次 */
+  key?: string;
+}
+
+export interface RequestLog {
+  id: number;
+  ts: number;
+  key_id: number | null;
+  key_name: string | null;
+  ip: string;
+  model: string | null;
+  mapped_model: string | null;
+  status: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  latency_ms: number;
+  ua: string | null;
+  error: string | null;
+  stream: boolean;
+}
+
+export interface UsagePoint {
+  day: string;
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+}
+
+export interface UsageBreakdown {
+  name: string;
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+}
+
+export interface StatsSummary {
+  today_requests: number;
+  today_tokens: number;
+  week_requests: number;
+  week_tokens: number;
+  total_requests: number;
+  total_tokens: number;
+  active_keys: number;
+  top_model: string | null;
+}
+
+export interface IpRule {
+  id: number;
+  kind: 'allow' | 'deny';
+  cidr: string;
+  note: string;
+  created_at: number;
+}
+
+export interface IpAccessLog {
+  id: number;
+  ts: number;
+  ip: string;
+  path: string;
+  blocked: boolean;
+  ua: string | null;
+}
+
+export interface SecurityConfig {
+  enabled: boolean;
+  mode: 'whitelist' | 'blacklist';
+}
+
+export interface UserItem {
+  username: string;
+  role: Role;
+}
+
+export interface UpstreamConfig {
+  listen?: string;
+  api_key_masked?: string;
+  auth_dir?: string;
+  schedule?: Record<string, unknown>;
+  pool?: Record<string, unknown>;
+  cooldown?: Record<string, unknown>;
+  features?: Record<string, unknown>;
+  raw?: Record<string, unknown>;
+}
+
+export interface Page<T> {
+  total: number;
+  items: T[];
+}

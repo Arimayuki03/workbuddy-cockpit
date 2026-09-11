@@ -1,0 +1,160 @@
+"""SQLite 存储层：密钥、日志、用量、IP 规则与全局设置。"""
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+import time
+from typing import Any, Iterable
+
+from . import config
+
+_lock = threading.RLock()
+_conn: sqlite3.Connection | None = None
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS api_keys (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT    NOT NULL,
+  key_hash      TEXT    NOT NULL,
+  prefix        TEXT    NOT NULL,
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  expires_at    INTEGER,
+  max_ips       INTEGER NOT NULL DEFAULT 0,
+  ip_allowlist  TEXT    NOT NULL DEFAULT '[]',
+  models        TEXT    NOT NULL DEFAULT '[]',
+  quota         INTEGER NOT NULL DEFAULT 0,
+  used_tokens   INTEGER NOT NULL DEFAULT 0,
+  created_at    INTEGER NOT NULL,
+  last_used_at  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_keys_prefix ON api_keys(prefix);
+
+CREATE TABLE IF NOT EXISTS api_key_ips (
+  key_id     INTEGER NOT NULL,
+  ip         TEXT    NOT NULL,
+  first_seen INTEGER NOT NULL,
+  PRIMARY KEY (key_id, ip)
+);
+
+CREATE TABLE IF NOT EXISTS request_logs (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts                INTEGER NOT NULL,
+  key_id            INTEGER,
+  ip                TEXT,
+  model             TEXT,
+  mapped_model      TEXT,
+  status            INTEGER DEFAULT 0,
+  prompt_tokens     INTEGER DEFAULT 0,
+  completion_tokens INTEGER DEFAULT 0,
+  latency_ms        INTEGER DEFAULT 0,
+  ua                TEXT,
+  error             TEXT,
+  stream            INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_logs_ts ON request_logs(ts);
+
+CREATE TABLE IF NOT EXISTS usage_daily (
+  day               TEXT    NOT NULL,
+  key_id            INTEGER NOT NULL,
+  model             TEXT    NOT NULL,
+  requests          INTEGER NOT NULL DEFAULT 0,
+  prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+  completion_tokens INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, key_id, model)
+);
+
+CREATE TABLE IF NOT EXISTS ip_rules (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind       TEXT    NOT NULL,
+  cidr       TEXT    NOT NULL,
+  note       TEXT    NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ip_access_logs (
+  id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts      INTEGER NOT NULL,
+  ip      TEXT,
+  path    TEXT,
+  blocked INTEGER NOT NULL DEFAULT 0,
+  ua      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ip_logs_ts ON ip_access_logs(ts);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT
+);
+"""
+
+
+def connect() -> sqlite3.Connection:
+    global _conn
+    if _conn is None:
+        config.ensure_dirs()
+        _conn = sqlite3.connect(str(config.DB_PATH), check_same_thread=False)
+        _conn.row_factory = sqlite3.Row
+        _conn.execute('PRAGMA journal_mode=WAL')
+        _conn.execute('PRAGMA synchronous=NORMAL')
+        _conn.executescript(SCHEMA)
+        _conn.commit()
+    return _conn
+
+
+def query(sql: str, args: Iterable[Any] = ()) -> list[sqlite3.Row]:
+    with _lock:
+        return list(connect().execute(sql, tuple(args)).fetchall())
+
+
+def query_one(sql: str, args: Iterable[Any] = ()) -> sqlite3.Row | None:
+    with _lock:
+        return connect().execute(sql, tuple(args)).fetchone()
+
+
+def execute(sql: str, args: Iterable[Any] = ()) -> int:
+    with _lock:
+        conn = connect()
+        cur = conn.execute(sql, tuple(args))
+        conn.commit()
+        return int(cur.lastrowid or 0)
+
+
+def executemany(sql: str, seq: Iterable[Iterable[Any]]) -> None:
+    with _lock:
+        conn = connect()
+        conn.executemany(sql, [tuple(x) for x in seq])
+        conn.commit()
+
+
+# ── settings ─────────────────────────────────────────────
+def get_setting(key: str, default: Any = None) -> Any:
+    row = query_one('SELECT value FROM settings WHERE key = ?', (key,))
+    if not row:
+        return default
+    try:
+        return json.loads(row['value'])
+    except Exception:
+        return default
+
+
+def set_setting(key: str, value: Any) -> None:
+    execute(
+        'INSERT INTO settings(key, value) VALUES(?, ?) '
+        'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+        (key, json.dumps(value, ensure_ascii=False)),
+    )
+
+
+# ── 用量累计 ─────────────────────────────────────────────
+def bump_usage(key_id: int, model: str, prompt_tokens: int, completion_tokens: int) -> None:
+    day = time.strftime('%Y-%m-%d')
+    execute(
+        'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, completion_tokens) '
+        'VALUES(?, ?, ?, 1, ?, ?) '
+        'ON CONFLICT(day, key_id, model) DO UPDATE SET '
+        '  requests = requests + 1, '
+        '  prompt_tokens = prompt_tokens + excluded.prompt_tokens, '
+        '  completion_tokens = completion_tokens + excluded.completion_tokens',
+        (day, key_id, model, prompt_tokens, completion_tokens),
+    )

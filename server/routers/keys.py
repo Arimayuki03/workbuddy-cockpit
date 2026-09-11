@@ -1,0 +1,66 @@
+"""API 密钥管理接口。"""
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+
+from .. import keysvc, security
+
+router = APIRouter(prefix='/api/keys', tags=['keys'])
+
+
+class KeyIn(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    expires_at: int | None = None
+    max_ips: int = 0
+    ip_allowlist: list[str] = Field(default_factory=list)
+    models: list[str] = Field(default_factory=list)
+    quota: int = 0
+
+
+class KeyPatch(BaseModel):
+    name: str | None = None
+    enabled: bool | None = None
+    expires_at: int | None = None
+    max_ips: int | None = None
+    ip_allowlist: list[str] | None = None
+    models: list[str] | None = None
+    quota: int | None = None
+
+
+@router.get('')
+def list_keys(user: dict = Depends(security.current_user)) -> list[dict]:
+    return keysvc.list_keys()
+
+
+@router.post('')
+def create_key(body: KeyIn, user: dict = Depends(security.require_admin)) -> dict:
+    return keysvc.create_key(
+        name=body.name,
+        expires_at=body.expires_at,
+        max_ips=body.max_ips,
+        ip_allowlist=body.ip_allowlist,
+        models=body.models,
+        quota=body.quota,
+    )
+
+
+@router.patch('/{key_id}')
+def update_key(key_id: int, body: KeyPatch, user: dict = Depends(security.require_admin)) -> dict:
+    updated = keysvc.update_key(key_id, body.model_dump(exclude_unset=True))
+    if not updated:
+        raise HTTPException(status_code=404, detail='密钥不存在')
+    return updated
+
+
+@router.post('/{key_id}/reset-usage')
+def reset_usage(key_id: int, user: dict = Depends(security.require_admin)) -> dict:
+    keysvc.reset_usage(key_id)
+    return {'ok': True}
+
+
+@router.delete('/{key_id}')
+def delete_key(key_id: int, user: dict = Depends(security.require_admin)) -> dict:
+    if not keysvc.delete_key(key_id):
+        raise HTTPException(status_code=404, detail='密钥不存在')
+    return {'ok': True}
