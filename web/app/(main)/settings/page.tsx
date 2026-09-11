@@ -15,7 +15,6 @@ import {
   ChevronDown,
   RotateCcw,
   PlugZap,
-  Power,
   Loader2,
 } from 'lucide-react';
 import {notify} from '@/lib/toast';
@@ -214,7 +213,6 @@ export default function SettingsPage() {
   /** Upstash（Redis 持久化）表单 */
   const [upstashForm, setUpstashForm] = useState({url: '', token: ''});
   const [upstashBusy, setUpstashBusy] = useState(false);
-  const [restarting, setRestarting] = useState(false);
 
   const load = useCallback(async () => {
     // 本地数据很快（配置/映射/用户），先取到即渲染，不被上游探测拖慢
@@ -634,26 +632,6 @@ export default function SettingsPage() {
             </div>
 
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                className="rounded-full"
-                disabled={!isAdmin || upstashBusy}
-                onClick={async () => {
-                  setRestarting(true);
-                  try {
-                    const r = await settingsApi.reloadUpstream();
-                    (r.ok ? notify.ok : notify.err)(r.message || '已重启上游');
-                  } catch (e) {
-                    notify.err(errText(e));
-                  } finally {
-                    setRestarting(false);
-                  }
-                }}
-              >
-                <Power className={restarting ? 'animate-spin' : ''} />
-                立即重启上游
-              </Button>
               {upstashConfigured && (
                 <ConfirmDialog
                   title="关闭 Redis 持久化？"

@@ -119,14 +119,14 @@ export default function AccountsPage() {
             </Button>
             {isAdmin && (
               <ConfirmDialog
-                title="重启上游容器？"
+                title="强制重启上游容器？"
                 description="通常无需手动执行：添加或删除账号后会自动重载。仅当上游状态异常、需要强制重载时才使用。重启约 0.5 秒，在途请求会正常完成。"
                 confirmText="重启"
                 onConfirm={restartUpstream}
                 trigger={
                   <Button variant="outline" size="sm" className="rounded-full" disabled={restarting}>
                     <Power className={restarting ? 'animate-spin' : ''} />
-                    重启上游
+                    强制重启
                   </Button>
                 }
               />
