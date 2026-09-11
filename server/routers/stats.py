@@ -48,6 +48,15 @@ def summary(user: dict = Depends(security.current_user)) -> dict:
     }
 
 
+@router.post('/repair-usage')
+def repair_usage(user: dict = Depends(security.require_admin)) -> dict:
+    """按请求日志回填用量统计的缺口（幂等，可重复执行）。
+
+    用于修复历史缺陷导致的部分调用未计入统计。
+    """
+    return db.backfill_usage_from_logs()
+
+
 @router.get('/daily')
 def daily(days: int = 30, user: dict = Depends(security.current_user)) -> list[dict]:
     rows = db.query(

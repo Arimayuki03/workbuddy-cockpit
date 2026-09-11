@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -41,6 +41,26 @@ app.include_router(stats.router)
 app.include_router(security_router.router)
 app.include_router(settings.router)
 app.include_router(gateway.router)
+
+
+@app.middleware('http')
+async def cache_headers(request: Request, call_next):
+    """按内容性质设置缓存策略。
+
+    - /_next/static/**：文件名含内容哈希，可长期强缓存（immutable）
+    - /api/**、/v1/**：动态数据，禁止任何缓存（含浏览器与中间代理）
+    - 其余（HTML 文档）：no-cache，即每次回源校验 ETag，避免拿到旧页面
+    """
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith('/_next/static/'):
+        response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+    elif path.startswith(('/api/', '/v1/', '/v2/', '/healthz')):
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
+        response.headers['Pragma'] = 'no-cache'
+    else:
+        response.headers['Cache-Control'] = 'no-cache'
+    return response
 
 
 @app.get('/api/sysinfo')

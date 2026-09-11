@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 import httpx
@@ -10,6 +11,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import config, db, iputil, keysvc
 from ..routers.security import get_config as get_security_config
+
+logger = logging.getLogger('workbuddy.gateway')
 
 router = APIRouter(tags=['gateway'])
 
@@ -36,16 +39,30 @@ def _log_ip(ip: str, path: str, blocked: bool, ua: str | None) -> None:
 
 
 def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt: int, ct: int, latency: int, ua: str | None, error: str | None, stream: bool) -> None:
-    db.execute(
-        'INSERT INTO request_logs(ts, key_id, ip, model, mapped_model, status, prompt_tokens, completion_tokens, latency_ms, ua, error, stream) '
-        'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        (int(time.time()), key['id'] if key else None, ip, model, mapped, status, pt, ct, latency, ua, error, 1 if stream else 0),
-    )
+    """记录调用日志与用量。
+
+    注意：日志/统计属于旁路，任何异常都不能影响用户请求本身
+    （曾因统计函数缺失导致流式响应在收尾阶段中断，客户端看到
+    内容正常但报 terminated）。因此这里整体兜底。
+    """
+    try:
+        db.execute(
+            'INSERT INTO request_logs(ts, key_id, ip, model, mapped_model, status, prompt_tokens, completion_tokens, latency_ms, ua, error, stream) '
+            'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (int(time.time()), key['id'] if key else None, ip, model, mapped, status, pt, ct, latency, ua, error, 1 if stream else 0),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('写入请求日志失败（不影响请求）: %s', exc)
+        return
+
     if key:
-        total = pt + ct
-        keysvc.touch(key, ip, total)
-        if total:
-            db.bump_usage(key['id'], model, pt, ct)
+        try:
+            total = pt + ct
+            keysvc.touch(key, ip, total)
+            if total:
+                db.bump_usage(key['id'], model, pt, ct)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning('累计用量失败（不影响请求）: %s', exc)
 
 
 def _authorize(request: Request, model: str | None) -> tuple[dict | None, str, JSONResponse | None]:

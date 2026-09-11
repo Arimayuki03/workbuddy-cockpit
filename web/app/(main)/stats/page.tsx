@@ -1,7 +1,7 @@
 'use client';
 
 import {useCallback, useEffect, useState} from 'react';
-import {Activity, TrendingUp, KeyRound, Cpu, RefreshCw} from 'lucide-react';
+import {Activity, TrendingUp, KeyRound, Cpu, RefreshCw, Wrench} from 'lucide-react';
 import {
   Bar,
   BarChart,
@@ -17,6 +17,8 @@ import {fmtCompact, fmtNumber} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {StatCard} from '@/components/common/layout/StatCard';
 import {EmptyState} from '@/components/common/layout/EmptyState';
+import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
+import {useAuth} from '@/lib/auth-context';
 import {Button} from '@/components/ui/button';
 import {
   Select,
@@ -44,6 +46,7 @@ const CHART_COLORS = [
 ];
 
 export default function StatsPage() {
+  const {isAdmin} = useAuth();
   const [summary, setSummary] = useState<StatsSummary | null>(null);
   const [daily, setDaily] = useState<UsagePoint[]>([]);
   const [byModel, setByModel] = useState<UsageBreakdown[]>([]);
@@ -93,6 +96,32 @@ export default function StatsPage() {
                 <SelectItem value="90">近 90 天</SelectItem>
               </SelectContent>
             </Select>
+            {isAdmin && (
+              <ConfirmDialog
+                title="按请求日志修复用量统计？"
+                description="将以「请求日志」为准，把尚未计入的历史用量补进统计。该操作幂等，可重复执行，不会重复累加。"
+                confirmText="开始修复"
+                onConfirm={async () => {
+                  try {
+                    const r = await statsApi.repairUsage();
+                    if (r.repaired > 0) {
+                      notify.ok('用量统计已修复', `补入 ${r.requests} 次请求、${r.tokens} Token`);
+                    } else {
+                      notify.info('无需修复', '统计与请求日志一致');
+                    }
+                    await load();
+                  } catch (e) {
+                    notify.err(errText(e));
+                  }
+                }}
+                trigger={
+                  <Button variant="outline" size="sm" className="rounded-full">
+                    <Wrench className="h-3.5 w-3.5" />
+                    修复统计
+                  </Button>
+                }
+              />
+            )}
             <Button variant="outline" size="sm" className="rounded-full" onClick={load} disabled={loading}>
               <RefreshCw className={loading ? 'animate-spin' : ''} />
               刷新
