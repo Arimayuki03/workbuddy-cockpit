@@ -93,40 +93,34 @@ export function AddAccountDialog({
           <DialogDescription>使用微信 / QQ 扫码完成授权，成功后自动签到并纳管</DialogDescription>
         </DialogHeader>
 
-        <div className="flex flex-col items-center gap-4 px-6 pb-6">
-          {phase === 'loading' && (
-            <div className="grid h-[232px] w-[232px] place-items-center rounded-2xl bg-muted">
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            </div>
-          )}
-
-          {(phase === 'waiting' || phase === 'success') && authUrl && (
-            <div className="rounded-2xl bg-white p-4 ring-1 ring-black/5">
-              <QRCodeSVG value={authUrl} size={200} level="M" />
-            </div>
-          )}
-
-          {phase === 'error' && (
-            <div className="grid h-[232px] w-[232px] place-items-center rounded-2xl bg-muted">
-              <AlertTriangle className="h-6 w-6 text-amber-500" />
-            </div>
-          )}
+        <div className="flex w-full min-w-0 flex-col items-center gap-4 px-6 pb-6">
+          {/* 固定尺寸，避免 loading/waiting/error 各阶段弹窗高度跳动 */}
+          <div className="grid h-[212px] w-[212px] shrink-0 place-items-center overflow-hidden rounded-2xl bg-white p-3 ring-1 ring-black/5">
+            {phase === 'loading' && <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />}
+            {phase === 'error' && <AlertTriangle className="h-7 w-7 text-amber-500" />}
+            {(phase === 'waiting' || phase === 'success') && authUrl && (
+              <QRCodeSVG value={authUrl} size={188} level="M" />
+            )}
+          </div>
 
           {authUrl && (
-            <a
-              href={authUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex max-w-full items-center gap-1 truncate text-[11px] text-blue-500 hover:underline"
-            >
-              <ExternalLink className="h-3 w-3 shrink-0" />
-              <span className="truncate">{authUrl}</span>
-            </a>
+            <div className="flex w-full items-center gap-1.5 rounded-full bg-muted px-3 py-1.5">
+              <ExternalLink className="h-3 w-3 shrink-0 text-muted-foreground" />
+              <a
+                href={authUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={authUrl}
+                className="min-w-0 flex-1 truncate text-[11px] text-blue-500 hover:underline"
+              >
+                {authUrl}
+              </a>
+            </div>
           )}
 
           <div
             className={
-              'flex items-center gap-2 text-xs ' +
+              'flex items-center gap-2 px-2 text-xs ' +
               (phase === 'success' ?
                 'text-emerald-500' :
                 phase === 'error' ?
@@ -134,17 +128,17 @@ export function AddAccountDialog({
                   'text-muted-foreground')
             }
           >
-            {phase === 'waiting' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            {phase === 'success' && <CheckCircle2 className="h-3.5 w-3.5" />}
+            {phase === 'waiting' && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />}
+            {phase === 'success' && <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />}
             <span className="text-center">{message}</span>
           </div>
 
           <div className="flex w-full gap-2">
-            <Button variant="outline" className="flex-1" onClick={() => onOpenChange(false)}>
+            <Button variant="outline" className="flex-1 rounded-full" onClick={() => onOpenChange(false)}>
               取消
             </Button>
             {phase === 'error' && (
-              <Button className="flex-1" onClick={start}>
+              <Button className="flex-1 rounded-full" onClick={start}>
                 重新获取
               </Button>
             )}
