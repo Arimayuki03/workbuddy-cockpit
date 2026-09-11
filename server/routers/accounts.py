@@ -1,17 +1,23 @@
 """账号管理：列表、扫码添加、签到、测试、刷新、删除、重启上游。"""
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import db, security
-from ..services import reload, tencent, wb2api
+from ..services import credits as creditsvc, reload, tencent, wb2api
 
 router = APIRouter(prefix='/api', tags=['accounts'])
 
 
 @router.get('/accounts')
 async def list_accounts(user: dict = Depends(security.current_user)) -> dict:
-    """账号列表：本地授权信息 + 上游运行时状态（含积分余额）。"""
+    """账号列表：本地授权信息 + 上游运行时状态（含积分余额）。
+
+    积分（credits）优先使用上游 /status 的值：它是上游调度时写入的快照，
+    与账号可用性判定一致，开销也小。前端可用「刷新积分」触发实时查询。
+    """
     accounts = wb2api.list_auth_accounts()
     status = await wb2api.get_status()
     wb2api.merge_pool_status(accounts, status)
@@ -61,6 +67,7 @@ async def auth_poll(state: str, user: dict = Depends(security.require_admin)) ->
         'add', code in (0, 10001), code, message,
     )
 
+    creditsvc.invalidate(str(result.get('uid', '')))
     filename, existed = tencent.write_auth_file(result)
 
     # 自动重载上游以加载新账号（后台合并执行，不阻塞本次响应）
@@ -72,6 +79,18 @@ async def auth_poll(state: str, user: dict = Depends(security.require_admin)) ->
         'nickname': result['nickname'],
         'updated': existed,
         'file': filename,
+    }
+
+
+def _auth_dict(raw: dict) -> dict:
+    """把授权文件内容整理成探测 / 查询积分所需的字段。"""
+    acct = raw.get('account') or {}
+    auth = raw.get('auth') or {}
+    return {
+        'access_token': auth.get('accessToken', ''),
+        'uid': acct.get('uid', ''),
+        'enterprise_id': acct.get('enterpriseId', ''),
+        'domain': auth.get('domain', ''),
     }
 
 
@@ -88,22 +107,78 @@ def _load(filename: str) -> dict:
 async def account_checkin(filename: str, user: dict = Depends(security.require_admin)) -> dict:
     raw = _load(filename)
     acct = raw.get('account') or {}
-    token = (raw.get('auth') or {}).get('accessToken', '')
+    auth = raw.get('auth') or {}
+    token = auth.get('accessToken', '')
+    uid = str(acct.get('uid', ''))
+    nickname = str(acct.get('nickname', ''))
+
     if not token:
-        db.add_checkin_log(
-            str(acct.get('uid', '')), str(acct.get('nickname', '')),
-            'manual', False, None, '该账号无有效 accessToken',
-        )
+        db.add_checkin_log(uid, nickname, 'manual', False, None, '该账号无有效 accessToken')
         return {'code': -1, 'message': '该账号无有效 accessToken'}
 
     code, message = await tencent.checkin(token)
     # 0 = 签到成功；10001 = 今日已签到，同样视为成功
     ok = code in (0, 10001)
-    db.add_checkin_log(
-        str(acct.get('uid', '')), str(acct.get('nickname', '')),
-        'manual', ok, code, message,
-    )
-    return {'code': code, 'message': message}
+    db.add_checkin_log(uid, nickname, 'manual', ok, code, message)
+
+    # 签到后顺带查实时积分：上游只在它自己的定时任务里刷新 credits，
+    # 手动签到不会带动它更新，所以这里主动查一次返回给前端。
+    credits: int | float | None = None
+    if ok:
+        # 签到会改变余额，先失效缓存再查实时值
+        creditsvc.invalidate(uid)
+        _, credits, _ = await creditsvc.get_credits(_auth_dict(raw))
+
+    return {'code': code, 'message': message, 'credits': credits}
+
+
+@router.get('/accounts/{filename}/credits')
+async def account_credits(
+    filename: str,
+    force: bool = False,
+    user: dict = Depends(security.current_user),
+) -> dict:
+    """查询单个账号的实时积分余额（直接向腾讯查询，带 60s 缓存）。
+
+    force=true 可绕过缓存强制查询。
+    """
+    raw = _load(filename)
+    ok, value, message = await creditsvc.get_credits(_auth_dict(raw), force=force)
+    return {'ok': ok, 'credits': value, 'message': message}
+
+
+@router.post('/accounts/refresh-credits')
+async def refresh_all_credits(user: dict = Depends(security.current_user)) -> dict:
+    """并发查询所有账号的实时积分，返回 {uid: credits}。
+
+    上游 /status 的 credits 只在它定时任务时更新，可能滞后数小时；
+    本接口直接向腾讯查询，用于「刷新积分」。
+    """
+    accounts = wb2api.list_auth_accounts()
+
+    async def one(acc: dict) -> tuple[str, int | float | None, str]:
+        try:
+            raw = wb2api.read_account_file(acc['file'])
+        except Exception as exc:  # noqa: BLE001
+            return acc['uid'], None, f'读取失败: {exc}'
+        ok, value, message = await creditsvc.get_credits(_auth_dict(raw), force=True)
+        return acc['uid'], value if ok else None, message
+
+    results = await asyncio.gather(*(one(a) for a in accounts)) if accounts else []
+
+    credits_map: dict[str, int | float | None] = {}
+    failed: list[str] = []
+    for uid, credits, message in results:
+        credits_map[uid] = credits
+        if credits is None:
+            failed.append(f'{uid[:12]}: {message}')
+
+    return {
+        'total': len(accounts),
+        'succeeded': len(accounts) - len(failed),
+        'credits': credits_map,
+        'failed': failed,
+    }
 
 
 @router.post('/accounts/checkin-all')
