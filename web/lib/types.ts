@@ -167,6 +167,7 @@ export interface UpstreamConfig {
   pool?: Record<string, unknown>;
   cooldown?: Record<string, unknown>;
   features?: Record<string, unknown>;
+  session_sticky?: Record<string, unknown>;
   upstash?: UpstashConfig;
 }
 

@@ -11,6 +11,7 @@ import {
   Server,
   Sparkles,
   Terminal,
+  X,
   XCircle,
 } from 'lucide-react';
 import {errText, systemApi} from '@/lib/api';
@@ -59,6 +60,12 @@ export function UpdatePanel() {
   const [versions, setVersions] = useState<{manager: string; upstream_connected: boolean; upstream_accounts: number | null} | null>(null);
   const [check, setCheck] = useState<UpdateCheck | null>(null);
   const [checking, setChecking] = useState(false);
+  /**
+   * 结果横幅是否已被关闭。用「是否正在运行」的边沿来复位：
+   * 状态从 running 变为结束、或再次发起更新时会重新出现，
+   * 不依赖 finished_at 是否存在，避免时间戳缺失时关不掉。
+   */
+  const [resultDismissed, setResultDismissed] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
@@ -108,6 +115,11 @@ export function UpdatePanel() {
     return () => window.clearInterval(timer);
   }, [load, running]);
 
+  // running 一旦变为 true，就复位「已关闭」，使本轮结果在结束后重新可见
+  useEffect(() => {
+    if (running) setResultDismissed(false);
+  }, [running]);
+
   // 日志自动滚到底
   useEffect(() => {
     if (logRef.current) {
@@ -135,7 +147,7 @@ export function UpdatePanel() {
     }
   }
 
-  const done = status && !status.running && status.ok !== null;
+  const done = !!status && !status.running && status.ok !== null && !resultDismissed;
 
   return (
     <div className="space-y-4">
@@ -318,7 +330,7 @@ export function UpdatePanel() {
           ) : (
             <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-500" />
           )}
-          <div className="space-y-1">
+          <div className="min-w-0 flex-1 space-y-1">
             <div className="text-xs font-medium">{status?.ok ? '更新完成' : '更新未完成'}</div>
             <div className="text-[11px] text-muted-foreground">
               {status?.ok
@@ -326,10 +338,19 @@ export function UpdatePanel() {
                 : '请查看下方日志排查；账号与配置未受影响。'}
             </div>
           </div>
+          <button
+            type="button"
+            aria-label="关闭提示"
+            title="关闭提示"
+            className="-m-1 shrink-0 rounded-full p-1 text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
+            onClick={() => setResultDismissed(true)}
+          >
+            <X className="h-4 w-4" />
+          </button>
         </div>
       )}
 
-      {!status?.updater_found && (
+      {status && status.updater_found === false && (
         <div className="flex items-start gap-2.5 rounded-[20px] border border-amber-500/30 bg-amber-500/10 p-4">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
           <div className="space-y-1">

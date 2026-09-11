@@ -71,28 +71,102 @@ interface NumField {
   unit?: string;
   min: number;
   max: number;
+  /** 步进，缺省 1；小数参数用 0.1 */
+  step?: number;
   def: number;
 }
 
-type Field = BoolField | NumField;
+interface HoursField {
+  key: string;
+  /** 时刻数组：上游是 []int，如 [9, 21] 表示每天 9 点与 21 点执行 */
+  kind: 'hours';
+  label: string;
+  desc: string;
+  def: number[];
+}
+
+interface DurationField {
+  key: string;
+  /** 时长字符串：上游接受 30s / 10m / 2h 等 */
+  kind: 'duration';
+  label: string;
+  desc: string;
+  def: string;
+}
+
+type Field = BoolField | NumField | HoursField | DurationField;
+
+/** 时长格式校验：数字 + 单位（s/m/h/d） */
+const DURATION_RE = /^\d+\s*(s|m|h|d)$/i;
+
+/** 把时刻数组格式化为可读文本，如 [9,21] -> "9, 21" */
+function hoursToText(v: unknown): string {
+  if (Array.isArray(v)) {
+    return v
+      .filter((x): x is number => typeof x === 'number')
+      .sort((a, b) => a - b)
+      .join(', ');
+  }
+  return '';
+}
+
+/** 解析用户输入的时刻列表：返回 {ok, hours?, error?} */
+function parseHours(text: string): {ok: boolean; hours: number[]; error?: string} {
+  const parts = text.split(/[,，\s]+/).filter(Boolean);
+  if (!parts.length) return {ok: false, hours: [], error: '请至少填一个时刻'};
+  const out: number[] = [];
+  for (const p of parts) {
+    const n = Number(p);
+    if (!Number.isInteger(n) || n < 0 || n > 23) {
+      return {ok: false, hours: [], error: `「${p}」不是 0-23 的整点`};
+    }
+    if (!out.includes(n)) out.push(n);
+  }
+  return {ok: true, hours: out.sort((a, b) => a - b)};
+}
 
 const SCHEDULE_FIELDS: Field[] = [
   {
     key: 'checkin_enabled',
     kind: 'bool',
     label: '自动签到',
-    desc: '每天自动领取免费额度，保持账号可用',
+    desc: '每天自动领取免费额度；签到时的余额查询还能解冻被冷却的账号',
     def: true,
   },
   {
     key: 'checkin_hours',
-    kind: 'num',
-    label: '签到检查间隔',
-    desc: '每隔多久检查一次是否已签到；已签到会自动跳过',
-    unit: '小时',
-    min: 1,
-    max: 168,
-    def: 6,
+    kind: 'hours',
+    label: '签到时刻',
+    desc: '在哪些整点执行签到（0-23，可多个）。签到时同时刷新余额并解冻冷却账号',
+    def: [9, 21],
+  },
+  {
+    key: 'travel_enabled',
+    kind: 'bool',
+    label: '猫猫旅行',
+    desc: '自动推进「猫猫旅行」：领养 / 派出 / 领取到站奖励，可获得积分',
+    def: true,
+  },
+  {
+    key: 'travel_hours',
+    kind: 'hours',
+    label: '旅行时刻',
+    desc: '在哪些整点推进旅行（0-23，可多个）。默认两趟闭环：早上领奖并派出，晚上领当日奖励',
+    def: [9, 21],
+  },
+  {
+    key: 'activity_enabled',
+    kind: 'bool',
+    label: '活跃上报',
+    desc: '每日上报一次对话活跃，点亮连续登录并解锁领养前置任务（领猫需要）',
+    def: true,
+  },
+  {
+    key: 'activity_hours',
+    kind: 'hours',
+    label: '上报时刻',
+    desc: '在哪些整点上报（0-23，可多个）。每号每天一次即可，重复上报无额外收益',
+    def: [10],
   },
   {
     key: 'keepalive_enabled',
@@ -103,13 +177,27 @@ const SCHEDULE_FIELDS: Field[] = [
   },
   {
     key: 'keepalive_hours',
-    kind: 'num',
-    label: '保活间隔',
-    desc: '每隔多久刷新一次令牌',
-    unit: '小时',
-    min: 1,
-    max: 72,
-    def: 1,
+    kind: 'hours',
+    label: '保活时刻',
+    desc: '在哪些整点刷新令牌（0-23，可多个）',
+    def: [22],
+  },
+];
+
+const COOLDOWN_FIELDS: Field[] = [
+  {
+    key: 'soft_rate',
+    kind: 'duration',
+    label: '软限流冷却基数',
+    desc: '被腾讯限流后，账号冷却多久。数值越大越保守（格式如 600s / 10m / 1h）',
+    def: '600s',
+  },
+  {
+    key: 'soft_rate_max',
+    kind: 'duration',
+    label: '冷却退避上限',
+    desc: '连续触发限流会逐次延长冷却，这是延长后的封顶值（格式如 2h）',
+    def: '2h',
   },
 ];
 
@@ -118,9 +206,9 @@ const POOL_FIELDS: Field[] = [
     key: 'max_in_flight',
     kind: 'num',
     label: '单账号最大并发',
-    desc: '一个账号同时处理几个请求。调大能提高吞吐，但更容易触发腾讯限流',
+    desc: '一个账号同时处理几个请求。调大能提高吞吐，但更容易触发腾讯限流（0 = 不限制）',
     unit: '个',
-    min: 1,
+    min: 0,
     max: 32,
     def: 3,
   },
@@ -132,27 +220,106 @@ const POOL_FIELDS: Field[] = [
     unit: '次',
     min: 1,
     max: 100,
-    def: 5,
+    def: 3,
   },
   {
     key: 'breaker_cooldown',
+    kind: 'duration',
+    label: '熔断基础冷却',
+    desc: '被熔断的账号先等待多久（格式如 30m / 1h）',
+    def: '30m',
+  },
+  {
+    key: 'breaker_cooldown_max',
+    kind: 'duration',
+    label: '熔断冷却上限',
+    desc: '反复熔断会指数退避延长，这是封顶值（格式如 6h）',
+    def: '6h',
+  },
+  {
+    key: 'idle_weight_per_hour',
     kind: 'num',
-    label: '熔断后冷却时间',
-    desc: '被暂停的账号，等待多久后自动恢复使用',
-    unit: '秒',
-    min: 10,
-    max: 3600,
-    def: 60,
+    label: '闲置补偿 / 小时',
+    desc: '账号每闲置 1 小时增加一点调度权重，让久未使用的账号优先被选中',
+    min: 0,
+    max: 10,
+    step: 0.1,
+    def: 0.5,
+  },
+  {
+    key: 'idle_weight_max',
+    kind: 'num',
+    label: '闲置补偿上限',
+    desc: '闲置加成的封顶值，避免某个账号权重无限增大',
+    min: 0,
+    max: 100,
+    step: 0.5,
+    def: 5,
   },
 ];
 
-type Group = 'schedule' | 'pool';
+const FEATURES_FIELDS: Field[] = [
+  {
+    key: 'sanitize_blacklist_fingerprints',
+    kind: 'bool',
+    label: '出站请求指纹脱敏',
+    desc: '对发往上游的请求做轻量脱敏，降低被判定异常的概率。除非在排查问题，否则建议保持开启',
+    def: true,
+  },
+];
+
+const SESSION_FIELDS: Field[] = [
+  {
+    key: 'enabled',
+    kind: 'bool',
+    label: '会话粘性',
+    desc: '同一会话的连续请求尽量路由到同一账号，多轮对话更连贯（多实例部署时依赖 Redis）',
+    def: true,
+  },
+  {
+    key: 'ttl',
+    kind: 'duration',
+    label: '会话保持时长',
+    desc: '一次会话多久没活动就解除绑定（格式如 30m / 1h）',
+    def: '30m',
+  },
+  {
+    key: 'gc_interval',
+    kind: 'duration',
+    label: '会话清理周期',
+    desc: '后台多久清理一次过期会话（格式如 5m / 10m）',
+    def: '5m',
+  },
+];
+
+type Group = 'schedule' | 'cooldown' | 'pool' | 'features' | 'session';
+
+/** 高级 JSON 编辑器里可直写的上游配置段（session 分组的段名是 session_sticky） */
+type WireSection = 'schedule' | 'cooldown' | 'pool' | 'features' | 'session_sticky';
 const GROUPS: {id: Group; title: string; desc: string; fields: Field[]}[] = [
   {
     id: 'schedule',
-    title: '自动签到与保活',
-    desc: '控制账号每天自动领额度、定期刷新令牌',
+    title: '定时任务',
+    desc: '四类任务各自独立排程：签到 / 猫猫旅行 / 活跃上报 / 保活。可分别开关并设置执行时刻',
     fields: SCHEDULE_FIELDS,
+  },
+  {
+    id: 'cooldown',
+    title: '限流与冷却',
+    desc: '被腾讯限流后的冷却策略',
+    fields: COOLDOWN_FIELDS,
+  },
+  {
+    id: 'features',
+    title: '功能开关',
+    desc: '上游的进阶行为开关',
+    fields: FEATURES_FIELDS,
+  },
+  {
+    id: 'session',
+    title: '会话粘性',
+    desc: '多轮对话的路由粘性与清理策略',
+    fields: SESSION_FIELDS,
   },
   {
     id: 'pool',
@@ -162,25 +329,66 @@ const GROUPS: {id: Group; title: string; desc: string; fields: Field[]}[] = [
   },
 ];
 
-function defaultValues(fields: Field[]): Record<string, boolean | number> {
-  const out: Record<string, boolean | number> = {};
-  for (const f of fields) out[f.key] = f.def;
+type FieldValue = boolean | number | string;
+
+function defaultValues(fields: Field[]): Record<string, FieldValue> {
+  const out: Record<string, FieldValue> = {};
+  for (const f of fields) out[f.key] = f.kind === 'hours' ? hoursToText(f.def) : f.def;
   return out;
 }
 
 /** 从配置中取出某个分组的已知字段（缺失或类型不符时回退到默认值） */
-function pickValues(fields: Field[], source: Record<string, unknown> | undefined): Record<string, boolean | number> {
-  const out: Record<string, boolean | number> = {};
+function pickValues(fields: Field[], source: Record<string, unknown> | undefined): Record<string, FieldValue> {
+  const out: Record<string, FieldValue> = {};
   for (const f of fields) {
     const raw = source?.[f.key];
-    if (f.kind === 'bool') {
-      out[f.key] = typeof raw === 'boolean' ? raw : f.def;
-    } else {
-      const n = typeof raw === 'number' ? raw : Number(raw);
-      out[f.key] = Number.isFinite(n) ? n : f.def;
+    switch (f.kind) {
+      case 'bool':
+        out[f.key] = typeof raw === 'boolean' ? raw : f.def;
+        break;
+      case 'num': {
+        const n = typeof raw === 'number' ? raw : Number(raw);
+        out[f.key] = Number.isFinite(n) ? n : f.def;
+        break;
+      }
+      case 'hours':
+        // 上游为 []int；表单里用 "9, 21" 这样的字符串承载，保存时再解析回数组
+        out[f.key] = Array.isArray(raw) ? hoursToText(raw) : hoursToText(f.def);
+        break;
+      case 'duration':
+        out[f.key] = typeof raw === 'string' && DURATION_RE.test(raw) ? raw : f.def;
+        break;
     }
   }
   return out;
+}
+
+/** 文本类字段的即时校验（用于输入框下方提示，不阻塞输入） */
+function fieldError(f: Field, raw: FieldValue): string | undefined {
+  if (f.kind === 'hours') {
+    const r = parseHours(String(raw));
+    return r.ok ? undefined : r.error;
+  }
+  if (f.kind === 'duration') {
+    return DURATION_RE.test(String(raw).trim()) ? undefined : '格式如 30s / 10m / 2h / 1d';
+  }
+  return undefined;
+}
+
+/** 把表单值转换成要写入上游 config.json 的值 */
+function toWire(
+  f: Field,
+  raw: FieldValue,
+): {ok: true; value: boolean | number | number[] | string} | {ok: false; error: string} {
+  if (f.kind === 'hours') {
+    const r = parseHours(String(raw));
+    return r.ok ? {ok: true, value: r.hours} : {ok: false, error: r.error ?? '时刻格式有误'};
+  }
+  if (f.kind === 'duration') {
+    const t = String(raw).trim();
+    return DURATION_RE.test(t) ? {ok: true, value: t} : {ok: false, error: '格式如 30s / 10m / 2h / 1d'};
+  }
+  return {ok: true, value: raw};
 }
 
 const FIELD_BY_KEY: Record<string, Field> = {};
@@ -192,19 +400,28 @@ export default function SettingsPage() {
   const [models, setModels] = useState<ModelInfo[]>([]);
 
   /** 可视化表单状态 */
-  const [form, setForm] = useState<Record<Group, Record<string, boolean | number>>>({
+  const [form, setForm] = useState<Record<Group, Record<string, FieldValue>>>({
     schedule: defaultValues(SCHEDULE_FIELDS),
+    cooldown: defaultValues(COOLDOWN_FIELDS),
     pool: defaultValues(POOL_FIELDS),
+    features: defaultValues(FEATURES_FIELDS),
+    session: defaultValues(SESSION_FIELDS),
   });
   /** 加载时的原始值，用于只提交改动过的项 */
-  const original = useRef<Record<Group, Record<string, boolean | number>>>({
+  const original = useRef<Record<Group, Record<string, FieldValue>>>({
     schedule: defaultValues(SCHEDULE_FIELDS),
+    cooldown: defaultValues(COOLDOWN_FIELDS),
     pool: defaultValues(POOL_FIELDS),
+    features: defaultValues(FEATURES_FIELDS),
+    session: defaultValues(SESSION_FIELDS),
   });
   /** 高级模式（直接编辑 JSON） */
   const [advanced, setAdvanced] = useState(false);
   const [schedText, setSchedText] = useState('');
+  const [coolText, setCoolText] = useState('');
   const [poolText, setPoolText] = useState('');
+  const [featText, setFeatText] = useState('');
+  const [sessText, setSessText] = useState('');
 
   const [modelMap, setModelMap] = useState<Record<string, string>>({});
   const [mapAlias, setMapAlias] = useState('');
@@ -229,15 +446,24 @@ export default function SettingsPage() {
       if (v.available !== false) {
         const picked = {
           schedule: pickValues(SCHEDULE_FIELDS, v.schedule),
+          cooldown: pickValues(COOLDOWN_FIELDS, v.cooldown),
           pool: pickValues(POOL_FIELDS, v.pool),
+          features: pickValues(FEATURES_FIELDS, v.features),
+          session: pickValues(SESSION_FIELDS, v.session_sticky),
         };
         setForm(picked);
         original.current = {
           schedule: {...picked.schedule},
+          cooldown: {...picked.cooldown},
           pool: {...picked.pool},
+          features: {...picked.features},
+          session: {...picked.session},
         };
         setSchedText(JSON.stringify(v.schedule ?? {}, null, 2));
+        setCoolText(JSON.stringify(v.cooldown ?? {}, null, 2));
         setPoolText(JSON.stringify(v.pool ?? {}, null, 2));
+        setFeatText(JSON.stringify(v.features ?? {}, null, 2));
+        setSessText(JSON.stringify(v.session_sticky ?? {}, null, 2));
         // url 可回显；token 不回显明文，留空表示不修改
         setUpstashForm({url: v.upstash?.url || '', token: ''});
       }
@@ -289,7 +515,7 @@ export default function SettingsPage() {
     }
   }
 
-  function setField(group: Group, key: string, value: boolean | number) {
+  function setField(group: Group, key: string, value: FieldValue) {
     setForm((prev) => ({...prev, [group]: {...prev[group], [key]: value}}));
   }
 
@@ -304,9 +530,17 @@ export default function SettingsPage() {
   async function saveGroup(group: Group) {
     const cur = form[group];
     const org = original.current[group];
-    const patch: Record<string, boolean | number> = {};
+    const patch: Record<string, boolean | number | number[] | string> = {};
     for (const k of Object.keys(cur)) {
-      if (cur[k] !== org[k]) patch[k] = cur[k];
+      if (cur[k] === org[k]) continue;
+      const f = FIELD_BY_KEY[k];
+      if (!f) continue;
+      const w = toWire(f, cur[k]);
+      if (!w.ok) {
+        notify.err(`「${f.label}」填写有误`, w.error);
+        return;
+      }
+      patch[k] = w.value;
     }
     if (!Object.keys(patch).length) {
       notify.info('没有需要保存的改动');
@@ -328,8 +562,8 @@ export default function SettingsPage() {
     setForm((prev) => ({...prev, [group]: {...original.current[group]}}));
   }
 
-  /** 高级模式：直接保存 JSON */
-  async function saveJson(field: Group, text: string) {
+  /** 高级模式：直接保存 JSON（字段名即上游 config.json 的段名） */
+  async function saveJson(field: WireSection, text: string) {
     let parsed: unknown;
     try {
       parsed = JSON.parse(text);
@@ -338,7 +572,7 @@ export default function SettingsPage() {
       return;
     }
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      notify.err('需要是一个 JSON 对象，例如 { "checkin_hours": 6 }');
+      notify.err('需要是一个 JSON 对象，例如 { "checkin_hours": [9, 21] }');
       return;
     }
     setBusy(true);
@@ -517,12 +751,13 @@ export default function SettingsPage() {
                           disabled={!isAdmin || !upstreamReady}
                           onCheckedChange={(v) => setField(g.id, f.key, v)}
                         />
-                      ) : (
+                      ) : f.kind === 'num' ? (
                         <div className="flex shrink-0 items-center gap-1.5">
                           <Input
                             type="number"
                             min={f.min}
                             max={f.max}
+                            step={f.step ?? 1}
                             value={String(form[g.id][f.key] ?? f.def)}
                             disabled={!isAdmin || !upstreamReady}
                             onChange={(e) => {
@@ -534,6 +769,31 @@ export default function SettingsPage() {
                           {f.unit && (
                             <span className="w-8 text-[11px] text-muted-foreground">{f.unit}</span>
                           )}
+                        </div>
+                      ) : (
+                        <div className="flex shrink-0 flex-col items-end gap-1">
+                          <Input
+                            value={String(form[g.id][f.key] ?? '')}
+                            disabled={!isAdmin || !upstreamReady}
+                            placeholder={f.kind === 'hours' ? '9, 21' : '600s'}
+                            onChange={(e) => setField(g.id, f.key, e.target.value)}
+                            className={
+                              'h-8 bg-background text-right tabular-nums ' +
+                              (f.kind === 'hours' ? 'w-32' : 'w-24') +
+                              (fieldError(f, form[g.id][f.key]) ? ' border-destructive' : '')
+                            }
+                          />
+                          <span className="text-[10px] leading-3 text-muted-foreground">
+                            {fieldError(f, form[g.id][f.key]) ? (
+                              <span className="text-destructive">
+                                {fieldError(f, form[g.id][f.key])}
+                              </span>
+                            ) : f.kind === 'hours' ? (
+                              '多个整点用逗号分隔（0-23）'
+                            ) : (
+                              '如 600s / 30m / 2h'
+                            )}
+                          </span>
                         </div>
                       )}
                     </div>
@@ -689,7 +949,7 @@ export default function SettingsPage() {
             </button>
 
             {advanced && (
-              <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <div className="font-mono text-[11px] text-muted-foreground">schedule</div>
@@ -710,6 +970,75 @@ export default function SettingsPage() {
                     value={upstreamReady ? schedText : ''}
                     placeholder={upstreamReady ? undefined : '未读取到上游配置，无法编辑'}
                     onChange={(e) => setSchedText(e.target.value)}
+                    className="bg-background font-mono text-xs"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="font-mono text-[11px] text-muted-foreground">cooldown</div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 rounded-full text-[11px]"
+                      disabled={!isAdmin || busy || !upstreamReady}
+                      onClick={() => saveJson('cooldown', coolText)}
+                    >
+                      保存
+                    </Button>
+                  </div>
+                  <Textarea
+                    rows={8}
+                    spellCheck={false}
+                    disabled={!isAdmin || !upstreamReady}
+                    value={upstreamReady ? coolText : ''}
+                    placeholder={upstreamReady ? undefined : '未读取到上游配置，无法编辑'}
+                    onChange={(e) => setCoolText(e.target.value)}
+                    className="bg-background font-mono text-xs"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="font-mono text-[11px] text-muted-foreground">features</div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 rounded-full text-[11px]"
+                      disabled={!isAdmin || busy || !upstreamReady}
+                      onClick={() => saveJson('features', featText)}
+                    >
+                      保存
+                    </Button>
+                  </div>
+                  <Textarea
+                    rows={8}
+                    spellCheck={false}
+                    disabled={!isAdmin || !upstreamReady}
+                    value={upstreamReady ? featText : ''}
+                    placeholder={upstreamReady ? undefined : '未读取到上游配置，无法编辑'}
+                    onChange={(e) => setFeatText(e.target.value)}
+                    className="bg-background font-mono text-xs"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="font-mono text-[11px] text-muted-foreground">session_sticky</div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 rounded-full text-[11px]"
+                      disabled={!isAdmin || busy || !upstreamReady}
+                      onClick={() => saveJson('session_sticky', sessText)}
+                    >
+                      保存
+                    </Button>
+                  </div>
+                  <Textarea
+                    rows={8}
+                    spellCheck={false}
+                    disabled={!isAdmin || !upstreamReady}
+                    value={upstreamReady ? sessText : ''}
+                    placeholder={upstreamReady ? undefined : '未读取到上游配置，无法编辑'}
+                    onChange={(e) => setSessText(e.target.value)}
                     className="bg-background font-mono text-xs"
                   />
                 </div>
