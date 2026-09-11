@@ -1,7 +1,7 @@
 'use client';
 
 import {useCallback, useEffect, useState} from 'react';
-import {Settings as SettingsIcon, RefreshCw, Plus, Trash2, Save, Users, Server, Shuffle, Info} from 'lucide-react';
+import {Settings as SettingsIcon, RefreshCw, Plus, Trash2, Save, Users, Server, Shuffle, Info, TriangleAlert} from 'lucide-react';
 import {toast} from 'sonner';
 import {settingsApi, upstreamApi, errText} from '@/lib/api';
 import type {ModelInfo, UpstreamConfig, UserItem} from '@/lib/types';
@@ -53,8 +53,10 @@ export default function SettingsPage() {
     ]);
     if (c.status === 'fulfilled') {
       setCfg(c.value);
-      setSchedText(JSON.stringify(c.value.schedule ?? {}, null, 2));
-      setPoolText(JSON.stringify(c.value.pool ?? {}, null, 2));
+      if (c.value.available !== false) {
+        setSchedText(JSON.stringify(c.value.schedule ?? {}, null, 2));
+        setPoolText(JSON.stringify(c.value.pool ?? {}, null, 2));
+      }
     }
     if (m.status === 'fulfilled') setModels(m.value);
     if (mm.status === 'fulfilled') setModelMap(mm.value);
@@ -101,6 +103,9 @@ export default function SettingsPage() {
     }
   }
 
+  const upstreamReady = !!cfg && cfg.available !== false;
+  const upstreamError = cfg && cfg.available === false ? cfg.error : undefined;
+
   return (
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
@@ -124,6 +129,20 @@ export default function SettingsPage() {
 
         {/* 上游配置 */}
         <TabsContent value="upstream" className="mt-4 space-y-4">
+          {upstreamError && (
+            <div className="flex items-start gap-2.5 rounded-[20px] border border-amber-500/30 bg-amber-500/10 p-4">
+              <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+              <div className="space-y-1">
+                <div className="text-xs font-medium">无法读取上游配置</div>
+                <div className="text-[11px] text-muted-foreground">{upstreamError}</div>
+                <div className="text-[11px] text-muted-foreground">
+                  请确认 workbuddy2api 已部署且路径正确（环境变量 <code className="font-mono">WB_UPSTREAM_CONFIG</code>）。
+                  在读取成功前，下方配置项已锁定，避免误写空配置覆盖真实文件。
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <div className="rounded-[20px] bg-muted p-4">
               <div className="mb-3 text-sm font-medium">基础信息</div>
@@ -132,12 +151,21 @@ export default function SettingsPage() {
                   ['监听地址', cfg?.listen || '—'],
                   ['API Key', cfg?.api_key_masked || '—'],
                   ['授权目录', cfg?.auth_dir || '—'],
+                  ['配置文件', cfg?.config_path || '—'],
                 ] as [string, string][]).map(([k, v]) => (
                   <div key={k} className="flex items-center justify-between gap-3">
-                    <span className="text-muted-foreground">{k}</span>
-                    <span className="truncate font-mono">{v}</span>
+                    <span className="shrink-0 text-muted-foreground">{k}</span>
+                    <span className="truncate font-mono" title={v}>{v}</span>
                   </div>
                 ))}
+                {cfg?.upstream_auth_dir && (
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="shrink-0 text-muted-foreground">上游声明目录</span>
+                    <span className="truncate font-mono text-amber-600 dark:text-amber-400" title={cfg.upstream_auth_dir}>
+                      {cfg.upstream_auth_dir}
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
             <div className="rounded-[20px] bg-muted p-4 lg:col-span-2">
@@ -150,7 +178,9 @@ export default function SettingsPage() {
                     </Badge>
                   ))
                 ) : (
-                  <span className="text-xs text-muted-foreground">未获取到模型列表</span>
+                  <span className="text-xs text-muted-foreground">
+                    {upstreamReady ? '未获取到模型列表' : '上游配置未就绪，暂无法获取模型'}
+                  </span>
                 )}
               </div>
             </div>
@@ -160,15 +190,22 @@ export default function SettingsPage() {
             <div className="rounded-[20px] bg-muted p-4">
               <div className="mb-3 flex items-center justify-between">
                 <div className="text-sm font-medium">schedule（签到 / 保活）</div>
-                <Button size="sm" variant="outline" className="rounded-full" disabled={!isAdmin || busy} onClick={saveSchedule}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="rounded-full"
+                  disabled={!isAdmin || busy || !upstreamReady}
+                  onClick={saveSchedule}
+                >
                   <Save className="h-3.5 w-3.5" />保存
                 </Button>
               </div>
               <Textarea
                 rows={9}
                 spellCheck={false}
-                disabled={!isAdmin}
-                value={schedText}
+                disabled={!isAdmin || !upstreamReady}
+                value={upstreamReady ? schedText : ''}
+                placeholder={upstreamReady ? undefined : '未读取到上游配置，无法编辑'}
                 onChange={(e) => setSchedText(e.target.value)}
                 className="bg-background font-mono text-xs"
               />
@@ -176,15 +213,22 @@ export default function SettingsPage() {
             <div className="rounded-[20px] bg-muted p-4">
               <div className="mb-3 flex items-center justify-between">
                 <div className="text-sm font-medium">pool（并发 / 熔断）</div>
-                <Button size="sm" variant="outline" className="rounded-full" disabled={!isAdmin || busy} onClick={savePool}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="rounded-full"
+                  disabled={!isAdmin || busy || !upstreamReady}
+                  onClick={savePool}
+                >
                   <Save className="h-3.5 w-3.5" />保存
                 </Button>
               </div>
               <Textarea
                 rows={9}
                 spellCheck={false}
-                disabled={!isAdmin}
-                value={poolText}
+                disabled={!isAdmin || !upstreamReady}
+                value={upstreamReady ? poolText : ''}
+                placeholder={upstreamReady ? undefined : '未读取到上游配置，无法编辑'}
                 onChange={(e) => setPoolText(e.target.value)}
                 className="bg-background font-mono text-xs"
               />

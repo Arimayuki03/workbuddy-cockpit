@@ -18,7 +18,12 @@ def get_upstream(user: dict = Depends(security.current_user)) -> dict:
 
 @router.post('/settings/upstream')
 def save_upstream(body: dict, user: dict = Depends(security.require_admin)) -> dict:
-    return wb2api.save_upstream_config(body)
+    try:
+        return wb2api.save_upstream_config(body)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # ── 模型别名映射 ─────────────────────────────────────────
