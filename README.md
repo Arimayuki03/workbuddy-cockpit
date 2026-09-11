@@ -366,7 +366,23 @@ workbuddy-manager/
 - 会话使用 HttpOnly + SameSite=Lax 签名 Cookie，生产环境自动启用 `Secure`
 - 同 IP 登录失败 5 次锁定 10 分钟
 - 所有文件操作做路径穿越校验
+- **真实 IP 取自反代覆盖写入的 `X-Real-IP`**（`X-Forwarded-For` 首段可伪造），
+  避免 IP 白/黑名单、每密钥 IP 限制与登录锁定被冒充绕过
+- 登录失败**按 IP + 用户名双维度锁定**，防单机与换 IP 的分布式爆破
+- 生产环境默认关闭 `/docs`、`/openapi.json`（`WB_ENABLE_DOCS=1` 开启）
+- 网关限制请求体大小（8 MiB）与每密钥调用频率（默认 120 次/分钟）
+- 已配置 CSP、`X-Frame-Options`、`X-Content-Type-Options` 等安全响应头
 - `users.json`、`data/*.db`、`.env`、账号授权文件均已在 `.gitignore` 中排除
+
+> 完整审查结论见 [安全审查报告](docs/SECURITY-AUDIT.md)（含已修复的高危问题与验证证据）。
+
+### 安全建议（部署后）
+
+1. **改掉初始密码**，不要沿用部署脚本中的默认值
+2. **务必经 HTTPS 访问**：7863 / 7864 建议只监听 `127.0.0.1`，由反向代理对外
+3. 如需前置 CDN，请把 `WB_TRUSTED_PROXY_HOPS` 设为 CDN + 反代的层数
+4. 发现问题请走[私密渠道](https://github.com/ithtelab/workbuddy-manager/security/advisories/new)，
+   **不要**公开提交 Issue
 
 > ⚠️ 公网暴露**必须**启用 HTTPS，否则会话 Cookie 与密码可被中间人窃取。
 > 建议再叠加 1Panel IP 白名单或 Cloudflare Access 加固。

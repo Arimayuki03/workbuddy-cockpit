@@ -113,20 +113,63 @@ def cookie_secure(request: Request) -> bool:
 
 
 # ── 登录防爆破 ───────────────────────────────────────────
-def login_blocked(ip: str) -> bool:
+# 按 IP 与按用户名双维度计数：
+#   - 按 IP：防单机爆破（配合修正后的真实 IP 解析才有效）
+#   - 按用户名：防「换 IP 打同一账号」的分布式爆破
+# 注意：两个字典都设有容量上限，避免被大量不同 IP/用户名撑爆内存。
+_fail: dict[str, list] = {}
+_user_fail: dict[str, list] = {}
+MAX_FAILS = 5
+LOCK_SECONDS = 600
+MAX_TRACKED = 5000
+
+
+def _prune(store: dict[str, list]) -> None:
+    """超限时清掉已过期条目；仍超限则整体清空（宁可放宽，不可被撑爆）。"""
+    if len(store) <= MAX_TRACKED:
+        return
+    now = time.time()
+    for k in [k for k, v in store.items() if (now - v[1]) >= LOCK_SECONDS]:
+        store.pop(k, None)
+    if len(store) > MAX_TRACKED:
+        store.clear()
+
+
+def login_blocked(ip: str, username: str | None = None) -> bool:
+    now = time.time()
     cnt, first = _fail.get(ip, [0, 0.0])
-    return cnt >= MAX_FAILS and (time.time() - first) < LOCK_SECONDS
+    if cnt >= MAX_FAILS and (now - first) < LOCK_SECONDS:
+        return True
+    if username:
+        key = username.lower()
+        ucnt, ufirst = _user_fail.get(key, [0, 0.0])
+        if ucnt >= MAX_FAILS and (now - ufirst) < LOCK_SECONDS:
+            return True
+    return False
 
 
-def record_fail(ip: str) -> None:
-    cnt, first = _fail.get(ip, [0, time.time()])
-    if (time.time() - first) >= LOCK_SECONDS:
-        cnt, first = 0, time.time()
+def record_fail(ip: str, username: str | None = None) -> None:
+    now = time.time()
+    cnt, first = _fail.get(ip, [0, now])
+    if (now - first) >= LOCK_SECONDS:
+        cnt, first = 0, now
     _fail[ip] = [cnt + 1, first]
 
+    if username:
+        key = username.lower()
+        ucnt, ufirst = _user_fail.get(key, [0, now])
+        if (now - ufirst) >= LOCK_SECONDS:
+            ucnt, ufirst = 0, now
+        _user_fail[key] = [ucnt + 1, ufirst]
 
-def clear_fail(ip: str) -> None:
+    _prune(_fail)
+    _prune(_user_fail)
+
+
+def clear_fail(ip: str, username: str | None = None) -> None:
     _fail.pop(ip, None)
+    if username:
+        _user_fail.pop(username.lower(), None)
 
 
 # ── FastAPI 依赖 ─────────────────────────────────────────
