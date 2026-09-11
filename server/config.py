@@ -91,10 +91,16 @@ def http_client(timeout, *, connect: float | None = None):
     """统一的 httpx 客户端：默认忽略系统/环境代理，避免内网请求被代理劫持。
 
     需要走代理时显式设置 WB_HTTP_PROXY。
+
+    timeout 可以传数字，也可以传已构造好的 httpx.Timeout。
+    注意：httpx 不允许「Timeout 实例 + connect 关键字」同时传，
+    因此传入实例时忽略 connect，避免 AssertionError。
     """
     import httpx
 
-    if connect is not None:
+    if isinstance(timeout, httpx.Timeout):
+        tmo = timeout
+    elif connect is not None:
         tmo = httpx.Timeout(timeout, connect=connect)
     else:
         tmo = httpx.Timeout(timeout)

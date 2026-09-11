@@ -6,8 +6,6 @@ import json
 import time
 from pathlib import Path
 
-import httpx
-
 from .. import config
 
 
@@ -64,6 +62,12 @@ def delete_auth_account(filename: str) -> bool:
 ASYNC_HEADERS = {'Content-Type': 'application/json'}
 
 
+def _err_text(exc: Exception) -> str:
+    """异常文本可能为空（如 AssertionError），补上类型名便于排查。"""
+    detail = str(exc).strip()
+    return f'{type(exc).__name__}: {detail}' if detail else type(exc).__name__
+
+
 def _auth_headers() -> dict:
     key = config.upstream_api_key()
     return {'Authorization': f'Bearer {key}'} if key else {}
@@ -71,9 +75,8 @@ def _auth_headers() -> dict:
 
 async def get_status() -> dict:
     # 连接超时短一些：上游未运行时快速失败，避免拖慢管理端页面
-    timeout = httpx.Timeout(10, connect=3)
     try:
-        async with config.http_client(timeout, connect=3) as client:
+        async with config.http_client(10, connect=3) as client:
             resp = await client.get(f'{config.WB2API_BASE}/status', headers=_auth_headers())
         if resp.status_code >= 400:
             return {'connected': False, 'error': f'上游返回 {resp.status_code}'}
@@ -81,20 +84,19 @@ async def get_status() -> dict:
         data['connected'] = True
         return data
     except Exception as exc:  # noqa: BLE001
-        return {'connected': False, 'error': str(exc)}
+        return {'connected': False, 'error': _err_text(exc)}
 
 
 async def get_models() -> tuple[bool, list | dict]:
-    timeout = httpx.Timeout(15, connect=3)
     try:
-        async with config.http_client(timeout, connect=3) as client:
+        async with config.http_client(15, connect=3) as client:
             resp = await client.get(f'{config.WB2API_BASE}/v1/models', headers=_auth_headers())
         if resp.status_code >= 400:
             return False, {'error': f'上游返回 {resp.status_code}'}
         body = resp.json()
         return True, body.get('data', body)
     except Exception as exc:  # noqa: BLE001
-        return False, {'error': str(exc)}
+        return False, {'error': _err_text(exc)}
 
 
 async def restart_container() -> tuple[bool, str]:
