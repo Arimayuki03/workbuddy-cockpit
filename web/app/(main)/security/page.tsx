@@ -1,0 +1,293 @@
+'use client';
+
+import {useCallback, useEffect, useState} from 'react';
+import {ShieldCheck, Plus, Trash2, RefreshCw, Ban, CircleCheck, Network} from 'lucide-react';
+import {toast} from 'sonner';
+import {securityApi, errText} from '@/lib/api';
+import type {IpAccessLog, IpRule, SecurityConfig} from '@/lib/types';
+import {fmtDateTime} from '@/lib/format';
+import {PageHeader} from '@/components/common/layout/PageHeader';
+import {EmptyState} from '@/components/common/layout/EmptyState';
+import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
+import {useAuth} from '@/lib/auth-context';
+import {Button} from '@/components/ui/button';
+import {Badge} from '@/components/ui/badge';
+import {Input} from '@/components/ui/input';
+import {Label} from '@/components/ui/label';
+import {Switch} from '@/components/ui/switch';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+
+export default function SecurityPage() {
+  const {isAdmin} = useAuth();
+  const [config, setConfig] = useState<SecurityConfig>({enabled: false, mode: 'blacklist'});
+  const [rules, setRules] = useState<IpRule[]>([]);
+  const [logs, setLogs] = useState<IpAccessLog[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const [newKind, setNewKind] = useState<'allow' | 'deny'>('deny');
+  const [newCidr, setNewCidr] = useState('');
+  const [newNote, setNewNote] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const [c, r, l] = await Promise.allSettled([
+      securityApi.config(),
+      securityApi.rules(),
+      securityApi.logs(200),
+    ]);
+    if (c.status === 'fulfilled') setConfig(c.value);
+    if (r.status === 'fulfilled') setRules(r.value);
+    if (l.status === 'fulfilled') setLogs(l.value);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function saveConfig(next: SecurityConfig) {
+    setConfig(next);
+    try {
+      await securityApi.saveConfig(next);
+      toast.success('安全配置已保存');
+    } catch (e) {
+      toast.error(errText(e));
+    }
+  }
+
+  async function addRule() {
+    if (!newCidr.trim()) {
+      toast.error('请输入 IP 或 CIDR');
+      return;
+    }
+    setBusy(true);
+    try {
+      await securityApi.addRule({kind: newKind, cidr: newCidr.trim(), note: newNote.trim()});
+      toast.success('规则已添加');
+      setNewCidr('');
+      setNewNote('');
+      load();
+    } catch (e) {
+      toast.error(errText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-4 md:gap-6">
+      <PageHeader
+        title="安全与 IP 管控"
+        description="入站 IP 白/黑名单、访问审计与全局拦截开关"
+        actions={
+          <Button variant="outline" size="sm" className="rounded-full" onClick={load} disabled={loading}>
+            <RefreshCw className={loading ? 'animate-spin' : ''} />
+            刷新
+          </Button>
+        }
+      />
+
+      <section className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <div className="rounded-[20px] bg-muted p-4 lg:col-span-1">
+          <div className="mb-3 flex items-center gap-2 text-sm font-medium">
+            <ShieldCheck className="h-4 w-4" />
+            拦截策略
+          </div>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-xs font-medium">启用 IP 管控</div>
+                <div className="text-[11px] text-muted-foreground">关闭时放行所有来源 IP</div>
+              </div>
+              <Switch
+                checked={config.enabled}
+                disabled={!isAdmin}
+                onCheckedChange={(v) => saveConfig({...config, enabled: v})}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-[11px] text-muted-foreground">模式</Label>
+              <Select
+                value={config.mode}
+                disabled={!isAdmin}
+                onValueChange={(v) => saveConfig({...config, mode: v as SecurityConfig['mode']})}
+              >
+                <SelectTrigger className="bg-background"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="blacklist">黑名单（仅拒绝命中项，默认放行）</SelectItem>
+                  <SelectItem value="whitelist">白名单（仅放行命中项，默认拒绝）</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-[20px] bg-muted p-4 lg:col-span-2">
+          <div className="mb-3 flex items-center gap-2 text-sm font-medium">
+            <Network className="h-4 w-4" />
+            添加规则
+          </div>
+          <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-4">
+            <div className="space-y-1.5">
+              <Label className="text-[11px] text-muted-foreground">类型</Label>
+              <Select value={newKind} onValueChange={(v) => setNewKind(v as 'allow' | 'deny')} disabled={!isAdmin}>
+                <SelectTrigger className="bg-background"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="deny">拒绝</SelectItem>
+                  <SelectItem value="allow">放行</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-[11px] text-muted-foreground">IP / CIDR</Label>
+              <Input value={newCidr} onChange={(e) => setNewCidr(e.target.value)} placeholder="1.2.3.4 或 10.0.0.0/8" className="bg-background" disabled={!isAdmin} />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-[11px] text-muted-foreground">备注</Label>
+              <Input value={newNote} onChange={(e) => setNewNote(e.target.value)} placeholder="可选" className="bg-background" disabled={!isAdmin} />
+            </div>
+            <Button className="rounded-full" onClick={addRule} disabled={!isAdmin || busy}>
+              <Plus />
+              添加
+            </Button>
+          </div>
+
+          <div className="mt-4 overflow-hidden rounded-2xl bg-background/60">
+            <Table>
+              <TableHeader>
+                <TableRow className="border-b border-border/60 hover:bg-transparent">
+                  <TableHead className="pl-3 text-[11px] text-muted-foreground">类型</TableHead>
+                  <TableHead className="text-[11px] text-muted-foreground">IP / CIDR</TableHead>
+                  <TableHead className="text-[11px] text-muted-foreground">备注</TableHead>
+                  <TableHead className="text-[11px] text-muted-foreground">创建时间</TableHead>
+                  {isAdmin && <TableHead className="pr-3 text-right text-[11px] text-muted-foreground">操作</TableHead>}
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {rules.map((r) => (
+                  <TableRow key={r.id} className="border-b border-border/40">
+                    <TableCell className="pl-3">
+                      {r.kind === 'allow' ? (
+                        <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">
+                          <CircleCheck className="h-3 w-3" />放行
+                        </Badge>
+                      ) : (
+                        <Badge variant="destructive" className="rounded-full">
+                          <Ban className="h-3 w-3" />拒绝
+                        </Badge>
+                      )}
+                    </TableCell>
+                    <TableCell className="font-mono text-xs">{r.cidr}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{r.note || '—'}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{fmtDateTime(r.created_at)}</TableCell>
+                    {isAdmin && (
+                      <TableCell className="pr-3 text-right">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 rounded-md text-red-500 hover:text-red-600"
+                          onClick={async () => {
+                            try {
+                              await securityApi.removeRule(r.id);
+                              toast.success('已删除');
+                              load();
+                            } catch (e) {
+                              toast.error(errText(e));
+                            }
+                          }}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </TableCell>
+                    )}
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+            {!rules.length && (
+              <div className="py-8 text-center text-xs text-muted-foreground">暂无规则</div>
+            )}
+          </div>
+        </div>
+      </section>
+
+      <section className="overflow-hidden rounded-[20px] bg-muted">
+        <div className="flex items-center justify-between px-4 py-3">
+          <div className="text-sm font-medium">IP 访问日志</div>
+          {isAdmin && (
+            <ConfirmDialog
+              title="清空访问日志？"
+              description="将删除全部 IP 访问审计记录。"
+              confirmText="清空"
+              destructive
+              onConfirm={async () => {
+                await securityApi.logsClear();
+                toast.success('已清空');
+                load();
+              }}
+              trigger={
+                <Button variant="outline" size="sm" className="rounded-full text-red-500">
+                  <Trash2 />
+                  清空
+                </Button>
+              }
+            />
+          )}
+        </div>
+        <Table>
+          <TableHeader>
+            <TableRow className="border-b border-border/60 hover:bg-transparent">
+              <TableHead className="pl-4 text-[11px] text-muted-foreground">时间</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">IP</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">路径</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">结果</TableHead>
+              <TableHead className="pr-4 text-[11px] text-muted-foreground">User-Agent</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {logs.map((l) => (
+              <TableRow key={l.id} className="border-b border-border/40">
+                <TableCell className="pl-4 text-xs text-muted-foreground">{fmtDateTime(l.ts)}</TableCell>
+                <TableCell className="font-mono text-xs">{l.ip}</TableCell>
+                <TableCell className="font-mono text-xs text-muted-foreground">{l.path}</TableCell>
+                <TableCell>
+                  {l.blocked ? (
+                    <Badge variant="destructive" className="rounded-full">已拦截</Badge>
+                  ) : (
+                    <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">放行</Badge>
+                  )}
+                </TableCell>
+                <TableCell className="max-w-[280px] truncate pr-4 text-[11px] text-muted-foreground">
+                  {l.ua || '—'}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+        {!logs.length && !loading && (
+          <EmptyState
+            icon={ShieldCheck}
+            title="暂无访问记录"
+            description="网关收到请求后会在此留痕"
+            className="flex flex-col items-center justify-center py-14 text-center"
+          />
+        )}
+      </section>
+    </div>
+  );
+}

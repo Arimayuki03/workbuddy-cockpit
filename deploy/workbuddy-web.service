@@ -1,0 +1,27 @@
+[Unit]
+Description=WorkBuddy Manager (账号池管理 + OpenAI 兼容反代网关)
+Documentation=https://github.com/
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/workbuddy-manager
+Environment=WB_MANAGER_HOST=0.0.0.0
+Environment=WB_MANAGER_PORT=7864
+Environment=WB2API_BASE=http://127.0.0.1:7863
+Environment=WB2API_CONTAINER=workbuddy2api
+Environment=WB_AUTH_DIR=/opt/workbuddy2api/auths
+Environment=WB_UPSTREAM_CONFIG=/opt/workbuddy2api/config.json
+Environment=WB_DATA_DIR=/opt/workbuddy-manager/data
+Environment=WB_STATIC_DIR=/opt/workbuddy-manager/web/out
+Environment=WB_SECURE_COOKIE=auto
+# 首次启动若不设 WB_ADMIN_PASSWORD，会随机生成并打印到日志（journalctl 可见）
+# Environment=WB_ADMIN_PASSWORD=改成你的强密码
+
+ExecStart=/usr/bin/python3 -m uvicorn server.main:app --host 0.0.0.0 --port 7864
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

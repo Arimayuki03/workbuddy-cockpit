@@ -1,0 +1,83 @@
+"""运行期配置：全部通过环境变量覆盖，默认值适配 1Panel 单机部署。"""
+from __future__ import annotations
+
+import json
+import os
+import secrets
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent  # 仓库根目录
+
+
+def _env(name: str, default: str) -> str:
+    v = os.environ.get(name, '').strip()
+    return v or default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, '').strip() or default)
+    except ValueError:
+        return default
+
+
+PORT = _env_int('WB_MANAGER_PORT', 7864)
+HOST = _env('WB_MANAGER_HOST', '0.0.0.0')
+
+# 上游 workbuddy2api（Go）
+WB2API_BASE = _env('WB2API_BASE', 'http://127.0.0.1:7863').rstrip('/')
+WB2API_KEY = _env('WB2API_KEY', '')
+WB2API_CONTAINER = _env('WB2API_CONTAINER', 'workbuddy2api')
+
+# 上游数据文件（与 workbuddy2api 共享）
+AUTH_DIR = Path(_env('WB_AUTH_DIR', '/opt/workbuddy2api/auths'))
+UPSTREAM_CONFIG = Path(_env('WB_UPSTREAM_CONFIG', '/opt/workbuddy2api/config.json'))
+
+# 本管理端数据
+DATA_DIR = Path(_env('WB_DATA_DIR', str(ROOT / 'data')))
+DB_PATH = Path(_env('WB_DB', str(DATA_DIR / 'manager.db')))
+USERS_FILE = Path(_env('WB_USERS_FILE', str(DATA_DIR / 'users.json')))
+STATIC_DIR = Path(_env('WB_STATIC_DIR', str(ROOT / 'web' / 'out')))
+
+# 网络
+UPSTREAM_TIMEOUT = _env_int('WB_UPSTREAM_TIMEOUT', 120)
+TENCENT_TIMEOUT = _env_int('WB_TENCENT_TIMEOUT', 15)
+TRUST_PROXY = _env('WB_TRUST_PROXY', '1') == '1'
+SESSION_DAYS = _env_int('WB_SESSION_DAYS', 7)
+COOKIE_NAME = 'wb_session'
+SECURE_COOKIE = _env('WB_SECURE_COOKIE', 'auto')  # auto | true | false
+
+# 允许的 CORS 来源（同源部署时留空即可）
+CORS_ORIGINS = [o for o in _env('WB_CORS_ORIGINS', '').split(',') if o]
+
+TENCENT_BASE = 'https://copilot.tencent.com'
+TENCENT_CHECKIN = 'https://www.codebuddy.cn/v2/billing/meter/daily-checkin'
+TENCENT_HEADERS = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json, text/plain, */*',
+    'X-Requested-With': 'XMLHttpRequest',
+    'User-Agent': 'CLI/2.63.2 CodeBuddy/2.63.2',
+    'Origin': 'https://www.codebuddy.cn',
+    'Referer': 'https://www.codebuddy.cn/',
+}
+
+
+def ensure_dirs() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+
+def upstream_api_key() -> str:
+    """优先环境变量，其次读取 workbuddy2api 的 config.json。"""
+    if WB2API_KEY:
+        return WB2API_KEY
+    try:
+        cfg = json.loads(UPSTREAM_CONFIG.read_text(encoding='utf-8'))
+        return str(cfg.get('api_key') or '')
+    except Exception:
+        return ''
+
+
+def new_secret() -> str:
+    return secrets.token_urlsafe(48)
