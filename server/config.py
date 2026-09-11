@@ -43,6 +43,11 @@ STATIC_DIR = Path(_env('WB_STATIC_DIR', str(ROOT / 'web' / 'out')))
 UPSTREAM_TIMEOUT = _env_int('WB_UPSTREAM_TIMEOUT', 120)
 TENCENT_TIMEOUT = _env_int('WB_TENCENT_TIMEOUT', 15)
 TRUST_PROXY = _env('WB_TRUST_PROXY', '1') == '1'
+# 可信反向代理跳数：用于从 X-Forwarded-For 右侧取真实客户端 IP。
+# 前面直接是 1Panel/OpenResty 时保持 1；若还挂了 CDN 则设为 CDN+反代的层数。
+TRUSTED_PROXY_HOPS = _env_int('WB_TRUSTED_PROXY_HOPS', 1)
+# 是否暴露 /docs、/openapi.json、/redoc。生产环境建议关闭（默认关闭）。
+ENABLE_DOCS = _env('WB_ENABLE_DOCS', '0') == '1'
 # 显式出口代理（可选，如 http://127.0.0.1:7890）。
 # 留空时所有请求都不使用任何代理：httpx 默认 trust_env=True 会读取系统/环境代理，
 # 会把内网请求（如 127.0.0.1:7863）也交给系统代理，导致连接被劫持或长时间超时。

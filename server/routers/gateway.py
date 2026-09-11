@@ -10,6 +10,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import config, db, iputil, keysvc
+from ..config import _env_int
 from ..routers.security import get_config as get_security_config
 
 logger = logging.getLogger('workbuddy.gateway')
@@ -29,6 +30,58 @@ def _bearer(request: Request) -> str:
     if auth.lower().startswith('bearer '):
         return auth[7:].strip()
     return request.headers.get('x-api-key', '').strip()
+
+
+# 请求体上限，与上游 workbuddy2api 的 8 MiB 限制对齐。
+# 不设上限时，超大请求体会被完整读入内存，少量并发即可耗尽内存。
+MAX_BODY_BYTES = 8 * 1024 * 1024
+
+
+def _body_too_large(request: Request) -> bool:
+    try:
+        return int(request.headers.get('content-length') or 0) > MAX_BODY_BYTES
+    except ValueError:
+        return False
+
+
+async def _read_json_body(request: Request) -> tuple[dict | None, JSONResponse | None]:
+    """读取并解析网关请求体，带大小与格式校验。"""
+    if _body_too_large(request):
+        return None, _oai_error(
+            f'请求体过大（上限 {MAX_BODY_BYTES // 1024 // 1024} MiB）',
+            413, 'invalid_request_error', 'payload_too_large',
+        )
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return None, _oai_error('请求体不是合法 JSON', 400)
+    if not isinstance(body, dict):
+        return None, _oai_error('请求体必须是 JSON 对象', 400)
+    return body, None
+
+
+# ── 简单的每密钥速率限制（滑动窗口）─────────────────────
+# 目的：单个密钥被打爆时保护上游账号池，避免拖垮其他调用方。
+# 计数放在进程内存，单实例足够；多实例部署时可换成 Redis。
+_rate: dict[int, list[float]] = {}
+RATE_WINDOW = 60
+RATE_MAX_PER_MIN = _env_int('WB_GATEWAY_RATE_PER_MIN', 120)
+
+
+def _rate_limited(key: dict) -> tuple[bool, int]:
+    """返回 (是否限流, 当前窗口内计数)。"""
+    kid = int(key['id'])
+    if RATE_MAX_PER_MIN <= 0:
+        return False, 0
+    now = time.time()
+    hits = [t for t in _rate.get(kid, []) if now - t < RATE_WINDOW]
+    hits.append(now)
+    _rate[kid] = hits
+    # 顺带清理过期键，避免长期运行后字典无限增长
+    if len(_rate) > 2000:
+        for k in [k for k, v in _rate.items() if not v or now - v[-1] > RATE_WINDOW]:
+            _rate.pop(k, None)
+    return len(hits) > RATE_MAX_PER_MIN, len(hits)
 
 
 def _log_ip(ip: str, path: str, blocked: bool, ua: str | None) -> None:
@@ -100,6 +153,12 @@ def _authorize(request: Request, model: str | None) -> tuple[dict | None, str, J
         _record(key, ip, model or '', '', 403, 0, 0, 0, ua, reason, False)
         return None, ip, _oai_error(reason, 403, 'permission_error', 'forbidden')
 
+    limited, count = _rate_limited(key)
+    if limited:
+        msg = f'请求过于频繁（{RATE_WINDOW}s 内超过 {RATE_MAX_PER_MIN} 次）'
+        _record(key, ip, model or '', '', 429, 0, 0, 0, ua, msg, False)
+        return None, ip, _oai_error(msg, 429, 'rate_limit_error', 'rate_limit_exceeded')
+
     return key, ip, None
 
 
@@ -158,10 +217,9 @@ async def list_models(request: Request):
 
 # ── 对话补全（v1 / v2）──────────────────────────────────
 async def _chat(request: Request, upstream_path: str):
-    try:
-        body = await request.json()
-    except Exception:
-        return _oai_error('请求体不是合法 JSON', 400)
+    body, err = await _read_json_body(request)
+    if err:
+        return err
 
     requested_model = body.get('model') if isinstance(body, dict) else None
     key, ip, err = _authorize(request, requested_model)

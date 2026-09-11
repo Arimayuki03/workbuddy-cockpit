@@ -18,20 +18,26 @@ def healthz() -> dict:
 @router.post('/login')
 async def login(request: Request) -> JSONResponse:
     ip = client_ip(request)
-    if security.login_blocked(ip):
-        raise HTTPException(status_code=429, detail='失败次数过多，请 10 分钟后再试')
 
-    body = await request.json()
-    username = str(body.get('username', '')).strip()
+    # 先解析用户名，以便同时做「按 IP」与「按用户名」的锁定判断
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail='请求格式错误') from None
+    username = str(body.get('username', '')).strip()[:64]
     password = str(body.get('password', ''))
+
+    if security.login_blocked(ip, username):
+        raise HTTPException(status_code=429, detail='失败次数过多，请 10 分钟后再试')
 
     cfg = security.load_users()
     user = next((u for u in cfg.get('users', []) if u.get('username') == username), None)
     if not user or not security.verify_pwd(password, user.get('pwd_hash', '')):
-        security.record_fail(ip)
+        # 同时记 IP 与用户名：前者防单机爆破，后者防换 IP 打同一账号
+        security.record_fail(ip, username)
         raise HTTPException(status_code=401, detail='用户名或密码错误')
 
-    security.clear_fail(ip)
+    security.clear_fail(ip, username)
     token = security.issue_token(username, user.get('role', 'viewer'))
     resp = JSONResponse({'ok': True, 'username': username, 'role': user.get('role', 'viewer')})
     resp.set_cookie(
