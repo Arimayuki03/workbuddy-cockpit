@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import random
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -24,12 +25,16 @@ MODELS = [
     'hy3-preview',
 ]
 
-# 模拟两个账号，便于查看账号页与仪表盘
+# 模拟几个账号，便于查看账号页与仪表盘（uid 与演示 auth 文件名对应）
 ACCOUNTS = [
     {'uid': '89374120', 'nickname': '黑天鹅', 'healthy': True, 'disabled': False,
-     'in_flight': 0, 'cooling': False, 'success_count': 128, 'err_total': 2},
-    {'uid': '91203877', 'nickname': '测试号', 'healthy': False, 'disabled': False,
-     'in_flight': 0, 'cooling': True, 'success_count': 12, 'err_total': 9},
+     'in_flight': 0, 'cooling': False, 'success_count': 4128, 'err_total': 6},
+    {'uid': '91203877', 'nickname': '测试号', 'healthy': True, 'disabled': False,
+     'in_flight': 0, 'cooling': False, 'success_count': 236, 'err_total': 11},
+    {'uid': '88110234', 'nickname': '运营小组', 'healthy': True, 'disabled': False,
+     'in_flight': 1, 'cooling': False, 'success_count': 1873, 'err_total': 4},
+    {'uid': '87120988', 'nickname': '备用账号', 'healthy': False, 'disabled': False,
+     'in_flight': 0, 'cooling': True, 'success_count': 96, 'err_total': 23},
 ]
 
 
@@ -56,11 +61,11 @@ class Handler(BaseHTTPRequestHandler):
                 'accounts': ACCOUNTS,
                 'cooling': 1,
                 'disabled': 0,
-                'healthy': 1,
+                'healthy': 3,
                 'in_flight_full': 0,
                 'redis_mode': 'noop',
-                'sticky_sessions': 0,
-                'total': 2,
+                'sticky_sessions': 2,
+                'total': 4,
             })
         elif path == '/v1/models':
             now = int(time.time())
@@ -76,17 +81,29 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get('Content-Length') or 0)
-        if length:
-            self.rfile.read(length)
+        raw = self.rfile.read(length) if length else b''
         path = self.path.split('?')[0]
         if path in ('/v1/chat/completions', '/v2/chat/completions'):
+            try:
+                req = json.loads(raw or b'{}')
+            except Exception:
+                req = {}
+            model = req.get('model') or 'glm-5.2'
+            # 模拟真实上游的耗时波动，便于本地观察延迟分布
+            time.sleep(random.uniform(0.35, 1.8))
+            prompt_tokens = random.randint(80, 1600)
+            completion_tokens = random.randint(20, 900)
             self._json({
                 'id': 'chatcmpl-mock',
                 'object': 'chat.completion',
                 'created': int(time.time()),
-                'model': 'glm-5.2',
+                'model': model,
                 'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': 'pong'}, 'finish_reason': 'stop'}],
-                'usage': {'prompt_tokens': 5, 'completion_tokens': 1, 'total_tokens': 6},
+                'usage': {
+                    'prompt_tokens': prompt_tokens,
+                    'completion_tokens': completion_tokens,
+                    'total_tokens': prompt_tokens + completion_tokens,
+                },
             })
         else:
             self._json({'ok': True})
