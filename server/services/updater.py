@@ -56,11 +56,26 @@ def read_status() -> dict:
             data = json.loads(STATUS_FILE.read_text(encoding='utf-8'))
             if isinstance(data, dict):
                 status.update(data)
-                # 进程已消失但状态仍标记运行中 → 判定为异常中断
+                # 进程已消失但状态仍标记运行中 → 需要判断是「真的崩了」还是
+                # 「管理端重启把更新进程一起带走了」。systemd 默认
+                # KillMode=control-group，`systemctl restart` 会终止整个 cgroup，
+                # 更新进程虽已 setsid 也难幸免；此时只要代码已换成目标版本，
+                # 就说明更新其实成功了。
                 if status.get('running') and not _pid_alive(status.get('pid')):
                     status['running'] = False
-                    status['ok'] = False
-                    status['step'] = '更新进程异常中断'
+                    if _update_landed(data):
+                        status['ok'] = True
+                        status['step'] = '更新完成（服务已重启）'
+                        # 被重启带走的进程来不及写结束时间，用状态文件时间兜底，
+                        # 否则「上次更新」会一直显示「从未」
+                        if not status.get('finished_at'):
+                            try:
+                                status['finished_at'] = int(STATUS_FILE.stat().st_mtime)
+                            except Exception:  # noqa: BLE001
+                                pass
+                    else:
+                        status['ok'] = False
+                        status['step'] = '更新进程异常中断'
         except Exception:  # noqa: BLE001
             pass
 
@@ -70,13 +85,34 @@ def read_status() -> dict:
 
 
 def current_version() -> str:
+    """当前部署版本。
+
+    以代码里的版本号为准，`.version` 标记只作部署痕迹：
+    两者不一致时说明旧版更新流程没能替换标记（代码已换、标记还是旧的），
+    此时采信代码并顺手把标记纠正过来，避免界面一直显示旧版本。
+    """
+    code = _app_version()
     marker = config.ROOT / '.version'
+    marker_ver = ''
     if marker.is_file():
         try:
-            return marker.read_text(encoding='utf-8').strip()
+            marker_ver = marker.read_text(encoding='utf-8').strip()
+        except Exception:  # noqa: BLE001
+            marker_ver = ''
+
+    def norm(v: str) -> str:
+        return str(v or '').strip().lstrip('vV')
+
+    if code and code != '0.0.0' and norm(code) != norm(marker_ver):
+        # 自愈：把标记对齐到实际代码版本
+        try:
+            marker.write_text(f'v{norm(code)}\n', encoding='utf-8')
         except Exception:  # noqa: BLE001
             pass
-    return f'v{_app_version()}'
+        return f'v{norm(code)}'
+    if marker_ver:
+        return marker_ver
+    return f'v{code}'
 
 
 def _app_version() -> str:
@@ -128,6 +164,35 @@ def _lock_active() -> bool:
     if _pid_alive(pid):
         return True
     LOCK_FILE.unlink(missing_ok=True)
+    return False
+
+
+def _update_landed(status: dict) -> bool:
+    """更新进程消失后，判断这次更新是否其实已经成功。
+
+    管理端更新最后一步是 `systemctl restart`，该操作会终止更新进程本身
+    （systemd 默认 KillMode=control-group，会清理整个 cgroup），
+    因此「进程不在了」多半是正常收尾，而不是崩溃。用两条证据判断：
+
+    1. 状态里记录了目标版本，且部署出来的版本已等于它；
+    2. 日志里出现「管理端已更新到 X，重启服务以生效」——该行只在
+       server/、web/out/、deploy/ 全部替换且依赖装完之后才打印，
+       看到它就说明只剩重启这一步，而重启正是导致进程消失的动作。
+       （旧版更新脚本不写目标版本，此条用于兼容过渡。）
+    """
+    cur = current_version().lstrip('vV')
+
+    target = str(status.get('target_version') or '').strip().lstrip('vV')
+    if target and cur == target:
+        return True
+
+    if not cur:
+        return False
+    for entry in status.get('logs') or []:
+        text = str((entry or {}).get('text') or '')
+        m = re.search(r'管理端已更新到\s*v?([0-9][0-9.]*)', text)
+        if m and m.group(1).strip() == cur:
+            return True
     return False
 
 
