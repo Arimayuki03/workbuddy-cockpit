@@ -207,19 +207,45 @@ npm run dev                          # http://localhost:3000
 > 本项目对内部请求默认 `trust_env=False`（不读取系统代理）；确需走代理时设置 `WB_HTTP_PROXY`。
 > TUN 模式下请在代理软件中把 `127.0.0.1` 加入直连 / 绕过列表。
 
-### 二、部署到服务器（Ubuntu + 1Panel）
+### 二、部署到服务器（一键脚本）
+
+本项目依赖上游 [`workbuddy2api`](https://github.com/Sliverkiss/workbuddy2api)
+（账号池与 OpenAI 兼容接口），**单独 clone 本仓库无法运行**。
+为此提供了一键脚本，会在干净机器上自动装好两者：
 
 ```bash
-# 本地先构建静态前端（产物 web/out 不入库）
-cd web && npm install && npm run build:export
+# 推荐：用 Release 包（内含已构建的前端，无需 Node.js）
+wget https://github.com/ithtelab/workbuddy-manager/releases/latest/download/workbuddy-manager-<版本>.tar.gz
+tar xzf workbuddy-manager-*.tar.gz && cd workbuddy-manager-*
 
-# 上传仓库到服务器后
-sudo bash deploy/install.sh          # 安装依赖 + 注册 systemd 服务
-journalctl -u workbuddy-web -f       # 查看首次生成的管理员密码
+sudo bash deploy/install.sh
 ```
 
-**1Panel 反向代理**：网站 → 创建反向代理 → 域名 `wb.example.com` → 目标 `http://127.0.0.1:7864`
-→ 申请 Let's Encrypt 证书并开启强制 HTTPS。
+脚本自动完成：
+
+1. 环境预检（Python / Docker / 端口）
+2. **安装上游 workbuddy2api** —— 克隆、生成随机 `api_key`、修正目录属主、
+   构建并启动容器、等待就绪
+3. 安装管理端 —— 部署代码、装依赖、注册 systemd 服务
+4. 验证并打印访问地址与初始密码
+
+**全程无需手工编辑配置。** 若已自备上游，加 `--skip-upstream` 即可跳过，
+脚本不会改动已有配置与账号。
+
+> 通过 `git clone` 部署时，需先在 `web/` 执行 `npm ci && npm run build:export`
+> （构建产物不入库），或改用 Release 包。
+
+首次启动的管理员密码：
+
+```bash
+journalctl -u workbuddy-web | grep -A3 '初始管理员'
+```
+
+**公网访问请务必配置 HTTPS 反向代理**（否则会话 Cookie 与密码可被窃听）。
+1Panel 用户：网站 → 创建反向代理 → 目标 `http://127.0.0.1:7864` →
+申请 Let's Encrypt 证书 → 开启强制 HTTPS。
+完整部署说明（含 Nginx 配置、加固建议、常见问题）见
+[deploy/README.md](deploy/README.md)。
 
 <details>
 <summary><b>环境变量一览</b></summary>
