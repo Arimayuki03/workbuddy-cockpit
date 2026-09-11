@@ -86,6 +86,21 @@ CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT
 );
+
+-- 签到 / 保活结果记录。上游只在失败时打日志、成功静默，
+-- 因此本表用于留下我们自己触发的签到结果，便于事后追溯。
+CREATE TABLE IF NOT EXISTS checkin_logs (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts       INTEGER NOT NULL,
+  uid      TEXT,
+  nickname TEXT,
+  source   TEXT NOT NULL DEFAULT 'manual',
+  kind     TEXT NOT NULL DEFAULT 'checkin',
+  success  INTEGER NOT NULL DEFAULT 0,
+  code     INTEGER,
+  message  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_checkin_ts ON checkin_logs(ts);
 """
 
 
@@ -146,8 +161,7 @@ def set_setting(key: str, value: Any) -> None:
     )
 
 
-# ── 用量累计 ─────────────────────────────────────────────
-def bump_usage(key_id: int, model: str, prompt_tokens: int, completion_tokens: int) -> None:
+# ── 用量累计 ─────────────────────────────────────────────def bump_usage(key_id: int, model: str, prompt_tokens: int, completion_tokens: int) -> None:
     day = time.strftime('%Y-%m-%d')
     execute(
         'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, completion_tokens) '
@@ -158,3 +172,48 @@ def bump_usage(key_id: int, model: str, prompt_tokens: int, completion_tokens: i
         '  completion_tokens = completion_tokens + excluded.completion_tokens',
         (day, key_id, model, prompt_tokens, completion_tokens),
     )
+
+
+# ── 签到 / 保活记录 ──────────────────────────────────────
+def add_checkin_log(
+    uid: str,
+    nickname: str,
+    source: str,
+    success: bool,
+    code: int | None = None,
+    message: str = '',
+    kind: str = 'checkin',
+) -> None:
+    execute(
+        'INSERT INTO checkin_logs(ts, uid, nickname, source, kind, success, code, message) '
+        'VALUES(?, ?, ?, ?, ?, ?, ?, ?)',
+        (int(time.time()), uid or '', nickname or '', source, kind, 1 if success else 0, code, message),
+    )
+
+
+def list_checkin_logs(limit: int = 200, uid: str | None = None) -> list[dict]:
+    if uid:
+        rows = query(
+            'SELECT * FROM checkin_logs WHERE uid = ? ORDER BY id DESC LIMIT ?',
+            (uid, min(1000, max(1, limit))),
+        )
+    else:
+        rows = query('SELECT * FROM checkin_logs ORDER BY id DESC LIMIT ?', (min(1000, max(1, limit)),))
+    return [
+        {
+            'id': r['id'],
+            'ts': r['ts'],
+            'uid': r['uid'],
+            'nickname': r['nickname'],
+            'source': r['source'],
+            'kind': r['kind'],
+            'success': bool(r['success']),
+            'code': r['code'],
+            'message': r['message'],
+        }
+        for r in rows
+    ]
+
+
+def clear_checkin_logs() -> None:
+    execute('DELETE FROM checkin_logs')

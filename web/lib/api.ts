@@ -1,6 +1,7 @@
 import axios, {AxiosError} from 'axios';
 import type {
   Account,
+  CheckinLog,
   AccountsResponse,
   ApiKey,
   IpAccessLog,
@@ -76,6 +77,14 @@ export const accountApi = {
   remove: (file: string) => del<{success: boolean}>(`/api/accounts/${encodeURIComponent(file)}`),
   checkin: (file: string) =>
     post<{code: number; message: string}>(`/api/accounts/${encodeURIComponent(file)}/checkin`),
+  checkinAll: () =>
+    post<{total: number; succeeded: number; results: {nickname: string; ok: boolean; message: string}[]}>(
+      '/api/accounts/checkin-all',
+    ),
+  checkinLogs: (limit = 200, uid?: string) => get<CheckinLog[]>('/api/checkin-logs', {limit, uid}),
+  clearCheckinLogs: () => post<{ok: boolean}>('/api/checkin-logs/clear'),
+  upstreamLogs: (limit = 200) =>
+    get<{available: boolean; lines: string[]; total: number}>('/api/upstream/logs', {limit}),
   test: (file: string) =>
     post<{ok: boolean; message: string}>(`/api/accounts/${encodeURIComponent(file)}/test`),
   refresh: (file: string) =>
