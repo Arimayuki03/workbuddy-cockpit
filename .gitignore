@@ -28,3 +28,6 @@ config.json
 *.log
 next-env.d.ts
 *.tsbuildinfo
+
+# 调试用临时截图
+.*.png
