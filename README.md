@@ -90,9 +90,16 @@
 </details>
 
 ### 账号管理
-> 扫码添加、Token 有效期进度、签到 / 测活 / 刷新 / 删除
+> Token 有效期按剩余时间分档着色（已过期 / 即将过期 / 偏紧 / 健康）
 
 <img src="docs/images/accounts.png" alt="账号管理" width="100%" />
+
+<details>
+<summary><b>扫码添加账号</b>（点击展开）</summary>
+
+<img src="docs/images/add-account.png" alt="扫码添加账号" width="100%" />
+
+</details>
 
 ### API 密钥
 > 独立配额、IP 限制、模型白名单，明文仅创建时展示一次

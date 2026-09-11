@@ -510,10 +510,11 @@ export function ManagementBar() {
                                 {accountCount === null ? (
                                   '—'
                                 ) : (
+                                  // 不用 inView：弹窗以缩放动画挂载时，
+                                  // useInView(once) 可能判定为不可见而停在初始值 0
                                   <CountingNumber
                                     number={accountCount}
                                     fromNumber={0}
-                                    inView={true}
                                     transition={{stiffness: 200, damping: 25}}
                                   />
                                 )}
