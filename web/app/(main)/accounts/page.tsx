@@ -13,6 +13,7 @@ import {
   History,
   CalendarCheck,
   TriangleAlert,
+  Coins,
 } from 'lucide-react';
 import {notify} from '@/lib/toast';
 import {accountApi, upstreamApi, errText} from '@/lib/api';
@@ -67,6 +68,62 @@ export default function AccountsPage() {
     load();
   }, [load]);
 
+  // 打开页面时自动拉一次实时积分：上游 /status 的 credits 可能滞后数小时，
+  // 首次进入应展示真实余额。服务端有 TTL 缓存，重复进入不会频繁请求。
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const r = await accountApi.refreshCredits();
+        if (!alive) return;
+        setAccounts((prev) =>
+          prev.map((a) =>
+            typeof r.credits[a.uid] === 'number' ? {...a, credits: r.credits[a.uid]} : a,
+          ),
+        );
+      } catch {
+        /* 静默失败：仍显示上游缓存值 */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // 上游状态（冷却 / 成功计数等）会随时间变化，页面停留时定时刷新，
+  // 否则会一直显示打开页面那一刻的旧数据。
+  const REFRESH_MS = 30000;
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void load();
+    }, REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [load]);
+
+  /** 刷新所有账号的实时积分（直接向腾讯查询，非上游缓存值） */
+  const [creditsBusy, setCreditsBusy] = useState(false);
+  const refreshCredits = useCallback(async () => {
+    setCreditsBusy(true);
+    try {
+      const r = await accountApi.refreshCredits();
+      // 就地更新，避免整页闪烁
+      setAccounts((prev) =>
+        prev.map((a) =>
+          typeof r.credits[a.uid] === 'number' ? {...a, credits: r.credits[a.uid]} : a,
+        ),
+      );
+      if (r.failed.length === 0) {
+        notify.ok('积分已刷新', `${r.succeeded}/${r.total} 个账号`);
+      } else {
+        notify.warn('部分账号积分未取到', `${r.succeeded}/${r.total} 成功，其余见账号状态`);
+      }
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setCreditsBusy(false);
+    }
+  }, []);
+
   /** 批量签到：逐账号记录结果 */
   const checkinAll = useCallback(async () => {
     setCheckinAllBusy(true);
@@ -113,8 +170,12 @@ export default function AccountsPage() {
   async function run(file: string, fn: () => Promise<unknown>, okMsg: string) {
     setBusyFile(file);
     try {
-      const res = (await fn()) as {message?: string; ok?: boolean};
+      const res = (await fn()) as {message?: string; ok?: boolean; credits?: number | null};
       const ok = res.ok !== false;
+      // 签到会返回刷新后的实时积分，直接就地更新，省一次请求
+      if (typeof res.credits === 'number') {
+        setAccounts((prev) => prev.map((a) => (a.file === file ? {...a, credits: res.credits} : a)));
+      }
       (ok ? notify.ok : notify.err)(res.message || okMsg);
       await load();
       window.dispatchEvent(new Event('workbuddy-manager:accounts-changed'));
@@ -165,6 +226,17 @@ export default function AccountsPage() {
                 }
               />
             )}
+            <Button
+              size="sm"
+              variant="outline"
+              className="rounded-full"
+              onClick={refreshCredits}
+              disabled={creditsBusy || !merged.length}
+              title="直接向腾讯查询各账号当前积分（上游缓存的积分可能滞后数小时）"
+            >
+              <Coins className={creditsBusy ? 'animate-pulse' : ''} />
+              刷新积分
+            </Button>
             {isAdmin && (
               <Button
                 size="sm"

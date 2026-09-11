@@ -56,6 +56,8 @@ CORS_ORIGINS = [o for o in _env('WB_CORS_ORIGINS', '').split(',') if o]
 
 TENCENT_BASE = 'https://copilot.tencent.com'
 TENCENT_CHECKIN = 'https://www.codebuddy.cn/v2/billing/meter/daily-checkin'
+# 积分余额查询（与上游 BillingBaseCN 一致）
+TENCENT_BILLING = 'https://www.codebuddy.cn/v2/billing/meter/get-user-resource'
 TENCENT_HEADERS = {
     'Content-Type': 'application/json',
     'Accept': 'application/json, text/plain, */*',

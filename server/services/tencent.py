@@ -139,6 +139,96 @@ async def checkin(access_token: str) -> tuple[int, str]:
         return -1, f'签到异常: {exc}'
 
 
+async def fetch_credits(auth: dict) -> tuple[bool, int | float | None, str]:
+    """查询账号**实时**积分余额。
+
+    为什么必须由管理端自己查：workbuddy2api 只在它的定时任务
+    （签到 / 保活时刻）刷新 credits，之后 /status 里一直是旧值；
+    手动签到也不会触发它刷新。因此要拿到当前余额只能直接调腾讯接口。
+
+    口径与上游保持一致：优先取套餐的 CycleCapacityRemain，
+    无 Cycle 字段时退回 CapacityRemain（见 upstream.UserResource）。
+    返回 (ok, credits, message)。
+    """
+    access_token = str(auth.get('access_token') or '')
+    if not access_token:
+        return False, None, '该账号无有效 accessToken'
+
+    now = time.time()
+    body = {
+        'PageNumber': 1,
+        'PageSize': 100,
+        'ProductCode': 'p_tcaca',
+        'Status': [0, 3],
+        'PackageEndTimeRangeBegin': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now)),
+        'PackageEndTimeRangeEnd': time.strftime(
+            '%Y-%m-%d %H:%M:%S', time.localtime(now + 365 * 101 * 24 * 3600)
+        ),
+    }
+    headers = {
+        **config.TENCENT_HEADERS,
+        'Accept': 'application/json',
+        'Authorization': f'Bearer {access_token}',
+    }
+
+    try:
+        async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
+            resp = await client.post(config.TENCENT_BILLING, json=body, headers=headers)
+        code, data = _envelope(resp)
+        if code != 0 or not data:
+            return False, None, f'查询失败 code={code}'
+
+        accounts = _extract_resource_accounts(data)
+        if accounts is None:
+            return False, None, '响应结构无法识别'
+
+        total = 0.0
+        for item in accounts:
+            if not isinstance(item, dict):
+                continue
+            total += _package_remain(item)
+        # 上游会把负值钳为 0；保留小数以贴近官方展示
+        total = max(0.0, total)
+        return True, (int(total) if total.is_integer() else round(total, 2)), '查询成功'
+    except Exception as exc:  # noqa: BLE001
+        return False, None, f'查询异常: {exc}'
+
+
+def _extract_resource_accounts(data: object) -> list | None:
+    """不同层级的信封包装，尽量把套餐数组取出来。"""
+    cur = data
+    for _ in range(4):
+        if isinstance(cur, dict):
+            if 'Accounts' in cur and isinstance(cur['Accounts'], list):
+                return cur['Accounts']
+            # 逐层下钻：Response / Data / data 等
+            for key in ('Response', 'Data', 'data', 'response'):
+                if isinstance(cur.get(key), (dict, list)):
+                    cur = cur[key]
+                    break
+            else:
+                return None
+        elif isinstance(cur, list):
+            return cur
+        else:
+            return None
+    return None
+
+
+def _package_remain(item: dict) -> float:
+    """单个套餐的剩余额度，口径与上游 UserResource 一致。"""
+    def num(key: str) -> float:
+        v = item.get(key)
+        return float(v) if isinstance(v, (int, float)) else 0.0
+
+    cycle_size = num('CycleCapacitySize')
+    cycle_remain = num('CycleCapacityRemain')
+    cycle_used = num('CycleCapacityUsed')
+    if cycle_size > 0 or cycle_remain > 0 or cycle_used > 0:
+        return cycle_remain
+    return num('CapacityRemain')
+
+
 async def probe_account(auth: dict, model: str = 'glm-5.2') -> tuple[bool, str]:
     """以最小**流式**对话请求探测账号可用性。
 

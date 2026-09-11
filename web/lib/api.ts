@@ -76,7 +76,22 @@ export const accountApi = {
     }>('/api/auth/poll', {state}),
   remove: (file: string) => del<{success: boolean}>(`/api/accounts/${encodeURIComponent(file)}`),
   checkin: (file: string) =>
-    post<{code: number; message: string}>(`/api/accounts/${encodeURIComponent(file)}/checkin`),
+    post<{code: number; message: string; credits?: number | null}>(
+      `/api/accounts/${encodeURIComponent(file)}/checkin`,
+    ),
+  /** 单个账号的实时积分（直接向腾讯查询） */
+  credits: (file: string) =>
+    get<{ok: boolean; credits: number | null; message: string}>(
+      `/api/accounts/${encodeURIComponent(file)}/credits`,
+    ),
+  /** 并发刷新所有账号的实时积分 */
+  refreshCredits: () =>
+    post<{
+      total: number;
+      succeeded: number;
+      credits: Record<string, number | null>;
+      failed: string[];
+    }>('/api/accounts/refresh-credits'),
   checkinAll: () =>
     post<{total: number; succeeded: number; results: {nickname: string; ok: boolean; message: string}[]}>(
       '/api/accounts/checkin-all',

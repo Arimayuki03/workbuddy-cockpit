@@ -48,6 +48,14 @@ export default function DashboardPage() {
     load();
   }, [load]);
 
+  // 账号健康度与用量会持续变化，页面停留时定时刷新避免展示陈旧数据
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void load();
+    }, 30000);
+    return () => window.clearInterval(timer);
+  }, [load]);
+
   const valid = accounts.filter((a) => !a.is_expired).length;
   const expiring = accounts.filter((a) => a.remain_seconds > 0 && a.remain_seconds < 3600).length;
   // 积分余额合计（仅统计已同步到的账号）
