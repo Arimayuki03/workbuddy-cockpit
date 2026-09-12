@@ -7,7 +7,6 @@ import {
   Zap,
   KeyRound,
   Trash2,
-  RefreshCw,
   Plus,
   Users,
   Power,
@@ -15,6 +14,7 @@ import {
   Coins,
   ChevronRight,
 } from 'lucide-react';
+import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {accountApi, upstreamApi, errText} from '@/lib/api';
 import type {Account, CreditsMeta, UpstreamStatus} from '@/lib/types';
@@ -97,13 +97,7 @@ export default function AccountsPage() {
 
   // 上游状态（冷却 / 成功计数等）会随时间变化，页面停留时定时刷新，
   // 否则会一直显示打开页面那一刻的旧数据。
-  const REFRESH_MS = 30000;
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      void load();
-    }, REFRESH_MS);
-    return () => window.clearInterval(timer);
-  }, [load]);
+  useHeartbeat(load, 30000);
 
   /** 刷新所有账号的实时积分（直接向腾讯查询，非上游缓存值） */
   const [creditsBusy, setCreditsBusy] = useState(false);
@@ -337,13 +331,9 @@ export default function AccountsPage() {
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
         title="账号管理"
-        description="腾讯 CodeBuddy 账号池：Token 有效期、签到与连通性"
+        description="腾讯 CodeBuddy 账号池：Token 有效期、签到与连通性（每 30 秒自动刷新）"
         actions={
           <>
-            <Button variant="outline" size="sm" className="rounded-full" onClick={load} disabled={loading}>
-              <RefreshCw className={loading ? 'animate-spin' : ''} />
-              刷新
-            </Button>
             {isAdmin && (
               <ConfirmDialog
                 title="强制重启上游容器？"

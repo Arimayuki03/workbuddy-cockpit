@@ -1,7 +1,8 @@
 'use client';
 
 import {useCallback, useEffect, useState} from 'react';
-import {ShieldCheck, Plus, Trash2, RefreshCw, Ban, CircleCheck, Network} from 'lucide-react';
+import {ShieldCheck, Plus, Trash2, Ban, CircleCheck, Network} from 'lucide-react';
+import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {securityApi, errText} from '@/lib/api';
 import type {IpAccessLog, IpRule, SecurityConfig} from '@/lib/types';
@@ -60,6 +61,9 @@ export default function SecurityPage() {
     load();
   }, [load]);
 
+  // IP 规则与访问日志会随流量变化，心跳刷新保持同步
+  useHeartbeat(load, 60000);
+
   async function saveConfig(next: SecurityConfig) {
     setConfig(next);
     try {
@@ -93,13 +97,7 @@ export default function SecurityPage() {
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
         title="安全与 IP 管控"
-        description="入站 IP 白/黑名单、访问审计与全局拦截开关"
-        actions={
-          <Button variant="outline" size="sm" className="rounded-full" onClick={load} disabled={loading}>
-            <RefreshCw className={loading ? 'animate-spin' : ''} />
-            刷新
-          </Button>
-        }
+        description="入站 IP 白/黑名单、访问审计与全局拦截开关（每 60 秒自动刷新）"
       />
 
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-3">

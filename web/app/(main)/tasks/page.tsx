@@ -10,6 +10,7 @@ import {
   Trash2,
   TriangleAlert,
 } from 'lucide-react';
+import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {accountApi, errText} from '@/lib/api';
 import type {Account, CheckinLog, TaskLog, TaskLogResponse} from '@/lib/types';
@@ -59,10 +60,8 @@ export default function TasksPage() {
   const [kindLabels, setKindLabels] = useState<Record<string, string>>({});
   const [taskFilter, setTaskFilter] = useState<string>('all');
   const [collectBusy, setCollectBusy] = useState(false);
-  const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
-    setLoading(true);
     const [accRes, logRes, ulRes, taskRes] = await Promise.allSettled([
       accountApi.list(),
       accountApi.checkinLogs(200),
@@ -80,20 +79,14 @@ export default function TasksPage() {
     if (accRes.status === 'rejected' && logRes.status === 'rejected' && taskRes.status === 'rejected') {
       notify.err(errText(accRes.reason ?? logRes.reason ?? taskRes.reason));
     }
-    setLoading(false);
   }, []);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  // 上游任务按点执行，停留期间定时刷新，避免一直看旧记录
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      void load();
-    }, 30000);
-    return () => window.clearInterval(timer);
-  }, [load]);
+  // 上游任务按点执行，停留期间心跳刷新，避免一直看旧记录
+  useHeartbeat(load, 30000);
 
   /** 立即采集一次上游任务日志 */
   const collectTasks = useCallback(async () => {
@@ -134,12 +127,6 @@ export default function TasksPage() {
       <PageHeader
         title="任务记录"
         description="签到结果、上游自动任务与积分收益（每 30 秒自动刷新）"
-        actions={
-          <Button variant="outline" size="sm" className="rounded-full" onClick={load} disabled={loading}>
-            <RefreshCw className={loading ? 'animate-spin' : ''} />
-            刷新
-          </Button>
-        }
       />
 
       {/* 签到记录 + 上游原始日志 */}

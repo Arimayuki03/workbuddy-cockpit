@@ -1,7 +1,8 @@
 'use client';
 
 import {useCallback, useEffect, useState} from 'react';
-import {ScrollText, RefreshCw, Search, Trash2, ChevronLeft, ChevronRight} from 'lucide-react';
+import {ScrollText, Search, Trash2, ChevronLeft, ChevronRight} from 'lucide-react';
+import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {keyApi, logApi, errText} from '@/lib/api';
 import type {ApiKey, RequestLog} from '@/lib/types';
@@ -80,6 +81,9 @@ export default function LogsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, days]);
 
+  // 新请求会不断写入日志；心跳刷新只更新当前筛选下的列表，不会重置筛选条件
+  useHeartbeat(load, 60000);
+
   useEffect(() => {
     keyApi.list().then(setKeys).catch(() => undefined);
   }, []);
@@ -95,13 +99,9 @@ export default function LogsPage() {
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
         title="请求日志"
-        description="反代网关的每一次调用记录，含状态、延迟与 Token 计量"
+        description="反代网关的每一次调用记录，含状态、延迟与 Token 计量（每 60 秒自动刷新）"
         actions={
           <>
-            <Button variant="outline" size="sm" className="rounded-full" onClick={load} disabled={loading}>
-              <RefreshCw className={loading ? 'animate-spin' : ''} />
-              刷新
-            </Button>
             {isAdmin && (
               <ConfirmDialog
                 title="清空所有日志？"
