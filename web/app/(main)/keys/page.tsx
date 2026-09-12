@@ -1,7 +1,8 @@
 'use client';
 
 import {useCallback, useEffect, useState} from 'react';
-import {KeyRound, Plus, Trash2, Copy, RefreshCw, Ban, CircleCheck, Pencil, RotateCcw} from 'lucide-react';
+import {KeyRound, Plus, Trash2, Copy, Ban, CircleCheck, Pencil, RotateCcw} from 'lucide-react';
+import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {keyApi, errText} from '@/lib/api';
 import type {ApiKey} from '@/lib/types';
@@ -83,6 +84,9 @@ export default function KeysPage() {
     load();
   }, [load]);
 
+  // 密钥状态可能被下游调用改变（配额用尽、过期），心跳刷新保持同步
+  useHeartbeat(load, 60000);
+
   function openCreate() {
     setEditing(null);
     setForm(emptyForm);
@@ -159,13 +163,9 @@ export default function KeysPage() {
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
         title="API 密钥"
-        description="对外反代网关的分发密钥，支持有效期、IP 白名单、模型白名单与配额"
+        description="对外反代网关的分发密钥，支持有效期、IP 白名单、模型白名单与配额（每 60 秒自动刷新）"
         actions={
           <>
-            <Button variant="outline" size="sm" className="rounded-full" onClick={load} disabled={loading}>
-              <RefreshCw className={loading ? 'animate-spin' : ''} />
-              刷新
-            </Button>
             {isAdmin && (
               <Button size="sm" className="rounded-full" onClick={openCreate}>
                 <Plus />

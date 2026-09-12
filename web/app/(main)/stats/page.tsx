@@ -1,7 +1,7 @@
 'use client';
 
 import {useCallback, useEffect, useState} from 'react';
-import {Activity, TrendingUp, KeyRound, Cpu, RefreshCw, Wrench} from 'lucide-react';
+import {Activity, TrendingUp, KeyRound, Cpu, Wrench} from 'lucide-react';
 import {
   Bar,
   BarChart,
@@ -11,6 +11,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import {useHeartbeat} from '@/lib/use-heartbeat';
 import {statsApi, errText} from '@/lib/api';
 import type {StatsSummary, UsageBreakdown, UsagePoint} from '@/lib/types';
 import {fmtCompact, fmtNumber} from '@/lib/format';
@@ -52,10 +53,7 @@ export default function StatsPage() {
   const [byModel, setByModel] = useState<UsageBreakdown[]>([]);
   const [byKey, setByKey] = useState<UsageBreakdown[]>([]);
   const [days, setDays] = useState('30');
-  const [loading, setLoading] = useState(true);
-
   const load = useCallback(async () => {
-    setLoading(true);
     const d = Number(days) || 30;
     const results = await Promise.allSettled([
       statsApi.summary(),
@@ -68,12 +66,14 @@ export default function StatsPage() {
     if (results[2].status === 'fulfilled') setByModel(results[2].value);
     if (results[3].status === 'fulfilled') setByKey(results[3].value);
     if (results.some((r) => r.status === 'rejected')) notify.err(errText((results.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason));
-    setLoading(false);
   }, [days]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // 用量随调用持续累计，心跳刷新让页面保持接近实时
+  useHeartbeat(load, 60000);
 
   const chartData = daily.map((d) => ({
     day: d.day.slice(5),
@@ -85,7 +85,7 @@ export default function StatsPage() {
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
         title="用量统计"
-        description="按时间、模型与密钥维度统计 Token 消耗与请求量"
+        description="按时间、模型与密钥维度统计 Token 消耗与请求量（每 60 秒自动刷新）"
         actions={
           <>
             <Select value={days} onValueChange={setDays}>
@@ -122,10 +122,6 @@ export default function StatsPage() {
                 }
               />
             )}
-            <Button variant="outline" size="sm" className="rounded-full" onClick={load} disabled={loading}>
-              <RefreshCw className={loading ? 'animate-spin' : ''} />
-              刷新
-            </Button>
           </>
         }
       />
