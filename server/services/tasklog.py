@@ -27,9 +27,11 @@ from . import wb2api
 
 # docker --timestamps 前缀
 _DOCKER_TS = re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)\s+(.*)$', re.S)
-# 任务行主体：<kind> <uid>: <rest>
+# 任务行主体：[WARN:|ERR:] <kind> <uid>: <rest>
+# 上游 2026-09-12 起：uid 统一截前 8 位，可疑/失败行加 WARN:/ERR: 前缀
 _TASK_LINE = re.compile(
-    r'\b(travel|activity|checkin|keepalive|user-resource)\s+([0-9A-Za-z_.-]+):\s*(.*)$'
+    r'(?:(WARN|ERR):\s+)?\b(travel|activity|checkin|keepalive|user-resource)\s+'
+    r'([0-9A-Za-z_.-]+):\s*(.*)$'
 )
 
 # 中文类型名，前端与日志里共用一套说法
@@ -68,7 +70,7 @@ def parse_line(line: str) -> dict | None:
     if not m:
         return None
 
-    kind, uid, rest = m.group(1), m.group(2), m.group(3).strip()
+    sev, kind, uid, rest = m.group(1), m.group(2), m.group(3), m.group(4).strip()
     lower = rest.lower()
 
     credits = 0
@@ -82,6 +84,14 @@ def parse_line(line: str) -> dict | None:
     elif m_adopt:
         credits = int(m_adopt.group(1))
         level = 'credit'
+    elif sev == 'ERR':
+        # 上游显式标了错误级别，直接采信
+        level = 'error'
+    elif sev == 'WARN':
+        level = 'warn'
+    elif re.match(r'report \d+/\d+:', lower):
+        # 5 连发上报中途失败：report 3/5: <err>
+        level = 'error'
     elif lower.startswith(_SKIP_MARKERS) or ('skip' in lower and 'ok' not in lower):
         level = 'info'
     elif 'silent drop' in lower or 'failed' in lower or 'unknown state' in lower:
@@ -153,6 +163,8 @@ _MESSAGE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r'report OK but streak\.days=0 \(silent drop\?\)'),
      '上报成功但连续天数仍为 0（疑似被静默丢弃）'),
     (re.compile(r'streak check failed \(report OK\):'), '连续天数校验失败（上报本身成功）'),
+    (re.compile(r'report (\d+)/(\d+) ok'), '活跃上报成功（第 {0}/{1} 条）'),
+    (re.compile(r'report (\d+)/(\d+):'), '活跃上报失败（第 {0}/{1} 条）'),
     (re.compile(r'streak days=(\d+)'), '连续登录 {0} 天'),
     (re.compile(r'keepalive ok expires=(\S+)'), '令牌保活成功（有效期 {0}）'),
     (re.compile(r'连续 (\d+) 次 12153 session dead — 禁用'), '连续 {0} 次会话失效，账号已禁用'),

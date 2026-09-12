@@ -264,6 +264,11 @@ def _sanitize_section(section: str, incoming: dict) -> dict:
             if not _DURATION_RE.match(raw.strip()):
                 raise ValueError(f'{key} 时长格式有误，应为 30s / 10m / 2h / 1d')
             out[key] = raw.strip()
+        elif key == 'activity_report_count':
+            # 上游语义：>=1 才是条数；0/负数会被归一为 1（旧行为）
+            if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+                raise ValueError('activity_report_count 必须是 >=1 的整数（1 为旧行为）')
+            out[key] = raw
         elif section == 'prompt' and key == 'mode':
             mode = str(raw or '').strip().lower()
             if mode not in ('custom', 'passthrough'):

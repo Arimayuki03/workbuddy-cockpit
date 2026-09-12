@@ -94,5 +94,60 @@ class CollectPipeline(unittest.TestCase):
         self.assertEqual(db.task_log_stats()['total'], 0)
 
 
+class NicknameResolution(unittest.TestCase):
+    """上游日志只带 uid 前 8 位；接口要能解析出昵称。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_db = config.DB_PATH
+        config.DB_PATH = Path(self._tmp.name) / 'n.db'
+        db._conn = None
+        db.connect()
+        self._orig_list = wb2api.list_auth_accounts
+
+    def tearDown(self) -> None:
+        wb2api.list_auth_accounts = self._orig_list
+        try:
+            if db._conn is not None:
+                db._conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        db._conn = None
+        config.DB_PATH = self._orig_db
+        self._tmp.cleanup()
+
+    def _resolve(self, row_uid: str, accounts: list[dict]) -> str:
+        wb2api.list_auth_accounts = lambda: accounts  # type: ignore[assignment]
+        db.clear_task_logs()
+        db.add_task_logs([{
+            'ts': 1, 'uid': row_uid, 'kind': 'travel', 'level': 'ok',
+            'credits': 0, 'message': 'depart ok location=1',
+            'dedup_key': f'nick-{row_uid}',
+        }])
+        # 复用路由里的解析逻辑
+        from server.routers import accounts as accounts_router
+        res = accounts_router.task_logs(limit=10, uid=None, kind=None, user={})
+        return res['logs'][0].get('nickname', '')
+
+    def test_full_uid_matches(self) -> None:
+        got = self._resolve(
+            '9b212d8c-f5f7-4ad6-aa20-1d576508c8c1',
+            [{'uid': '9b212d8c-f5f7-4ad6-aa20-1d576508c8c1', 'nickname': '黑天鹅'}],
+        )
+        self.assertEqual(got, '黑天鹅')
+
+    def test_truncated_prefix_matches(self) -> None:
+        """上游截断后的 8 位前缀也要能对上昵称。"""
+        got = self._resolve(
+            '9b212d8c',
+            [{'uid': '9b212d8c-f5f7-4ad6-aa20-1d576508c8c1', 'nickname': '黑天鹅'}],
+        )
+        self.assertEqual(got, '黑天鹅')
+
+    def test_unknown_uid_returns_empty(self) -> None:
+        got = self._resolve('ffffffff', [{'uid': 'aaaaaaaa-1111', 'nickname': '别人'}])
+        self.assertEqual(got, '')
+
+
 if __name__ == '__main__':
     unittest.main()

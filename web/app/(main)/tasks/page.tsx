@@ -13,7 +13,7 @@ import {
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {accountApi, errText} from '@/lib/api';
-import type {Account, CheckinLog, TaskLog, TaskLogResponse} from '@/lib/types';
+import type {CheckinLog, TaskLog, TaskLogResponse} from '@/lib/types';
 import {fmtDateTime, fmtNumber} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
@@ -52,7 +52,6 @@ const LEVEL_TONE: Record<string, string> = {
 
 export default function TasksPage() {
   const {isAdmin} = useAuth();
-  const [accounts, setAccounts] = useState<Account[]>([]);
   const [checkinLogs, setCheckinLogs] = useState<CheckinLog[]>([]);
   const [upstreamLines, setUpstreamLines] = useState<string[]>([]);
   const [taskLogs, setTaskLogs] = useState<TaskLog[]>([]);
@@ -62,13 +61,11 @@ export default function TasksPage() {
   const [collectBusy, setCollectBusy] = useState(false);
 
   const load = useCallback(async () => {
-    const [accRes, logRes, ulRes, taskRes] = await Promise.allSettled([
-      accountApi.list(),
+    const [logRes, ulRes, taskRes] = await Promise.allSettled([
       accountApi.checkinLogs(200),
       accountApi.upstreamLogs(300),
       accountApi.taskLogs(500),
     ]);
-    if (accRes.status === 'fulfilled') setAccounts(accRes.value.accounts);
     if (logRes.status === 'fulfilled') setCheckinLogs(logRes.value);
     if (ulRes.status === 'fulfilled') setUpstreamLines(ulRes.value.lines);
     if (taskRes.status === 'fulfilled') {
@@ -76,8 +73,8 @@ export default function TasksPage() {
       setTaskStats(taskRes.value.stats);
       setKindLabels(taskRes.value.kinds);
     }
-    if (accRes.status === 'rejected' && logRes.status === 'rejected' && taskRes.status === 'rejected') {
-      notify.err(errText(accRes.reason ?? logRes.reason ?? taskRes.reason));
+    if (logRes.status === 'rejected' && taskRes.status === 'rejected') {
+      notify.err(errText(logRes.reason ?? taskRes.reason));
     }
   }, []);
 
@@ -103,18 +100,11 @@ export default function TasksPage() {
     }
   }, [load]);
 
-  /** uid → 昵称：任务日志只留存 uid，展示时换成昵称更易读 */
-  const uidToNick = useMemo(() => {
-    const m: Record<string, string> = {};
-    for (const a of accounts) {
-      if (a.uid && a.nickname) m[a.uid] = a.nickname;
-    }
-    return m;
-  }, [accounts]);
-
-  function accountLabel(uid: string) {
+  function accountLabel(l: TaskLog) {
+    const uid = l.uid || '';
     if (!uid) return '—';
-    return uidToNick[uid] || uid;
+    // 昵称由后端解析：上游 2026-09-12 起只打 uid 前 8 位，前端拿不到完整 uid
+    return l.nickname || uid;
   }
 
   const filteredTasks = useMemo(
@@ -365,7 +355,7 @@ export default function TasksPage() {
                   </div>
                   <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
                     <span className="truncate" title={l.uid}>
-                      {accountLabel(l.uid)}
+                      {accountLabel(l)}
                     </span>
                     <span className="shrink-0 tabular-nums">{fmtDateTime(l.ts)}</span>
                   </div>
@@ -392,7 +382,7 @@ export default function TasksPage() {
                       </TableCell>
                       <TableCell className="text-xs">{kindLabels[l.kind] || l.kind}</TableCell>
                       <TableCell className="max-w-[180px] truncate text-xs" title={l.uid}>
-                        {accountLabel(l.uid)}
+                        {accountLabel(l)}
                       </TableCell>
                       <TableCell
                         className={`max-w-[520px] truncate text-xs ${LEVEL_TONE[l.level] || ''}`}

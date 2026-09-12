@@ -209,6 +209,8 @@ export interface TaskLog {
   message: string;
   /** 中文展示文案 */
   message_cn?: string;
+  /** 账号昵称（后端按 uid/前缀解析；上游日志只带 uid 前 8 位） */
+  nickname?: string;
 }
 
 export interface TaskLogResponse {

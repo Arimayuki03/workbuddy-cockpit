@@ -259,10 +259,41 @@ def task_logs(
     后台采集器解析后落库的记录，因此能长期保留并统计积分收益。
     """
     logs = db.list_task_logs(limit=limit, uid=uid, kind=kind)
-    # 结果文案中文化：数据库留英文原文（排查要看上游原话），
-    # 接口额外给出 message_cn 供界面展示
+
+    # uid → 昵称。上游 2026-09-12 起把日志里的 uid 截成前 8 位，
+    # 而账号表里是完整 uuid，无法直接相等匹配，因此按前缀解析；
+    # 前缀命中多个账号（理论可能）时不猜，保留 uid 原文。
+    nick_by_uid: dict[str, str] = {}
+    nick_by_prefix: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    try:
+        for acc in wb2api.list_auth_accounts():
+            auid = str(acc.get('uid') or '')
+            nick = str(acc.get('nickname') or '')
+            if not auid or not nick:
+                continue
+            nick_by_uid[auid] = nick
+            prefix = auid[:8]
+            if prefix in nick_by_prefix and nick_by_prefix[prefix] != nick:
+                ambiguous.add(prefix)
+            else:
+                nick_by_prefix[prefix] = nick
+    except Exception:  # noqa: BLE001
+        pass
+
     for row in logs:
+        # 结果文案中文化：数据库留英文原文（排查要看上游原话），
+        # 接口额外给出 message_cn 供界面展示
         row['message_cn'] = tasklog.translate_message(row.get('message', ''))
+        row_uid = str(row.get('uid') or '')
+        if not row_uid:
+            row['nickname'] = ''
+        elif row_uid in nick_by_uid:
+            row['nickname'] = nick_by_uid[row_uid]
+        else:
+            prefix = row_uid[:8]
+            row['nickname'] = '' if prefix in ambiguous else nick_by_prefix.get(prefix, '')
+
     return {
         'logs': logs,
         'stats': db.task_log_stats(),
