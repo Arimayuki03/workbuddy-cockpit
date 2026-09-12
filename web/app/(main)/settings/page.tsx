@@ -628,7 +628,7 @@ export default function SettingsPage() {
         </TabsList>
 
         {/* ═══ 上游配置 ═══ */}
-        <TabsContent value="upstream" className="mt-4 space-y-4">
+        <TabsContent value="upstream" className="mt-3 space-y-3">
           {upstreamError && (
             <div className="flex items-start gap-2.5 rounded-[20px] border border-amber-500/30 bg-amber-500/10 p-4">
               <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
@@ -644,10 +644,10 @@ export default function SettingsPage() {
           )}
 
           {/* 账号池概况 */}
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-            <div className="rounded-[20px] bg-muted p-4">
-              <div className="mb-3 text-sm font-medium">服务信息</div>
-              <div className="space-y-2 text-xs">
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+            <div className="rounded-[20px] bg-muted px-3.5 py-3">
+              <div className="mb-2 text-sm font-medium">服务信息</div>
+              <div className="space-y-1.5 text-xs">
                 {([
                   ['上游地址', cfg?.listen ? `127.0.0.1${cfg.listen}` : '—'],
                   ['接入密钥', cfg?.api_key_masked ? '已配置（已隐藏）' : '—'],
@@ -677,12 +677,12 @@ export default function SettingsPage() {
               )}
             </div>
 
-            <div className="rounded-[20px] bg-muted p-4 lg:col-span-2">
-              <div className="mb-3 flex items-center justify-between">
+            <div className="rounded-[20px] bg-muted px-3.5 py-3 lg:col-span-2">
+              <div className="mb-2 flex items-center justify-between">
                 <div className="text-sm font-medium">可用模型</div>
                 <div className="text-[11px] text-muted-foreground">来自上游实时列表</div>
               </div>
-              <div className="flex flex-wrap gap-1.5">
+              <div className="flex flex-wrap gap-1">
                 {models.length ? (
                   models.map((m) => (
                     <Badge key={m.id} variant="secondary" className="rounded-full font-mono text-[10px]">
@@ -702,8 +702,8 @@ export default function SettingsPage() {
           {GROUPS.map((g) => {
             const dirty = isDirty(g.id);
             return (
-              <div key={g.id} className="rounded-[20px] bg-muted p-4">
-                <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+              <div key={g.id} className="rounded-[20px] bg-muted px-3.5 py-3">
+                <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <div className="text-sm font-medium">{g.title}</div>
                     <div className="text-[11px] text-muted-foreground">{g.desc}</div>
@@ -734,11 +734,12 @@ export default function SettingsPage() {
                   </div>
                 </div>
 
-                <div className="space-y-2">
+                {/* 宽屏两列：开关与它对应的时刻/数值字段天然成对，行数减半 */}
+                <div className="grid grid-cols-1 gap-1.5 xl:grid-cols-2">
                   {g.fields.map((f) => (
                     <div
                       key={f.key}
-                      className="flex items-center justify-between gap-4 rounded-2xl bg-background/60 px-3.5 py-3"
+                      className="flex items-center justify-between gap-3 rounded-2xl bg-background/60 px-3 py-2"
                     >
                       <div className="min-w-0">
                         <div className="text-xs font-medium">{f.label}</div>
@@ -767,7 +768,7 @@ export default function SettingsPage() {
                             className="h-8 w-20 bg-background text-right tabular-nums"
                           />
                           {f.unit && (
-                            <span className="w-8 text-[11px] text-muted-foreground">{f.unit}</span>
+                            <span className="w-6 text-[11px] text-muted-foreground">{f.unit}</span>
                           )}
                         </div>
                       ) : (
@@ -783,17 +784,13 @@ export default function SettingsPage() {
                               (fieldError(f, form[g.id][f.key]) ? ' border-destructive' : '')
                             }
                           />
-                          <span className="text-[10px] leading-3 text-muted-foreground">
-                            {fieldError(f, form[g.id][f.key]) ? (
-                              <span className="text-destructive">
-                                {fieldError(f, form[g.id][f.key])}
-                              </span>
-                            ) : f.kind === 'hours' ? (
-                              '多个整点用逗号分隔（0-23）'
-                            ) : (
-                              '如 600s / 30m / 2h'
-                            )}
-                          </span>
+                          {/* 格式说明已在左侧描述里给出，这里只在填错时占位，
+                              避免每行都被一行提示撑高 */}
+                          {fieldError(f, form[g.id][f.key]) && (
+                            <span className="text-[10px] leading-3 text-destructive">
+                              {fieldError(f, form[g.id][f.key])}
+                            </span>
+                          )}
                         </div>
                       )}
                     </div>

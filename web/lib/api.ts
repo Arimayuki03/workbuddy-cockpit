@@ -13,6 +13,7 @@ import type {
   RequestLog,
   SecurityConfig,
   StatsSummary,
+  TaskLogResponse,
   UpstreamConfig,
   UpstreamStatus,
   UsageBreakdown,
@@ -101,6 +102,10 @@ export const accountApi = {
     ),
   checkinLogs: (limit = 200, uid?: string) => get<CheckinLog[]>('/api/checkin-logs', {limit, uid}),
   clearCheckinLogs: () => post<{ok: boolean}>('/api/checkin-logs/clear'),
+  taskLogs: (limit = 200, uid?: string, kind?: string) =>
+    get<TaskLogResponse>('/api/task-logs', {limit, uid, kind}),
+  collectTaskLogs: () => post<{ok: boolean; parsed: number; added: number}>('/api/task-logs/collect'),
+  clearTaskLogs: () => post<{ok: boolean}>('/api/task-logs/clear'),
   upstreamLogs: (limit = 200) =>
     get<{available: boolean; lines: string[]; total: number}>('/api/upstream/logs', {limit}),
   test: (file: string) =>

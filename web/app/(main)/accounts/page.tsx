@@ -14,10 +14,12 @@ import {
   CalendarCheck,
   TriangleAlert,
   Coins,
+  Cat,
+  Filter,
 } from 'lucide-react';
 import {notify} from '@/lib/toast';
 import {accountApi, upstreamApi, errText} from '@/lib/api';
-import type {Account, CheckinLog, UpstreamStatus} from '@/lib/types';
+import type {Account, CheckinLog, TaskLog, TaskLogResponse, UpstreamStatus} from '@/lib/types';
 import {expiryVisual, fmtDateTime, fmtNumber, fmtRemain} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
@@ -47,20 +49,32 @@ export default function AccountsPage() {
   const [checkinLogs, setCheckinLogs] = useState<CheckinLog[]>([]);
   const [checkinAllBusy, setCheckinAllBusy] = useState(false);
   const [upstreamLines, setUpstreamLines] = useState<string[]>([]);
+  /** 上游自动任务留痕（旅行/活跃/签到/保活）+ 积分收益统计 */
+  const [taskLogs, setTaskLogs] = useState<TaskLog[]>([]);
+  const [taskStats, setTaskStats] = useState<TaskLogResponse['stats'] | null>(null);
+  const [kindLabels, setKindLabels] = useState<Record<string, string>>({});
+  const [taskFilter, setTaskFilter] = useState<string>('all');
+  const [collectBusy, setCollectBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [accRes, upRes, logRes, ulRes] = await Promise.allSettled([
+    const [accRes, upRes, logRes, ulRes, taskRes] = await Promise.allSettled([
       accountApi.list(),
       upstreamApi.status(),
       accountApi.checkinLogs(100),
       accountApi.upstreamLogs(200),
+      accountApi.taskLogs(300),
     ]);
     if (accRes.status === 'fulfilled') setAccounts(accRes.value.accounts);
     else notify.err(errText(accRes.reason));
     if (upRes.status === 'fulfilled') setUpstream(upRes.value);
     if (logRes.status === 'fulfilled') setCheckinLogs(logRes.value);
     if (ulRes.status === 'fulfilled') setUpstreamLines(ulRes.value.lines);
+    if (taskRes.status === 'fulfilled') {
+      setTaskLogs(taskRes.value.logs);
+      setTaskStats(taskRes.value.stats);
+      setKindLabels(taskRes.value.kinds);
+    }
     setLoading(false);
   }, []);
 
@@ -98,6 +112,21 @@ export default function AccountsPage() {
       void load();
     }, REFRESH_MS);
     return () => window.clearInterval(timer);
+  }, [load]);
+
+  /** 立即采集一次上游任务日志（不等后台 45 秒轮询） */
+  const collectTasks = useCallback(async () => {
+    setCollectBusy(true);
+    try {
+      const r = await accountApi.collectTaskLogs();
+      await load();
+      if (r.added > 0) notify.ok('已采集新记录', `新增 ${r.added} 条任务日志`);
+      else notify.info('暂无新记录', '上游还没有产生新的自动任务日志');
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setCollectBusy(false);
+    }
   }, [load]);
 
   /** 刷新所有账号的实时积分（直接向腾讯查询，非上游缓存值） */
@@ -521,6 +550,153 @@ export default function AccountsPage() {
             </div>
           )}
         </div>
+      </section>
+
+      {/* 自动任务与积分记录：上游把结果打在容器日志里且重建即丢，
+          这里展示后台采集器落库后的长期留痕，便于核对积分收益 */}
+      <section className="overflow-hidden rounded-[20px] bg-muted">
+        <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <Cat className="h-4 w-4" />
+            自动任务与积分记录
+            <span className="text-[11px] font-normal text-muted-foreground">
+              猫猫旅行 / 活跃上报 / 自动签到 / 保活
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            {taskStats && taskStats.total > 0 && (
+              <Badge variant="secondary" className="rounded-full tabular-nums">
+                共 {fmtNumber(taskStats.total)} 条
+                {taskStats.total_credits > 0 && (
+                  <span className="ml-1 text-emerald-600 dark:text-emerald-400">
+                    +{fmtNumber(taskStats.total_credits)} 积分
+                  </span>
+                )}
+              </Badge>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 rounded-full text-[11px]"
+              disabled={collectBusy}
+              onClick={collectTasks}
+            >
+              <RefreshCw className={collectBusy ? 'animate-spin' : ''} />
+              立即采集
+            </Button>
+            {isAdmin && taskLogs.length > 0 && (
+              <ConfirmDialog
+                title="清空任务记录？"
+                description="仅删除管理端采集留存的记录，不影响账号与上游运行。"
+                confirmText="清空"
+                destructive
+                onConfirm={async () => {
+                  await accountApi.clearTaskLogs();
+                  notify.ok('已清空');
+                  await load();
+                }}
+                trigger={
+                  <Button variant="ghost" size="sm" className="h-7 rounded-full text-red-500">
+                    <Trash2 className="h-3.5 w-3.5" />
+                    清空
+                  </Button>
+                }
+              />
+            )}
+          </div>
+        </div>
+
+        {taskLogs.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 px-4 pb-3">
+            <Filter className="h-3 w-3 text-muted-foreground" />
+            {[
+              {id: 'all', label: '全部'},
+              ...Object.entries(kindLabels).map(([id, label]) => ({id, label})),
+            ].map((t) => {
+              const active = taskFilter === t.id;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setTaskFilter(t.id)}
+                  className={
+                    'rounded-full px-2.5 py-1 text-[11px] transition-colors ' +
+                    (active
+                      ? 'bg-foreground text-background'
+                      : 'bg-background/60 text-muted-foreground hover:text-foreground')
+                  }
+                >
+                  {t.label}
+                  {taskStats?.by_kind?.[t.id]?.count ? ` ${taskStats.by_kind[t.id].count}` : ''}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {taskLogs.length ? (
+          <div className="max-h-[360px] overflow-auto px-4 pb-4">
+            <Table>
+              <TableHeader>
+                <TableRow className="border-b border-border/60 hover:bg-transparent">
+                  <TableHead className="pl-0 text-[11px] text-muted-foreground">时间</TableHead>
+                  <TableHead className="text-[11px] text-muted-foreground">类型</TableHead>
+                  <TableHead className="text-[11px] text-muted-foreground">账号</TableHead>
+                  <TableHead className="text-[11px] text-muted-foreground">结果</TableHead>
+                  <TableHead className="pr-0 text-right text-[11px] text-muted-foreground">积分</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {taskLogs
+                  .filter((l) => taskFilter === 'all' || l.kind === taskFilter)
+                  .slice(0, 60)
+                  .map((l) => {
+                    const tone: Record<string, string> = {
+                      credit: 'text-emerald-600 dark:text-emerald-400',
+                      ok: 'text-muted-foreground',
+                      info: 'text-muted-foreground',
+                      warn: 'text-amber-600 dark:text-amber-400',
+                      error: 'text-red-600 dark:text-red-400',
+                    };
+                    return (
+                      <TableRow key={l.id} className="border-b border-border/40">
+                        <TableCell className="pl-0 text-xs tabular-nums text-muted-foreground">
+                          {fmtDateTime(l.ts)}
+                        </TableCell>
+                        <TableCell className="text-xs">
+                          {kindLabels[l.kind] || l.kind}
+                        </TableCell>
+                        <TableCell className="text-xs tabular-nums">{l.uid || '—'}</TableCell>
+                        <TableCell className={`max-w-[380px] truncate text-xs ${tone[l.level] || ''}`} title={l.message}>
+                          {l.message}
+                        </TableCell>
+                        <TableCell className="pr-0 text-right text-xs font-medium tabular-nums">
+                          {l.credits > 0 ? (
+                            <span className="text-emerald-600 dark:text-emerald-400">+{l.credits}</span>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+              </TableBody>
+            </Table>
+            {taskLogs.filter((l) => taskFilter === 'all' || l.kind === taskFilter).length === 0 && (
+              <div className="py-8 text-center text-xs text-muted-foreground">
+                该类型下暂无记录。
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="px-4 py-10 text-center text-xs leading-5 text-muted-foreground">
+            <Cat className="mx-auto mb-2 h-4 w-4" />
+            暂无自动任务记录。上游的签到 / 猫猫旅行 / 活跃上报 / 保活结果会打在容器日志里，
+            后台每 45 秒采集一次并长期保留（容器重建也不会丢）。
+            <br />
+            想立刻看到结果，点右上角「立即采集」。
+          </div>
+        )}
       </section>
 
       <AddAccountDialog open={addOpen} onOpenChange={setAddOpen} onSuccess={load} />

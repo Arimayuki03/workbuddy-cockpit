@@ -14,6 +14,7 @@ from .routers import (
     accounts, auth, gateway, keys, logs,
     security as security_router, settings, stats, system,
 )
+from .services import tasklog
 
 
 @asynccontextmanager
@@ -21,7 +22,13 @@ async def lifespan(app: FastAPI):
     config.ensure_dirs()
     db.connect()
     security.load_users()  # 首次启动会自动生成管理员并打印一次密码
-    yield
+    # 后台采集上游自动任务日志（旅行/活跃/签到/保活），容器日志会被重建清掉，
+    # 这里解析后落库长期保留，界面才能看到「这趟旅行领了多少积分」
+    tasklog.start_collector()
+    try:
+        yield
+    finally:
+        tasklog.stop_collector()
 
 
 app = FastAPI(
