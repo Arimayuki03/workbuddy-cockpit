@@ -135,6 +135,112 @@ def strip_docker_ts(line: str) -> str:
     return m.group(2) if m else line
 
 
+# ── 结果文案中文化 ───────────────────────────────────────
+# 上游日志是英文原文，直接展示对中文用户不友好。这里在**展示层**翻译，
+# 不动数据库里存的原文——排查问题时要能看到上游原话。
+#   (匹配文本, 中文模板)  模板里的 {n} 会被捕获组依次填充
+_MESSAGE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r'claim ok record=(\d+) reward=(\d+)'), '领奖成功：第 {0} 次行程，获得 {1} 积分'),
+    (re.compile(r'adopt ok \(\+(\d+) credits?\)'), '领养成功：获得 {0} 积分'),
+    (re.compile(r'depart ok location=(\d+)'), '已派出旅行（目的地 {0}）'),
+    (re.compile(r'claim skipped \(arrived but no record_id\)'), '领奖跳过：已到站但无记录 ID'),
+    (re.compile(r'claim record=(\d+):'), '领奖失败（行程 {0}）'),
+    (re.compile(r'skip \(daily limit reached\)'), '跳过：今日次数已达上限'),
+    (re.compile(r'skip \(traveling record=(\d+)\)'), '跳过：旅行进行中（行程 {0}）'),
+    (re.compile(r'skip \(unknown state "([^"]*)"\)'), '跳过：状态未知（{0}）'),
+    (re.compile(r'adopt skipped \(conversation threshold not reached, retry tomorrow\)'),
+     '领养跳过：对话数未达门槛，明天重试'),
+    (re.compile(r'report OK but streak\.days=0 \(silent drop\?\)'),
+     '上报成功但连续天数仍为 0（疑似被静默丢弃）'),
+    (re.compile(r'streak check failed \(report OK\):'), '连续天数校验失败（上报本身成功）'),
+    (re.compile(r'streak days=(\d+)'), '连续登录 {0} 天'),
+    (re.compile(r'keepalive ok expires=(\S+)'), '令牌保活成功（有效期 {0}）'),
+    (re.compile(r'连续 (\d+) 次 12153 session dead — 禁用'), '连续 {0} 次会话失效，账号已禁用'),
+    (re.compile(r'连续 (\d+) 次 12153 session dead'), '连续 {0} 次会话失效'),
+)
+
+_MESSAGE_EXACT = {
+    'checkin ok code=0': '签到成功',
+    'keepalive ok': '令牌保活成功',
+    'buddy-info': '获取 Buddy 信息失败',
+    'agreement': '签署协议失败',
+    'adopt': '领养失败',
+    'depart': '派出失败',
+    'status': '查询旅行状态失败',
+    'claim': '领奖失败',
+}
+
+# 「阶段名: 错误详情」的失败行：把阶段名换成中文，错误详情保留原文
+_STAGE_LABELS = {
+    'buddy-info': '获取 Buddy 信息失败',
+    'agreement': '签署协议失败',
+    'adopt': '领养失败',
+    'depart': '派出失败',
+    'status': '查询旅行状态失败',
+    'claim': '领奖失败',
+    'save': '保存令牌失败',
+}
+
+_TRUNC_RE = re.compile(r'^(.*?)\s*\.\.\.\s*（已截断）$')
+
+# 常见技术错误的短语替换（作用在展示文案上，覆盖「阶段: <英文错误>」的详情部分）
+_PHRASES: tuple[tuple[str, str], ...] = (
+    ('context deadline exceeded', '请求超时'),
+    ('Client.Timeout exceeded while awaiting headers', '等待响应头超时'),
+    ('unexpected end of JSON input', '响应内容不完整（JSON 解析失败）'),
+    ('connection refused', '连接被拒绝'),
+    ('no such host', '域名解析失败'),
+    ('i/o timeout', '网络超时'),
+    ('EOF', '连接被提前关闭'),
+)
+
+
+def _apply_phrases(text: str) -> str:
+    out = text
+    for en, cn in _PHRASES:
+        if en in out:
+            out = out.replace(en, cn)
+    return out
+
+
+def translate_message(message: str) -> str:
+    """把上游英文结果翻成中文；认不出的原样返回（并保留截断标记）。"""
+    raw = (message or '').strip()
+    if not raw:
+        return raw
+
+    # 被截断时先剥掉标记，翻完再补回；否则标记里的中文会干扰判断
+    m_trunc = _TRUNC_RE.match(raw)
+    body = m_trunc.group(1).strip() if m_trunc else raw
+    suffix = ' …（已截断）' if m_trunc else ''
+
+    # 本管理端自己写的中文流水（如「余额 +100（…）」）无需翻译
+    if body.startswith('余额 '):
+        return raw
+
+    if body in _MESSAGE_EXACT:
+        return _MESSAGE_EXACT[body] + suffix
+
+    for pattern, tpl in _MESSAGE_RULES:
+        m = pattern.search(body)
+        if m:
+            try:
+                return tpl.format(*m.groups()) + suffix
+            except (IndexError, KeyError):
+                return tpl + suffix
+
+    # 「阶段: 详情」形式（详情里的常见英文错误一并转中文）
+    m_stage = re.match(r'^([a-z-]+):\s*(.+)$', body)
+    if m_stage and m_stage.group(1) in _STAGE_LABELS:
+        return _apply_phrases(f'{_STAGE_LABELS[m_stage.group(1)]}：{m_stage.group(2)}') + suffix
+
+    # 单行无参数文案
+    if body in _STAGE_LABELS:
+        return _STAGE_LABELS[body] + suffix
+
+    return _apply_phrases(raw)
+
+
 # ── 后台采集 ─────────────────────────────────────────────
 _collector: asyncio.Task | None = None
 _last: dict = {'at': 0, 'added': 0, 'scanned': 0, 'error': ''}

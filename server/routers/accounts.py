@@ -258,8 +258,13 @@ def task_logs(
     上游把这些结果打在容器日志里，容器重建即丢失；本接口读取的是
     后台采集器解析后落库的记录，因此能长期保留并统计积分收益。
     """
+    logs = db.list_task_logs(limit=limit, uid=uid, kind=kind)
+    # 结果文案中文化：数据库留英文原文（排查要看上游原话），
+    # 接口额外给出 message_cn 供界面展示
+    for row in logs:
+        row['message_cn'] = tasklog.translate_message(row.get('message', ''))
     return {
-        'logs': db.list_task_logs(limit=limit, uid=uid, kind=kind),
+        'logs': logs,
         'stats': db.task_log_stats(),
         'kinds': tasklog.KIND_LABELS,
         'collector': tasklog.state(),

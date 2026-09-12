@@ -5,6 +5,7 @@ import {
   MessageCircleIcon,
   BarChart3,
   Users,
+  ClipboardList,
   KeyRound,
   ScrollText,
   TrendingUp,
@@ -406,6 +407,11 @@ export function ManagementBar() {
       title: '账号',
       icon: <Users {...IconOptions} />,
       href: '/accounts',
+    },
+    {
+      title: '任务',
+      icon: <ClipboardList {...IconOptions} />,
+      href: '/tasks',
     },
     {
       title: '密钥',
