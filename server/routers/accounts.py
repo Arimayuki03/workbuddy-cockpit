@@ -6,7 +6,7 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import db, security
-from ..services import credits as creditsvc, reload, tencent, wb2api
+from ..services import credits as creditsvc, reload, tasklog, tencent, wb2api
 
 router = APIRouter(prefix='/api', tags=['accounts'])
 
@@ -231,17 +231,52 @@ def clear_checkin_logs(user: dict = Depends(security.require_admin)) -> dict:
     return {'ok': True}
 
 
+@router.get('/task-logs')
+def task_logs(
+    limit: int = 200,
+    uid: str | None = None,
+    kind: str | None = None,
+    user: dict = Depends(security.current_user),
+) -> dict:
+    """上游自动任务留痕（猫猫旅行 / 活跃上报 / 自动签到 / 保活）。
+
+    上游把这些结果打在容器日志里，容器重建即丢失；本接口读取的是
+    后台采集器解析后落库的记录，因此能长期保留并统计积分收益。
+    """
+    return {
+        'logs': db.list_task_logs(limit=limit, uid=uid, kind=kind),
+        'stats': db.task_log_stats(),
+        'kinds': tasklog.KIND_LABELS,
+        'collector': tasklog.state(),
+    }
+
+
+@router.post('/task-logs/collect')
+async def collect_task_logs(user: dict = Depends(security.require_admin)) -> dict:
+    """立即采集一次（不等后台轮询），便于刚跑完任务就看结果。"""
+    parsed, added = await tasklog._collect_once()
+    return {'ok': True, 'parsed': parsed, 'added': added}
+
+
+@router.post('/task-logs/clear')
+def clear_task_logs(user: dict = Depends(security.require_admin)) -> dict:
+    db.clear_task_logs()
+    return {'ok': True}
+
+
 @router.get('/upstream/logs')
 def upstream_logs(limit: int = 200, user: dict = Depends(security.current_user)) -> dict:
-    """上游容器日志中与签到/保活相关的行。
+    """上游容器日志中与自动任务相关的行（原始日志）。
 
-    上游成功签到不打日志，因此这里主要呈现失败与保活记录；
-    成功与否可结合「签到记录」中的手动结果与账号 credits 判断。
+    上游只在失败时打日志、成功大多静默（旅行与活跃上报除外，它们会记录
+    积分与服务端判据）。结构化、可长期保留的记录见 /api/task-logs。
     """
     lines = wb2api.read_container_logs(limit=limit)
-    keywords = ('checkin', 'keepalive', 'user-resource')
+    keywords = ('checkin', 'keepalive', 'user-resource', 'travel', 'activity')
     interesting = [
-        ln for ln in lines
+        # 去掉 docker --timestamps 前缀（上游自己已带秒级时间，重复显示反而难读）
+        tasklog.strip_docker_ts(ln)
+        for ln in lines
         if any(k in ln.lower() for k in keywords)
     ]
     return {'available': lines != [], 'lines': interesting, 'total': len(lines)}

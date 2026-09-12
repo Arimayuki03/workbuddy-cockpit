@@ -185,6 +185,31 @@ export interface CheckinLog {
   message: string;
 }
 
+/** 上游自动任务留痕（猫猫旅行 / 活跃上报 / 自动签到 / 保活） */
+export interface TaskLog {
+  id: number;
+  ts: number;
+  uid: string;
+  /** travel / activity / checkin / keepalive / user-resource */
+  kind: string;
+  /** credit 有积分收益 / ok 成功 / info 跳过 / warn 警告 / error 失败 */
+  level: string;
+  credits: number;
+  message: string;
+}
+
+export interface TaskLogResponse {
+  logs: TaskLog[];
+  stats: {
+    by_kind: Record<string, {count: number; credits: number}>;
+    total: number;
+    total_credits: number;
+  };
+  kinds: Record<string, string>;
+  collector: {at?: number; parsed?: number; added?: number; error?: string};
+}
+
+
 export interface UpdateLogLine {
   ts: number;
   level: string;

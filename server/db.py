@@ -101,6 +101,22 @@ CREATE TABLE IF NOT EXISTS checkin_logs (
   message  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_checkin_ts ON checkin_logs(ts);
+
+-- 上游自动任务日志（旅行 / 活跃上报 / 签到 / 保活）的结构化留痕。
+-- 上游把这些结果打在容器日志里，容器重建（更新上游）后日志就没了，
+-- 所以采集器解析后落到本表长期保留。dedup_key 由「容器日志时间戳 + 行内容」
+-- 生成，重复采集同一条日志时用 INSERT OR IGNORE 天然去重。
+CREATE TABLE IF NOT EXISTS task_logs (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts        INTEGER NOT NULL,
+  uid       TEXT,
+  kind      TEXT NOT NULL,
+  level     TEXT NOT NULL DEFAULT 'ok',
+  credits   INTEGER NOT NULL DEFAULT 0,
+  message   TEXT,
+  dedup_key TEXT NOT NULL UNIQUE
+);
+CREATE INDEX IF NOT EXISTS idx_task_logs_ts ON task_logs(ts);
 """
 
 
@@ -218,6 +234,86 @@ def list_checkin_logs(limit: int = 200, uid: str | None = None) -> list[dict]:
 
 def clear_checkin_logs() -> None:
     execute('DELETE FROM checkin_logs')
+
+
+# ── 上游自动任务日志 ─────────────────────────────────────
+def add_task_logs(entries: list[dict]) -> int:
+    """批量写入自动任务日志，返回**实际新增**条数（重复的按 dedup_key 忽略）。
+
+    用 `INSERT OR IGNORE` + `total_changes` 差值统计，避免反复采集同一批
+    日志时把「已存在」也算成新增。
+    """
+    if not entries:
+        return 0
+    rows = [
+        (
+            int(e.get('ts') or 0),
+            str(e.get('uid') or ''),
+            str(e.get('kind') or ''),
+            str(e.get('level') or 'ok'),
+            int(e.get('credits') or 0),
+            str(e.get('message') or '')[:500],
+            str(e.get('dedup_key') or ''),
+        )
+        for e in entries
+    ]
+    with _lock:
+        conn = connect()
+        before = conn.total_changes
+        conn.executemany(
+            'INSERT OR IGNORE INTO task_logs(ts, uid, kind, level, credits, message, dedup_key) '
+            'VALUES(?, ?, ?, ?, ?, ?, ?)',
+            rows,
+        )
+        conn.commit()
+        return conn.total_changes - before
+
+
+def list_task_logs(limit: int = 200, uid: str | None = None, kind: str | None = None) -> list[dict]:
+    sql = 'SELECT * FROM task_logs'
+    where: list[str] = []
+    args: list[Any] = []
+    if uid:
+        where.append('uid = ?')
+        args.append(uid)
+    if kind:
+        where.append('kind = ?')
+        args.append(kind)
+    if where:
+        sql += ' WHERE ' + ' AND '.join(where)
+    sql += ' ORDER BY ts DESC, id DESC LIMIT ?'
+    args.append(min(1000, max(1, limit)))
+    return [
+        {
+            'id': r['id'],
+            'ts': r['ts'],
+            'uid': r['uid'],
+            'kind': r['kind'],
+            'level': r['level'],
+            'credits': r['credits'],
+            'message': r['message'],
+        }
+        for r in query(sql, tuple(args))
+    ]
+
+
+def task_log_stats() -> dict:
+    """按类型汇总条数与累计积分，用于页面上方的概览。"""
+    rows = query(
+        'SELECT kind, COUNT(*) AS n, COALESCE(SUM(credits), 0) AS credits '
+        'FROM task_logs GROUP BY kind'
+    )
+    by_kind = {r['kind']: {'count': int(r['n']), 'credits': int(r['credits'])} for r in rows}
+    total = query_one('SELECT COUNT(*) AS n, COALESCE(SUM(credits),0) AS credits FROM task_logs')
+    return {
+        'by_kind': by_kind,
+        'total': int(total['n']) if total else 0,
+        'total_credits': int(total['credits']) if total else 0,
+    }
+
+
+def clear_task_logs() -> None:
+    execute('DELETE FROM task_logs')
 
 
 # ── 用量回填 ─────────────────────────────────────────────
