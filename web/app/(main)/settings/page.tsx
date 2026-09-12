@@ -94,7 +94,36 @@ interface DurationField {
   def: string;
 }
 
-type Field = BoolField | NumField | HoursField | DurationField;
+interface SelectField {
+  key: string;
+  /** 枚举字符串：上游只接受给定取值 */
+  kind: 'select';
+  label: string;
+  desc: string;
+  /** 危险项：填错会导致上游启动失败，界面上给显式警示 */
+  caution?: string;
+  options: {value: string; label: string}[];
+  def: string;
+}
+
+interface TextField {
+  key: string;
+  /** 自由文本（文件路径之类），不做格式假设，仅禁止换行/控制字符 */
+  kind: 'text';
+  label: string;
+  desc: string;
+  caution?: string;
+  placeholder?: string;
+  def: string;
+}
+
+type Field =
+  | BoolField
+  | NumField
+  | HoursField
+  | DurationField
+  | SelectField
+  | TextField;
 
 /** 时长格式校验：数字 + 单位（s/m/h/d） */
 const DURATION_RE = /^\d+\s*(s|m|h|d)$/i;
@@ -292,40 +321,133 @@ const SESSION_FIELDS: Field[] = [
   },
 ];
 
-type Group = 'schedule' | 'cooldown' | 'pool' | 'features' | 'session';
+const PROMPT_FIELDS: Field[] = [
+  {
+    key: 'mode',
+    kind: 'select',
+    label: '系统提示词模式',
+    desc: 'custom：网关用自有提示词替换客户端传来的 system 消息；passthrough：原样透传客户端的 system',
+    caution:
+      '默认 custom 会覆盖下游自己的 system prompt。若你的应用依赖自带角色设定或输出格式约束，请改为 passthrough，否则这些指令会被服务端替换掉。',
+    options: [
+      {value: 'custom', label: 'custom（替换为网关提示词，默认）'},
+      {value: 'passthrough', label: 'passthrough（透传客户端 system）'},
+    ],
+    def: 'custom',
+  },
+  {
+    key: 'file',
+    kind: 'text',
+    label: '自定义提示词文件',
+    desc: '留空使用内置默认提示词。填了路径就必须可读，否则上游启动直接报错',
+    caution: '路径必须存在于上游容器内且可读；写错会导致上游启动失败、反代不可用。不确定就留空。',
+    placeholder: '留空 = 使用内置默认',
+    def: '',
+  },
+];
 
-/** 高级 JSON 编辑器里可直写的上游配置段（session 分组的段名是 session_sticky） */
-type WireSection = 'schedule' | 'cooldown' | 'pool' | 'features' | 'session_sticky';
-const GROUPS: {id: Group; title: string; desc: string; fields: Field[]}[] = [
+const SERVER_FIELDS: Field[] = [
+  {
+    key: 'max_body_mb',
+    kind: 'num',
+    label: '请求体上限',
+    desc: '单个请求体最大体积，超过返回 413；调大可容纳更长的上下文',
+    unit: 'MB',
+    min: 1,
+    max: 256,
+    def: 8,
+  },
+];
+
+const UPSTREAM_FIELDS: Field[] = [
+  {
+    key: 'user_agent',
+    kind: 'text',
+    label: '出站 User-Agent',
+    desc: '网关向腾讯发起请求时使用的客户端标识，留空用内置默认',
+    placeholder: '留空 = 内置默认',
+    def: '',
+  },
+];
+
+type Group = 'schedule' | 'prompt' | 'cooldown' | 'features' | 'session' | 'pool' | 'server' | 'upstream';
+
+/** 高级 JSON 编辑器里可直写的上游配置段 */
+type WireSection =
+  | 'schedule'
+  | 'cooldown'
+  | 'pool'
+  | 'features'
+  | 'session_sticky'
+  | 'prompt'
+  | 'server'
+  | 'upstream';
+
+interface GroupDef {
+  id: Group;
+  /** 对应的上游 config.json 段名（UI 名与段名不一致时由此映射） */
+  section: WireSection;
+  title: string;
+  desc: string;
+  fields: Field[];
+}
+
+const GROUPS: GroupDef[] = [
   {
     id: 'schedule',
+    section: 'schedule',
     title: '定时任务',
     desc: '四类任务各自独立排程：签到 / 猫猫旅行 / 活跃上报 / 保活。可分别开关并设置执行时刻',
     fields: SCHEDULE_FIELDS,
   },
   {
+    id: 'prompt',
+    section: 'prompt',
+    title: '系统提示词',
+    desc: '网关如何对待客户端传来的 system / developer 消息',
+    fields: PROMPT_FIELDS,
+  },
+  {
     id: 'cooldown',
+    section: 'cooldown',
     title: '限流与冷却',
     desc: '被腾讯限流后的冷却策略',
     fields: COOLDOWN_FIELDS,
   },
   {
     id: 'features',
+    section: 'features',
     title: '功能开关',
     desc: '上游的进阶行为开关',
     fields: FEATURES_FIELDS,
   },
   {
     id: 'session',
+    section: 'session_sticky',
     title: '会话粘性',
     desc: '多轮对话的路由粘性与清理策略',
     fields: SESSION_FIELDS,
   },
   {
     id: 'pool',
+    section: 'pool',
     title: '并发与熔断',
     desc: '控制账号池的并发能力与故障保护',
     fields: POOL_FIELDS,
+  },
+  {
+    id: 'server',
+    section: 'server',
+    title: '请求上限',
+    desc: '网关自身的请求约束',
+    fields: SERVER_FIELDS,
+  },
+  {
+    id: 'upstream',
+    section: 'upstream',
+    title: '出站标识',
+    desc: '网关向腾讯发起请求时的客户端标识',
+    fields: UPSTREAM_FIELDS,
   },
 ];
 
@@ -358,6 +480,13 @@ function pickValues(fields: Field[], source: Record<string, unknown> | undefined
       case 'duration':
         out[f.key] = typeof raw === 'string' && DURATION_RE.test(raw) ? raw : f.def;
         break;
+      case 'select':
+        // 只接受枚举内的取值；配置里是别的值（上游改过枚举）时回退默认
+        out[f.key] = typeof raw === 'string' && f.options.some((o) => o.value === raw) ? raw : f.def;
+        break;
+      case 'text':
+        out[f.key] = typeof raw === 'string' ? raw : f.def;
+        break;
     }
   }
   return out;
@@ -371,6 +500,9 @@ function fieldError(f: Field, raw: FieldValue): string | undefined {
   }
   if (f.kind === 'duration') {
     return DURATION_RE.test(String(raw).trim()) ? undefined : '格式如 30s / 10m / 2h / 1d';
+  }
+  if (f.kind === 'text' && /[\r\n\u0000-\u001f]/.test(String(raw))) {
+    return '不能包含换行或控制字符';
   }
   return undefined;
 }
@@ -388,6 +520,17 @@ function toWire(
     const t = String(raw).trim();
     return DURATION_RE.test(t) ? {ok: true, value: t} : {ok: false, error: '格式如 30s / 10m / 2h / 1d'};
   }
+  if (f.kind === 'select') {
+    const v = String(raw);
+    return f.options.some((o) => o.value === v)
+      ? {ok: true, value: v}
+      : {ok: false, error: '取值不在允许范围内'};
+  }
+  if (f.kind === 'text') {
+    const t = String(raw).trim();
+    if (/[\r\n\u0000-\u001f]/.test(t)) return {ok: false, error: '不能包含换行或控制字符'};
+    return {ok: true, value: t};
+  }
   return {ok: true, value: raw};
 }
 
@@ -402,18 +545,24 @@ export default function SettingsPage() {
   /** 可视化表单状态 */
   const [form, setForm] = useState<Record<Group, Record<string, FieldValue>>>({
     schedule: defaultValues(SCHEDULE_FIELDS),
+    prompt: defaultValues(PROMPT_FIELDS),
     cooldown: defaultValues(COOLDOWN_FIELDS),
     pool: defaultValues(POOL_FIELDS),
     features: defaultValues(FEATURES_FIELDS),
     session: defaultValues(SESSION_FIELDS),
+    server: defaultValues(SERVER_FIELDS),
+    upstream: defaultValues(UPSTREAM_FIELDS),
   });
   /** 加载时的原始值，用于只提交改动过的项 */
   const original = useRef<Record<Group, Record<string, FieldValue>>>({
     schedule: defaultValues(SCHEDULE_FIELDS),
+    prompt: defaultValues(PROMPT_FIELDS),
     cooldown: defaultValues(COOLDOWN_FIELDS),
     pool: defaultValues(POOL_FIELDS),
     features: defaultValues(FEATURES_FIELDS),
     session: defaultValues(SESSION_FIELDS),
+    server: defaultValues(SERVER_FIELDS),
+    upstream: defaultValues(UPSTREAM_FIELDS),
   });
   /** 高级模式（直接编辑 JSON） */
   const [advanced, setAdvanced] = useState(false);
@@ -422,6 +571,9 @@ export default function SettingsPage() {
   const [poolText, setPoolText] = useState('');
   const [featText, setFeatText] = useState('');
   const [sessText, setSessText] = useState('');
+  const [promptText, setPromptText] = useState('');
+  const [serverText, setServerText] = useState('');
+  const [upText, setUpText] = useState('');
 
   const [modelMap, setModelMap] = useState<Record<string, string>>({});
   const [mapAlias, setMapAlias] = useState('');
@@ -446,24 +598,33 @@ export default function SettingsPage() {
       if (v.available !== false) {
         const picked = {
           schedule: pickValues(SCHEDULE_FIELDS, v.schedule),
+          prompt: pickValues(PROMPT_FIELDS, v.prompt),
           cooldown: pickValues(COOLDOWN_FIELDS, v.cooldown),
           pool: pickValues(POOL_FIELDS, v.pool),
           features: pickValues(FEATURES_FIELDS, v.features),
           session: pickValues(SESSION_FIELDS, v.session_sticky),
+          server: pickValues(SERVER_FIELDS, v.server),
+          upstream: pickValues(UPSTREAM_FIELDS, v.upstream),
         };
         setForm(picked);
         original.current = {
           schedule: {...picked.schedule},
+          prompt: {...picked.prompt},
           cooldown: {...picked.cooldown},
           pool: {...picked.pool},
           features: {...picked.features},
           session: {...picked.session},
+          server: {...picked.server},
+          upstream: {...picked.upstream},
         };
         setSchedText(JSON.stringify(v.schedule ?? {}, null, 2));
         setCoolText(JSON.stringify(v.cooldown ?? {}, null, 2));
         setPoolText(JSON.stringify(v.pool ?? {}, null, 2));
         setFeatText(JSON.stringify(v.features ?? {}, null, 2));
         setSessText(JSON.stringify(v.session_sticky ?? {}, null, 2));
+        setPromptText(JSON.stringify(v.prompt ?? {}, null, 2));
+        setServerText(JSON.stringify(v.server ?? {}, null, 2));
+        setUpText(JSON.stringify(v.upstream ?? {}, null, 2));
         // url 可回显；token 不回显明文，留空表示不修改
         setUpstashForm({url: v.upstash?.url || '', token: ''});
       }
@@ -548,7 +709,8 @@ export default function SettingsPage() {
     }
     setBusy(true);
     try {
-      await settingsApi.saveUpstream({[group]: patch});
+      const def = GROUPS.find((g) => g.id === group);
+      await settingsApi.saveUpstream({[def?.section ?? group]: patch});
       notify.ok('设置已保存', '正在自动应用到上游…');
       await load();
     } catch (e) {
@@ -736,66 +898,110 @@ export default function SettingsPage() {
 
                 {/* 宽屏两列：开关与它对应的时刻/数值字段天然成对，行数减半 */}
                 <div className="grid grid-cols-1 gap-1.5 xl:grid-cols-2">
-                  {g.fields.map((f) => (
-                    <div
-                      key={f.key}
-                      className="flex items-center justify-between gap-3 rounded-2xl bg-background/60 px-3 py-2"
-                    >
-                      <div className="min-w-0">
-                        <div className="text-xs font-medium">{f.label}</div>
-                        <div className="mt-0.5 text-[11px] leading-4 text-muted-foreground">{f.desc}</div>
-                      </div>
-
-                      {f.kind === 'bool' ? (
-                        <Switch
-                          checked={!!form[g.id][f.key]}
-                          disabled={!isAdmin || !upstreamReady}
-                          onCheckedChange={(v) => setField(g.id, f.key, v)}
-                        />
-                      ) : f.kind === 'num' ? (
-                        <div className="flex shrink-0 items-center gap-1.5">
-                          <Input
-                            type="number"
-                            min={f.min}
-                            max={f.max}
-                            step={f.step ?? 1}
-                            value={String(form[g.id][f.key] ?? f.def)}
-                            disabled={!isAdmin || !upstreamReady}
-                            onChange={(e) => {
-                              const n = Number(e.target.value);
-                              setField(g.id, f.key, Number.isFinite(n) ? n : f.def);
-                            }}
-                            className="h-8 w-20 bg-background text-right tabular-nums"
-                          />
-                          {f.unit && (
-                            <span className="w-6 text-[11px] text-muted-foreground">{f.unit}</span>
+                  {g.fields.map((f) => {
+                    const err = fieldError(f, form[g.id][f.key]);
+                    const caution = 'caution' in f ? f.caution : undefined;
+                    return (
+                      <div
+                        key={f.key}
+                        className="flex items-center justify-between gap-3 rounded-2xl bg-background/60 px-3 py-2"
+                      >
+                        <div className="min-w-0">
+                          <div className="text-xs font-medium">{f.label}</div>
+                          <div className="mt-0.5 text-[11px] leading-4 text-muted-foreground">{f.desc}</div>
+                          {f.kind !== 'bool' && err && (
+                            <div className="mt-0.5 text-[10px] leading-3 text-destructive">{err}</div>
                           )}
                         </div>
-                      ) : (
-                        <div className="flex shrink-0 flex-col items-end gap-1">
+
+                        {f.kind === 'bool' ? (
+                          <Switch
+                            checked={!!form[g.id][f.key]}
+                            disabled={!isAdmin || !upstreamReady}
+                            onCheckedChange={(v) => setField(g.id, f.key, v)}
+                          />
+                        ) : f.kind === 'num' ? (
+                          <div className="flex shrink-0 items-center gap-1.5">
+                            <Input
+                              type="number"
+                              min={f.min}
+                              max={f.max}
+                              step={f.step ?? 1}
+                              value={String(form[g.id][f.key] ?? f.def)}
+                              disabled={!isAdmin || !upstreamReady}
+                              onChange={(e) => {
+                                const n = Number(e.target.value);
+                                setField(g.id, f.key, Number.isFinite(n) ? n : f.def);
+                              }}
+                              className="h-8 w-20 bg-background text-right tabular-nums"
+                            />
+                            {f.unit && (
+                              <span className="w-8 text-[11px] text-muted-foreground">{f.unit}</span>
+                            )}
+                          </div>
+                        ) : f.kind === 'select' ? (
+                          <Select
+                            value={String(form[g.id][f.key] ?? f.def)}
+                            disabled={!isAdmin || !upstreamReady}
+                            onValueChange={(v) => setField(g.id, f.key, v)}
+                          >
+                            <SelectTrigger className="h-8 w-[168px] shrink-0 bg-background text-xs">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {f.options.map((o) => (
+                                <SelectItem key={o.value} value={o.value} className="text-xs">
+                                  {o.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        ) : f.kind === 'text' ? (
+                          <Input
+                            value={String(form[g.id][f.key] ?? '')}
+                            disabled={!isAdmin || !upstreamReady}
+                            placeholder={f.placeholder}
+                            onChange={(e) => setField(g.id, f.key, e.target.value)}
+                            className={
+                              'h-8 shrink-0 bg-background text-xs ' +
+                              (caution ? 'w-56' : 'w-40') +
+                              (err ? ' border-destructive' : '')
+                            }
+                          />
+                        ) : (
                           <Input
                             value={String(form[g.id][f.key] ?? '')}
                             disabled={!isAdmin || !upstreamReady}
                             placeholder={f.kind === 'hours' ? '9, 21' : '600s'}
                             onChange={(e) => setField(g.id, f.key, e.target.value)}
                             className={
-                              'h-8 bg-background text-right tabular-nums ' +
+                              'h-8 shrink-0 bg-background text-right tabular-nums ' +
                               (f.kind === 'hours' ? 'w-32' : 'w-24') +
-                              (fieldError(f, form[g.id][f.key]) ? ' border-destructive' : '')
+                              (err ? ' border-destructive' : '')
                             }
                           />
-                          {/* 格式说明已在左侧描述里给出，这里只在填错时占位，
-                              避免每行都被一行提示撑高 */}
-                          {fieldError(f, form[g.id][f.key]) && (
-                            <span className="text-[10px] leading-3 text-destructive">
-                              {fieldError(f, form[g.id][f.key])}
-                            </span>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  ))}
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
+
+                {/* 危险项警示：填错会导致上游启动失败，单独占一行说明 */}
+                {g.fields.some((f) => 'caution' in f && f.caution) && (
+                  <div className="mt-1.5 space-y-1">
+                    {g.fields.map((f) =>
+                      'caution' in f && f.caution ? (
+                        <div
+                          key={f.key}
+                          className="flex items-start gap-1.5 rounded-xl bg-amber-500/10 px-3 py-2 text-[11px] leading-4 text-amber-600 dark:text-amber-400"
+                        >
+                          <TriangleAlert className="mt-0.5 h-3 w-3 shrink-0" />
+                          <span>{f.caution}</span>
+                        </div>
+                      ) : null,
+                    )}
+                  </div>
+                )}
 
                 {!isAdmin && (
                   <p className="mt-2 text-[11px] text-muted-foreground">只读角色无法修改设置。</p>
@@ -946,7 +1152,7 @@ export default function SettingsPage() {
             </button>
 
             {advanced && (
-              <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+              <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <div className="font-mono text-[11px] text-muted-foreground">schedule</div>
@@ -1062,6 +1268,35 @@ export default function SettingsPage() {
                     className="bg-background font-mono text-xs"
                   />
                 </div>
+                {([
+                  ['prompt', promptText, setPromptText],
+                  ['server', serverText, setServerText],
+                  ['upstream', upText, setUpText],
+                ] as const).map(([name, val, setter]) => (
+                  <div key={name} className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="font-mono text-[11px] text-muted-foreground">{name}</div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 rounded-full text-[11px]"
+                        disabled={!isAdmin || busy || !upstreamReady}
+                        onClick={() => saveJson(name, val)}
+                      >
+                        保存
+                      </Button>
+                    </div>
+                    <Textarea
+                      rows={8}
+                      spellCheck={false}
+                      disabled={!isAdmin || !upstreamReady}
+                      value={upstreamReady ? val : ''}
+                      placeholder={upstreamReady ? undefined : '未读取到上游配置，无法编辑'}
+                      onChange={(e) => setter(e.target.value)}
+                      className="bg-background font-mono text-xs"
+                    />
+                  </div>
+                ))}
               </div>
             )}
           </div>

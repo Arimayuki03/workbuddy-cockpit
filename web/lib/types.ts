@@ -168,6 +168,9 @@ export interface UpstreamConfig {
   cooldown?: Record<string, unknown>;
   features?: Record<string, unknown>;
   session_sticky?: Record<string, unknown>;
+  prompt?: Record<string, unknown>;
+  server?: Record<string, unknown>;
+  upstream?: Record<string, unknown>;
   upstash?: UpstashConfig;
 }
 

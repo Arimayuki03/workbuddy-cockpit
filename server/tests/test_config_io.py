@@ -121,6 +121,56 @@ class UpstreamConfigRoundTrip(unittest.TestCase):
         wb2api.save_upstream_config({'api_key': 'hacked'})
         self.assertEqual(read_cfg(self.cfg_path)['api_key'], 'secret')
 
+    # ── prompt / server / upstream（新增段）─────────────────
+    def test_prompt_mode_round_trip(self) -> None:
+        write_cfg(self.cfg_path, {'prompt': {'mode': 'custom'}})
+        wb2api.save_upstream_config({'prompt': {'mode': 'passthrough'}})
+        self.assertEqual(read_cfg(self.cfg_path)['prompt']['mode'], 'passthrough')
+
+    def test_prompt_mode_normalised_and_validated(self) -> None:
+        write_cfg(self.cfg_path, {'prompt': {'mode': 'custom'}})
+        wb2api.save_upstream_config({'prompt': {'mode': 'Passthrough'}})
+        self.assertEqual(read_cfg(self.cfg_path)['prompt']['mode'], 'passthrough')
+        with self.assertRaises(ValueError):
+            wb2api.save_upstream_config({'prompt': {'mode': 'replace'}})
+        # 拒绝后保持原值
+        self.assertEqual(read_cfg(self.cfg_path)['prompt']['mode'], 'passthrough')
+
+    def test_prompt_file_rejects_control_chars(self) -> None:
+        write_cfg(self.cfg_path, {'prompt': {'file': ''}})
+        wb2api.save_upstream_config({'prompt': {'file': '/etc/prompt.md'}})
+        self.assertEqual(read_cfg(self.cfg_path)['prompt']['file'], '/etc/prompt.md')
+        with self.assertRaises(ValueError):
+            wb2api.save_upstream_config({'prompt': {'file': '/a\nb'}})
+
+    def test_server_max_body_mb_validation(self) -> None:
+        write_cfg(self.cfg_path, {'server': {'max_body_mb': 8}})
+        wb2api.save_upstream_config({'server': {'max_body_mb': 32}})
+        self.assertEqual(read_cfg(self.cfg_path)['server']['max_body_mb'], 32)
+        for bad in (0, -1, 257, 'many'):
+            with self.assertRaises(ValueError):
+                wb2api.save_upstream_config({'server': {'max_body_mb': bad}})
+        self.assertEqual(read_cfg(self.cfg_path)['server']['max_body_mb'], 32)
+
+    def test_upstream_user_agent_round_trip(self) -> None:
+        write_cfg(self.cfg_path, {})
+        wb2api.save_upstream_config({'upstream': {'user_agent': 'MyClient/1.0'}})
+        self.assertEqual(read_cfg(self.cfg_path)['upstream']['user_agent'], 'MyClient/1.0')
+        with self.assertRaises(ValueError):
+            wb2api.save_upstream_config({'upstream': {'user_agent': 'bad\nua'}})
+
+    def test_new_sections_do_not_touch_others(self) -> None:
+        """保存 prompt 不应影响 timeout 等同段的其他键。"""
+        write_cfg(
+            self.cfg_path,
+            {'upstream': {'timeout_seconds': 120, 'idle_timeout_seconds': 300}},
+        )
+        wb2api.save_upstream_config({'upstream': {'user_agent': 'X/1'}})
+        cfg = read_cfg(self.cfg_path)['upstream']
+        self.assertEqual(cfg['timeout_seconds'], 120)
+        self.assertEqual(cfg['idle_timeout_seconds'], 300)
+        self.assertEqual(cfg['user_agent'], 'X/1')
+
     def test_missing_config_refuses_to_write(self) -> None:
         with self.assertRaises(FileNotFoundError):
             wb2api.save_upstream_config({'schedule': {'checkin_hours': [9]}})
