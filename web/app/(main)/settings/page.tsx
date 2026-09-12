@@ -211,6 +211,16 @@ const SCHEDULE_FIELDS: Field[] = [
     desc: '在哪些整点刷新令牌（0-23，可多个）',
     def: [22],
   },
+  {
+    key: 'activity_report_count',
+    kind: 'num',
+    label: '每次上报条数',
+    desc: '每个账号每次活跃上报发几条。领养猫需要 5 次对话，默认 5 条一次刷满；填 1 即旧行为',
+    unit: '条',
+    min: 1,
+    max: 20,
+    def: 5,
+  },
 ];
 
 const COOLDOWN_FIELDS: Field[] = [

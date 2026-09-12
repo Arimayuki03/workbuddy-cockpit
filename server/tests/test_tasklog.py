@@ -78,6 +78,61 @@ class ParseTaskLines(unittest.TestCase):
             assert ev is not None, line
             self.assertEqual(ev['level'], 'error', line)
 
+    # ── 上游 2026-09-12 起的日志格式变化 ────────────────
+    def test_uid_truncated_to_8_chars(self) -> None:
+        """上游把日志里的 uid 截成前 8 位。"""
+        ev = tasklog.parse_line(
+            f'{DOCKER}travel 9b212d8c: claim ok record=12 reward=100'
+        )
+        assert ev is not None
+        self.assertEqual(ev['uid'], '9b212d8c')
+        self.assertEqual(ev['credits'], 100)
+
+    def test_warn_prefix_captured(self) -> None:
+        ev = tasklog.parse_line(
+            f'{DOCKER}WARN: activity 9b212d8c: report OK but streak.days=0 (silent drop?)'
+        )
+        assert ev is not None
+        self.assertEqual(ev['kind'], 'activity')
+        self.assertEqual(ev['uid'], '9b212d8c')
+        self.assertEqual(ev['level'], 'warn')
+
+    def test_err_prefix_captured(self) -> None:
+        ev = tasklog.parse_line(
+            f'{DOCKER}ERR: checkin 9b212d8c: context deadline exceeded'
+        )
+        assert ev is not None
+        self.assertEqual(ev['level'], 'error')
+
+    def test_activity_burst_lines(self) -> None:
+        """活跃上报改 5 连发：report N/M ok / report N/M: <err>。"""
+        ok = tasklog.parse_line(f'{DOCKER}activity 9b212d8c: report 1/5 ok')
+        assert ok is not None
+        self.assertEqual(ok['level'], 'ok')
+        self.assertEqual(ok['kind'], 'activity')
+
+        bad = tasklog.parse_line(f'{DOCKER}activity 9b212d8c: report 3/5: timeout')
+        assert bad is not None
+        self.assertEqual(bad['level'], 'error')
+
+    def test_new_failure_wording_is_error(self) -> None:
+        """WARN:/ERR: 之外，未加前缀的失败行仍应判为 error。"""
+        for line in (
+            'activity 9b212d8c: report 2/5: connection reset',
+            'activity 9b212d8c: buddy-info: timeout',
+        ):
+            ev = tasklog.parse_line(f'{DOCKER}{line}')
+            assert ev is not None, line
+            self.assertEqual(ev['level'], 'error', line)
+
+    def test_report_burst_translated(self) -> None:
+        self.assertEqual(
+            tasklog.translate_message('report 1/5 ok'), '活跃上报成功（第 1/5 条）'
+        )
+        self.assertEqual(
+            tasklog.translate_message('report 3/5: timeout'), '活跃上报失败（第 3/5 条）'
+        )
+
     def test_unrelated_lines_ignored(self) -> None:
         for line in (
             '',
