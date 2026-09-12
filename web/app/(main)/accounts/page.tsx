@@ -241,6 +241,21 @@ export default function AccountsPage() {
     }
   }
 
+  /** uid → 昵称：任务日志只留存了 uid，展示时换成昵称更易读 */
+  const uidToNick = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const a of merged) {
+      if (a.uid && a.nickname) m[a.uid] = a.nickname;
+    }
+    return m;
+  }, [merged]);
+
+  /** 任务日志里的账号显示：昵称优先，取不到再退回 uid */
+  function accountLabel(uid: string) {
+    if (!uid) return '—';
+    return uidToNick[uid] || uid;
+  }
+
   /** 账号状态徽章（表格与移动端卡片共用） */
   function renderStatus(a: Account) {
     if (a.disabled === true) return <Badge variant="destructive" className="rounded-full">● 已禁用</Badge>;
@@ -600,7 +615,10 @@ export default function AccountsPage() {
           <div className="flex items-center justify-between px-4 py-3">
             <div className="flex items-center gap-2 text-sm font-medium">
               <History className="h-4 w-4" />
-              上游签到 / 保活日志
+              上游原始日志
+              <span className="text-[11px] font-normal text-muted-foreground">
+                （签到 / 保活 / 旅行 / 活跃）
+              </span>
             </div>
             <span className="text-[11px] text-muted-foreground">来自容器日志</span>
           </div>
@@ -613,9 +631,10 @@ export default function AccountsPage() {
           ) : (
             <div className="px-4 py-10 text-center text-xs leading-5 text-muted-foreground">
               <TriangleAlert className="mx-auto mb-2 h-4 w-4 text-amber-500" />
-              上游自动签到<b>成功时不会打日志</b>（源码里仅在失败时记录），
-              因此这里通常是空的 —— 没有记录即代表没有失败。
-              想看成功记录，请用上方的「全部签到」，结果会记入左侧列表。
+              上游只在<b>失败</b>与<b>旅行 / 活跃</b>时打日志：签到成功、
+              保活正常都是静默的，所以这里没有记录不代表没执行。
+              想看结构化、可长期保留（容器重建也不丢）的记录，请看下方
+              「自动任务与积分记录」。
             </div>
           )}
         </div>
@@ -726,7 +745,9 @@ export default function AccountsPage() {
                       {l.message}
                     </div>
                     <div className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground">
-                      <span className="font-mono">{l.uid}</span>
+                      <span className="truncate font-mono" title={l.uid}>
+                        {accountLabel(l.uid)}
+                      </span>
                       <span className="tabular-nums">{fmtDateTime(l.ts)}</span>
                     </div>
                   </div>
@@ -763,7 +784,9 @@ export default function AccountsPage() {
                         <TableCell className="text-xs">
                           {kindLabels[l.kind] || l.kind}
                         </TableCell>
-                        <TableCell className="text-xs tabular-nums">{l.uid || '—'}</TableCell>
+                        <TableCell className="max-w-[160px] truncate text-xs" title={l.uid}>
+                          {accountLabel(l.uid)}
+                        </TableCell>
                         <TableCell className={`max-w-[380px] truncate text-xs ${tone[l.level] || ''}`} title={l.message}>
                           {l.message}
                         </TableCell>
