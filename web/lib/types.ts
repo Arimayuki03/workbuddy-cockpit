@@ -174,6 +174,13 @@ export interface UpstreamConfig {
   upstash?: UpstashConfig;
 }
 
+/** 积分查询来源：实时查询 or 命中 60 秒缓存 */
+export interface CreditsMeta {
+  cached: boolean;
+  cache_age: number | null;
+  message?: string;
+}
+
 export interface CheckinLog {
   id: number;
   ts: number;

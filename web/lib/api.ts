@@ -2,6 +2,7 @@ import axios, {AxiosError} from 'axios';
 import type {
   Account,
   CheckinLog,
+  CreditsMeta,
   AccountsResponse,
   ApiKey,
   IpAccessLog,
@@ -85,17 +86,19 @@ export const accountApi = {
     ),
   /** 单个账号的实时积分（直接向腾讯查询） */
   credits: (file: string) =>
-    get<{ok: boolean; credits: number | null; message: string}>(
+    get<{ok: boolean; credits: number | null; message: string; cached: boolean; cache_age: number | null}>(
       `/api/accounts/${encodeURIComponent(file)}/credits`,
     ),
   /** 并发刷新所有账号的实时积分 */
-  refreshCredits: () =>
+  /** 查询全部账号积分；force=false 时 60 秒内命中服务端缓存 */
+  refreshCredits: (force = true) =>
     post<{
       total: number;
       succeeded: number;
       credits: Record<string, number | null>;
+      meta: Record<string, CreditsMeta>;
       failed: string[];
-    }>('/api/accounts/refresh-credits'),
+    }>('/api/accounts/refresh-credits' + (force ? '?force=true' : '?force=false')),
   checkinAll: () =>
     post<{total: number; succeeded: number; results: {nickname: string; ok: boolean; message: string}[]}>(
       '/api/accounts/checkin-all',

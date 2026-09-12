@@ -1,7 +1,7 @@
 'use client';
 
 import {useCallback, useEffect, useState} from 'react';
-import {Users, CircleCheck, TriangleAlert, Activity, Server, RefreshCw, Coins} from 'lucide-react';
+import {Users, CircleCheck, TriangleAlert, Activity, Server, Coins} from 'lucide-react';
 import {
   Area,
   AreaChart,
@@ -17,7 +17,6 @@ import {expiryVisual, fmtCompact, fmtNumber, fmtRemain} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {StatCard} from '@/components/common/layout/StatCard';
 import {EmptyState} from '@/components/common/layout/EmptyState';
-import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
 import {notify} from '@/lib/toast';
 
@@ -26,22 +25,31 @@ export default function DashboardPage() {
   const [summary, setSummary] = useState<StatsSummary | null>(null);
   const [daily, setDaily] = useState<UsagePoint[]>([]);
   const [upstream, setUpstream] = useState<UpstreamStatus | null>(null);
-  const [loading, setLoading] = useState(true);
+  /** 实时积分（按 uid），叠加到 accounts 上；上游 /status 的 credits 可能滞后数小时 */
+  const [liveCredits, setLiveCredits] = useState<Record<string, number>>({});
 
   const load = useCallback(async () => {
-    setLoading(true);
     const results = await Promise.allSettled([
       accountApi.list(),
       statsApi.summary(),
       statsApi.daily(14),
       upstreamApi.status(),
+      // force=false：命中服务端 60 秒缓存，30 秒轮询不会反复打腾讯
+      accountApi.refreshCredits(false),
     ]);
     if (results[0].status === 'fulfilled') setAccounts(results[0].value.accounts);
     if (results[1].status === 'fulfilled') setSummary(results[1].value);
     if (results[2].status === 'fulfilled') setDaily(results[2].value);
     if (results[3].status === 'fulfilled') setUpstream(results[3].value);
-    if (results.some((r) => r.status === 'rejected')) notify.err('部分数据加载失败');
-    setLoading(false);
+    if (results[4].status === 'fulfilled') {
+      const r = results[4].value;
+      setLiveCredits(
+        Object.fromEntries(
+          Object.entries(r.credits).filter(([, v]) => typeof v === 'number') as [string, number][],
+        ),
+      );
+    }
+    if (results.slice(0, 4).some((r) => r.status === 'rejected')) notify.err('部分数据加载失败');
   }, []);
 
   useEffect(() => {
@@ -59,9 +67,11 @@ export default function DashboardPage() {
   const valid = accounts.filter((a) => !a.is_expired).length;
   const expiring = accounts.filter((a) => a.remain_seconds > 0 && a.remain_seconds < 3600).length;
   // 积分余额合计（仅统计已同步到的账号）
-  const creditsKnown = accounts.filter((a) => typeof a.credits === 'number');
-  const totalCredits = creditsKnown.reduce((sum, a) => sum + (a.credits || 0), 0);
-  const creditsLow = creditsKnown.filter((a) => (a.credits || 0) < 200).length;
+  // 优先用实时查询到的积分，其次上游 /status 的（可能滞后的）值
+  const credOf = (a: Account) => liveCredits[a.uid] ?? a.credits;
+  const creditsKnown = accounts.filter((a) => typeof credOf(a) === 'number');
+  const totalCredits = creditsKnown.reduce((sum, a) => sum + (credOf(a) || 0), 0);
+  const creditsLow = creditsKnown.filter((a) => (credOf(a) || 0) < 200).length;
 
   const chartData = daily.map((d) => ({
     day: d.day.slice(5),
@@ -71,15 +81,11 @@ export default function DashboardPage() {
 
   return (
     <div className="flex flex-col gap-4 md:gap-6">
+      {/* 本页 30 秒自动刷新，且没有任何会改变数据的操作，
+          因此不再放手动刷新按钮（移动端还省下一行） */}
       <PageHeader
         title="仪表盘"
-        description="账号池健康度、反代网关与今日用量总览"
-        actions={
-          <Button variant="outline" size="sm" className="rounded-full" onClick={load} disabled={loading}>
-            <RefreshCw className={loading ? 'animate-spin' : ''} />
-            刷新
-          </Button>
-        }
+        description="账号池健康度、反代网关与今日用量总览（每 30 秒自动刷新）"
       />
 
       <section className="grid grid-cols-2 gap-3 lg:grid-cols-5 md:gap-4">
@@ -251,17 +257,17 @@ export default function DashboardPage() {
                     <span
                       className={
                         'text-[11px] font-medium tabular-nums ' +
-                        (typeof a.credits !== 'number'
+                        (typeof credOf(a) !== 'number'
                           ? 'text-muted-foreground'
-                          : a.credits <= 0
+                          : (credOf(a) as number) <= 0
                             ? 'text-red-600 dark:text-red-400'
-                            : a.credits < 200
+                            : (credOf(a) as number) < 200
                               ? 'text-amber-600 dark:text-amber-400'
                               : 'text-foreground')
                       }
                       title="积分余额"
                     >
-                      {typeof a.credits === 'number' ? `${fmtNumber(a.credits)} 积分` : ''}
+                      {typeof credOf(a) === 'number' ? `${fmtNumber(credOf(a))} 积分` : ''}
                     </span>
                   </div>
                 </div>

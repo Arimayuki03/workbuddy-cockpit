@@ -127,7 +127,9 @@ async def account_checkin(filename: str, user: dict = Depends(security.require_a
     if ok:
         # 签到会改变余额，先失效缓存再查实时值
         creditsvc.invalidate(uid)
-        _, credits, _ = await creditsvc.get_credits(_auth_dict(raw))
+        _, credits, _, _, _ = await creditsvc.get_credits(
+            _auth_dict(raw), nickname=str(acct.get('nickname') or ''),
+        )
 
     return {'code': code, 'message': message, 'credits': credits}
 
@@ -143,33 +145,45 @@ async def account_credits(
     force=true 可绕过缓存强制查询。
     """
     raw = _load(filename)
-    ok, value, message = await creditsvc.get_credits(_auth_dict(raw), force=force)
-    return {'ok': ok, 'credits': value, 'message': message}
+    acct = raw.get('account') or {}
+    ok, value, message, cached, age = await creditsvc.get_credits(
+        _auth_dict(raw), force=force, nickname=str(acct.get('nickname') or ''),
+    )
+    return {'ok': ok, 'credits': value, 'message': message, 'cached': cached, 'cache_age': age}
 
 
 @router.post('/accounts/refresh-credits')
-async def refresh_all_credits(user: dict = Depends(security.current_user)) -> dict:
-    """并发查询所有账号的实时积分，返回 {uid: credits}。
+async def refresh_all_credits(
+    force: bool = True,
+    user: dict = Depends(security.current_user),
+) -> dict:
+    """并发查询所有账号的积分，返回 {uid: credits} 与每条是否来自缓存。
 
     上游 /status 的 credits 只在它定时任务时更新，可能滞后数小时；
-    本接口直接向腾讯查询，用于「刷新积分」。
+    本接口直接向腾讯查询。force=true（默认）用于「刷新积分」按钮，
+    强制绕过 60 秒缓存；force=false 用于页面加载，命中缓存时不重复请求腾讯。
+    无论哪种，都回传 cached / cache_age，前端据此标注「实时 / 缓存」。
     """
     accounts = wb2api.list_auth_accounts()
 
-    async def one(acc: dict) -> tuple[str, int | float | None, str]:
+    async def one(acc: dict) -> tuple[str, int | float | None, str, bool, int | None]:
         try:
             raw = wb2api.read_account_file(acc['file'])
         except Exception as exc:  # noqa: BLE001
-            return acc['uid'], None, f'读取失败: {exc}'
-        ok, value, message = await creditsvc.get_credits(_auth_dict(raw), force=True)
-        return acc['uid'], value if ok else None, message
+            return acc['uid'], None, f'读取失败: {exc}', False, None
+        ok, value, message, cached, age = await creditsvc.get_credits(
+            _auth_dict(raw), force=force, nickname=str(acc.get('nickname') or ''),
+        )
+        return acc['uid'], value if ok else None, message, cached, age
 
     results = await asyncio.gather(*(one(a) for a in accounts)) if accounts else []
 
     credits_map: dict[str, int | float | None] = {}
+    meta: dict[str, dict] = {}
     failed: list[str] = []
-    for uid, credits, message in results:
+    for uid, credits, message, cached, age in results:
         credits_map[uid] = credits
+        meta[uid] = {'cached': cached, 'cache_age': age, 'message': message}
         if credits is None:
             failed.append(f'{uid[:12]}: {message}')
 
@@ -177,6 +191,7 @@ async def refresh_all_credits(user: dict = Depends(security.current_user)) -> di
         'total': len(accounts),
         'succeeded': len(accounts) - len(failed),
         'credits': credits_map,
+        'meta': meta,
         'failed': failed,
     }
 
