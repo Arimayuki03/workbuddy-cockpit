@@ -207,9 +207,12 @@ const FloatingDockDesktop = memo(
           )}
         >
           {(() => {
-            const firstRow = items.slice(0, 3);
+            // 以分隔线为界拆两段。不能写死 slice(0, 3)：
+            // 分隔线前有几个图标是可变的，写死会把多出来的那个图标静默丢掉
+            // （曾经把「密钥」挤掉过）。
             const dividerIndex = items.findIndex((item) => item.title === 'divider');
-            const secondRow = dividerIndex !== -1 ? items.slice(dividerIndex + 1) : [];
+            const firstRow = dividerIndex === -1 ? items : items.slice(0, dividerIndex);
+            const secondRow = dividerIndex === -1 ? [] : items.slice(dividerIndex + 1);
 
             return (
               <>
