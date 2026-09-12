@@ -144,7 +144,12 @@ def state() -> dict:
     return dict(_last)
 
 
-async def _collect_once(limit: int = 800) -> tuple[int, int]:
+# 每次回看的日志行数：上游会为每个请求打日志，行数消耗很快，
+# 太小可能在两次轮询之间漏掉任务行；这里取一个明显大于 45 秒产出量的值。
+TAIL_LINES = 3000
+
+
+async def _collect_once(limit: int = TAIL_LINES) -> tuple[int, int]:
     """读一次容器日志并入库，返回 (解析到的任务行数, 新增条数)。"""
     lines = await asyncio.to_thread(wb2api.read_container_logs, limit, True)
     events = parse_lines(lines)
