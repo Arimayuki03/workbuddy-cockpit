@@ -171,10 +171,75 @@ class UpstreamConfigRoundTrip(unittest.TestCase):
         self.assertEqual(cfg['idle_timeout_seconds'], 300)
         self.assertEqual(cfg['user_agent'], 'X/1')
 
+    # ── 整数字段区间（前端 max 只是输入框属性，服务端必须兜底）──
+    def test_activity_report_count_range(self) -> None:
+        write_cfg(self.cfg_path, {'schedule': {}})
+        # 合法：1（旧行为）~ 50
+        for v in (1, 5, 20, 50):
+            wb2api.save_upstream_config({'schedule': {'activity_report_count': v}})
+            self.assertEqual(read_cfg(self.cfg_path)['schedule']['activity_report_count'], v)
+        # 非法：越界 / 零 / 负数 / 非整数 / bool
+        for bad in (0, -1, 51, 999, 100000, 'x', 3.5, True):
+            with self.assertRaises(ValueError, msg=f'{bad!r} 应被拒绝'):
+                wb2api.save_upstream_config({'schedule': {'activity_report_count': bad}})
+        # 拒绝后配置保持最后一次合法值
+        self.assertEqual(read_cfg(self.cfg_path)['schedule']['activity_report_count'], 50)
+
+    def test_pool_int_ranges(self) -> None:
+        write_cfg(self.cfg_path, {'pool': {}})
+        with self.assertRaises(ValueError):
+            wb2api.save_upstream_config({'pool': {'max_in_flight': 999}})
+        with self.assertRaises(ValueError):
+            wb2api.save_upstream_config({'pool': {'breaker_threshold': 0}})
+        with self.assertRaises(ValueError):
+            wb2api.save_upstream_config({'pool': {'idle_weight_max': -1}})
+        # 合法值可通过
+        wb2api.save_upstream_config({'pool': {'max_in_flight': 3, 'breaker_threshold': 3}})
+        self.assertEqual(read_cfg(self.cfg_path)['pool']['max_in_flight'], 3)
+
+    def test_pool_float_range(self) -> None:
+        write_cfg(self.cfg_path, {'pool': {}})
+        for v in (0, 0.5, 100.0):
+            wb2api.save_upstream_config({'pool': {'idle_weight_per_hour': v}})
+        self.assertEqual(read_cfg(self.cfg_path)['pool']['idle_weight_per_hour'], 100.0)
+        for bad in (-1, 101, 'fast', True):
+            with self.assertRaises(ValueError, msg=f'{bad!r} 应被拒绝'):
+                wb2api.save_upstream_config({'pool': {'idle_weight_per_hour': bad}})
+
     def test_missing_config_refuses_to_write(self) -> None:
         with self.assertRaises(FileNotFoundError):
             wb2api.save_upstream_config({'schedule': {'checkin_hours': [9]}})
         self.assertFalse(self.cfg_path.exists())
+
+
+class TokenTTL(unittest.TestCase):
+    """从 JWT 解出令牌总时长（供进度条按真实比例展示）。"""
+
+    @staticmethod
+    def _jwt(iat: int, exp: int) -> str:
+        import base64, json as _json
+        def seg(obj):
+            raw = _json.dumps(obj).encode()
+            return base64.urlsafe_b64encode(raw).decode().rstrip('=')
+        return f'{seg({"alg": "RS256"})}.{seg({"iat": iat, "exp": exp})}.sig'
+
+    def test_reads_lifetime(self) -> None:
+        ttl = wb2api.token_ttl_seconds(self._jwt(1000, 1000 + 60 * 86400))
+        self.assertEqual(ttl, 60 * 86400)
+
+    def test_garbage_returns_none(self) -> None:
+        for bad in ('', 'not-a-jwt', 'a.b.c', 'onlyonesegment'):
+            self.assertIsNone(wb2api.token_ttl_seconds(bad), bad)
+
+    def test_missing_or_invalid_claims(self) -> None:
+        import base64, json as _json
+        def seg(obj):
+            raw = _json.dumps(obj).encode()
+            return base64.urlsafe_b64encode(raw).decode().rstrip('=')
+        # 缺 exp
+        self.assertIsNone(wb2api.token_ttl_seconds(f'{seg({})}.{seg({"iat": 1})}.s'))
+        # exp <= iat
+        self.assertIsNone(wb2api.token_ttl_seconds(f'{seg({})}.{seg({"iat": 100, "exp": 50})}.s'))
 
 
 if __name__ == '__main__':

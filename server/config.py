@@ -42,6 +42,9 @@ STATIC_DIR = Path(_env('WB_STATIC_DIR', str(ROOT / 'web' / 'out')))
 # 网络
 UPSTREAM_TIMEOUT = _env_int('WB_UPSTREAM_TIMEOUT', 120)
 TENCENT_TIMEOUT = _env_int('WB_TENCENT_TIMEOUT', 15)
+# 「全部签到」的并发上限：太低会拖到前端超时（几十个账号时），
+# 太高又容易触发腾讯风控。5 是保守且够快的取值。
+CHECKIN_CONCURRENCY = max(1, _env_int('WB_CHECKIN_CONCURRENCY', 5))
 TRUST_PROXY = _env('WB_TRUST_PROXY', '1') == '1'
 # 可信反向代理跳数：用于从 X-Forwarded-For 右侧取真实客户端 IP。
 # 前面直接是 1Panel/OpenResty 时保持 1；若还挂了 CDN 则设为 CDN+反代的层数。

@@ -14,6 +14,13 @@ import {useAuth} from '@/lib/auth-context';
 import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
 import {Input} from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import {Label} from '@/components/ui/label';
 import {Textarea} from '@/components/ui/textarea';
 import {
@@ -36,7 +43,10 @@ import {
 
 interface FormState {
   name: string;
+  /** 新建：0 = 永不过期；编辑：0 = 保持当前有效期不变 */
   expiresDays: string;
+  /** 编辑时的有效期操作：keep 保持不变 / days 从现在起 N 天 / never 永不过期 */
+  expiryMode: 'keep' | 'days' | 'never';
   maxIps: string;
   ipAllowlist: string;
   models: string;
@@ -45,6 +55,7 @@ interface FormState {
 
 const emptyForm: FormState = {
   name: '',
+  expiryMode: 'keep',
   expiresDays: '0',
   maxIps: '0',
   ipAllowlist: '',
@@ -97,6 +108,8 @@ export default function KeysPage() {
     setEditing(k);
     setForm({
       name: k.name,
+      // 默认不改动有效期；要续期/取消过期需显式选择
+      expiryMode: 'keep',
       expiresDays: '0',
       maxIps: String(k.max_ips || 0),
       ipAllowlist: (k.ip_allowlist || []).join('\n'),
@@ -121,7 +134,22 @@ export default function KeysPage() {
         models: toLines(form.models),
         quota: Number(form.quota) || 0,
       };
-      if (days > 0) payload.expires_at = Math.floor(Date.now() / 1000) + days * 86400;
+
+      // 新建：填了天数才设过期（0 = 永不过期，不下发 expires_at）
+      // 编辑：按显式选择处理，避免「打开就保存」把有效期重置
+      if (!editing) {
+        if (days > 0) payload.expires_at = Math.floor(Date.now() / 1000) + days * 86400;
+      } else if (form.expiryMode === 'days') {
+        if (days <= 0) {
+          notify.err('请填写大于 0 的天数');
+          setBusy(false);
+          return;
+        }
+        payload.expires_at = Math.floor(Date.now() / 1000) + days * 86400;
+      } else if (form.expiryMode === 'never') {
+        // 后端以 null 表示「无过期时间」
+        payload.expires_at = null;
+      }
 
       if (editing) {
         await keyApi.update(editing.id, payload as Partial<ApiKey>);
@@ -327,15 +355,47 @@ export default function KeysPage() {
                 <Label className="text-[11px] text-muted-foreground">名称</Label>
                 <Input value={form.name} onChange={(e) => setForm({...form, name: e.target.value})} placeholder="例如：客服组" />
               </div>
-              {!editing && (
+              {!editing ? (
                 <div className="space-y-1.5">
-                  <Label className="text-[11px] text-muted-foreground">有效期（天，0 = 永不过期）</Label>
+                  <Label className="text-[11px] text-muted-foreground">有效期（天，自创建时起算，0 = 永不过期）</Label>
                   <Input
                     type="number"
                     min={0}
                     value={form.expiresDays}
                     onChange={(e) => setForm({...form, expiresDays: e.target.value})}
                   />
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <Label className="text-[11px] text-muted-foreground">
+                    有效期
+                    {editing.expires_at ? `（当前：${fmtDateTime(editing.expires_at)} 到期）` : '（当前：永不过期）'}
+                  </Label>
+                  <div className="flex items-center gap-2">
+                    <Select
+                      value={form.expiryMode}
+                      onValueChange={(v) => setForm({...form, expiryMode: v as FormState['expiryMode']})}
+                    >
+                      <SelectTrigger className="flex-1">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="keep">保持不变</SelectItem>
+                        <SelectItem value="days">从现在起 N 天后过期</SelectItem>
+                        <SelectItem value="never">永不过期</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    {form.expiryMode === 'days' && (
+                      <Input
+                        type="number"
+                        min={1}
+                        className="w-24"
+                        placeholder="天数"
+                        value={form.expiresDays}
+                        onChange={(e) => setForm({...form, expiresDays: e.target.value})}
+                      />
+                    )}
+                  </div>
                 </div>
               )}
               <div className="grid grid-cols-2 gap-3">

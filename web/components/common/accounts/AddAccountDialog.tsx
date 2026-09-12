@@ -30,12 +30,15 @@ export function AddAccountDialog({
   const [message, setMessage] = useState('');
   const stateRef = useRef('');
   const timerRef = useRef<number | null>(null);
+  /** 上一次 poll 是否还在飞：单次超过 2 秒时避免请求叠加 */
+  const pollingRef = useRef(false);
 
   const stopPoll = useCallback(() => {
     if (timerRef.current !== null) {
       window.clearInterval(timerRef.current);
       timerRef.current = null;
     }
+    pollingRef.current = false;
   }, []);
 
   const start = useCallback(async () => {
@@ -51,6 +54,8 @@ export function AddAccountDialog({
       setMessage('等待手机扫码确认…');
 
       timerRef.current = window.setInterval(async () => {
+        if (pollingRef.current) return;  // 上一次还没回来，跳过本轮
+        pollingRef.current = true;
         try {
           const res = await accountApi.poll(stateRef.current);
           if (res.status === 'success') {
@@ -71,6 +76,8 @@ export function AddAccountDialog({
           }
         } catch {
           /* 忽略单次轮询错误，等待下次 */
+        } finally {
+          pollingRef.current = false;
         }
       }, 2000);
     } catch (e) {

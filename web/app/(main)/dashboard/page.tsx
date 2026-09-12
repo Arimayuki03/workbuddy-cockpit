@@ -14,7 +14,7 @@ import {
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {accountApi, statsApi, upstreamApi} from '@/lib/api';
 import type {Account, StatsSummary, UpstreamStatus, UsagePoint} from '@/lib/types';
-import {expiryVisual, fmtCompact, fmtNumber, fmtRemain} from '@/lib/format';
+import {expiryBarPercent, expiryVisual, fmtCompact, fmtNumber, fmtRemain} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {StatCard} from '@/components/common/layout/StatCard';
 import {EmptyState} from '@/components/common/layout/EmptyState';
@@ -223,7 +223,7 @@ export default function DashboardPage() {
         {accounts.length ? (
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {accounts.slice(0, 9).map((a) => {
-              const pct = Math.min(100, Math.max(0, (a.remain_seconds / (72 * 3600)) * 100));
+              const pct = expiryBarPercent(a.remain_seconds, a.ttl_seconds);
               const vis = expiryVisual(a.remain_seconds);
               return (
                 <div key={a.file} className="rounded-2xl bg-background/60 p-3">

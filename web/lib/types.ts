@@ -6,6 +6,8 @@ export interface Me {
 }
 
 export interface Account {
+  /** 该令牌签发的总时长（秒）；后端从 JWT 解出，解不出为 null */
+  ttl_seconds?: number | null;
   file: string;
   uid: string;
   nickname: string;
