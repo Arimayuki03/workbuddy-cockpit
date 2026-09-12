@@ -59,6 +59,27 @@ export interface ExpiryVisual {
 }
 
 /**
+ * 有效期进度条的兜底窗口（60 天）。
+ *
+ * 正常会用后端从 JWT 解出的真实总时长（ttlSeconds）；只有在解不出时
+ * 才退回这个默认值（腾讯签发约 60 天）。
+ *
+ * 历史问题：这里曾写死 72 小时（3 天）作为满格，而 token 实际有效期约 60 天，
+ * 于是「60 天」和「5 天」的进度条都是一整条，等于没有信息。
+ */
+export const EXPIRY_BAR_FALLBACK_SECONDS = 60 * 86400;
+
+/**
+ * 进度条宽度百分比（0–100）。
+ * ttlSeconds 为该令牌签发的总时长；未知时用兜底窗口。
+ */
+export function expiryBarPercent(remainSeconds: number, ttlSeconds?: number | null): number {
+  if (!Number.isFinite(remainSeconds) || remainSeconds <= 0) return 0;
+  const total = ttlSeconds && ttlSeconds > 0 ? ttlSeconds : EXPIRY_BAR_FALLBACK_SECONDS;
+  return Math.min(100, (remainSeconds / total) * 100);
+}
+
+/**
  * 按剩余有效期分档：
  * - expired 已过期      → 红（destructive）
  * - urgent  < 1 小时     → 琥珀

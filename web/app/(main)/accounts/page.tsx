@@ -18,7 +18,7 @@ import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {accountApi, upstreamApi, errText} from '@/lib/api';
 import type {Account, CreditsMeta, UpstreamStatus} from '@/lib/types';
-import {expiryVisual, fmtNumber, fmtRemain} from '@/lib/format';
+import {expiryBarPercent, expiryVisual, fmtNumber, fmtRemain} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
@@ -34,8 +34,6 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-
-const TOKEN_TTL = 72 * 3600;
 
 export default function AccountsPage() {
   const {isAdmin} = useAuth();
@@ -266,7 +264,7 @@ export default function AccountsPage() {
 
   /** Token 有效期进度条 */
   function renderExpiry(a: Account) {
-    const pct = Math.min(100, Math.max(0, (a.remain_seconds / TOKEN_TTL) * 100));
+    const pct = expiryBarPercent(a.remain_seconds, a.ttl_seconds);
     const vis = expiryVisual(a.remain_seconds);
     return (
       <div className="w-[150px]">

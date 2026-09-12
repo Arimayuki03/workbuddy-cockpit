@@ -65,11 +65,15 @@ export default function SecurityPage() {
   useHeartbeat(load, 60000);
 
   async function saveConfig(next: SecurityConfig) {
+    // 乐观更新：先切到目标态让开关立刻响应；失败则回滚到改动前的值，
+    // 否则界面会停在一个后端并未生效的状态上（刷新才暴露）。
+    const prev = config;
     setConfig(next);
     try {
       await securityApi.saveConfig(next);
       notify.ok('安全配置已保存');
     } catch (e) {
+      setConfig(prev);
       notify.err(errText(e));
     }
   }

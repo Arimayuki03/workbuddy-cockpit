@@ -5,7 +5,7 @@ import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from .. import db, security
+from .. import config, db, security
 from ..services import credits as creditsvc, reload, tasklog, tencent, wb2api
 
 router = APIRouter(prefix='/api', tags=['accounts'])
@@ -196,15 +196,26 @@ async def refresh_all_credits(
     }
 
 
+def _checkin_semaphore() -> asyncio.Semaphore:
+    """限制签到并发数：太高容易触发腾讯风控，太低又会拖到前端超时。"""
+    return asyncio.Semaphore(config.CHECKIN_CONCURRENCY)
+
+
 @router.post('/accounts/checkin-all')
 async def checkin_all(user: dict = Depends(security.require_admin)) -> dict:
     """对所有账号执行一次签到，并逐条记录结果。
 
     上游的自动签到只在失败时打日志、成功静默，且没有可触发的 HTTP 接口；
     这里用管理端自己的签到实现补齐「可手动触发 + 可追溯」。
+
+    并发执行（上限见 WB_CHECKIN_CONCURRENCY）：逐个 await 时，
+    几十个账号叠加腾讯 RPC 耗时会超过前端 60 秒超时——前端报失败、
+    后端却还在跑，用户容易重复点击。并发后总耗时约等于最慢的单个账号。
     """
-    results: list[dict] = []
-    for acc in wb2api.list_auth_accounts():
+    accounts = wb2api.list_auth_accounts()
+    sem = _checkin_semaphore()
+
+    async def one(acc: dict) -> dict:
         filename = acc['file']
         uid = acc.get('uid', '')
         nickname = acc.get('nickname', '')
@@ -212,23 +223,24 @@ async def checkin_all(user: dict = Depends(security.require_admin)) -> dict:
             raw = wb2api.read_account_file(filename)
             token = (raw.get('auth') or {}).get('accessToken', '')
         except Exception as exc:  # noqa: BLE001
-            db.add_checkin_log(uid, nickname, 'manual-batch', False, None, f'读取失败: {exc}')
-            results.append({'nickname': nickname, 'ok': False, 'message': f'读取失败: {exc}'})
-            continue
+            msg = f'读取失败: {exc}'
+            db.add_checkin_log(uid, nickname, 'manual-batch', False, None, msg)
+            return {'nickname': nickname, 'ok': False, 'message': msg}
 
         if not token:
             msg = '无有效 accessToken'
             db.add_checkin_log(uid, nickname, 'manual-batch', False, None, msg)
-            results.append({'nickname': nickname, 'ok': False, 'message': msg})
-            continue
+            return {'nickname': nickname, 'ok': False, 'message': msg}
 
-        code, message = await tencent.checkin(token)
+        async with sem:
+            code, message = await tencent.checkin(token)
         ok = code in (0, 10001)
         db.add_checkin_log(uid, nickname, 'manual-batch', ok, code, message)
-        results.append({'nickname': nickname, 'ok': ok, 'code': code, 'message': message})
+        return {'nickname': nickname, 'ok': ok, 'code': code, 'message': message}
 
+    results = await asyncio.gather(*(one(a) for a in accounts)) if accounts else []
     succeeded = sum(1 for r in results if r['ok'])
-    return {'total': len(results), 'succeeded': succeeded, 'results': results}
+    return {'total': len(results), 'succeeded': succeeded, 'results': list(results)}
 
 
 @router.get('/checkin-logs')

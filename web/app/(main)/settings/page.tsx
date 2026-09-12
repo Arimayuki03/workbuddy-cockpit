@@ -504,6 +504,15 @@ function pickValues(fields: Field[], source: Record<string, unknown> | undefined
 
 /** 文本类字段的即时校验（用于输入框下方提示，不阻塞输入） */
 function fieldError(f: Field, raw: FieldValue): string | undefined {
+  if (f.kind === 'num') {
+    // 输入框的 min/max 只是浏览器属性，不参与提交校验，这里显式检查
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return '请填写数字';
+    if (n < f.min || n > f.max) {
+      return `请填 ${f.min}–${f.max}${f.unit ? `（${f.unit}）` : ''}`;
+    }
+    return undefined;
+  }
   if (f.kind === 'hours') {
     const r = parseHours(String(raw));
     return r.ok ? undefined : r.error;
@@ -529,6 +538,14 @@ function toWire(
   if (f.kind === 'duration') {
     const t = String(raw).trim();
     return DURATION_RE.test(t) ? {ok: true, value: t} : {ok: false, error: '格式如 30s / 10m / 2h / 1d'};
+  }
+  if (f.kind === 'num') {
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return {ok: false, error: '请填写数字'};
+    if (n < f.min || n > f.max) {
+      return {ok: false, error: `请填 ${f.min}–${f.max}${f.unit ? `（${f.unit}）` : ''}`};
+    }
+    return {ok: true, value: n};
   }
   if (f.kind === 'select') {
     const v = String(raw);
@@ -946,7 +963,10 @@ export default function SettingsPage() {
                                 const n = Number(e.target.value);
                                 setField(g.id, f.key, Number.isFinite(n) ? n : f.def);
                               }}
-                              className="h-8 w-20 bg-background text-right tabular-nums"
+                              className={
+                                'h-8 w-20 bg-background text-right tabular-nums' +
+                                (err ? ' border-destructive' : '')
+                              }
                             />
                             {f.unit && (
                               <span className="w-8 text-[11px] text-muted-foreground">{f.unit}</span>

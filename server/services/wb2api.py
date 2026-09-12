@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 import time
@@ -21,6 +22,32 @@ def _safe_file(filename: str) -> Path:
 
 def read_account_file(filename: str) -> dict:
     return json.loads(_safe_file(filename).read_text(encoding='utf-8'))
+
+
+def token_ttl_seconds(access_token: str) -> int | None:
+    """从 accessToken（JWT）里读出它的总有效期（exp - iat），单位秒。
+
+    用途：界面上的「有效期进度条」需要一个「满格 = 多久」的基准。
+    auth 文件里只有 expiresAt，没有签发起始时间，光看文件算不出比例；
+    而 JWT 载荷里同时有 iat 与 exp，且只是本地解码、不发网络请求。
+
+    纯展示用途：解不出来就返回 None，调用方回退到一个保守的默认窗口，
+    绝不影响任何鉴权判断。
+    """
+    try:
+        parts = (access_token or '').split('.')
+        if len(parts) < 2:
+            return None
+        payload = parts[1]
+        payload += '=' * (-len(payload) % 4)  # 补齐 base64url padding
+        data = json.loads(base64.urlsafe_b64decode(payload))
+        iat = int(data.get('iat') or 0)
+        exp = int(data.get('exp') or 0)
+        if iat > 0 and exp > iat:
+            return exp - iat
+    except Exception:  # noqa: BLE001
+        return None
+    return None
 
 
 def list_auth_accounts() -> list[dict]:
@@ -46,6 +73,8 @@ def list_auth_accounts() -> list[dict]:
                 'expires_at': exp,
                 'is_expired': now >= exp,
                 'remain_seconds': max(0, int(exp - now)),
+                # 该令牌签发的总时长（供进度条按真实比例展示），解不出为 None
+                'ttl_seconds': token_ttl_seconds(str(auth.get('accessToken') or '')),
                 'source': 'file',
             }
         )
@@ -238,6 +267,41 @@ def _has_control_chars(v: str) -> bool:
 
 
 _HOURS_KEYS = ('checkin_hours', 'travel_hours', 'activity_hours', 'keepalive_hours')
+
+# 整数/小数字段的取值范围：键 -> (最小, 最大, 单位)
+# 上限不是洁癖——这些值直接决定上游的行为强度与成本（例如
+# activity_report_count 决定每号每天发多少条对话）。前端的 max 只是
+# 输入框属性，拦不住直接调接口，必须服务端兜底。
+_INT_RANGES: dict[str, tuple[int, int, str]] = {
+    'activity_report_count': (1, 50, '条'),
+    'max_in_flight': (0, 64, '个'),
+    'breaker_threshold': (1, 100, '次'),
+    'idle_weight_max': (0, 1000, ''),
+    'max_body_mb': (1, 256, 'MB'),
+}
+
+_FLOAT_RANGES: dict[str, tuple[float, float, str]] = {
+    'idle_weight_per_hour': (0.0, 100.0, ''),
+}
+
+
+def _check_int(key: str, raw: object) -> int:
+    lo, hi, unit = _INT_RANGES[key]
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValueError(f'{key} 必须是整数')
+    if not lo <= raw <= hi:
+        raise ValueError(f'{key} 必须在 {lo}-{hi}{unit} 之间（收到 {raw}）')
+    return raw
+
+
+def _check_float(key: str, raw: object) -> float:
+    lo, hi, unit = _FLOAT_RANGES[key]
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(f'{key} 必须是数字')
+    val = float(raw)
+    if not lo <= val <= hi:
+        raise ValueError(f'{key} 必须在 {lo}-{hi}{unit} 之间（收到 {raw}）')
+    return val
 _DURATION_RE = re.compile(r'^\d+\s*(s|m|h|d)$', re.IGNORECASE)
 
 
@@ -264,11 +328,11 @@ def _sanitize_section(section: str, incoming: dict) -> dict:
             if not _DURATION_RE.match(raw.strip()):
                 raise ValueError(f'{key} 时长格式有误，应为 30s / 10m / 2h / 1d')
             out[key] = raw.strip()
-        elif key == 'activity_report_count':
-            # 上游语义：>=1 才是条数；0/负数会被归一为 1（旧行为）
-            if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
-                raise ValueError('activity_report_count 必须是 >=1 的整数（1 为旧行为）')
-            out[key] = raw
+        elif key in _INT_RANGES:
+            # 统一区间校验（activity_report_count 等；见 _INT_RANGES 注释）
+            out[key] = _check_int(key, raw)
+        elif key in _FLOAT_RANGES:
+            out[key] = _check_float(key, raw)
         elif section == 'prompt' and key == 'mode':
             mode = str(raw or '').strip().lower()
             if mode not in ('custom', 'passthrough'):
@@ -281,10 +345,6 @@ def _sanitize_section(section: str, incoming: dict) -> dict:
             if _has_control_chars(path):
                 raise ValueError('prompt.file 不能包含换行或控制字符')
             out[key] = path
-        elif section == 'server' and key == 'max_body_mb':
-            if isinstance(raw, bool) or not isinstance(raw, int) or not 1 <= raw <= 256:
-                raise ValueError('server.max_body_mb 必须是 1-256 的整数')
-            out[key] = raw
         elif section == 'upstream' and key == 'user_agent':
             ua = str(raw or '').strip()
             if _has_control_chars(ua):

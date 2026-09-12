@@ -146,6 +146,10 @@ export const statsApi = {
   byModel: (days = 30) => get<UsageBreakdown[]>('/api/stats/by-model', {days}),
   byKey: (days = 30) => get<UsageBreakdown[]>('/api/stats/by-key', {days}),
   /** 按请求日志回填用量缺口（幂等） */
+  rebuildUsage: () =>
+    post<{rows_before: number; rows_after: number; requests_delta: number; tokens_delta: number}>(
+      '/api/stats/rebuild-usage',
+    ),
   repairUsage: () =>
     post<{repaired: number; requests: number; tokens: number}>('/api/stats/repair-usage'),
 };

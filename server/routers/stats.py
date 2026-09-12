@@ -57,6 +57,16 @@ def repair_usage(user: dict = Depends(security.require_admin)) -> dict:
     return db.backfill_usage_from_logs()
 
 
+@router.post('/rebuild-usage')
+def rebuild_usage(user: dict = Depends(security.require_admin)) -> dict:
+    """以请求日志为准重建用量统计（清理时区口径不一致造成的重复计数）。
+
+    与 /repair-usage 的区别：repair 只补缺口（增量、幂等），
+    本接口是**重建**——会替换 usage_daily 的内容，能删除此前多出来的行。
+    """
+    return db.rebuild_usage_from_logs()
+
+
 @router.get('/daily')
 def daily(days: int = 30, user: dict = Depends(security.current_user)) -> list[dict]:
     rows = db.query(

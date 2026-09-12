@@ -1,7 +1,7 @@
 'use client';
 
 import {useCallback, useEffect, useState} from 'react';
-import {Activity, TrendingUp, KeyRound, Cpu, Wrench} from 'lucide-react';
+import {Activity, TrendingUp, KeyRound, Cpu, Wrench, RotateCcw} from 'lucide-react';
 import {
   Bar,
   BarChart,
@@ -118,6 +118,34 @@ export default function StatsPage() {
                   <Button variant="outline" size="sm" className="rounded-full">
                     <Wrench className="h-3.5 w-3.5" />
                     修复统计
+                  </Button>
+                }
+              />
+            )}
+            {isAdmin && (
+              <ConfirmDialog
+                title="按请求日志重建用量统计？"
+                description="会清空现有汇总，再以「请求日志」为准重新生成。用于清理历史上因时区口径不一致导致的重复计数（同一次调用被算进两天）。注意：若请求日志曾被清空，那部分历史汇总会随之丢失。"
+                confirmText="开始重建"
+                destructive
+                onConfirm={async () => {
+                  try {
+                    const r = await statsApi.rebuildUsage();
+                    const d = r.tokens_delta;
+                    notify.ok(
+                      '用量统计已重建',
+                      `汇总行 ${r.rows_before} → ${r.rows_after}` +
+                        (d !== 0 ? `，Token 修正 ${d > 0 ? '+' : ''}${fmtNumber(d)}` : '，总量无变化'),
+                    );
+                    await load();
+                  } catch (e) {
+                    notify.err(errText(e));
+                  }
+                }}
+                trigger={
+                  <Button variant="outline" size="sm" className="rounded-full text-amber-600 dark:text-amber-400">
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    重建统计
                   </Button>
                 }
               />

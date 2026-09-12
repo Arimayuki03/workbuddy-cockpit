@@ -12,6 +12,27 @@ from . import config
 _lock = threading.RLock()
 _conn: sqlite3.Connection | None = None
 
+
+def day_of(ts: int | float | None = None) -> str:
+    """把时间戳换算成「哪一天」，全库统一用本地时区。
+
+    必须统一口径：写入用量（bump_usage）与回填用量（backfill_usage_from_logs）
+    过去一个用本地日期、一个用 UTC 日期，在 UTC+8 机器上凌晨 00:00-08:00 的调用
+    会被算进两个不同的 day，导致回填把同一次调用重复计数。
+    展示层（stats.py 的 today/_since）也用本地日期，故此处一律取本地。
+    """
+    t = time.time() if ts is None else float(ts)
+    return time.strftime('%Y-%m-%d', time.localtime(t))
+
+
+def day_sql(column: str = 'ts') -> str:
+    """在 SQL 里按本地时区取日期的表达式（与 day_of 口径一致）。
+
+    注意 SQLite 的 date(ts,'unixepoch') 是 UTC，不能直接用它——那正是
+    之前造成口径不一致的原因。这里用 'unixepoch','localtime' 两个修饰符。
+    """
+    return f"strftime('%Y-%m-%d', {column}, 'unixepoch', 'localtime')"
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS api_keys (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -179,7 +200,7 @@ def set_setting(key: str, value: Any) -> None:
 
 # ── 用量累计 ─────────────────────────────────────────────
 def bump_usage(key_id: int, model: str, prompt_tokens: int, completion_tokens: int) -> None:
-    day = time.strftime('%Y-%m-%d')
+    day = day_of()
     execute(
         'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, completion_tokens) '
         'VALUES(?, ?, ?, 1, ?, ?) '
@@ -325,8 +346,9 @@ def backfill_usage_from_logs() -> dict:
     因此可重复执行而不会重复计数。
     """
     # 应有用量（按天 × 密钥 × 模型）
+    # 必须与 bump_usage 用同一时区口径（本地），否则凌晨的调用会被算成两天
     expected = query(
-        "SELECT date(ts,'unixepoch') AS day, key_id, COALESCE(model,'') AS model, "
+        f"SELECT {day_sql('ts')} AS day, key_id, COALESCE(model,'') AS model, "
         "COUNT(*) AS requests, COALESCE(SUM(prompt_tokens),0) AS pt, COALESCE(SUM(completion_tokens),0) AS ct "
         "FROM request_logs WHERE key_id IS NOT NULL GROUP BY day, key_id, model"
     )
@@ -366,4 +388,40 @@ def backfill_usage_from_logs() -> dict:
         'repaired': fixed,
         'requests': added_requests,
         'tokens': added_tokens,
+    }
+
+
+def rebuild_usage_from_logs() -> dict:
+    """以请求日志为准**重建**用量统计（会替换 usage_daily 的内容）。
+
+    用途：修复历史时区口径不一致造成的污染——凌晨的调用曾被同时算进
+    本地日与 UTC 日两行，导致总量偏高。回填（MAX 语义）只能补缺口、
+    无法删除多出来的行，因此需要一次重建。
+
+    注意：本操作以 request_logs 为唯一依据。若请求日志曾被清空，
+    那部分历史汇总会随之丢失（接口上已明确标注）。
+    """
+    expected = query(
+        f"SELECT {day_sql('ts')} AS day, key_id, COALESCE(model,'') AS model, "
+        "COUNT(*) AS requests, COALESCE(SUM(prompt_tokens),0) AS pt, "
+        "COALESCE(SUM(completion_tokens),0) AS ct "
+        "FROM request_logs WHERE key_id IS NOT NULL GROUP BY day, key_id, model"
+    )
+    before = query_one('SELECT COUNT(*) AS c, COALESCE(SUM(requests),0) AS r, '
+                       'COALESCE(SUM(prompt_tokens+completion_tokens),0) AS t FROM usage_daily')
+    execute('DELETE FROM usage_daily')
+    for row in expected:
+        execute(
+            'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, completion_tokens) '
+            'VALUES(?, ?, ?, ?, ?, ?)',
+            (row['day'], row['key_id'], row['model'], int(row['requests']), int(row['pt']), int(row['ct'])),
+        )
+    after = query_one('SELECT COUNT(*) AS c, COALESCE(SUM(requests),0) AS r, '
+                      'COALESCE(SUM(prompt_tokens+completion_tokens),0) AS t FROM usage_daily')
+    return {
+        'rows_before': int(before['c']) if before else 0,
+        'rows_after': int(after['c']) if after else 0,
+        # 差值可正可负：负数说明此前确实被重复计数了
+        'requests_delta': int(after['r'] or 0) - int(before['r'] or 0),
+        'tokens_delta': int(after['t'] or 0) - int(before['t'] or 0),
     }
