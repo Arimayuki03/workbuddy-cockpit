@@ -232,6 +232,11 @@ def load_upstream_config() -> dict:
 
 # 上游 config.json 的可视化字段类型约束：
 #   *_hours 是 []int（整点数组），cooldown.* 是时长字符串（30s/10m/2h/1d）
+def _has_control_chars(v: str) -> bool:
+    """是否含换行或控制字符（路径 / UA 这类单行文本不允许）。"""
+    return any(ord(ch) < 32 for ch in v)
+
+
 _HOURS_KEYS = ('checkin_hours', 'travel_hours', 'activity_hours', 'keepalive_hours')
 _DURATION_RE = re.compile(r'^\d+\s*(s|m|h|d)$', re.IGNORECASE)
 
@@ -259,6 +264,27 @@ def _sanitize_section(section: str, incoming: dict) -> dict:
             if not _DURATION_RE.match(raw.strip()):
                 raise ValueError(f'{key} 时长格式有误，应为 30s / 10m / 2h / 1d')
             out[key] = raw.strip()
+        elif section == 'prompt' and key == 'mode':
+            mode = str(raw or '').strip().lower()
+            if mode not in ('custom', 'passthrough'):
+                raise ValueError('prompt.mode 只能是 custom 或 passthrough')
+            out[key] = mode
+        elif section == 'prompt' and key == 'file':
+            # 路径非空但不可读会让上游启动直接失败（fail fast），
+            # 因此这里做基础合法性检查，并明确提示风险
+            path = str(raw or '').strip()
+            if _has_control_chars(path):
+                raise ValueError('prompt.file 不能包含换行或控制字符')
+            out[key] = path
+        elif section == 'server' and key == 'max_body_mb':
+            if isinstance(raw, bool) or not isinstance(raw, int) or not 1 <= raw <= 256:
+                raise ValueError('server.max_body_mb 必须是 1-256 的整数')
+            out[key] = raw
+        elif section == 'upstream' and key == 'user_agent':
+            ua = str(raw or '').strip()
+            if _has_control_chars(ua):
+                raise ValueError('upstream.user_agent 不能包含换行或控制字符')
+            out[key] = ua
     return out
 
 
@@ -278,7 +304,8 @@ def save_upstream_config(patch: dict) -> dict:
     if not isinstance(cfg, dict):
         raise ValueError('上游配置文件不是合法的 JSON 对象，已取消保存')
 
-    for field in ('schedule', 'pool', 'cooldown', 'features', 'session_sticky'):
+    for field in ('schedule', 'pool', 'cooldown', 'features',
+                  'session_sticky', 'prompt', 'server', 'upstream'):
         if field in patch and isinstance(patch[field], dict):
             cfg.setdefault(field, {})
             cfg[field].update(_sanitize_section(field, patch[field]))
