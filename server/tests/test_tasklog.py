@@ -127,6 +127,43 @@ class ParseTaskLines(unittest.TestCase):
         self.assertEqual(len(events), 3)
         self.assertEqual([e['kind'] for e in events], ['travel', 'activity', 'travel'])
 
+    # ── 结果文案中文化 ──────────────────────────────────
+    def test_credit_messages_translated(self) -> None:
+        self.assertEqual(
+            tasklog.translate_message('claim ok record=12 reward=100'),
+            '领奖成功：第 12 次行程，获得 100 积分',
+        )
+        self.assertEqual(
+            tasklog.translate_message('adopt ok (+300 credits)'),
+            '领养成功：获得 300 积分',
+        )
+
+    def test_skip_and_streak_translated(self) -> None:
+        self.assertEqual(
+            tasklog.translate_message('skip (daily limit reached)'),
+            '跳过：今日次数已达上限',
+        )
+        self.assertEqual(tasklog.translate_message('streak days=3'), '连续登录 3 天')
+        self.assertIn('静默丢弃', tasklog.translate_message(
+            'report OK but streak.days=0 (silent drop?)'))
+
+    def test_technical_error_phrases_translated(self) -> None:
+        self.assertEqual(tasklog.translate_message('checkin ok code=0'), '签到成功')
+        self.assertIn('请求超时', tasklog.translate_message('status: context deadline exceeded'))
+        self.assertIn('JSON 解析失败', tasklog.translate_message('unexpected end of JSON input'))
+
+    def test_own_chinese_ledger_message_untouched(self) -> None:
+        msg = '余额 +100（1300 → 1400） · 黑天鹅'
+        self.assertEqual(tasklog.translate_message(msg), msg)
+
+    def test_unknown_message_falls_back_to_original(self) -> None:
+        msg = 'some brand new upstream wording'
+        self.assertEqual(tasklog.translate_message(msg), msg)
+
+    def test_truncated_marker_preserved(self) -> None:
+        out = tasklog.translate_message('adopt ok (+300 credits) ... （已截断）')
+        self.assertEqual(out, '领养成功：获得 300 积分 …（已截断）')
+
     def test_strip_docker_ts(self) -> None:
         self.assertEqual(
             tasklog.strip_docker_ts(f'{DOCKER}travel 1: claim ok record=1 reward=100'),

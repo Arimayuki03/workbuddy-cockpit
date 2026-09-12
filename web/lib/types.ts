@@ -200,12 +200,15 @@ export interface TaskLog {
   id: number;
   ts: number;
   uid: string;
-  /** travel / activity / checkin / keepalive / user-resource */
+  /** travel / activity / checkin / keepalive / user-resource / credit */
   kind: string;
   /** credit 有积分收益 / ok 成功 / info 跳过 / warn 警告 / error 失败 */
   level: string;
   credits: number;
+  /** 上游英文原文（排查用，界面上作为悬浮提示） */
   message: string;
+  /** 中文展示文案 */
+  message_cn?: string;
 }
 
 export interface TaskLogResponse {
