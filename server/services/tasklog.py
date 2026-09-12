@@ -39,6 +39,9 @@ KIND_LABELS = {
     'checkin': '自动签到',
     'keepalive': '令牌保活',
     'user-resource': '余额查询',
+    # 余额变动流水：由 credits.record_balance 写入，
+    # 用于覆盖上游不打日志的获取渠道（签到、活跃上报等）
+    'credit': '积分变动',
 }
 
 # 明确表示「什么都没做，也不算失败」的前缀

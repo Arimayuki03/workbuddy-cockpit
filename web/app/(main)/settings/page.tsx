@@ -781,13 +781,16 @@ export default function SettingsPage() {
       />
 
       <Tabs defaultValue="upstream">
-        <TabsList>
+        {/* 五个标签在手机上会撑破容器，这里允许横向滚动 */}
+        <div className="-mx-1 overflow-x-auto px-1 pb-1">
+        <TabsList className="w-max">
           <TabsTrigger value="upstream"><Server className="mr-1.5 h-3.5 w-3.5" />上游配置</TabsTrigger>
           <TabsTrigger value="models"><Shuffle className="mr-1.5 h-3.5 w-3.5" />模型映射</TabsTrigger>
           <TabsTrigger value="users"><Users className="mr-1.5 h-3.5 w-3.5" />管理用户</TabsTrigger>
           <TabsTrigger value="system"><DownloadCloud className="mr-1.5 h-3.5 w-3.5" />系统更新</TabsTrigger>
           <TabsTrigger value="about"><Info className="mr-1.5 h-3.5 w-3.5" />关于</TabsTrigger>
         </TabsList>
+        </div>
 
         {/* ═══ 上游配置 ═══ */}
         <TabsContent value="upstream" className="mt-3 space-y-3">

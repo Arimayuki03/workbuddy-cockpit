@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import {notify} from '@/lib/toast';
 import {accountApi, upstreamApi, errText} from '@/lib/api';
-import type {Account, CheckinLog, TaskLog, TaskLogResponse, UpstreamStatus} from '@/lib/types';
+import type {Account, CheckinLog, CreditsMeta, TaskLog, TaskLogResponse, UpstreamStatus} from '@/lib/types';
 import {expiryVisual, fmtDateTime, fmtNumber, fmtRemain} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
@@ -54,6 +54,14 @@ export default function AccountsPage() {
   const [taskStats, setTaskStats] = useState<TaskLogResponse['stats'] | null>(null);
   const [kindLabels, setKindLabels] = useState<Record<string, string>>({});
   const [taskFilter, setTaskFilter] = useState<string>('all');
+  /** 每个账号积分是实时查询还是命中缓存（含缓存已存在秒数） */
+  const [creditsMeta, setCreditsMeta] = useState<Record<string, CreditsMeta>>({});
+  /**
+   * 查到的积分按 uid 单独存一份，渲染时再叠加到账号上。
+   * 不能直接改写 accounts：积分请求与账号列表是并发的，
+   * 积分常常先返回，那时 accounts 还是空的，就地改写会落空。
+   */
+  const [liveCredits, setLiveCredits] = useState<Record<string, number>>({});
   const [collectBusy, setCollectBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -88,13 +96,16 @@ export default function AccountsPage() {
     let alive = true;
     (async () => {
       try {
-        const r = await accountApi.refreshCredits();
+        // force=false：60 秒内重复打开页面直接命中服务端缓存，
+        // 不再每次都全量请求腾讯；命中时界面会明确标注「缓存」
+        const r = await accountApi.refreshCredits(false);
         if (!alive) return;
-        setAccounts((prev) =>
-          prev.map((a) =>
-            typeof r.credits[a.uid] === 'number' ? {...a, credits: r.credits[a.uid]} : a,
+        setLiveCredits(
+          Object.fromEntries(
+            Object.entries(r.credits).filter(([, v]) => typeof v === 'number') as [string, number][],
           ),
         );
+        setCreditsMeta(r.meta ?? {});
       } catch {
         /* 静默失败：仍显示上游缓存值 */
       }
@@ -134,13 +145,13 @@ export default function AccountsPage() {
   const refreshCredits = useCallback(async () => {
     setCreditsBusy(true);
     try {
-      const r = await accountApi.refreshCredits();
-      // 就地更新，避免整页闪烁
-      setAccounts((prev) =>
-        prev.map((a) =>
-          typeof r.credits[a.uid] === 'number' ? {...a, credits: r.credits[a.uid]} : a,
+      const r = await accountApi.refreshCredits(true);
+      setLiveCredits(
+        Object.fromEntries(
+          Object.entries(r.credits).filter(([, v]) => typeof v === 'number') as [string, number][],
         ),
       );
+      setCreditsMeta(r.meta ?? {});
       if (r.failed.length === 0) {
         notify.ok('积分已刷新', `${r.succeeded}/${r.total} 个账号`);
       } else {
@@ -230,6 +241,133 @@ export default function AccountsPage() {
     }
   }
 
+  /** 账号状态徽章（表格与移动端卡片共用） */
+  function renderStatus(a: Account) {
+    if (a.disabled === true) return <Badge variant="destructive" className="rounded-full">● 已禁用</Badge>;
+    if (a.is_expired) return <Badge variant="destructive" className="rounded-full">● 已过期</Badge>;
+    if (a.cooling)
+      return (
+        <Badge variant="secondary" className="rounded-full text-amber-600 dark:text-amber-400">
+          ● 冷却中
+        </Badge>
+      );
+    return (
+      <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">
+        ● 在线
+      </Badge>
+    );
+  }
+
+  /** 积分余额 + 数据来源标注。
+   *  明确区分「实时」与「缓存 x 秒前」，避免把滞后的数字当成刚查到的。 */
+  function renderCredits(a: Account) {
+    // 优先用刚查到的实时值，其次上游 /status 的缓存值
+    const value = liveCredits[a.uid] ?? a.credits;
+    if (value === null || value === undefined) {
+      return (
+        <span
+          className="text-xs text-muted-foreground"
+          title="上游尚未返回该账号的积分（可能是刚添加、或上游不可达）"
+        >
+          —
+        </span>
+      );
+    }
+    const meta = creditsMeta[a.uid];
+    const tone =
+      value <= 0
+        ? 'text-red-600 dark:text-red-400'
+        : value < 200
+          ? 'text-amber-600 dark:text-amber-400'
+          : 'text-foreground';
+    return (
+      <span className="inline-flex items-center gap-1.5">
+        <span className={`text-xs font-medium tabular-nums ${tone}`} title="当前可花费积分余额（所有套餐剩余额度合计）">
+          {fmtNumber(value)}
+        </span>
+        {meta &&
+          (meta.cached ? (
+            <span
+              className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] leading-3 text-amber-600 dark:text-amber-400"
+              title="60 秒内已查过，直接用了服务端缓存；点「刷新积分」可强制重新查询"
+            >
+              {meta.cache_age != null ? `缓存 ${meta.cache_age}s 前` : '缓存'}
+            </span>
+          ) : (
+            <span
+              className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] leading-3 text-emerald-600 dark:text-emerald-400"
+              title="刚刚向腾讯查询的实时值"
+            >
+              实时
+            </span>
+          ))}
+      </span>
+    );
+  }
+
+  /** Token 有效期进度条 */
+  function renderExpiry(a: Account) {
+    const pct = Math.min(100, Math.max(0, (a.remain_seconds / TOKEN_TTL) * 100));
+    const vis = expiryVisual(a.remain_seconds);
+    return (
+      <div className="w-[150px]">
+        <div className={`mb-1 text-[11px] font-medium tabular-nums ${vis.textClass}`}>
+          {fmtRemain(a.remain_seconds)}
+        </div>
+        <div className="h-1.5 overflow-hidden rounded-full bg-border">
+          <div className="h-full rounded-full transition-all" style={{width: `${pct}%`, background: vis.barColor}} />
+        </div>
+      </div>
+    );
+  }
+
+  /** 单账号操作按钮组 */
+  function renderActions(a: Account) {
+    const busy = busyFile === a.file;
+    return (
+      <div className="flex justify-end gap-1">
+        <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title="签到" disabled={busy}
+          onClick={() => run(a.file, () => accountApi.checkin(a.file), '操作完成')}>
+          <Gift className="h-3.5 w-3.5" />
+        </Button>
+        <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title="连通性测试" disabled={busy}
+          onClick={() => run(a.file, () => accountApi.test(a.file), '测试完成')}>
+          <Zap className="h-3.5 w-3.5" />
+        </Button>
+        <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title="刷新 Token" disabled={busy}
+          onClick={() => run(a.file, () => accountApi.refresh(a.file), '刷新完成')}>
+          <KeyRound className="h-3.5 w-3.5" />
+        </Button>
+        <ConfirmDialog
+          title={`删除账号「${a.nickname || a.uid}」？`}
+          description="将删除本地授权文件，并自动重载上游使其生效。此操作不可撤销。"
+          confirmText="删除"
+          destructive
+          onConfirm={() => run(a.file, () => accountApi.remove(a.file), '已删除')}
+          trigger={
+            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md text-red-500 hover:text-red-600" title="删除">
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+          }
+        />
+      </div>
+    );
+  }
+
+  /** 头像（首字母） */
+  function renderAvatar(a: Account) {
+    return (
+      <div
+        className={
+          'grid h-7 w-7 shrink-0 place-items-center rounded-full text-[11px] font-semibold ' +
+          (a.is_expired ? 'bg-muted-foreground/20 text-muted-foreground' : 'bg-primary text-primary-foreground')
+        }
+      >
+        {(a.nickname || '?').charAt(0)}
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
@@ -250,7 +388,8 @@ export default function AccountsPage() {
                 trigger={
                   <Button variant="outline" size="sm" className="rounded-full" disabled={restarting}>
                     <Power className={restarting ? 'animate-spin' : ''} />
-                    强制重启
+                    <span className="hidden sm:inline">强制重启</span>
+                    <span className="sm:hidden">重启</span>
                   </Button>
                 }
               />
@@ -264,7 +403,8 @@ export default function AccountsPage() {
               title="直接向腾讯查询各账号当前积分（上游缓存的积分可能滞后数小时）"
             >
               <Coins className={creditsBusy ? 'animate-pulse' : ''} />
-              刷新积分
+              <span className="hidden sm:inline">刷新积分</span>
+              <span className="sm:hidden">积分</span>
             </Button>
             {isAdmin && (
               <Button
@@ -289,6 +429,49 @@ export default function AccountsPage() {
       />
 
       <section className="overflow-hidden rounded-[20px] bg-muted">
+        {/* 手机端：卡片列表。表格 6 列在窄屏需要横向滚动，读一行要来回拖，
+            改为纵向卡片后信息一眼可见 */}
+        <div className="divide-y divide-border/40 md:hidden">
+          {merged.map((a) => (
+            <div key={a.file} className="space-y-2.5 px-3.5 py-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2.5">
+                  {renderAvatar(a)}
+                  <div className="min-w-0">
+                    <div
+                      className={
+                        'truncate text-sm font-medium ' + (a.is_expired ? 'text-muted-foreground' : '')
+                      }
+                    >
+                      {a.nickname || '未命名'}
+                    </div>
+                    <div className="truncate font-mono text-[10px] text-muted-foreground">{a.uid}</div>
+                  </div>
+                </div>
+                {renderStatus(a)}
+              </div>
+
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <Coins className="h-3.5 w-3.5 text-muted-foreground" />
+                  {renderCredits(a)}
+                </div>
+                {renderExpiry(a)}
+              </div>
+
+              {isAdmin && renderActions(a)}
+            </div>
+          ))}
+          {!merged.length && !loading && (
+            <div className="px-4 py-12 text-center text-xs text-muted-foreground">暂无账号</div>
+          )}
+          {loading && !merged.length && (
+            <div className="px-4 py-12 text-center text-xs text-muted-foreground">加载中…</div>
+          )}
+        </div>
+
+        {/* 桌面端：表格 */}
+        <div className="hidden md:block">
         <Table>
           <TableHeader>
             <TableRow className="border-b border-border/60 hover:bg-transparent">
@@ -301,140 +484,26 @@ export default function AccountsPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {merged.map((a) => {
-              const pct = Math.min(100, Math.max(0, (a.remain_seconds / TOKEN_TTL) * 100));
-              const disabled = a.disabled === true;
-              const busy = busyFile === a.file;
-              // 有效期分档改用共享规则（与仪表盘一致）
-              const vis = expiryVisual(a.remain_seconds);
-              const remainTone = vis.textClass;
-              const barTone = vis.barColor;
-              return (
-                <TableRow key={a.file} className="border-b border-border/40">
-                  <TableCell className="pl-4">
-                    <div className="flex items-center gap-2.5">
-                      <div
-                        className={
-                          'grid h-7 w-7 shrink-0 place-items-center rounded-full text-[11px] font-semibold ' +
-                          (a.is_expired
-                            ? 'bg-muted-foreground/20 text-muted-foreground'
-                            : 'bg-primary text-primary-foreground')
-                        }
-                      >
-                        {(a.nickname || '?').charAt(0)}
-                      </div>
-                      <span className={'truncate text-sm font-medium ' + (a.is_expired ? 'text-muted-foreground' : '')}>
-                        {a.nickname || '未命名'}
-                      </span>
-                    </div>
-                  </TableCell>
-                  <TableCell className="font-mono text-xs text-muted-foreground">{a.uid}</TableCell>
-                  <TableCell>
-                    {disabled ? (
-                      <Badge variant="destructive" className="rounded-full">● 已禁用</Badge>
-                    ) : a.is_expired ? (
-                      <Badge variant="destructive" className="rounded-full">● 已过期</Badge>
-                    ) : a.cooling ? (
-                      <Badge variant="secondary" className="rounded-full text-amber-600 dark:text-amber-400">● 冷却中</Badge>
-                    ) : (
-                      <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">● 在线</Badge>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    {a.credits === null || a.credits === undefined ? (
-                      <span
-                        className="text-xs text-muted-foreground"
-                        title="上游尚未返回该账号的积分（可能是刚添加、或上游不可达）"
-                      >
-                        —
-                      </span>
-                    ) : (
-                      <span
-                        className={
-                          'text-xs font-medium tabular-nums ' +
-                          (a.credits <= 0
-                            ? 'text-red-600 dark:text-red-400'
-                            : a.credits < 200
-                              ? 'text-amber-600 dark:text-amber-400'
-                              : 'text-foreground')
-                        }
-                        title="当前可花费积分余额（所有套餐剩余额度合计）"
-                      >
-                        {fmtNumber(a.credits)}
-                      </span>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <div className="w-[150px]">
-                      <div className={'mb-1 text-[11px] font-medium tabular-nums ' + remainTone}>
-                        {fmtRemain(a.remain_seconds)}
-                      </div>
-                      <div className="h-1.5 overflow-hidden rounded-full bg-border">
-                        <div
-                          className="h-full rounded-full transition-all"
-                          style={{width: `${pct}%`, background: barTone}}
-                        />
-                      </div>
-                    </div>
-                  </TableCell>
-                  {isAdmin && (
-                    <TableCell className="pr-4">
-                      <div className="flex justify-end gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7 rounded-md"
-                          title="签到"
-                          disabled={busy}
-                          onClick={() => run(a.file, () => accountApi.checkin(a.file), '操作完成')}
-                        >
-                          <Gift className="h-3.5 w-3.5" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7 rounded-md"
-                          title="连通性测试"
-                          disabled={busy}
-                          onClick={() => run(a.file, () => accountApi.test(a.file), '测试完成')}
-                        >
-                          <Zap className="h-3.5 w-3.5" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7 rounded-md"
-                          title="刷新 Token"
-                          disabled={busy}
-                          onClick={() => run(a.file, () => accountApi.refresh(a.file), '刷新完成')}
-                        >
-                          <KeyRound className="h-3.5 w-3.5" />
-                        </Button>
-                        <ConfirmDialog
-                          title={`删除账号「${a.nickname || a.uid}」？`}
-                          description="将删除本地授权文件，并自动重载上游使其生效。此操作不可撤销。"
-                          confirmText="删除"
-                          destructive
-                          onConfirm={() => run(a.file, () => accountApi.remove(a.file), '已删除')}
-                          trigger={
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7 rounded-md text-red-500 hover:text-red-600"
-                              title="删除"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </Button>
-                          }
-                        />
-                      </div>
-                    </TableCell>
-                  )}
-                </TableRow>
-              );
-            })}
+            {merged.map((a) => (
+              <TableRow key={a.file} className="border-b border-border/40">
+                <TableCell className="pl-4">
+                  <div className="flex items-center gap-2.5">
+                    {renderAvatar(a)}
+                    <span className={'truncate text-sm font-medium ' + (a.is_expired ? 'text-muted-foreground' : '')}>
+                      {a.nickname || '未命名'}
+                    </span>
+                  </div>
+                </TableCell>
+                <TableCell className="font-mono text-xs text-muted-foreground">{a.uid}</TableCell>
+                <TableCell>{renderStatus(a)}</TableCell>
+                <TableCell>{renderCredits(a)}</TableCell>
+                <TableCell>{renderExpiry(a)}</TableCell>
+                {isAdmin && <TableCell className="pr-4">{renderActions(a)}</TableCell>}
+              </TableRow>
+            ))}
           </TableBody>
         </Table>
+        </div>
 
         {!merged.length && !loading && (
           <EmptyState
@@ -636,6 +705,34 @@ export default function AccountsPage() {
 
         {taskLogs.length ? (
           <div className="max-h-[360px] overflow-auto px-4 pb-4">
+            {/* 手机端：卡片式；桌面：表格 */}
+            <div className="space-y-1.5 md:hidden">
+              {taskLogs
+                .filter((l) => taskFilter === 'all' || l.kind === taskFilter)
+                .slice(0, 60)
+                .map((l) => (
+                  <div key={l.id} className="rounded-xl bg-background/60 px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-medium">{kindLabels[l.kind] || l.kind}</span>
+                      <span className="text-xs font-semibold tabular-nums">
+                        {l.credits > 0 ? (
+                          <span className="text-emerald-600 dark:text-emerald-400">+{l.credits}</span>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </span>
+                    </div>
+                    <div className="mt-1 break-words text-[11px] leading-4 text-muted-foreground">
+                      {l.message}
+                    </div>
+                    <div className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground">
+                      <span className="font-mono">{l.uid}</span>
+                      <span className="tabular-nums">{fmtDateTime(l.ts)}</span>
+                    </div>
+                  </div>
+                ))}
+            </div>
+            <div className="hidden md:block">
             <Table>
               <TableHeader>
                 <TableRow className="border-b border-border/60 hover:bg-transparent">
@@ -682,6 +779,7 @@ export default function AccountsPage() {
                   })}
               </TableBody>
             </Table>
+            </div>
             {taskLogs.filter((l) => taskFilter === 'all' || l.kind === taskFilter).length === 0 && (
               <div className="py-8 text-center text-xs text-muted-foreground">
                 该类型下暂无记录。
