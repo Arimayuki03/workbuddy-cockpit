@@ -19,17 +19,18 @@ def summary(user: dict = Depends(security.current_user)) -> dict:
     today = time.strftime('%Y-%m-%d')
     week = _since(7)
 
-    def agg(where: str, args: tuple) -> tuple[int, int]:
+    def agg(where: str, args: tuple) -> tuple[int, int, float]:
         row = db.query_one(
             f'SELECT COALESCE(SUM(requests),0) AS r, '
-            f'COALESCE(SUM(prompt_tokens + completion_tokens),0) AS t FROM usage_daily WHERE {where}',
+            f'COALESCE(SUM(prompt_tokens + completion_tokens),0) AS t, '
+            f'COALESCE(SUM(credit),0) AS c FROM usage_daily WHERE {where}',
             args,
         )
-        return int(row['r']), int(row['t'])
+        return int(row['r']), int(row['t']), float(row['c'] or 0)
 
-    t_req, t_tok = agg('day = ?', (today,))
-    w_req, w_tok = agg('day >= ?', (week,))
-    a_req, a_tok = agg('1=1', ())
+    t_req, t_tok, t_credit = agg('day = ?', (today,))
+    w_req, w_tok, w_credit = agg('day >= ?', (week,))
+    a_req, a_tok, a_credit = agg('1=1', ())
 
     active_keys = db.query_one('SELECT COUNT(*) AS c FROM api_keys WHERE enabled = 1')['c']
     top = db.query_one(
@@ -39,6 +40,10 @@ def summary(user: dict = Depends(security.current_user)) -> dict:
     return {
         'today_requests': t_req,
         'today_tokens': t_tok,
+        # 实际扣费（上游 usage.credit 合计）；上游未返回该字段时恒为 0
+        'today_credit': t_credit,
+        'week_credit': w_credit,
+        'total_credit': a_credit,
         'week_requests': w_req,
         'week_tokens': w_tok,
         'total_requests': a_req,
@@ -71,7 +76,8 @@ def rebuild_usage(user: dict = Depends(security.require_admin)) -> dict:
 def daily(days: int = 30, user: dict = Depends(security.current_user)) -> list[dict]:
     rows = db.query(
         'SELECT day, SUM(requests) AS requests, '
-        'SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens '
+        'SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens, '
+        'COALESCE(SUM(credit),0) AS credit '
         'FROM usage_daily WHERE day >= ? GROUP BY day ORDER BY day ASC',
         (_since(max(1, days)),),
     )
@@ -81,6 +87,7 @@ def daily(days: int = 30, user: dict = Depends(security.current_user)) -> list[d
             'requests': int(r['requests'] or 0),
             'prompt_tokens': int(r['prompt_tokens'] or 0),
             'completion_tokens': int(r['completion_tokens'] or 0),
+            'credit': float(r['credit'] or 0),
         }
         for r in rows
     ]
@@ -90,7 +97,8 @@ def daily(days: int = 30, user: dict = Depends(security.current_user)) -> list[d
 def by_model(days: int = 30, user: dict = Depends(security.current_user)) -> list[dict]:
     rows = db.query(
         'SELECT model AS name, SUM(requests) AS requests, '
-        'SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens '
+        'SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens, '
+        'COALESCE(SUM(credit),0) AS credit '
         'FROM usage_daily WHERE day >= ? GROUP BY model ORDER BY SUM(prompt_tokens + completion_tokens) DESC',
         (_since(max(1, days)),),
     )
@@ -100,6 +108,7 @@ def by_model(days: int = 30, user: dict = Depends(security.current_user)) -> lis
             'requests': int(r['requests'] or 0),
             'prompt_tokens': int(r['prompt_tokens'] or 0),
             'completion_tokens': int(r['completion_tokens'] or 0),
+            'credit': float(r['credit'] or 0),
         }
         for r in rows
     ]
@@ -109,7 +118,8 @@ def by_model(days: int = 30, user: dict = Depends(security.current_user)) -> lis
 def by_key(days: int = 30, user: dict = Depends(security.current_user)) -> list[dict]:
     rows = db.query(
         'SELECT COALESCE(k.name, u.key_id || "") AS name, SUM(u.requests) AS requests, '
-        'SUM(u.prompt_tokens) AS prompt_tokens, SUM(u.completion_tokens) AS completion_tokens '
+        'SUM(u.prompt_tokens) AS prompt_tokens, SUM(u.completion_tokens) AS completion_tokens, '
+        'COALESCE(SUM(u.credit),0) AS credit '
         'FROM usage_daily u LEFT JOIN api_keys k ON k.id = u.key_id '
         'WHERE u.day >= ? GROUP BY u.key_id ORDER BY SUM(u.prompt_tokens + u.completion_tokens) DESC',
         (_since(max(1, days)),),
@@ -120,6 +130,7 @@ def by_key(days: int = 30, user: dict = Depends(security.current_user)) -> list[
             'requests': int(r['requests'] or 0),
             'prompt_tokens': int(r['prompt_tokens'] or 0),
             'completion_tokens': int(r['completion_tokens'] or 0),
+            'credit': float(r['credit'] or 0),
         }
         for r in rows
     ]

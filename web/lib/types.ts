@@ -90,6 +90,8 @@ export interface RequestLog {
   ua: string | null;
   error: string | null;
   stream: boolean;
+  /** 本次调用的真实扣费（上游 usage.credit）；null = 上游未返回，不是 0 */
+  credit: number | null;
 }
 
 export interface UsagePoint {
@@ -97,6 +99,8 @@ export interface UsagePoint {
   requests: number;
   prompt_tokens: number;
   completion_tokens: number;
+  /** 当日实际扣费合计 */
+  credit: number;
 }
 
 export interface UsageBreakdown {
@@ -104,11 +108,17 @@ export interface UsageBreakdown {
   requests: number;
   prompt_tokens: number;
   completion_tokens: number;
+  /** 该维度实际扣费合计 */
+  credit: number;
 }
 
 export interface StatsSummary {
   today_requests: number;
   today_tokens: number;
+  /** 实际扣费（上游 usage.credit 合计）；上游未返回该字段时恒为 0 */
+  today_credit: number;
+  week_credit: number;
+  total_credit: number;
   week_requests: number;
   week_tokens: number;
   total_requests: number;

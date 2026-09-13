@@ -71,7 +71,9 @@ CREATE TABLE IF NOT EXISTS request_logs (
   latency_ms        INTEGER DEFAULT 0,
   ua                TEXT,
   error             TEXT,
-  stream            INTEGER DEFAULT 0
+  stream            INTEGER DEFAULT 0,
+  -- 本次调用的真实扣费（来自上游 usage.credit）；NULL = 上游未返回，不等于 0
+  credit            REAL
 );
 CREATE INDEX IF NOT EXISTS idx_logs_ts ON request_logs(ts);
 
@@ -82,6 +84,8 @@ CREATE TABLE IF NOT EXISTS usage_daily (
   requests          INTEGER NOT NULL DEFAULT 0,
   prompt_tokens     INTEGER NOT NULL DEFAULT 0,
   completion_tokens INTEGER NOT NULL DEFAULT 0,
+  -- 当日实际扣费合计（来自上游 usage.credit；上游未返回时不计入）
+  credit            REAL    NOT NULL DEFAULT 0,
   PRIMARY KEY (day, key_id, model)
 );
 
@@ -150,8 +154,33 @@ def connect() -> sqlite3.Connection:
         _conn.execute('PRAGMA journal_mode=WAL')
         _conn.execute('PRAGMA synchronous=NORMAL')
         _conn.executescript(SCHEMA)
+        _migrate(_conn)
         _conn.commit()
     return _conn
+
+
+# 增量迁移：SQLite 的 CREATE TABLE IF NOT EXISTS 不会给已存在的表补列，
+# 因此新增字段必须显式 ALTER。每条用 PRAGMA 检测后再加，可重复执行。
+_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    # (表名, 列名, 列定义)
+    ('request_logs', 'credit', 'REAL'),
+    ('usage_daily', 'credit', 'REAL NOT NULL DEFAULT 0'),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, column, decl in _MIGRATIONS:
+        try:
+            cols = {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}
+        except sqlite3.Error:
+            continue
+        if not cols or column in cols:
+            continue
+        try:
+            conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {decl}')
+        except sqlite3.Error:
+            # 并发启动时可能已被另一进程加过，忽略即可
+            pass
 
 
 def query(sql: str, args: Iterable[Any] = ()) -> list[sqlite3.Row]:
@@ -199,16 +228,24 @@ def set_setting(key: str, value: Any) -> None:
 
 
 # ── 用量累计 ─────────────────────────────────────────────
-def bump_usage(key_id: int, model: str, prompt_tokens: int, completion_tokens: int) -> None:
+def bump_usage(
+    key_id: int,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    credit: float | None = None,
+) -> None:
+    """累计当日用量。credit 为本次真实扣费，缺省不计入（不按 0 记）。"""
     day = day_of()
     execute(
-        'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, completion_tokens) '
-        'VALUES(?, ?, ?, 1, ?, ?) '
+        'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, completion_tokens, credit) '
+        'VALUES(?, ?, ?, 1, ?, ?, ?) '
         'ON CONFLICT(day, key_id, model) DO UPDATE SET '
         '  requests = requests + 1, '
         '  prompt_tokens = prompt_tokens + excluded.prompt_tokens, '
-        '  completion_tokens = completion_tokens + excluded.completion_tokens',
-        (day, key_id, model, prompt_tokens, completion_tokens),
+        '  completion_tokens = completion_tokens + excluded.completion_tokens, '
+        '  credit = credit + excluded.credit',
+        (day, key_id, model, prompt_tokens, completion_tokens, float(credit or 0)),
     )
 
 
@@ -413,12 +450,15 @@ def backfill_usage_from_logs() -> dict:
     # 必须与 bump_usage 用同一时区口径（本地），否则凌晨的调用会被算成两天
     expected = query(
         f"SELECT {day_sql('ts')} AS day, key_id, COALESCE(model,'') AS model, "
-        "COUNT(*) AS requests, COALESCE(SUM(prompt_tokens),0) AS pt, COALESCE(SUM(completion_tokens),0) AS ct "
+        "COUNT(*) AS requests, COALESCE(SUM(prompt_tokens),0) AS pt, "
+        "COALESCE(SUM(completion_tokens),0) AS ct, COALESCE(SUM(credit),0) AS cr "
         "FROM request_logs WHERE key_id IS NOT NULL GROUP BY day, key_id, model"
     )
     current = {
         (r['day'], r['key_id'], r['model']): r
-        for r in query('SELECT day, key_id, model, requests, prompt_tokens, completion_tokens FROM usage_daily')
+        for r in query(
+            'SELECT day, key_id, model, requests, prompt_tokens, completion_tokens, credit FROM usage_daily'
+        )
     }
 
     fixed = 0
@@ -436,13 +476,15 @@ def backfill_usage_from_logs() -> dict:
         if d_req <= 0 and d_pt <= 0 and d_ct <= 0:
             continue
         execute(
-            'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, completion_tokens) '
-            'VALUES(?, ?, ?, ?, ?, ?) '
+            'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, completion_tokens, credit) '
+            'VALUES(?, ?, ?, ?, ?, ?, ?) '
             'ON CONFLICT(day, key_id, model) DO UPDATE SET '
             '  requests = MAX(requests, excluded.requests), '
             '  prompt_tokens = MAX(prompt_tokens, excluded.prompt_tokens), '
-            '  completion_tokens = MAX(completion_tokens, excluded.completion_tokens)',
-            (row['day'], row['key_id'], row['model'], int(row['requests']), int(row['pt']), int(row['ct'])),
+            '  completion_tokens = MAX(completion_tokens, excluded.completion_tokens), '
+            '  credit = MAX(credit, excluded.credit)',
+            (row['day'], row['key_id'], row['model'], int(row['requests']),
+             int(row['pt']), int(row['ct']), float(row['cr'] or 0)),
         )
         fixed += 1
         added_requests += max(0, d_req)
@@ -468,7 +510,7 @@ def rebuild_usage_from_logs() -> dict:
     expected = query(
         f"SELECT {day_sql('ts')} AS day, key_id, COALESCE(model,'') AS model, "
         "COUNT(*) AS requests, COALESCE(SUM(prompt_tokens),0) AS pt, "
-        "COALESCE(SUM(completion_tokens),0) AS ct "
+        "COALESCE(SUM(completion_tokens),0) AS ct, COALESCE(SUM(credit),0) AS cr "
         "FROM request_logs WHERE key_id IS NOT NULL GROUP BY day, key_id, model"
     )
     before = query_one('SELECT COUNT(*) AS c, COALESCE(SUM(requests),0) AS r, '
@@ -476,9 +518,10 @@ def rebuild_usage_from_logs() -> dict:
     execute('DELETE FROM usage_daily')
     for row in expected:
         execute(
-            'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, completion_tokens) '
-            'VALUES(?, ?, ?, ?, ?, ?)',
-            (row['day'], row['key_id'], row['model'], int(row['requests']), int(row['pt']), int(row['ct'])),
+            'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, completion_tokens, credit) '
+            'VALUES(?, ?, ?, ?, ?, ?, ?)',
+            (row['day'], row['key_id'], row['model'], int(row['requests']),
+             int(row['pt']), int(row['ct']), float(row['cr'] or 0)),
         )
     after = query_one('SELECT COUNT(*) AS c, COALESCE(SUM(requests),0) AS r, '
                       'COALESCE(SUM(prompt_tokens+completion_tokens),0) AS t FROM usage_daily')

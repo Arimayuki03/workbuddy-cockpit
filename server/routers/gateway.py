@@ -91,8 +91,30 @@ def _log_ip(ip: str, path: str, blocked: bool, ua: str | None) -> None:
     )
 
 
-def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt: int, ct: int, latency: int, ua: str | None, error: str | None, stream: bool) -> None:
+def _usage_credit(usage: dict | None) -> float | None:
+    """从 usage 里取上游的真实扣费（credit）。
+
+    上游从 2026-09-13 起在末帧 usage 里带 credit（本次真实扣费）。
+    取不到就返回 None（存 NULL），不要退化成 0——「没数据」和「免费」
+    在成本判断上是两回事，混为一谈会误判成免费号。
+    """
+    if not isinstance(usage, dict):
+        return None
+    raw = usage.get('credit')
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return val if val >= 0 else None
+
+
+def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt: int, ct: int, latency: int, ua: str | None, error: str | None, stream: bool, *, credit: float | None = None) -> None:
     """记录调用日志与用量。
+
+    credit 为上游返回的真实扣费（usage.credit）。None 表示上游没给，
+    与「扣了 0」是两回事，因此用 NULL 存而不是 0。
 
     注意：日志/统计属于旁路，任何异常都不能影响用户请求本身
     （曾因统计函数缺失导致流式响应在收尾阶段中断，客户端看到
@@ -100,9 +122,9 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
     """
     try:
         db.execute(
-            'INSERT INTO request_logs(ts, key_id, ip, model, mapped_model, status, prompt_tokens, completion_tokens, latency_ms, ua, error, stream) '
-            'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (int(time.time()), key['id'] if key else None, ip, model, mapped, status, pt, ct, latency, ua, error, 1 if stream else 0),
+            'INSERT INTO request_logs(ts, key_id, ip, model, mapped_model, status, prompt_tokens, completion_tokens, latency_ms, ua, error, stream, credit) '
+            'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (int(time.time()), key['id'] if key else None, ip, model, mapped, status, pt, ct, latency, ua, error, 1 if stream else 0, credit),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning('写入请求日志失败（不影响请求）: %s', exc)
@@ -112,8 +134,8 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
         try:
             total = pt + ct
             keysvc.touch(key, ip, total)
-            if total:
-                db.bump_usage(key['id'], model, pt, ct)
+            if total or credit:
+                db.bump_usage(key['id'], model, pt, ct, credit)
         except Exception as exc:  # noqa: BLE001
             logger.warning('累计用量失败（不影响请求）: %s', exc)
 
@@ -255,7 +277,10 @@ async def _chat(request: Request, upstream_path: str):
             pt = int(usage.get('prompt_tokens') or 0)
             ct = int(usage.get('completion_tokens') or 0)
             error = None if resp.status_code < 400 else (str(data)[:500] if data is not None else resp.text[:500])
-            _record(key, ip, requested_model or '', mapped or '', resp.status_code, pt, ct, latency, ua, error, False)
+            _record(
+                key, ip, requested_model or '', mapped or '', resp.status_code, pt, ct,
+                latency, ua, error, False, credit=_usage_credit(usage),
+            )
             if data is not None:
                 return JSONResponse(data, status_code=resp.status_code)
             return JSONResponse({'error': {'message': resp.text[:1000], 'type': 'api_error'}}, status_code=resp.status_code)
@@ -299,7 +324,10 @@ async def _chat(request: Request, upstream_path: str):
             latency = int((time.time() - started) * 1000)
             pt = int(usage.get('prompt_tokens') or 0)
             ct = int(usage.get('completion_tokens') or 0)
-            _record(key, ip, requested_model or '', mapped or '', status_code, pt, ct, latency, ua, error_text, True)
+            _record(
+                key, ip, requested_model or '', mapped or '', status_code, pt, ct,
+                latency, ua, error_text, True, credit=_usage_credit(usage),
+            )
 
     return StreamingResponse(generator(), status_code=status_code, media_type=content_type)
 
