@@ -53,6 +53,8 @@ function resultText(l: TaskLog): string {
 /** 每页条数：签到行较矮、内容更同质，可以多放几条；任务行较高，少放 */
 const PAGE_SIZE = 20;
 const CHECKIN_PAGE_SIZE = 12;
+/** 手机端任务卡片比桌面表格行高得多，减少每页条数避免一次拉太长 */
+const PAGE_SIZE_MOBILE = 8;
 
 /** 时间范围选项（与请求日志页保持一致的说法） */
 const RANGES = [
@@ -143,6 +145,22 @@ export default function TasksPage() {
 
   const [upstreamLines, setUpstreamLines] = useState<string[]>([]);
   const [collectBusy, setCollectBusy] = useState(false);
+  /**
+   * 移动端把三块整合成一张卡片 + 分段切换。
+   * 三块竖着堆叠时，各有表头与分页，页面又长又碎；
+   * 桌面端横向空间够，仍三块并列。
+   */
+  const [mobileTab, setMobileTab] = useState<'checkin' | 'tasks' | 'raw'>('checkin');
+  /** 手机端用更小的页尺寸（卡片行高约是表格行的两倍） */
+  const [narrow, setNarrow] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 767px)');
+    const sync = () => setNarrow(mq.matches);
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  }, []);
+  const taskPageSize = narrow ? PAGE_SIZE_MOBILE : PAGE_SIZE;
 
   const load = useCallback(async () => {
     const [logRes, ulRes, taskRes] = await Promise.allSettled([
@@ -154,8 +172,8 @@ export default function TasksPage() {
       ),
       accountApi.upstreamLogs(300),
       accountApi.taskLogs(
-        PAGE_SIZE,
-        (taskPage - 1) * PAGE_SIZE,
+        taskPageSize,
+        (taskPage - 1) * taskPageSize,
         taskFilter === 'all' ? undefined : taskFilter,
         undefined,
         Number(taskDays),
@@ -175,7 +193,7 @@ export default function TasksPage() {
     if (logRes.status === 'rejected' && taskRes.status === 'rejected') {
       notify.err(errText(logRes.reason ?? taskRes.reason));
     }
-  }, [checkinPage, checkinDays, taskPage, taskFilter, taskDays]);
+  }, [checkinPage, checkinDays, taskPage, taskFilter, taskDays, taskPageSize]);
 
   useEffect(() => {
     load();
@@ -211,7 +229,7 @@ export default function TasksPage() {
 
   // 筛选与分页都在服务端完成，这里直接用返回的当前页
   const filteredTasks = taskLogs;
-  const taskPages = Math.max(1, Math.ceil(taskTotal / PAGE_SIZE));
+  const taskPages = Math.max(1, Math.ceil(taskTotal / taskPageSize));
   const checkinPages = Math.max(1, Math.ceil(checkinTotal / CHECKIN_PAGE_SIZE));
 
   return (
@@ -221,15 +239,44 @@ export default function TasksPage() {
         description="签到结果、上游自动任务与积分收益（每 30 秒自动刷新）"
       />
 
+      {/* 移动端：三块整合成一张卡片，用分段切换，避免又长又碎 */}
+      <div className="flex gap-1 rounded-full bg-muted p-1 md:hidden">
+        {([
+          ['checkin', '签到记录'],
+          ['tasks', '自动任务'],
+          ['raw', '原始日志'],
+        ] as const).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setMobileTab(id)}
+            className={
+              'flex-1 rounded-full px-3 py-1.5 text-xs transition-colors ' +
+              (mobileTab === id
+                ? 'bg-background font-medium text-foreground shadow-sm'
+                : 'text-muted-foreground')
+            }
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       {/* 签到记录 + 上游原始日志 */}
-      {/* items-start：两块各自决定高度，签到不再被右栏拉伸、右栏也不留大片空白 */}
-      <section className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
-        <div className="overflow-hidden rounded-[20px] bg-muted">
-          <div className="flex items-center justify-between px-4 py-3">
-            <div className="flex items-center gap-2 text-sm font-medium">
-              <CalendarCheck className="h-4 w-4" />
-              签到记录
-              <span className="text-[11px] font-normal text-muted-foreground">
+      {/* 两块等高：右栏内容区 flex-1 撑满，避免卡片下方留大片空白 */}
+      <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div
+          className={
+            'overflow-hidden rounded-[20px] bg-muted ' +
+            (mobileTab === 'checkin' ? '' : 'hidden ') +
+            'md:block'
+          }
+        >
+          <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 px-4 py-3">
+            <div className="flex min-w-0 items-center gap-2 text-sm font-medium">
+              <CalendarCheck className="h-4 w-4 shrink-0" />
+              <span className="shrink-0">签到记录</span>
+              <span className="hidden truncate text-[11px] font-normal text-muted-foreground sm:inline">
                 （本端触发：手动 / 批量 / 添加账号）
               </span>
             </div>
@@ -347,29 +394,37 @@ export default function TasksPage() {
           />
         </div>
 
-        <div className="overflow-hidden rounded-[20px] bg-muted">
-          <div className="flex items-center justify-between px-4 py-3">
+        <div
+          className={
+            'flex flex-col overflow-hidden rounded-[20px] bg-muted ' +
+            (mobileTab === 'raw' ? '' : 'hidden ') +
+            'md:flex'
+          }
+        >
+          <div className="flex shrink-0 items-center justify-between px-4 py-3">
             <div className="flex items-center gap-2 text-sm font-medium">
               <History className="h-4 w-4" />
               上游原始日志
-              <span className="text-[11px] font-normal text-muted-foreground">
+              <span className="hidden text-[11px] font-normal text-muted-foreground sm:inline">
                 （签到 / 保活 / 旅行 / 活跃）
               </span>
             </div>
             <span className="text-[11px] text-muted-foreground">来自容器日志</span>
           </div>
           {upstreamLines.length ? (
-            <div className="max-h-[446px] overflow-auto px-4 pb-3">
+            <div className="min-h-0 flex-1 overflow-auto px-4 pb-3">
               <pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-muted-foreground">
-                {upstreamLines.slice(-60).join('\n')}
+                {upstreamLines.slice(-200).join('\n')}
               </pre>
             </div>
           ) : (
-            <div className="px-4 py-10 text-center text-xs leading-5 text-muted-foreground">
-              <TriangleAlert className="mx-auto mb-2 h-4 w-4 text-amber-500" />
-              上游只在<b>失败</b>与<b>旅行 / 活跃</b>时打日志：签到成功、
-              保活正常都是静默的，所以这里没有记录不代表没执行。
-              结构化、可长期保留（容器重建也不丢）的记录见下方「自动任务与积分记录」。
+            <div className="flex min-h-0 flex-1 items-center justify-center px-4 py-6">
+              <div className="text-center text-xs leading-5 text-muted-foreground">
+                <TriangleAlert className="mx-auto mb-2 h-4 w-4 text-amber-500" />
+                上游只在<b>失败</b>与<b>旅行 / 活跃</b>时打日志：签到成功、
+                保活正常都是静默的，所以这里没有记录不代表没执行。
+                结构化、可长期保留（容器重建也不丢）的记录见下方「自动任务与积分记录」。
+              </div>
             </div>
           )}
         </div>
@@ -377,16 +432,22 @@ export default function TasksPage() {
 
       {/* 自动任务与积分记录：上游把结果打在容器日志里且重建即丢，
           这里展示后台采集器落库后的长期留痕，便于核对积分收益 */}
-      <section className="overflow-hidden rounded-[20px] bg-muted">
+      <section
+        className={
+          'overflow-hidden rounded-[20px] bg-muted ' +
+          (mobileTab === 'tasks' ? '' : 'hidden ') +
+          'md:block'
+        }
+      >
         <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
           <div className="flex items-center gap-2 text-sm font-medium">
             <Cat className="h-4 w-4" />
             自动任务与积分记录
-            <span className="text-[11px] font-normal text-muted-foreground">
+            <span className="hidden text-[11px] font-normal text-muted-foreground sm:inline">
               猫猫旅行 / 活跃上报 / 自动签到 / 保活
             </span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Select value={taskDays} onValueChange={(v) => { setTaskDays(v); setTaskPage(1); }}>
               <SelectTrigger className="h-7 w-[116px] rounded-full text-[11px]">
                 <SelectValue />
@@ -400,7 +461,7 @@ export default function TasksPage() {
               </SelectContent>
             </Select>
             {taskStats && taskStats.total > 0 && (
-              <Badge variant="secondary" className="rounded-full tabular-nums">
+              <Badge variant="secondary" className="hidden shrink-0 rounded-full tabular-nums sm:inline-flex">
                 共 {fmtNumber(taskStats.total)} 条
                 {taskStats.total_credits > 0 && (
                   <span className="ml-1 text-emerald-600 dark:text-emerald-400">
@@ -558,7 +619,7 @@ export default function TasksPage() {
         <Pager
           page={taskPage}
           pages={taskPages}
-          size={PAGE_SIZE}
+          size={taskPageSize}
           total={taskTotal}
           noun="条记录"
           onChange={setTaskPage}
