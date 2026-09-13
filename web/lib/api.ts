@@ -204,4 +204,7 @@ export const systemApi = {
   /** 启动一键更新；target: manager | upstream | both */
   startUpdate: (target: 'manager' | 'upstream' | 'both') =>
     post<{ok: boolean; message: string}>('/api/system/update', {target}),
+  /** 固定上游版本（空串 = 取消固定，恢复跟随分支） */
+  setUpstreamRef: (ref: string) =>
+    post<{ok: boolean; upstream_ref: string}>('/api/system/upstream-ref', {ref}),
 };

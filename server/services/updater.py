@@ -24,6 +24,9 @@ from .. import config
 STATUS_FILE = config.DATA_DIR / 'update-status.json'
 LOCK_FILE = config.DATA_DIR / 'update.lock'
 LOG_FILE = config.DATA_DIR / 'update.log'
+# 上游版本固定：写入提交号/标签后，更新上游时检出该版本而不跟随分支。
+# 用于上游某提交自身有问题（如 Dockerfile 引用了已删除的文件）时回退。
+UPSTREAM_REF_FILE = config.DATA_DIR / 'upstream-ref.txt'
 
 # 锁有效期：超过此时间视为异常退出遗留，允许再次更新
 LOCK_TTL = 3600
@@ -49,6 +52,8 @@ def read_status() -> dict:
         'version': current_version(),
         'updater_found': _updater_script().is_file(),
         'upstream_dir': str(_upstream_dir()),
+        # 当前固定的上游版本（空 = 跟随分支）
+        'upstream_ref': upstream_ref(),
     }
 
     if STATUS_FILE.is_file():
@@ -196,6 +201,32 @@ def _update_landed(status: dict) -> bool:
     return False
 
 
+def upstream_ref() -> str:
+    """当前固定的上游版本（空 = 跟随分支）。"""
+    try:
+        return UPSTREAM_REF_FILE.read_text(encoding='utf-8').strip()
+    except Exception:  # noqa: BLE001
+        return ''
+
+
+def set_upstream_ref(ref: str) -> str:
+    """固定/取消固定上游版本。
+
+    ref 为空即取消固定（恢复跟随分支）。只做格式校验：允许
+    十六进制提交号、标签名（v1.2.3 之类），拒绝明显有问题的输入——
+    这个值会被拼进 git 命令的参数位，不能让任意字符串进来。
+    """
+    val = (ref or '').strip()
+    if not val:
+        UPSTREAM_REF_FILE.unlink(missing_ok=True)
+        return ''
+    if not re.fullmatch(r'[0-9A-Za-z][0-9A-Za-z._/-]{0,79}', val):
+        raise ValueError('版本写法不合法（只允许提交号或标签名）')
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    UPSTREAM_REF_FILE.write_text(val, encoding='utf-8')
+    return val
+
+
 def start_update(target: str) -> tuple[bool, str]:
     """启动更新（后台脱离运行）。返回 (是否已启动, 说明)。"""
     if target not in ('manager', 'upstream', 'both'):
@@ -221,6 +252,9 @@ def start_update(target: str) -> tuple[bool, str]:
         'WB_DATA_DIR': str(config.DATA_DIR),
         'WB_UPDATE_STATUS': str(STATUS_FILE),
         'WB_SERVICE_NAME': os.environ.get('WB_SERVICE_NAME', 'workbuddy-web'),
+        # 上游版本固定（空 = 跟随分支）；worker 据此决定检出哪个版本
+        'WB_UPSTREAM_REF': upstream_ref(),
+        'WB_UPSTREAM_REF_FILE': str(UPSTREAM_REF_FILE),
     })
 
     try:

@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   DownloadCloud,
   Loader2,
+  Pin,
   RefreshCw,
   RotateCcw,
   Server,
@@ -21,6 +22,7 @@ import {fmtAgo} from '@/lib/format';
 import {useAuth} from '@/lib/auth-context';
 import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
+import {Input} from '@/components/ui/input';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 
 /** 更新对象说明，用于确认弹窗与按钮文案 */
@@ -66,6 +68,10 @@ export function UpdatePanel() {
    * 不依赖 finished_at 是否存在，避免时间戳缺失时关不掉。
    */
   const [resultDismissed, setResultDismissed] = useState(false);
+  /** 上游版本固定输入（空 = 跟随分支） */
+  const [refInput, setRefInput] = useState('');
+  const [refBusy, setRefBusy] = useState(false);
+  const refInited = useRef(false);
   const logRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
@@ -75,7 +81,13 @@ export function UpdatePanel() {
         systemApi.versions(),
         systemApi.checkUpdate(),
       ]);
-      if (st.status === 'fulfilled') setStatus(st.value);
+      if (st.status === 'fulfilled') {
+        setStatus(st.value);
+        if (!refInited.current) {
+          refInited.current = true;
+          setRefInput(st.value.upstream_ref || '');
+        }
+      }
       if (vs.status === 'fulfilled') setVersions(vs.value);
       if (ck.status === 'fulfilled') setCheck(ck.value);
     } catch {
@@ -144,6 +156,25 @@ export function UpdatePanel() {
       notify.err(errText(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  /** 保存上游版本固定（空 = 取消固定） */
+  async function saveUpstreamRef() {
+    setRefBusy(true);
+    try {
+      const r = await systemApi.setUpstreamRef(refInput.trim());
+      setRefInput(r.upstream_ref || '');
+      if (r.upstream_ref) {
+        notify.ok('已固定上游版本', `下次「更新上游」将检出 ${r.upstream_ref}，不再跟随分支`);
+      } else {
+        notify.info('已取消固定', '上游更新将恢复跟随分支');
+      }
+      await load();
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setRefBusy(false);
     }
   }
 
@@ -401,6 +432,72 @@ export function UpdatePanel() {
         {!isAdmin && (
           <p className="mt-2 text-[11px] text-muted-foreground">只读角色无法执行更新。</p>
         )}
+      </div>
+
+      {/* 上游版本固定：上游某个提交自身有问题时，固定回上一个可用提交 */}
+      <div className="rounded-[20px] bg-muted p-4">
+        <div className="mb-1 flex flex-wrap items-center gap-2 text-sm font-medium">
+          <Pin className="h-4 w-4" />
+          固定上游版本
+          {status?.upstream_ref ? (
+            <Badge variant="secondary" className="rounded-full text-amber-600 dark:text-amber-400">
+              已固定 {status.upstream_ref}
+            </Badge>
+          ) : (
+            <Badge variant="secondary" className="rounded-full text-muted-foreground">
+              跟随分支
+            </Badge>
+          )}
+        </div>
+        <div className="mb-3 text-[11px] leading-4 text-muted-foreground">
+          默认跟随上游 master。若上游某个提交自身有问题（例如 Dockerfile 引用了
+          已删除的文件导致重建失败），在这里填上一个可用的<strong>提交号或标签</strong>，
+          之后「更新上游」就会检出该版本而不是最新代码，用来快速回退。
+          留空并保存即恢复跟随分支。
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Input
+            value={refInput}
+            disabled={!isAdmin || refBusy}
+            placeholder="例如 98b5e160（留空 = 跟随分支）"
+            className="h-8 w-full max-w-[320px] bg-background font-mono text-xs"
+            onChange={(e) => setRefInput(e.target.value)}
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            className="rounded-full"
+            disabled={!isAdmin || refBusy}
+            onClick={saveUpstreamRef}
+          >
+            {refBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Pin className="h-3.5 w-3.5" />}
+            保存
+          </Button>
+          {status?.upstream_ref && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="rounded-full text-muted-foreground"
+              disabled={!isAdmin || refBusy}
+              onClick={async () => {
+                setRefInput('');
+                setRefBusy(true);
+                try {
+                  await systemApi.setUpstreamRef('');
+                  notify.info('已取消固定', '上游更新将恢复跟随分支');
+                  await load();
+                } catch (e) {
+                  notify.err(errText(e));
+                } finally {
+                  setRefBusy(false);
+                }
+              }}
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              取消固定
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* 日志 */}
