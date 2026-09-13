@@ -1,7 +1,7 @@
 import axios, {AxiosError} from 'axios';
 import type {
   Account,
-  CheckinLog,
+  CheckinLogPage,
   CreditsMeta,
   AccountsResponse,
   ApiKey,
@@ -103,10 +103,13 @@ export const accountApi = {
     post<{total: number; succeeded: number; results: {nickname: string; ok: boolean; message: string}[]}>(
       '/api/accounts/checkin-all',
     ),
-  checkinLogs: (limit = 200, uid?: string) => get<CheckinLog[]>('/api/checkin-logs', {limit, uid}),
+  /** 签到记录（分页）。days 用于时间范围筛选 */
+  checkinLogs: (limit = 20, offset = 0, uid?: string, days?: number) =>
+    get<CheckinLogPage>('/api/checkin-logs', {limit, offset, uid, days}),
   clearCheckinLogs: () => post<{ok: boolean}>('/api/checkin-logs/clear'),
-  taskLogs: (limit = 200, uid?: string, kind?: string) =>
-    get<TaskLogResponse>('/api/task-logs', {limit, uid, kind}),
+  /** 自动任务记录（分页）。kind / days 为筛选条件 */
+  taskLogs: (limit = 20, offset = 0, kind?: string, uid?: string, days?: number) =>
+    get<TaskLogResponse>('/api/task-logs', {limit, offset, kind, uid, days}),
   collectTaskLogs: () => post<{ok: boolean; parsed: number; added: number}>('/api/task-logs/collect'),
   clearTaskLogs: () => post<{ok: boolean}>('/api/task-logs/clear'),
   upstreamLogs: (limit = 200) =>

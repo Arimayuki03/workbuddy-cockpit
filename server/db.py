@@ -229,14 +229,30 @@ def add_checkin_log(
     )
 
 
-def list_checkin_logs(limit: int = 200, uid: str | None = None) -> list[dict]:
+def _checkin_where(uid: str | None = None, days: int | None = None) -> tuple[str, list[Any]]:
+    where: list[str] = []
+    args: list[Any] = []
     if uid:
-        rows = query(
-            'SELECT * FROM checkin_logs WHERE uid = ? ORDER BY id DESC LIMIT ?',
-            (uid, min(1000, max(1, limit))),
-        )
-    else:
-        rows = query('SELECT * FROM checkin_logs ORDER BY id DESC LIMIT ?', (min(1000, max(1, limit)),))
+        where.append('uid = ?')
+        args.append(uid)
+    if days:
+        where.append('ts >= ?')
+        args.append(int(time.time()) - days * 86400)
+    return ((' WHERE ' + ' AND '.join(where)) if where else '', args)
+
+
+def list_checkin_logs(
+    limit: int = 200,
+    uid: str | None = None,
+    *,
+    offset: int = 0,
+    days: int | None = None,
+) -> list[dict]:
+    clause, args = _checkin_where(uid, days)
+    rows = query(
+        f'SELECT * FROM checkin_logs{clause} ORDER BY id DESC LIMIT ? OFFSET ?',
+        (*args, min(500, max(1, limit)), max(0, int(offset))),
+    )
     return [
         {
             'id': r['id'],
@@ -251,6 +267,13 @@ def list_checkin_logs(limit: int = 200, uid: str | None = None) -> list[dict]:
         }
         for r in rows
     ]
+
+
+def count_checkin_logs(uid: str | None = None, days: int | None = None) -> int:
+    """当前筛选下的总条数（分页用；不传筛选即全量）。"""
+    clause, args = _checkin_where(uid, days)
+    row = query_one(f'SELECT COUNT(*) AS n FROM checkin_logs{clause}', args)
+    return int(row['n']) if row else 0
 
 
 def clear_checkin_logs() -> None:
@@ -290,8 +313,11 @@ def add_task_logs(entries: list[dict]) -> int:
         return conn.total_changes - before
 
 
-def list_task_logs(limit: int = 200, uid: str | None = None, kind: str | None = None) -> list[dict]:
-    sql = 'SELECT * FROM task_logs'
+def _task_log_where(
+    uid: str | None = None,
+    kind: str | None = None,
+    days: int | None = None,
+) -> tuple[str, list[Any]]:
     where: list[str] = []
     args: list[Any] = []
     if uid:
@@ -300,10 +326,25 @@ def list_task_logs(limit: int = 200, uid: str | None = None, kind: str | None = 
     if kind:
         where.append('kind = ?')
         args.append(kind)
-    if where:
-        sql += ' WHERE ' + ' AND '.join(where)
-    sql += ' ORDER BY ts DESC, id DESC LIMIT ?'
-    args.append(min(1000, max(1, limit)))
+    if days:
+        where.append('ts >= ?')
+        args.append(int(time.time()) - days * 86400)
+    return ((' WHERE ' + ' AND '.join(where)) if where else '', args)
+
+
+def list_task_logs(
+    limit: int = 200,
+    uid: str | None = None,
+    kind: str | None = None,
+    *,
+    offset: int = 0,
+    days: int | None = None,
+) -> list[dict]:
+    clause, args = _task_log_where(uid, kind, days)
+    rows = query(
+        f'SELECT * FROM task_logs{clause} ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?',
+        (*args, min(500, max(1, limit)), max(0, int(offset))),
+    )
     return [
         {
             'id': r['id'],
@@ -314,18 +355,41 @@ def list_task_logs(limit: int = 200, uid: str | None = None, kind: str | None = 
             'credits': r['credits'],
             'message': r['message'],
         }
-        for r in query(sql, tuple(args))
+        for r in rows
     ]
 
 
-def task_log_stats() -> dict:
-    """按类型汇总条数与累计积分，用于页面上方的概览。"""
+def count_task_logs(
+    uid: str | None = None,
+    kind: str | None = None,
+    days: int | None = None,
+) -> int:
+    """当前筛选下的总条数（分页用）。
+
+    分页必须用筛选后的总数：此前界面徽章取的是全局统计，而列表只取前 500 条，
+    会出现「徽章说 2200 条、实际只能看到 500 条」且更早记录翻不到的情况。
+    """
+    clause, args = _task_log_where(uid, kind, days)
+    row = query_one(f'SELECT COUNT(*) AS n FROM task_logs{clause}', args)
+    return int(row['n']) if row else 0
+
+
+def task_log_stats(days: int | None = None) -> dict:
+    """按类型汇总条数与累计积分，用于页面上方的概览。
+
+    days 让概览与列表的时间范围保持一致，否则筛选后数字会对不上。
+    """
+    clause, args = _task_log_where(days=days)
     rows = query(
         'SELECT kind, COUNT(*) AS n, COALESCE(SUM(credits), 0) AS credits '
-        'FROM task_logs GROUP BY kind'
+        f'FROM task_logs{clause} GROUP BY kind',
+        args,
     )
     by_kind = {r['kind']: {'count': int(r['n']), 'credits': int(r['credits'])} for r in rows}
-    total = query_one('SELECT COUNT(*) AS n, COALESCE(SUM(credits),0) AS credits FROM task_logs')
+    total = query_one(
+        f'SELECT COUNT(*) AS n, COALESCE(SUM(credits),0) AS credits FROM task_logs{clause}',
+        args,
+    )
     return {
         'by_kind': by_kind,
         'total': int(total['n']) if total else 0,

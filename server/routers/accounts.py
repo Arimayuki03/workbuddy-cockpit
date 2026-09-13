@@ -247,9 +247,20 @@ async def checkin_all(user: dict = Depends(security.require_admin)) -> dict:
 def checkin_logs(
     limit: int = 200,
     uid: str | None = None,
+    offset: int = 0,
+    days: int | None = None,
     user: dict = Depends(security.current_user),
-) -> list[dict]:
-    return db.list_checkin_logs(limit=limit, uid=uid)
+) -> dict:
+    """签到记录（分页）。
+
+    返回 items + total（**当前筛选下**的总数）。历史只增不减，
+    不分页的话列表会无限增长；total 也必须是筛选后的值，
+    否则界面会拿全量数字去算页数，出现空页。
+    """
+    return {
+        'items': db.list_checkin_logs(limit=limit, uid=uid, offset=offset, days=days),
+        'total': db.count_checkin_logs(uid=uid, days=days),
+    }
 
 
 @router.post('/checkin-logs/clear')
@@ -261,16 +272,21 @@ def clear_checkin_logs(user: dict = Depends(security.require_admin)) -> dict:
 @router.get('/task-logs')
 def task_logs(
     limit: int = 200,
+    offset: int = 0,
     uid: str | None = None,
     kind: str | None = None,
+    days: int | None = None,
     user: dict = Depends(security.current_user),
 ) -> dict:
     """上游自动任务留痕（猫猫旅行 / 活跃上报 / 自动签到 / 保活）。
 
     上游把这些结果打在容器日志里，容器重建即丢失；本接口读取的是
     后台采集器解析后落库的记录，因此能长期保留并统计积分收益。
+
+    分页返回：列表只取当前页，`total` 为**当前筛选下**的总数，
+    概览 `stats` 也按同一时间范围统计，保证数字与列表一致。
     """
-    logs = db.list_task_logs(limit=limit, uid=uid, kind=kind)
+    logs = db.list_task_logs(limit=limit, uid=uid, kind=kind, offset=offset, days=days)
 
     # uid → 昵称。上游 2026-09-12 起把日志里的 uid 截成前 8 位，
     # 而账号表里是完整 uuid，无法直接相等匹配，因此按前缀解析；
@@ -308,7 +324,8 @@ def task_logs(
 
     return {
         'logs': logs,
-        'stats': db.task_log_stats(),
+        'total': db.count_task_logs(uid=uid, kind=kind, days=days),
+        'stats': db.task_log_stats(days=days),
         'kinds': tasklog.KIND_LABELS,
         'collector': tasklog.state(),
     }
