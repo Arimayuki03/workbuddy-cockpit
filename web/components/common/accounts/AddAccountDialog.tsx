@@ -6,6 +6,7 @@ import {notify} from '@/lib/toast';
 import {Loader2, CheckCircle2, AlertTriangle, ExternalLink} from 'lucide-react';
 import {accountApi, errText} from '@/lib/api';
 import {Button} from '@/components/ui/button';
+import {CopyButton, ShareButton} from '@/components/ui/copy-button';
 import {
   Dialog,
   DialogContent,
@@ -115,17 +116,35 @@ export function AddAccountDialog({
           </div>
 
           {authUrl && (
-            <div className="flex w-full items-center gap-1.5 rounded-full bg-muted px-3 py-1.5">
-              <ExternalLink className="h-3 w-3 shrink-0 text-muted-foreground" />
-              <a
-                href={authUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                title={authUrl}
-                className="min-w-0 flex-1 truncate text-[11px] text-blue-500 hover:underline"
-              >
-                {authUrl}
-              </a>
+            <div className="w-full space-y-2">
+              {/* 链接本身可点开；旁边给复制与分享，便于把授权链接发给朋友 */}
+              <div className="flex w-full items-center gap-1.5 rounded-full bg-muted px-3 py-1.5">
+                <ExternalLink className="h-3 w-3 shrink-0 text-muted-foreground" />
+                <a
+                  href={authUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={authUrl}
+                  className="min-w-0 flex-1 truncate text-[11px] text-blue-500 hover:underline"
+                >
+                  {authUrl}
+                </a>
+              </div>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <CopyButton
+                  value={authUrl}
+                  size="sm"
+                  showLabel
+                  label="复制链接"
+                  variant="outline"
+                  className="rounded-full"
+                />
+                <ShareButton
+                  title="添加腾讯账号"
+                  text="打开这个链接完成扫码授权，之后会自动签到并纳入账号池"
+                  url={authUrl}
+                />
+              </div>
             </div>
           )}
 

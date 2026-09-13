@@ -12,6 +12,7 @@ import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {useAuth} from '@/lib/auth-context';
 import {Button} from '@/components/ui/button';
+import {CopyButton} from '@/components/ui/copy-button';
 import {Badge} from '@/components/ui/badge';
 import {Input} from '@/components/ui/input';
 import {Label} from '@/components/ui/label';
@@ -313,12 +314,17 @@ export default function LogsPage() {
                 ['流式', detail.stream ? '是' : '否'],
                 ['User-Agent', detail.ua || '—'],
                 ['错误', detail.error || '—'],
-              ] as [string, string][]).map(([k, v]) => (
-                <div key={k} className="flex gap-3">
-                  <div className="w-32 shrink-0 text-muted-foreground">{k}</div>
-                  <div className="min-w-0 flex-1 break-all font-mono">{v}</div>
-                </div>
-              ))}
+              ] as [string, string][]).map(([k, v]) => {
+                // 这些字段内容较长且常需要贴出来（排查 / 反馈），给出复制入口
+                const copyable = ['来源 IP', 'User-Agent', '错误'].includes(k) && v !== '—';
+                return (
+                  <div key={k} className="flex items-start gap-3">
+                    <div className="w-32 shrink-0 text-muted-foreground">{k}</div>
+                    <div className="min-w-0 flex-1 break-all font-mono">{v}</div>
+                    {copyable && <CopyButton value={v} title={`复制${k}`} className="-mt-1" />}
+                  </div>
+                );
+              })}
             </div>
           )}
         </DrawerContent>

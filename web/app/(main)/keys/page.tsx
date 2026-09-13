@@ -1,17 +1,18 @@
 'use client';
 
 import {useCallback, useEffect, useState} from 'react';
-import {KeyRound, Plus, Trash2, Copy, Ban, CircleCheck, Pencil, RotateCcw} from 'lucide-react';
+import {KeyRound, Plus, Trash2, Ban, CircleCheck, Pencil, RotateCcw} from 'lucide-react';
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {keyApi, errText} from '@/lib/api';
 import type {ApiKey} from '@/lib/types';
-import {copyText, fmtDateTime, fmtNumber} from '@/lib/format';
+import {fmtDateTime, fmtNumber} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {useAuth} from '@/lib/auth-context';
 import {Button} from '@/components/ui/button';
+import {CopyButton} from '@/components/ui/copy-button';
 import {Badge} from '@/components/ui/badge';
 import {Input} from '@/components/ui/input';
 import {
@@ -178,14 +179,8 @@ export default function KeysPage() {
     }
   }
 
-  async function copyKey(text: string) {
-    const ok = await copyText(text);
-    if (ok) {
-      notify.ok('已复制到剪贴板');
-    } else {
-      notify.err('复制失败');
-    }
-  }
+  // 下游接入地址：客户端才能拿到当前 origin，静态导出阶段为空
+  const baseUrl = typeof window !== 'undefined' ? window.location.origin : '';
 
   return (
     <div className="flex flex-col gap-4 md:gap-6">
@@ -456,15 +451,17 @@ export default function KeysPage() {
             <DialogDescription>请立即复制保存，关闭后将无法再次查看完整密钥</DialogDescription>
           </DialogHeader>
           <div className="space-y-3 px-6 pb-2">
+            {/* min-w-0 必不可少：flex 项默认 min-width:auto，长密钥会把
+                复制按钮挤出去（移动端就点不到了） */}
             <div className="flex items-center gap-2 rounded-2xl bg-muted p-3">
-              <code className="flex-1 overflow-x-auto whitespace-nowrap font-mono text-xs">{issued}</code>
-              <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" onClick={() => issued && copyKey(issued)}>
-                <Copy className="h-3.5 w-3.5" />
-              </Button>
+              <code className="min-w-0 flex-1 break-all font-mono text-xs">{issued}</code>
+              <CopyButton value={issued || ''} size="sm" showLabel label="复制密钥" />
             </div>
-            <p className="text-[11px] text-muted-foreground">
-              Base URL：<code className="font-mono">{typeof window !== 'undefined' ? window.location.origin : ''}/v1</code>
-            </p>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-muted-foreground">Base URL</span>
+              <code className="min-w-0 flex-1 break-all font-mono text-[11px]">{baseUrl}/v1</code>
+              <CopyButton value={`${baseUrl}/v1`} title="复制 Base URL" />
+            </div>
           </div>
           <DialogFooter>
             <Button className="rounded-full" onClick={() => setIssued(null)}>
