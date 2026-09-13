@@ -202,6 +202,33 @@ async def get_models() -> tuple[bool, list | dict]:
         return False, {'error': _err_text(exc)}
 
 
+def models_source(items: list) -> str:
+    """判断这份模型列表来自上游「动态拉取」还是「内置静态表」。
+
+    为什么需要区分：上游 `/v1/models` 优先用池里随机一个健康账号去动态拉取
+    （成功则缓存 1 小时），**拉取失败就回退到编译进二进制的静态表**，且失败后
+    还有 5 分钟负缓存。两者外观一样，但静态表是老版本写死的、数量少得多——
+    界面若一律标「来自上游实时列表」，用户会以为账号/配置有问题，实际是上游
+    在走回退。实测有部署只显示 6 个模型，且顺序与旧版静态表完全一致。
+
+    判据：动态条目会带 `max_output_tokens`（上游 modelList 里动态分支才写这个
+    键），静态表条目只有 id/object/created/owned_by/context_length。
+    这是上游内部实现细节，故只作展示提示；判不出来返回 'unknown'，前端
+    据此回退到中性文案，绝不因此报错。
+    """
+    if not isinstance(items, list) or not items:
+        return 'unknown'
+    dicts = [x for x in items if isinstance(x, dict)]
+    if not dicts:
+        return 'unknown'
+    if any('max_output_tokens' in x for x in dicts):
+        return 'dynamic'
+    # 没有该键且条目结构齐全 → 基本可判定为静态回退表
+    if all('id' in x for x in dicts):
+        return 'static'
+    return 'unknown'
+
+
 async def restart_container() -> tuple[bool, str]:
     name = config.WB2API_CONTAINER
     try:

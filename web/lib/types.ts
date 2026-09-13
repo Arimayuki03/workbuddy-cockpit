@@ -57,7 +57,23 @@ export interface UpstreamStatus {
 export interface ModelInfo {
   id: string;
   owned_by?: string;
+  /** 上下文窗口（上游动态拉取给出；静态回退表为固定值） */
+  context_length?: number;
   context_window?: number;
+  /**
+   * 最大输出 token。**只有上游动态拉取的条目才带这个键**，内置静态回退表没有，
+   * 前端据此判断列表来源（见 ModelListResponse.source）。
+   */
+  max_output_tokens?: number | null;
+}
+
+/** 模型列表来源：dynamic = 上游实时动态拉取；static = 上游内置静态回退表 */
+export type ModelSource = 'dynamic' | 'static' | 'unknown';
+
+export interface ModelListResponse {
+  models: ModelInfo[];
+  source: ModelSource;
+  count: number;
 }
 
 export interface ApiKey {

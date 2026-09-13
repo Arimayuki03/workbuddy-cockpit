@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import {notify} from '@/lib/toast';
 import {settingsApi, upstreamApi, errText} from '@/lib/api';
-import type {ModelInfo, UpstreamConfig, UserItem} from '@/lib/types';
+import type {ModelInfo, ModelSource, UpstreamConfig, UserItem} from '@/lib/types';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
@@ -610,6 +610,9 @@ export default function SettingsPage() {
   const {isAdmin} = useAuth();
   const [cfg, setCfg] = useState<UpstreamConfig | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
+  /** 模型列表来源：dynamic = 上游实时拉取，static = 上游内置回退表 */
+  const [modelSource, setModelSource] = useState<ModelSource>('unknown');
+  const [modelsLoading, setModelsLoading] = useState(false);
 
   /** 可视化表单状态 */
   const [form, setForm] = useState<Record<Group, Record<string, FieldValue>>>({
@@ -702,12 +705,25 @@ export default function SettingsPage() {
     if (u.status === 'fulfilled') setUsers(u.value);
   }, []);
 
-  /** 上游模型列表单独拉取：上游不可达时可能较慢，不阻塞其余设置项 */
-  const loadModels = useCallback(async () => {
+  /**
+   * 上游模型列表。
+   *
+   * 上游自己会缓存 1 小时（动态拉取成功时），失败则回退到编译进二进制的
+   * 静态表、并有 5 分钟负缓存——所以「刷新页面」不一定能拿到新列表。
+   * 这也是为什么提供手动重新拉取：上游刷新令牌/新增模型后，用户需要能
+   * 立刻主动取一次，而不是干等缓存过期。
+   */
+  const loadModels = useCallback(async (silent = true) => {
+    if (!silent) setModelsLoading(true);
     try {
-      setModels(await upstreamApi.models());
+      const res = await upstreamApi.models();
+      setModels(res.models || []);
+      setModelSource(res.source || 'unknown');
     } catch {
       setModels([]);
+      setModelSource('unknown');
+    } finally {
+      if (!silent) setModelsLoading(false);
     }
   }, []);
 
@@ -838,13 +854,14 @@ export default function SettingsPage() {
             variant="outline"
             size="sm"
             className="rounded-full"
+            title="重新读取上游配置与模型列表（上游模型列表自身有 1 小时缓存）"
             onClick={() => {
               load();
-              loadModels();
+              loadModels(false);
             }}
           >
             <RefreshCw />
-            刷新
+            刷新配置与模型
           </Button>
         }
       />
@@ -916,9 +933,48 @@ export default function SettingsPage() {
             </div>
 
             <div className="rounded-[20px] bg-muted px-3.5 py-3 lg:col-span-2">
-              <div className="mb-2 flex items-center justify-between">
-                <div className="text-sm font-medium">可用模型</div>
-                <div className="text-[11px] text-muted-foreground">来自上游实时列表</div>
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  <div className="text-sm font-medium">可用模型</div>
+                  {modelSource === 'dynamic' && (
+                    <span className="shrink-0 text-[11px] text-muted-foreground">
+                      上游实时列表 · {models.length} 个
+                    </span>
+                  )}
+                  {modelSource === 'static' && (
+                    <span
+                      className="shrink-0 text-[11px] text-amber-600 dark:text-amber-400"
+                      title="上游动态拉取失败时，会回退到其内置的静态模型表——那是编译进二进制的固定列表，数量比实际可用模型少。可直接点击右侧「重新拉取」再试一次。"
+                    >
+                      上游内置回退表（非实时） · {models.length} 个
+                    </span>
+                  )}
+                  {modelSource === 'unknown' && models.length > 0 && (
+                    <span className="shrink-0 text-[11px] text-muted-foreground">
+                      {models.length} 个
+                    </span>
+                  )}
+                </div>
+                {/*
+                  只在请求进行中禁用，不绑定「配置文件是否可读」——这两件事无关：
+                  模型列表是从上游 /v1/models 实时取的，config.json 读不到不代表
+                  上游不可达。把按钮一起禁用会让用户在最需要重试时点不动。
+                */}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 shrink-0 gap-1.5 text-[11px]"
+                  disabled={modelsLoading}
+                  title="重新向上游拉取模型列表（上游自身有 1 小时缓存，失败时回退静态表）"
+                  onClick={() => loadModels(false)}
+                >
+                  {modelsLoading ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-3.5 w-3.5" />
+                  )}
+                  重新拉取
+                </Button>
               </div>
               <div className="flex flex-wrap gap-1">
                 {models.length ? (
@@ -933,6 +989,25 @@ export default function SettingsPage() {
                   </span>
                 )}
               </div>
+
+              {/* 关键说明：模型列表由上游**随机挑一个健康账号**去拉，取决于该账号的
+                  授权，所以「同样的部署、不同账号看到的模型数量不同」是正常的——
+                  并非本站少显示。上游自身还会缓存 1 小时。 */}
+              {models.length > 0 && (
+                <p className="mt-2 text-[10px] leading-4 text-muted-foreground/80">
+                  {modelSource === 'static' ? (
+                    <>
+                      上游动态拉取失败，已回退到它<b>编译进二进制的静态表</b>——数量比实际可用模型少。
+                      可点击「重新拉取」再试，或重启上游容器后重试。
+                    </>
+                  ) : (
+                    <>
+                      列表由上游随机选取的一个健康账号拉取，<b>取决于该账号的授权</b>——
+                      不同账号（企业 / 套餐）可见的模型数量可能不同；上游自身缓存 1 小时。
+                    </>
+                  )}
+                </p>
+              )}
             </div>
           </div>
 

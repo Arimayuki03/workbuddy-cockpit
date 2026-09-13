@@ -36,11 +36,27 @@ async def upstream_status(user: dict = Depends(security.current_user)) -> dict:
 
 
 @router.get('/models')
-async def models(user: dict = Depends(security.current_user)) -> list | dict:
+async def models(user: dict = Depends(security.current_user)) -> dict:
+    """上游可用模型列表。
+
+    返回结构化对象而非裸数组，是为了带上 source：上游在动态拉取失败时会
+    回退到**内置静态表**（老版本写死的，数量少得多），两者外观一样。前端
+    据此如实标注来源，避免让人误以为是自己账号/配置有问题。
+    """
     ok, data = await wb2api.get_models()
     if not ok:
         raise HTTPException(status_code=502, detail=str(data))
-    return data
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict) and isinstance(data.get('data'), list):
+        items = data['data']
+    else:
+        items = []
+    return {
+        'models': items,
+        'source': wb2api.models_source(items),
+        'count': len(items),
+    }
 
 
 @router.post('/auth/start')

@@ -8,7 +8,7 @@ import type {
   IpAccessLog,
   IpRule,
   Me,
-  ModelInfo,
+  ModelListResponse,
   Page,
   ReloadState,
   RequestLog,
@@ -125,7 +125,7 @@ export const accountApi = {
 /* ── 上游状态 ───────────────────────────────────────── */
 export const upstreamApi = {
   status: () => get<UpstreamStatus>('/api/status'),
-  models: () => get<ModelInfo[]>('/api/models'),
+  models: () => get<ModelListResponse>('/api/models'),
 };
 
 /* ── API 密钥 ───────────────────────────────────────── */
