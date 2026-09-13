@@ -156,11 +156,14 @@ def _usage_credit(usage: dict | None) -> float | None:
     return val if val >= 0 else None
 
 
-def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt: int, ct: int, latency: int, ua: str | None, error: str | None, stream: bool, *, credit: float | None = None) -> None:
+def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt: int, ct: int, latency: int, ua: str | None, error: str | None, stream: bool, *, credit: float | None = None, first_token: int | None = None) -> None:
     """记录调用日志与用量。
 
     credit 为上游返回的真实扣费（usage.credit）。None 表示上游没给，
     与「扣了 0」是两回事，因此用 NULL 存而不是 0。
+
+    first_token 为首字延迟（毫秒）。None 表示未采集到：非流式请求本来就没有
+    中间过程，历史记录也没这个值，因此同样用 NULL 存，而不是 0。
 
     注意：日志/统计属于旁路，任何异常都不能影响用户请求本身
     （曾因统计函数缺失导致流式响应在收尾阶段中断，客户端看到
@@ -168,9 +171,9 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
     """
     try:
         db.execute(
-            'INSERT INTO request_logs(ts, key_id, ip, model, mapped_model, status, prompt_tokens, completion_tokens, latency_ms, ua, error, stream, credit) '
-            'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (int(time.time()), key['id'] if key else None, ip, model, mapped, status, pt, ct, latency, ua, error, 1 if stream else 0, credit),
+            'INSERT INTO request_logs(ts, key_id, ip, model, mapped_model, status, prompt_tokens, completion_tokens, latency_ms, first_token_ms, ua, error, stream, credit) '
+            'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (int(time.time()), key['id'] if key else None, ip, model, mapped, status, pt, ct, latency, first_token, ua, error, 1 if stream else 0, credit),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning('写入请求日志失败（不影响请求）: %s', exc)
@@ -245,8 +248,14 @@ def _upstream_headers() -> dict:
     return headers
 
 
-def _parse_sse_usage(pending: str, usage: dict) -> str:
-    """从 SSE 文本片段中提取 usage，返回未处理完的残留缓冲。"""
+def _scan_sse(pending: str, usage: dict) -> tuple[str, bool]:
+    """扫描 SSE 文本片段：提取 usage，并判断是否已出现首个正文。
+
+    返回 (未处理完的残留缓冲, 本次是否见到正文 delta)。
+    为什么要单独判断「正文」：OpenAI 流的第一块通常只有 role、content 为空，
+    若用「收到首块」当首字，会把连接建立时间也算进去，数字偏小且失真。
+    """
+    saw_content = False
     while '\n' in pending:
         line, pending = pending.split('\n', 1)
         line = line.strip()
@@ -259,9 +268,21 @@ def _parse_sse_usage(pending: str, usage: dict) -> str:
             obj = json.loads(payload)
         except Exception:
             continue
-        if isinstance(obj, dict) and isinstance(obj.get('usage'), dict):
+        if not isinstance(obj, dict):
+            continue
+        if isinstance(obj.get('usage'), dict):
             usage.update(obj['usage'])
-    return pending
+        choices = obj.get('choices')
+        if isinstance(choices, list):
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                delta = choice.get('delta') or choice.get('message') or {}
+                if isinstance(delta, dict) and (
+                    delta.get('content') or delta.get('reasoning_content')
+                ):
+                    saw_content = True
+    return pending, saw_content
 
 
 # ── 模型列表 ─────────────────────────────────────────────
@@ -353,6 +374,9 @@ async def _chat(request: Request, upstream_path: str):
         usage: dict = {}
         pending = ''
         error_text: str | None = None
+        # 首字延迟：只记一次，取「首个含正文的 delta」到达时刻。
+        # 注意起点含建连 + 上游排队 + 模型开始思考，这正是「上游多久开始回话」。
+        first_token_ms: int | None = None
         try:
             async for chunk in resp.aiter_bytes():
                 if status_code >= 400:
@@ -362,7 +386,9 @@ async def _chat(request: Request, upstream_path: str):
                     yield chunk
                     continue
                 pending += chunk.decode('utf-8', errors='ignore')
-                pending = _parse_sse_usage(pending, usage)
+                pending, saw_content = _scan_sse(pending, usage)
+                if saw_content and first_token_ms is None:
+                    first_token_ms = int((time.time() - started) * 1000)
                 yield chunk
         finally:
             await resp.aclose()
@@ -373,6 +399,7 @@ async def _chat(request: Request, upstream_path: str):
             _record(
                 key, ip, requested_model or '', mapped or '', status_code, pt, ct,
                 latency, ua, error_text, True, credit=_usage_credit(usage),
+                first_token=first_token_ms,
             )
 
     return StreamingResponse(generator(), status_code=status_code, media_type=content_type)

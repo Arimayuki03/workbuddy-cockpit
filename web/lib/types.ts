@@ -87,6 +87,13 @@ export interface RequestLog {
   prompt_tokens: number;
   completion_tokens: number;
   latency_ms: number;
+  /**
+   * 首字延迟（毫秒）：从发起上游请求到收到第一个含正文的 delta。
+   * null = 未采集（非流式请求，或升级前的历史记录）。
+   * 与 latency_ms 的区别：latency_ms 含模型生成全部内容的耗时，回答越长越大，
+   * 反映不出上游响应快慢；首字延迟才是「上游多久开始回话」。
+   */
+  first_token_ms: number | null;
   ua: string | null;
   error: string | null;
   stream: boolean;

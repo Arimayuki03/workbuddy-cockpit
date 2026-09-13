@@ -65,6 +65,8 @@ def list_logs(
             'prompt_tokens': r['prompt_tokens'],
             'completion_tokens': r['completion_tokens'],
             'latency_ms': r['latency_ms'],
+            # 首字延迟：NULL 表示未采集（非流式请求或旧记录）
+            'first_token_ms': r['first_token_ms'],
             'ua': r['ua'],
             'error': r['error'],
             'stream': bool(r['stream']),
