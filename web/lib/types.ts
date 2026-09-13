@@ -264,6 +264,8 @@ export interface UpdateStatus {
   version: string;
   updater_found: boolean;
   upstream_dir: string;
+  /** 当前固定的上游版本（空 = 跟随分支） */
+  upstream_ref?: string;
   started_at?: number;
   finished_at?: number | null;
   duration?: number;

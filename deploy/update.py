@@ -41,6 +41,10 @@ UPSTREAM_REPO = os.environ.get('WB_UPSTREAM_REPO') or 'https://github.com/Sliver
 SERVICE_NAME = os.environ.get('WB_SERVICE_NAME') or 'workbuddy-web'
 DATA_DIR = Path(os.environ.get('WB_DATA_DIR') or INSTALL_DIR / 'data')
 STATUS_FILE = Path(os.environ.get('WB_UPDATE_STATUS') or DATA_DIR / 'update-status.json')
+# 上游版本固定：写入提交号/标签后，上游更新会检出该版本而不是跟随分支。
+# 用途：上游某个提交自身有问题（如 Dockerfile 引用了已删除的文件）时，
+# 可以固定回上一个可用提交，避免「一更就坏、且没有退路」。
+UPSTREAM_REF_FILE = Path(os.environ.get('WB_UPSTREAM_REF_FILE') or DATA_DIR / 'upstream-ref.txt')
 
 STEP_TIMEOUT = int(os.environ.get('WB_UPDATE_STEP_TIMEOUT') or 900)
 
@@ -201,24 +205,46 @@ def update_upstream(rep: Reporter) -> None:
         # 丢弃本地改动：其中包含我们的端口收敛，稍后会重新施加
         run(['git', 'checkout', '--', '.'], cwd=UPSTREAM_DIR, rep=rep, check=False)
 
-    # 2) 拉取
-    rep.log('拉取上游最新代码…')
-    rc, out = run(['git', 'fetch', '--depth', '1', 'origin'], cwd=UPSTREAM_DIR, rep=rep, check=False)
-    if rc != 0:
-        rep.log('git fetch 失败（网络问题？）', 'warn')
-    branch = 'master'
-    rc, out = run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=UPSTREAM_DIR, rep=rep, check=False)
-    if rc == 0 and out.strip():
-        branch = out.strip()
+    # 2) 拉取（或检出被固定的版本）
+    pinned = _read_upstream_ref()
     before = ''
     rc, out = run(['git', 'rev-parse', 'HEAD'], cwd=UPSTREAM_DIR, rep=rep, check=False)
     if rc == 0:
         before = out.strip()[:8]
 
-    rc, out = run(['git', 'pull', '--ff-only', 'origin', branch], cwd=UPSTREAM_DIR, rep=rep, check=False)
-    if rc != 0:
-        rep.log('fast-forward 失败，尝试硬重置到远端（本地改动已备份）', 'warn')
-        run(['git', 'reset', '--hard', f'origin/{branch}'], cwd=UPSTREAM_DIR, rep=rep, check=False)
+    if pinned:
+        rep.log(f'已固定上游版本：{pinned}（不跟随分支）')
+        rc, out = run(['git', 'fetch', '--depth', '1', 'origin', pinned],
+                      cwd=UPSTREAM_DIR, rep=rep, check=False)
+        if rc != 0:
+            # 浅克隆有时取不到任意提交，退回完整 fetch 再试
+            rep.log('按提交直接拉取失败，尝试完整拉取…', 'warn')
+            rc, out = run(['git', 'fetch', 'origin'], cwd=UPSTREAM_DIR, rep=rep, check=False)
+        if rc != 0:
+            raise RuntimeError(f'拉取上游 {pinned} 失败（提交/标签是否存在？网络是否正常？）')
+        rc, out = run(['git', 'reset', '--hard', 'FETCH_HEAD'], cwd=UPSTREAM_DIR, rep=rep, check=False)
+        if rc != 0:
+            rc, out = run(['git', 'reset', '--hard', pinned], cwd=UPSTREAM_DIR, rep=rep, check=False)
+        if rc != 0:
+            raise RuntimeError(f'检出上游 {pinned} 失败')
+    else:
+        rep.log('拉取上游最新代码…')
+        rc, out = run(['git', 'fetch', '--depth', '1', 'origin'], cwd=UPSTREAM_DIR, rep=rep, check=False)
+        if rc != 0:
+            rep.log('git fetch 失败（网络问题？）', 'warn')
+        branch = 'master'
+        rc, out = run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=UPSTREAM_DIR, rep=rep, check=False)
+        cur = out.strip() if rc == 0 else ''
+        if rc == 0 and cur and cur != 'HEAD':
+            branch = cur
+        else:
+            # 之前固定过版本会处于游离 HEAD，先切回分支再 pull
+            run(['git', 'checkout', '-f', branch], cwd=UPSTREAM_DIR, rep=rep, check=False)
+
+        rc, out = run(['git', 'pull', '--ff-only', 'origin', branch], cwd=UPSTREAM_DIR, rep=rep, check=False)
+        if rc != 0:
+            rep.log('fast-forward 失败，尝试硬重置到远端（本地改动已备份）', 'warn')
+            run(['git', 'reset', '--hard', f'origin/{branch}'], cwd=UPSTREAM_DIR, rep=rep, check=False)
 
     after = ''
     rc, out = run(['git', 'rev-parse', 'HEAD'], cwd=UPSTREAM_DIR, rep=rep, check=False)
@@ -232,17 +258,123 @@ def update_upstream(rep: Reporter) -> None:
     # 3) 恢复安全基线
     enforce_local_bind(rep)
 
-    # 4) 重建并启动
+    # 4) 构建前预检：上游偶尔会漏改 Dockerfile（删了文件却仍在 COPY），
+    #    提前查出来，避免只看到 docker 那串难懂的报错
+    missing = _missing_copy_sources()
+    if missing:
+        rep.log('构建预检未通过：Dockerfile 引用了不存在的文件', 'error')
+        for m in missing:
+            rep.log(f'  缺少 {m}', 'error')
+        rep.log('这是上游代码本身的问题（不是你配置的问题）。'
+                '可在「设置 → 系统更新」把上游固定到上一个可用提交，或等待上游修复。', 'error')
+        raise RuntimeError('上游 Dockerfile 引用了不存在的文件：' + ', '.join(missing))
+
+    # 5) 重建并启动
     rep.log('重建并启动上游容器（首次可能需数分钟）…')
     compose_cmd = ['docker', 'compose'] if _has_compose_v2() else ['docker-compose']
-    run(compose_cmd + ['up', '-d', '--build'], cwd=UPSTREAM_DIR, rep=rep)
+    rc, out = run(compose_cmd + ['up', '-d', '--build'], cwd=UPSTREAM_DIR, rep=rep, check=False)
+    if rc != 0:
+        hint = _diagnose_build_failure(out)
+        rep.log(f'重建失败（exit {rc}）', 'error')
+        if hint:
+            rep.log(f'原因判断：{hint}', 'error')
+        # 构建失败时 compose 不会动已在运行的容器，明确说明当前服务状态
+        _report_service_state(rep)
+        raise RuntimeError('上游重建失败' + (f'：{hint}' if hint else '，请查看上方日志'))
 
-    # 5) 等待就绪
+    # 6) 等待就绪
     rep.log('等待上游就绪…')
     if wait_health(f'http://127.0.0.1:{UPSTREAM_PORT}/healthz', 90, rep):
         rep.log('上游已就绪')
     else:
         rep.log('上游未在预期时间内就绪，请查看容器日志', 'warn')
+
+
+def _read_upstream_ref() -> str:
+    """要固定的上游版本（提交号/标签）。环境变量优先，其次本地文件；空 = 跟随分支。"""
+    env = (os.environ.get('WB_UPSTREAM_REF') or '').strip()
+    if env:
+        return env
+    try:
+        return UPSTREAM_REF_FILE.read_text(encoding='utf-8').strip()
+    except Exception:  # noqa: BLE001
+        return ''
+
+
+def _missing_copy_sources() -> list[str]:
+    """列出 Dockerfile 里 COPY 引用了、但仓库中并不存在的本地文件。
+
+    上游曾出现「删了脚本却漏改 Dockerfile」导致镜像构建失败。这类问题
+    docker 的报错（failed to calculate checksum ... not found）不容易读懂，
+    这里提前查出来给出明确结论。
+
+    只判定**确凿**的情况：跳过 --from=（阶段拷贝）、URL、含通配符的源，
+    避免误报把正常更新挡下来。
+    """
+    dockerfile = UPSTREAM_DIR / 'Dockerfile'
+    if not dockerfile.is_file():
+        return []
+    missing: list[str] = []
+    try:
+        lines = dockerfile.read_text(encoding='utf-8', errors='replace').splitlines()
+    except Exception:  # noqa: BLE001
+        return []
+
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        parts = line.split()
+        if len(parts) < 2 or parts[0].upper() != 'COPY':
+            continue
+        tokens = parts[1:]
+        if any(t.startswith('--from=') for t in tokens):
+            continue  # 从构建阶段拷贝，不是仓库文件
+        # 去掉 --chown= 之类的选项
+        srcs = [t for t in tokens[:-1] if not t.startswith('--')]
+        for src in srcs:
+            if any(ch in src for ch in '*?['):
+                continue  # 通配符交给 docker 自己解析
+            if src.startswith(('http://', 'https://')):
+                continue
+            if not (UPSTREAM_DIR / src).exists():
+                missing.append(src)
+    return missing
+
+
+def _diagnose_build_failure(out: str) -> str:
+    """把 docker 构建失败的长日志归纳成一句人话。"""
+    low = (out or '').lower()
+    if 'not found' in low and ('checksum' in low or 'copy' in low):
+        return ('上游 Dockerfile 引用了仓库里不存在的文件——这是上游代码的问题，'
+                '不是你配置的问题。可把它固定到上一个可用提交后重试')
+    if 'no space left' in low:
+        return '磁盘空间不足，请清理后重试'
+    if any(k in low for k in ('dial tcp', 'i/o timeout', 'temporary failure', 'connection refused')):
+        return '网络问题（拉取基础镜像或依赖失败），稍后重试'
+    if 'permission denied' in low:
+        return '权限不足，请确认以 root 或具备 docker 权限的用户执行'
+    return ''
+
+
+def _health_ok(url: str, timeout: int = 3) -> bool:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return resp.status == 200
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _report_service_state(rep: Reporter) -> None:
+    """构建失败后说明当前服务是否还活着。
+
+    构建失败时 compose 不会动已在运行的容器，因此旧版本通常仍在提供服务；
+    明确告诉用户这一点，避免误以为「更新失败=服务挂了」而做多余操作。
+    """
+    if _health_ok(f'http://127.0.0.1:{UPSTREAM_PORT}/healthz'):
+        rep.log('注意：本次重建失败，但检测到上游仍在响应——旧容器未被影响，服务正常', 'warn')
+    else:
+        rep.log('警告：上游健康检查未通过，请检查容器状态（docker ps / docker logs）', 'error')
 
 
 def _has_compose_v2() -> bool:
