@@ -9,6 +9,19 @@
 
 ## [未发布]
 
+### 安全
+- **升级 Next.js 15.3.8 → 15.5.25**（响应 Issue #2）：15.3.8 落在多个 Next.js
+  公告的影响范围内（含 2 个 critical）。npm audit 已从 3 条降至 **0 条**
+  - 说明：本项目生产环境是 `output: 'export'` 静态导出，由 FastAPI 托管静态文件，
+    **运行时并没有 Next.js 服务端**（无 middleware / route handler / server actions，
+    `images.unoptimized: true`），因此那些 SSRF / RCE / DoS 公告在生产上并不适用。
+    但公开仓库应当保持依赖干净，且升级成本极低，故一并处理
+  - `eslint-config-next` 同步升到 15.5.25
+  - 加 `overrides.postcss = 8.5.28`：Next 内置的 postcss 8.4.31 落在公告范围内，
+    顶到已修复版本后 audit 归零；已实测构建产物与全部路由正常
+  - 未升级到 Next 16：那是破坏性大版本，收益不符合风险
+
+
 ### 新增
 - **实际扣费（实付）可视化**：上游 2026-09-13 起在响应末帧的 `usage.credit`
   里返回**本次真实扣费**，管理端现将它与 Token 一起留痕
