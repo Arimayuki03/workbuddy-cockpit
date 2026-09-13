@@ -255,16 +255,49 @@ export function UpdatePanel() {
                   </div>
                 )}
                 {check.upstream.has_update && (
-                  <div className="space-y-0.5 text-[11px] text-muted-foreground">
+                  <div className="space-y-1 text-[11px] text-muted-foreground">
                     <div>
                       上游：{check.upstream.current || '未知'} →{' '}
                       <span className="font-medium text-foreground">{check.upstream.latest}</span>
+                      {!!check.upstream.ahead && (
+                        <span className="ml-1">（落后 {check.upstream.ahead} 个提交）</span>
+                      )}
                     </div>
-                    {check.upstream.subject && (
-                      <div className="break-all">
-                        最新提交：{check.upstream.subject}
-                        {check.upstream.date && `（${check.upstream.date.slice(0, 10)}）`}
-                      </div>
+                    {/* 变更列表：上游常一次累积多个提交，列出各自说明才能判断
+                        「这批更新做了什么、值不值得跟」 */}
+                    {check.upstream.changes?.length ? (
+                      <details className="group">
+                        <summary className="cursor-pointer list-none">
+                          <span className="text-foreground/80 group-open:hidden">
+                            查看这 {check.upstream.ahead || check.upstream.changes.length} 个提交改了什么
+                          </span>
+                          <span className="hidden text-foreground/80 group-open:inline">
+                            收起变更说明
+                          </span>
+                        </summary>
+                        <ul className="mt-1 max-h-[220px] space-y-0.5 overflow-auto rounded-xl bg-background/60 p-2">
+                          {check.upstream.changes.map((c) => (
+                            <li key={c.sha} className="flex gap-2">
+                              <span className="shrink-0 font-mono text-[10px] text-muted-foreground/70">
+                                {c.sha}
+                              </span>
+                              <span className="min-w-0 flex-1 break-all">{c.subject}</span>
+                            </li>
+                          ))}
+                          {check.upstream.truncated && (
+                            <li className="pt-0.5 text-[10px] text-muted-foreground/70">
+                              仅显示最近 {check.upstream.changes.length} 条，完整列表见仓库比较页
+                            </li>
+                          )}
+                        </ul>
+                      </details>
+                    ) : (
+                      check.upstream.subject && (
+                        <div className="break-all">
+                          最新提交：{check.upstream.subject}
+                          {check.upstream.date && `（${check.upstream.date.slice(0, 10)}）`}
+                        </div>
+                      )
                     )}
                   </div>
                 )}

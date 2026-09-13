@@ -291,11 +291,26 @@ export interface ManagerVersion extends VersionSide {
   repo: string;
 }
 
+/** 上游两个版本之间的单条提交 */
+export interface UpstreamChange {
+  sha: string;
+  subject: string;
+  date: string;
+}
+
 export interface UpstreamVersion extends VersionSide {
   /** 最新提交时间 */
   date: string;
   /** 最新提交说明 */
   subject: string;
+  /** 本地落后远端多少个提交（0 = 未知或不落后） */
+  ahead?: number;
+  /** 两版本之间的提交总数 */
+  total?: number;
+  /** 变更说明列表（最新在前，最多 20 条） */
+  changes?: UpstreamChange[];
+  /** 提交数超过展示上限，列表被截断 */
+  truncated?: boolean;
   repo: string;
 }
 

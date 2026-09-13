@@ -334,16 +334,69 @@ def _upstream_api_slug() -> str:
     return slug
 
 
-def _local_upstream_head() -> str:
-    """本地上游仓库当前的 commit（短 sha）。"""
+def _local_upstream_head(full: bool = False) -> str:
+    """本地上游仓库当前的 commit。
+
+    full=True 返回完整 sha（GitHub compare API 用完整 sha 更稳，短 sha 偶发 404）。
+    """
     try:
         proc = subprocess.run(['git', 'rev-parse', 'HEAD'],
                               cwd=str(_upstream_dir()), capture_output=True, text=True, timeout=10)
         if proc.returncode == 0:
-            return proc.stdout.strip()[:8]
+            sha = proc.stdout.strip()
+            return sha if full else sha[:8]
     except Exception:  # noqa: BLE001
         pass
     return ''
+
+
+# 变更列表最多带回多少条提交说明（界面上展示最近若干条即可）
+_CHANGES_LIMIT = 20
+
+
+def _fetch_upstream_changes(slug: str, base_sha: str, head_sha: str) -> dict:
+    """用 compare API 取两者之间的提交数与说明。
+
+    为什么不是只显示「最新一条提交」：上游常一次累积多个提交，
+    只显示最新一条会让人以为「就改了这一处」，看不出这批更新到底做了什么
+    （功能还是修复、值不值得跟）。
+
+    失败一律返回空结构——版本提示是辅助信息，不能因为拿不到就报错。
+    """
+    out: dict = {'ahead': 0, 'total': 0, 'changes': [], 'truncated': False}
+    if not base_sha or not head_sha or base_sha == head_sha:
+        return out
+    try:
+        data = _gh_get(
+            f'https://api.github.com/repos/{slug}/compare/{base_sha}...{head_sha}'
+        )
+    except Exception:  # noqa: BLE001
+        # 本地提交不在远端（如上游 force-push）时会 404，静默降级
+        return out
+    if not isinstance(data, dict):
+        return out
+
+    out['ahead'] = int(data.get('ahead_by') or 0)
+    commits = data.get('commits') or []
+    if not isinstance(commits, list):
+        commits = []
+    out['total'] = int(data.get('total_commits') or len(commits))
+
+    items: list[dict] = []
+    for c in commits:
+        if not isinstance(c, dict):
+            continue
+        commit = c.get('commit') or {}
+        items.append({
+            'sha': str(c.get('sha') or '')[:8],
+            'subject': str(commit.get('message') or '').split('\n')[0][:120],
+            'date': str((commit.get('committer') or {}).get('date') or ''),
+        })
+    # compare 返回的是时间正序（旧→新）；界面想先看最新的，故倒序
+    items.reverse()
+    out['changes'] = items[:_CHANGES_LIMIT]
+    out['truncated'] = len(items) > _CHANGES_LIMIT
+    return out
 
 
 def _parse_version(v: str) -> tuple[int, ...] | None:
@@ -420,9 +473,14 @@ def _fetch_remote_versions() -> dict:
         commits = _gh_get(f'https://api.github.com/repos/{slug}/commits?sha={branch}&per_page=1')
         if isinstance(commits, list) and commits:
             c = commits[0]
-            result['upstream']['latest'] = str(c.get('sha') or '')[:8]
+            head_sha = str(c.get('sha') or '')
+            result['upstream']['latest'] = head_sha[:8]
             result['upstream']['date'] = str(((c.get('commit') or {}).get('committer') or {}).get('date') or '')
             result['upstream']['subject'] = str(((c.get('commit') or {}).get('message') or '').split('\n')[0])[:120]
+            # 本地已部署的版本与远端不同时，进一步取「领先多少个提交 + 各自说明」
+            local_full = _local_upstream_head(full=True)
+            if local_full and not head_sha.startswith(local_full) and not local_full.startswith(head_sha):
+                result['upstream'].update(_fetch_upstream_changes(slug, local_full, head_sha))
     except urllib.error.HTTPError as exc:
         result['upstream']['error'] = f'HTTP {exc.code}'
     except Exception as exc:  # noqa: BLE001
@@ -474,6 +532,12 @@ def check_updates(force: bool = False) -> dict:
             'has_update': upstream_has,
             'date': str(cache.get('upstream', {}).get('date') or ''),
             'subject': str(cache.get('upstream', {}).get('subject') or ''),
+            # 领先多少个提交 + 各自说明：上游常一次累积多个提交，
+            # 只显示最新一条会让人以为「就改了这一处」
+            'ahead': int(cache.get('upstream', {}).get('ahead') or 0),
+            'total': int(cache.get('upstream', {}).get('total') or 0),
+            'changes': cache.get('upstream', {}).get('changes') or [],
+            'truncated': bool(cache.get('upstream', {}).get('truncated')),
             'error': str(cache.get('upstream', {}).get('error') or ''),
             'repo': _upstream_api_slug(),
         },
