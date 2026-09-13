@@ -32,27 +32,73 @@ def _bearer(request: Request) -> str:
     return request.headers.get('x-api-key', '').strip()
 
 
-# 请求体上限，与上游 workbuddy2api 的 8 MiB 限制对齐。
-# 不设上限时，超大请求体会被完整读入内存，少量并发即可耗尽内存。
-MAX_BODY_BYTES = 8 * 1024 * 1024
+# 请求体上限跟随上游的 server.max_body_mb（默认 8 MiB）。
+#
+# 不能写死：上游该值**可配置**（管理端设置页也能改），写死会让本端变成隐性瓶颈——
+# 用户把上游上限调大后，请求仍会在本端先被 413 拦掉，且看不出是谁拦的。
+# 每次读配置有 IO 成本，故做 10 秒缓存：改动很快生效，又不必每请求读文件。
+_BODY_LIMIT_TTL = 10
+_body_limit_cache: dict[str, float | int] = {'at': 0.0, 'bytes': 0}
+DEFAULT_MAX_BODY_MB = 8
 
 
-def _body_too_large(request: Request) -> bool:
+def max_body_bytes() -> int:
+    """当前生效的请求体上限（字节）。读取上游 config.json 的 server.max_body_mb。"""
+    now = time.time()
+    cached = int(_body_limit_cache['bytes'])
+    if cached and now - float(_body_limit_cache['at']) < _BODY_LIMIT_TTL:
+        return cached
+    limit = DEFAULT_MAX_BODY_MB * 1024 * 1024
     try:
-        return int(request.headers.get('content-length') or 0) > MAX_BODY_BYTES
-    except ValueError:
-        return False
+        cfg = json.loads(config.UPSTREAM_CONFIG.read_text(encoding='utf-8'))
+        mb = int((cfg.get('server') or {}).get('max_body_mb') or 0)
+        if mb > 0:
+            limit = mb * 1024 * 1024
+    except Exception:  # noqa: BLE001
+        # 配置读不到就沿用默认值：网关不能因为读不到配置而拒绝服务
+        pass
+    _body_limit_cache['at'] = now
+    _body_limit_cache['bytes'] = limit
+    return limit
+
+
+def _payload_too_large(limit: int) -> JSONResponse:
+    mb = limit // 1024 // 1024
+    return _oai_error(
+        f'请求体超过 {mb} MB 上限：请压缩内容（精简上下文或附件），'
+        f'或在管理端「设置 → 上游配置 → 请求上限」调大 server.max_body_mb 后重试',
+        413, 'invalid_request_error', 'payload_too_large',
+    )
 
 
 async def _read_json_body(request: Request) -> tuple[dict | None, JSONResponse | None]:
-    """读取并解析网关请求体，带大小与格式校验。"""
-    if _body_too_large(request):
-        return None, _oai_error(
-            f'请求体过大（上限 {MAX_BODY_BYTES // 1024 // 1024} MiB）',
-            413, 'invalid_request_error', 'payload_too_large',
-        )
+    """读取并解析网关请求体，带大小与格式校验。
+
+    大小校验必须落在**实际读取**上，不能只看 Content-Length：
+    分块传输（chunked）时该头缺失，伪造该头也可以偏小，
+    只看头会让超大请求被整段读进内存（少量并发即可耗尽内存）。
+    """
+    limit = max_body_bytes()
     try:
-        body = await request.json()
+        declared = int(request.headers.get('content-length') or 0)
+    except ValueError:
+        declared = 0
+    if declared > limit:
+        return None, _payload_too_large(limit)
+
+    chunks: list[bytes] = []
+    size = 0
+    try:
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > limit:
+                return None, _payload_too_large(limit)
+            chunks.append(chunk)
+    except Exception:  # noqa: BLE001
+        return None, _oai_error('读取请求体失败', 400)
+
+    try:
+        body = json.loads(b''.join(chunks))
     except Exception:  # noqa: BLE001
         return None, _oai_error('请求体不是合法 JSON', 400)
     if not isinstance(body, dict):

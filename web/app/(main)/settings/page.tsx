@@ -362,7 +362,7 @@ const SERVER_FIELDS: Field[] = [
     key: 'max_body_mb',
     kind: 'num',
     label: '请求体上限',
-    desc: '单个请求体最大体积，超过返回 413；调大可容纳更长的上下文',
+    desc: '单个请求体最大体积，超过返回 413。反代网关也按此值限制入站请求，调大可容纳更长的上下文',
     unit: 'MB',
     min: 1,
     max: 256,
