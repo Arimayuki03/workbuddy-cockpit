@@ -298,6 +298,97 @@ class TokenTTL(unittest.TestCase):
         # exp <= iat
         self.assertIsNone(wb2api.token_ttl_seconds(f'{seg({})}.{seg({"iat": 100, "exp": 50})}.s'))
 
+    def test_issued_at_reads_iat(self) -> None:
+        """签发时间（≈ 最近一次刷新）用于区分「刚续期」与「从没刷新过」。
+
+        背景：界面的「有效期」是剩余时间，刷新会重新拉满，所以单看天数分不清
+        「刚被保活续期」和「一直用着当初扫码的长令牌」——后者才是隐患账号。
+        """
+        iat = 1_700_000_000
+        self.assertEqual(wb2api.token_issued_at(self._jwt(iat, iat + 7 * 86400)), iat)
+
+    def test_issued_at_garbage_returns_none(self) -> None:
+        for bad in ('', 'not-a-jwt', 'a.b.c', 'two.parts'):
+            self.assertIsNone(wb2api.token_issued_at(bad), bad)
+
+    def test_issued_at_matches_ttl_source(self) -> None:
+        """两者必须来自同一个令牌，避免显示与进度条基准不一致。"""
+        iat, exp = 1_700_000_000, 1_700_000_000 + 60 * 86400
+        tok = self._jwt(iat, exp)
+        self.assertEqual(wb2api.token_issued_at(tok), iat)
+        self.assertEqual(wb2api.token_ttl_seconds(tok), exp - iat)
+
+
+class ExpiryFallback(unittest.TestCase):
+    """JWT 解不出时的兜底：用 auth 文件 mtime 推算窗口，而不是假定 60 天。
+
+    原来的兜底是「解不出就当 60 天」，问题在于：一个 7 天的令牌按 60 天算，
+    进度条只显示 12%，看着像快过期——属于误报。而 JWT 解不出并非罕见：
+    扁平形手写 auth 文件的 accessToken 常常不是标准 JWT。
+
+    用 mtime 是有依据的：上游刷新 token 后会**原子写回**该文件，安装器写盘
+    也走同一路径，因此 mtime ≈ 最近一次写入/刷新时刻，exp - mtime 即本次
+    有效期的近似值。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = config.AUTH_DIR
+        config.AUTH_DIR = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        config.AUTH_DIR = self._orig
+        self._tmp.cleanup()
+
+    def _write(self, name: str, uid: str, expires_at: int, token: str,
+               mtime: int) -> Path:
+        p = Path(self._tmp.name) / name
+        p.write_text(json.dumps({
+            'account': {'uid': uid, 'nickname': uid},
+            'auth': {'accessToken': token, 'expiresAt': expires_at},
+        }), encoding='utf-8')
+        os.utime(p, (mtime, mtime))
+        return p
+
+    def _acct(self, uid: str) -> dict:
+        return next(a for a in wb2api.list_auth_accounts() if a['uid'] == uid)
+
+    @staticmethod
+    def _jwt(iat: int, exp: int) -> str:
+        import base64
+        def seg(obj):
+            raw = json.dumps(obj).encode()
+            return base64.urlsafe_b64encode(raw).decode().rstrip('=')
+        return f'{seg({"alg": "RS256"})}.{seg({"iat": iat, "exp": exp})}.sig'
+
+    def test_mtime_fallback_uses_file_window_not_60_days(self) -> None:
+        import time
+        now = int(time.time())
+        # 非 JWT + 7 天有效期 + 刚写入
+        self._write('workbuddy-1.json', '1', now + 7 * 86400, 'not-a-jwt', now)
+        a = self._acct('1')
+        self.assertEqual(a['ttl_seconds'], 7 * 86400)
+        self.assertEqual(a['issued_at'], now)
+
+    def test_jwt_takes_priority_over_mtime(self) -> None:
+        import time
+        now = int(time.time())
+        # JWT 说 7 天窗口、3 天前签发；mtime 设成现在也不能覆盖 JWT
+        token = self._jwt(now - 3 * 86400, now + 4 * 86400)
+        self._write('workbuddy-2.json', '2', now + 4 * 86400, token, now)
+        a = self._acct('2')
+        self.assertEqual(a['ttl_seconds'], 7 * 86400)
+        self.assertEqual(a['issued_at'], now - 3 * 86400)
+
+    def test_no_usable_signal_stays_none(self) -> None:
+        """mtime 晚于 expiresAt（异常数据）时不能算出负数窗口。"""
+        import time
+        now = int(time.time())
+        self._write('workbuddy-3.json', '3', now - 100, 'not-a-jwt', now)
+        a = self._acct('3')
+        self.assertIsNone(a['ttl_seconds'])
+        self.assertIsNone(a['issued_at'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -24,15 +24,10 @@ def read_account_file(filename: str) -> dict:
     return json.loads(_safe_file(filename).read_text(encoding='utf-8'))
 
 
-def token_ttl_seconds(access_token: str) -> int | None:
-    """从 accessToken（JWT）里读出它的总有效期（exp - iat），单位秒。
+def _jwt_times(access_token: str) -> tuple[int, int] | None:
+    """从 accessToken（JWT）里读出 (iat, exp)。解不出返回 None。
 
-    用途：界面上的「有效期进度条」需要一个「满格 = 多久」的基准。
-    auth 文件里只有 expiresAt，没有签发起始时间，光看文件算不出比例；
-    而 JWT 载荷里同时有 iat 与 exp，且只是本地解码、不发网络请求。
-
-    纯展示用途：解不出来就返回 None，调用方回退到一个保守的默认窗口，
-    绝不影响任何鉴权判断。
+    纯本地 base64 解码，不发网络请求；仅用于展示，绝不参与鉴权判断。
     """
     try:
         parts = (access_token or '').split('.')
@@ -44,10 +39,40 @@ def token_ttl_seconds(access_token: str) -> int | None:
         iat = int(data.get('iat') or 0)
         exp = int(data.get('exp') or 0)
         if iat > 0 and exp > iat:
-            return exp - iat
+            return iat, exp
     except Exception:  # noqa: BLE001
         return None
     return None
+
+
+def token_ttl_seconds(access_token: str) -> int | None:
+    """该令牌签发的总时长（exp - iat），单位秒。
+
+    用途：界面上的「有效期进度条」需要一个「满格 = 多久」的基准。
+    auth 文件里只有 expiresAt，没有签发起始时间，光看文件算不出比例；
+    而 JWT 载荷里同时有 iat 与 exp，且只是本地解码、不发网络请求。
+
+    为什么不另存一份 expiresIn：JWT 的 exp - iat 就是该令牌自身的真实寿命，
+    且随令牌一起走——刷新换发新令牌时它自动更新，也不会被上游写回时丢掉。
+    另存字段反而可能与令牌不一致或过期。
+
+    纯展示用途：解不出来就返回 None，调用方回退到保守的默认窗口，
+    绝不影响任何鉴权判断。
+    """
+    times = _jwt_times(access_token)
+    return times[1] - times[0] if times else None
+
+
+def token_issued_at(access_token: str) -> int | None:
+    """令牌签发时间（JWT iat，Unix 秒）。解不出返回 None。
+
+    为什么有用：界面显示的「有效期」是**剩余时间**，刷新会把它重新拉满，
+    因此单看剩余天数分不清一个账号是「刚被保活续期」还是「从没刷新过、
+    一直用着当初扫码签发的长令牌」。后者才是保活没覆盖到、到期会掉线的
+    隐患账号。刷新会换发新令牌，故 iat 近似等于「最近一次刷新时间」。
+    """
+    times = _jwt_times(access_token)
+    return times[0] if times else None
 
 
 def list_auth_accounts() -> list[dict]:
@@ -64,6 +89,24 @@ def list_auth_accounts() -> list[dict]:
         acct = raw.get('account', {}) or {}
         auth = raw.get('auth', {}) or {}
         exp = int(auth.get('expiresAt', 0) or 0)
+        token = str(auth.get('accessToken') or '')
+
+        # 总时长：优先用 JWT 自身的 iat→exp（最权威）；JWT 解不出时退回用
+        # 文件修改时间推算。上游刷新 token 后会原子写回该文件，因此 mtime
+        # 近似等于「最近一次写入/刷新」时刻，于是 exp - mtime ≈ 本次有效期。
+        # 这比原来那种「解不出就假定 60 天」的猜测更贴近真实：一个 7 天的
+        # 令牌若按 60 天算，进度条只会显示 12%，看着像快过期，属于误报。
+        ttl = token_ttl_seconds(token)
+        issued = token_issued_at(token)
+        try:
+            mtime = int(path.stat().st_mtime)
+        except OSError:
+            mtime = 0
+        if ttl is None and exp > mtime > 0:
+            ttl = exp - mtime
+        if issued is None and 0 < mtime < exp:
+            issued = mtime
+
         out.append(
             {
                 'file': path.name,
@@ -74,7 +117,9 @@ def list_auth_accounts() -> list[dict]:
                 'is_expired': now >= exp,
                 'remain_seconds': max(0, int(exp - now)),
                 # 该令牌签发的总时长（供进度条按真实比例展示），解不出为 None
-                'ttl_seconds': token_ttl_seconds(str(auth.get('accessToken') or '')),
+                'ttl_seconds': ttl,
+                # 令牌签发时间 ≈ 最近一次刷新时间（刷新会换发新令牌），解不出为 None
+                'issued_at': issued,
                 'source': 'file',
             }
         )

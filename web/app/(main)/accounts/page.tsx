@@ -18,7 +18,7 @@ import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {accountApi, upstreamApi, errText} from '@/lib/api';
 import type {Account, CreditsMeta, UpstreamStatus} from '@/lib/types';
-import {expiryBarPercent, expiryVisual, fmtNumber, fmtRemain} from '@/lib/format';
+import {expiryBarPercent, expiryVisual, fmtAgo, fmtDateTime, fmtNumber, fmtRemain} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
@@ -266,6 +266,10 @@ export default function AccountsPage() {
   function renderExpiry(a: Account) {
     const pct = expiryBarPercent(a.remain_seconds, a.ttl_seconds);
     const vis = expiryVisual(a.remain_seconds);
+    // 「有效期」是剩余时间，刷新会把它重新拉满，所以单看天数分不清
+    // 「刚被保活续期」和「从没刷新过、还用着当初扫码的长令牌」。
+    // 补一行签发时间（≈ 最近一次刷新）才能区分——后者是保活没覆盖到的隐患账号。
+    const issued = a.issued_at ?? null;
     return (
       <div className="w-[150px]">
         <div className={`mb-1 text-[11px] font-medium tabular-nums ${vis.textClass}`}>
@@ -274,6 +278,14 @@ export default function AccountsPage() {
         <div className="h-1.5 overflow-hidden rounded-full bg-border">
           <div className="h-full rounded-full transition-all" style={{width: `${pct}%`, background: vis.barColor}} />
         </div>
+        {issued != null && (
+          <div
+            className="mt-1 text-[10px] text-muted-foreground/70"
+            title={`令牌签发于 ${fmtDateTime(issued)}（刷新会换发新令牌）`}
+          >
+            最后续期 {fmtAgo(issued)}
+          </div>
+        )}
       </div>
     );
   }
