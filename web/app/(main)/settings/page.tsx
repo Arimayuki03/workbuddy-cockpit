@@ -17,6 +17,7 @@ import {
   PlugZap,
   Loader2,
   DownloadCloud,
+  FileText,
 } from 'lucide-react';
 import {notify} from '@/lib/toast';
 import {settingsApi, upstreamApi, errText} from '@/lib/api';
@@ -26,6 +27,7 @@ import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {useAuth} from '@/lib/auth-context';
 import {UpdatePanel} from '@/components/common/settings/UpdatePanel';
+import {ChangelogPanel} from '@/components/common/settings/ChangelogPanel';
 import {CopyButton} from '@/components/ui/copy-button';
 import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
@@ -848,13 +850,14 @@ export default function SettingsPage() {
       />
 
       <Tabs defaultValue="upstream">
-        {/* 五个标签在手机上会撑破容器，这里允许横向滚动 */}
+        {/* 标签较多，手机上会撑破容器，这里允许横向滚动 */}
         <div className="-mx-1 overflow-x-auto px-1 pb-1">
         <TabsList className="w-max">
           <TabsTrigger value="upstream"><Server className="mr-1.5 h-3.5 w-3.5" />上游配置</TabsTrigger>
           <TabsTrigger value="models"><Shuffle className="mr-1.5 h-3.5 w-3.5" />模型映射</TabsTrigger>
           <TabsTrigger value="users"><Users className="mr-1.5 h-3.5 w-3.5" />管理用户</TabsTrigger>
           <TabsTrigger value="system"><DownloadCloud className="mr-1.5 h-3.5 w-3.5" />系统更新</TabsTrigger>
+          <TabsTrigger value="changelog"><FileText className="mr-1.5 h-3.5 w-3.5" />更新日志</TabsTrigger>
           <TabsTrigger value="about"><Info className="mr-1.5 h-3.5 w-3.5" />关于</TabsTrigger>
         </TabsList>
         </div>
@@ -1595,6 +1598,11 @@ export default function SettingsPage() {
         {/* ═══ 系统更新 ═══ */}
         <TabsContent value="system" className="mt-4 space-y-4">
           <UpdatePanel />
+        </TabsContent>
+
+        {/* ═══ 更新日志 ═══ */}
+        <TabsContent value="changelog" className="mt-4">
+          <ChangelogPanel />
         </TabsContent>
 
         {/* ═══ 关于 ═══ */}

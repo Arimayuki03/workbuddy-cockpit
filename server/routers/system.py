@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .. import security
-from ..services import updater, wb2api
+from ..services import changelog, updater, wb2api
 
 router = APIRouter(prefix='/api/system', tags=['system'])
 
@@ -83,3 +83,14 @@ async def versions(user: dict = Depends(security.current_user)) -> dict:
         'upstream_accounts': upstream_total,
         'upstream_dir': str(updater._upstream_dir()),
     }
+
+
+@router.get('/changelog')
+def get_changelog(user: dict = Depends(security.current_user)) -> dict:
+    """更新日志（解析仓库根目录的 CHANGELOG.md）。
+
+    离线环境同样可用：文件随发布包一起分发，无需访问 GitHub。
+    """
+    data = changelog.load_changelog()
+    data['current'] = updater.current_version()
+    return data
