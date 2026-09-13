@@ -26,6 +26,7 @@ import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {useAuth} from '@/lib/auth-context';
 import {UpdatePanel} from '@/components/common/settings/UpdatePanel';
+import {CopyButton} from '@/components/ui/copy-button';
 import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
 import {Input} from '@/components/ui/input';
@@ -847,14 +848,17 @@ export default function SettingsPage() {
                 ] as [string, string][]).map(([k, v]) => (
                   <div key={k} className="flex items-center justify-between gap-3">
                     <span className="shrink-0 text-muted-foreground">{k}</span>
-                    <span className="truncate font-mono" title={v}>{v}</span>
+                    <span className="min-w-0 flex-1 truncate text-right font-mono" title={v}>{v}</span>
+                    {k === '账号目录' && v !== '—' && (
+                      <CopyButton value={v} title="复制账号目录" className="h-6 w-6" />
+                    )}
                   </div>
                 ))}
                 {cfg?.upstream_auth_dir && (
                   <div className="flex items-start justify-between gap-3">
                     <span className="shrink-0 text-muted-foreground">上游声明目录</span>
                     <span
-                      className="truncate text-right font-mono text-amber-600 dark:text-amber-400"
+                      className="min-w-0 flex-1 truncate text-right font-mono text-amber-600 dark:text-amber-400"
                       title={cfg.upstream_auth_dir}
                     >
                       {cfg.upstream_auth_dir}
