@@ -21,7 +21,6 @@
     顶到已修复版本后 audit 归零；已实测构建产物与全部路由正常
   - 未升级到 Next 16：那是破坏性大版本，收益不符合风险
 
-
 ### 新增
 - **实际扣费（实付）可视化**：上游 2026-09-13 起在响应末帧的 `usage.credit`
   里返回**本次真实扣费**，管理端现将它与 Token 一起留痕
@@ -34,18 +33,6 @@
   而 SQLite 的 `CREATE TABLE IF NOT EXISTS` **不会给老表补列**。
   新增 `_migrate()`（`PRAGMA table_info` 检测后 `ALTER TABLE`），
   可重复执行、保留旧数据。升级不再需要手工动库
-
-### 计划中
-- **海外版（CodeBuddy 国际版）支持**：受上游限制，暂不可用。上游
-  `workbuddy2api` 的出站地址硬编码国内域名（`copilot.tencent.com` /
-  `www.codebuddy.cn`），且 `chatBase()` / `billingBase()` 不看账号的
-  `domain` 字段（该字段只作为 `X-Domain` 请求头发送，是企业标识而非区域标识）。
-  需上游先做成按账号/按域选择 base URL，本端再把自实现的登录/签到/余额地址
-  改为可配置。见 [Issue #1](https://github.com/ithtelab/workbuddy-manager/issues/1)
-
-### 说明
-- 扣费字段来自上游，若上游版本较旧（未返回 `usage.credit`），界面统一显示 `—`，
-  属于「无数据显示」而非异常
 
 ### 修复
 - **任务记录页会随记录数无限变长**：两块列表一次把取回的数据全部渲染，
@@ -69,6 +56,18 @@
   切换类型或时间范围会自动回到第 1 页；概览数字也按同一范围统计，避免对不上
 
 ---
+
+### 说明
+- 扣费字段来自上游，若上游版本较旧（未返回 `usage.credit`），界面统一显示 `—`，
+  属于「无数据显示」而非异常
+
+### 计划中
+- **海外版（CodeBuddy 国际版）支持**：受上游限制，暂不可用。上游
+  `workbuddy2api` 的出站地址硬编码国内域名（`copilot.tencent.com` /
+  `www.codebuddy.cn`），且 `chatBase()` / `billingBase()` 不看账号的
+  `domain` 字段（该字段只作为 `X-Domain` 请求头发送，是企业标识而非区域标识）。
+  需上游先做成按账号/按域选择 base URL，本端再把自实现的登录/签到/余额地址
+  改为可配置。见 [Issue #1](https://github.com/ithtelab/workbuddy-manager/issues/1)
 
 ## [1.0.11] - 2026-09-13
 
