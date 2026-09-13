@@ -27,12 +27,53 @@ from . import wb2api
 
 # docker --timestamps 前缀
 _DOCKER_TS = re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)\s+(.*)$', re.S)
-# 任务行主体：[WARN:|ERR:] <kind> <uid>: <rest>
-# 上游 2026-09-12 起：uid 统一截前 8 位，可疑/失败行加 WARN:/ERR: 前缀
+
+_KINDS = 'travel|activity|checkin|keepalive|user-resource'
+
+# 账号 uid 的形态：字母数字（允许 - _），长度 >= 6。
+_UID_SHAPE = re.compile(r'^[0-9A-Za-z_-]{6,64}$')
+
+# 但上游除任务行外还会打「阶段行」与「汇总行」，形如
+#   `checkin done: total=3 ok=1 ...`
+#   `scheduled checkin skipped: ...`
+# 它们同样是 `<kind> <单词>:` 的形态，会把 done / skipped 当成账号 uid，
+# 在界面上凭空多出几个不存在的账号。因此用一个**保留字排除表**。
+#
+# 为什么不改成「uid 必须含数字」：uuid 的前 8 位是十六进制，
+# 存在全是 a-f 的可能（约 0.05%/账号），那样整段日志会被静默丢掉——
+# 用一个精确的排除表比赌 uid 的形状更安全。
+_RESERVED_TOKENS = {
+    'done', 'skipped', 'skip', 'refresh', 'save', 'total', 'ok', 'fail',
+    'already', 'scheduled', 'start', 'end', 'begin', 'result', 'error',
+}
+
+# 主形态：[WARN:|ERR:] <kind> <uid>: <rest>
+# 上游 2026-09-12 起：uid 截前 8 位，可疑/失败行加 WARN:/ERR: 前缀
 _TASK_LINE = re.compile(
-    r'(?:(WARN|ERR):\s+)?\b(travel|activity|checkin|keepalive|user-resource)\s+'
-    r'([0-9A-Za-z_.-]+):\s*(.*)$'
+    r'(?:(WARN|ERR):\s+)?\b(' + _KINDS + r')\s+([0-9A-Za-z_-]+):\s*(.*)$'
 )
+
+# 阶段形态：[WARN:|ERR:] <kind> <uid> <stage>: <rest>
+# 例：`checkin 9b212d8c refresh: <err>`、`checkin 9b212d8c save: <err>`
+# 注意 uid 与阶段名之间是空格而非冒号，主形态匹配不到，需单独认。
+_STAGE_LINE = re.compile(
+    r'(?:(WARN|ERR):\s+)?\b(' + _KINDS + r')\s+([0-9A-Za-z_-]+)\s+'
+    r'([a-z][a-z0-9_-]{1,20}):\s*(.*)$'
+)
+
+# 汇总形态：[WARN:|ERR:] <kind> done: <k=v ...>
+_SUMMARY_LINE = re.compile(
+    r'(?:(WARN|ERR):\s+)?\b(' + _KINDS + r')\s+done:\s*(.*)$'
+)
+
+# 跳过形态：`scheduled checkin skipped: <err>`
+_SCHED_SKIP_LINE = re.compile(
+    r'(?:(WARN|ERR):\s+)?scheduled\s+(' + _KINDS + r')\s+skipped:\s*(.*)$'
+)
+
+# 幂等成功标志：腾讯把「今天已签到」当业务错误返回，但语义上是成功。
+# 与上游 IsAlreadyCheckin 的判定保持一致（已签到 / already）。
+_ALREADY_MARKERS = ('已签到', 'already', '重复签到')
 
 # 中文类型名，前端与日志里共用一套说法
 KIND_LABELS = {
@@ -52,8 +93,94 @@ _SKIP_MARKERS = ('skip', 'skipped')
 _POLL_SECONDS = 45
 
 
+def _event(ts: int, kind: str, uid: str, level: str, credits: int, message: str) -> dict:
+    return {
+        'ts': ts,
+        'uid': uid,
+        'kind': kind,
+        'level': level,
+        'credits': credits,
+        'message': message,
+        # 同一条容器日志行的时间戳精确到纳秒，配合内容即可唯一标识，
+        # 因此反复采集不会重复入库
+        'dedup_key': hashlib.sha1(f'{ts}|{kind}|{uid}|{message}'.encode('utf-8')).hexdigest(),
+    }
+
+
+def _is_uid(token: str) -> bool:
+    tok = token or ''
+    if tok.lower() in _RESERVED_TOKENS:
+        return False
+    return bool(_UID_SHAPE.match(tok))
+
+
+def _classify(rest: str, sev: str | None) -> tuple[int, str]:
+    """从结果文案判断 (积分收益, 级别)。"""
+    credits = 0
+    lower = rest.lower()
+
+    m_reward = re.search(r'reward=(\d+)', rest)
+    m_adopt = re.search(r'adopt ok\s*\(\+?(\d+)\s*credits?\)', rest, re.IGNORECASE)
+    if m_reward:
+        return int(m_reward.group(1)), 'credit'
+    if m_adopt:
+        return int(m_adopt.group(1)), 'credit'
+
+    # 账号被禁用属于严重结果，即使上游只标了 WARN 也按失败展示
+    if '禁用' in rest or 'session dead' in lower:
+        return 0, 'error'
+
+    if sev == 'ERR':
+        return 0, 'error'
+    if sev == 'WARN':
+        return 0, 'warn'
+
+    # 「今天已签到」是幂等成功：腾讯以业务错误返回，但语义上没问题。
+    # 不特判就会在界面上显示成红色的签到失败。
+    if any(m in rest or m in lower for m in _ALREADY_MARKERS):
+        return 0, 'ok'
+
+    if re.match(r'report \d+/\d+:', lower):
+        return 0, 'error'          # 5 连发上报中途失败
+    if lower.startswith(_SKIP_MARKERS) or ('skip' in lower and 'ok' not in lower):
+        return 0, 'info'
+    if 'silent drop' in lower or 'failed' in lower or 'unknown state' in lower:
+        return 0, 'warn'
+    if ' ok' in lower or lower.startswith('ok') or 'days=' in lower:
+        return 0, 'ok'
+    if lower in ('refreshed',) or lower.startswith('refresh ok'):
+        return 0, 'ok'
+    # 其余形如 "<stage>: <error>" 保留为 error
+    return 0, 'error'
+
+
+def _parse_checkin_summary(ts: int, rest: str) -> dict:
+    """解析 `checkin done: total=3 ok=1 already=1 fail=1 skipped=0`。
+
+    这是上游新增的每轮汇总行，不属于任何账号；单独作为一条统计记录保留，
+    便于在界面上对账「这轮签到到底成了几个」。
+    """
+    kv = dict(re.findall(r'(\w+)=(\d+)', rest))
+    total = kv.get('total', '?')
+    ok = kv.get('ok', '0')
+    already = kv.get('already', '0')
+    fail = kv.get('fail', '0')
+    skipped = kv.get('skipped', '0')
+    msg = f'本轮签到完成：共 {total} 个，成功 {ok}，已签到 {already}，失败 {fail}，跳过 {skipped}'
+    level = 'warn' if fail not in ('0', '') else 'ok'
+    return _event(ts, 'checkin', '', level, 0, msg)
+
+
 def parse_line(line: str) -> dict | None:
-    """把一行容器日志解析成结构化事件；与任务无关的行返回 None。"""
+    """把一行容器日志解析成结构化事件；与任务无关的行返回 None。
+
+    上游日志有四种形态（2026-09-12 起）：
+      1. <kind> <uid>: <rest>              任务结果（成功也打，如「今日已签到」）
+      2. <kind> <uid> <stage>: <rest>      阶段失败（refresh / save）
+      3. <kind> done: total=.. ok=.. ...   每轮汇总
+      4. scheduled <kind> skipped: <rest>  计划阶段跳过
+    只按形态 1 匹配会把 done / skipped 误当账号，故分别处理。
+    """
     raw = (line or '').rstrip('\r\n')
     if not raw.strip():
         return None
@@ -66,51 +193,38 @@ def parse_line(line: str) -> dict | None:
     else:
         body = raw
 
+    # 形态 3：每轮汇总（先判，避免 `checkin done:` 被当成 uid=done）
+    m = _SUMMARY_LINE.search(body)
+    if m and m.group(2):
+        return _parse_checkin_summary(ts, m.group(3).strip())
+
+    # 形态 4：计划阶段跳过
+    m = _SCHED_SKIP_LINE.search(body)
+    if m and m.group(2):
+        reason = m.group(3).strip()
+        return _event(
+            ts, m.group(2), '', 'info', 0,
+            f'计划任务未执行：{reason}' if reason else '计划任务未执行',
+        )
+
+    # 形态 1：任务结果（uid 必须像 uid）
     m = _TASK_LINE.search(body)
-    if not m:
-        return None
+    if m and _is_uid(m.group(3)):
+        sev, kind, uid = m.group(1), m.group(2), m.group(3)
+        rest = m.group(4).strip()
+        credits, level = _classify(rest, sev)
+        return _event(ts, kind, uid, level, credits, rest)
 
-    sev, kind, uid, rest = m.group(1), m.group(2), m.group(3), m.group(4).strip()
-    lower = rest.lower()
+    # 形态 2：阶段失败（uid 后跟阶段名，如 `checkin <uid> refresh: ...`）
+    m = _STAGE_LINE.search(body)
+    if m and _is_uid(m.group(3)):
+        sev, kind, uid = m.group(1), m.group(2), m.group(3)
+        stage, rest = m.group(4), m.group(5).strip()
+        message = f'{stage}: {rest}'
+        credits, level = _classify(message, sev)
+        return _event(ts, kind, uid, level, credits, message)
 
-    credits = 0
-    level = 'error'
-
-    m_reward = re.search(r'reward=(\d+)', rest)
-    m_adopt = re.search(r'adopt ok\s*\(\+?(\d+)\s*credits?\)', rest, re.IGNORECASE)
-    if m_reward:
-        credits = int(m_reward.group(1))
-        level = 'credit'
-    elif m_adopt:
-        credits = int(m_adopt.group(1))
-        level = 'credit'
-    elif sev == 'ERR':
-        # 上游显式标了错误级别，直接采信
-        level = 'error'
-    elif sev == 'WARN':
-        level = 'warn'
-    elif re.match(r'report \d+/\d+:', lower):
-        # 5 连发上报中途失败：report 3/5: <err>
-        level = 'error'
-    elif lower.startswith(_SKIP_MARKERS) or ('skip' in lower and 'ok' not in lower):
-        level = 'info'
-    elif 'silent drop' in lower or 'failed' in lower or 'unknown state' in lower:
-        level = 'warn'
-    elif ' ok' in lower or lower.startswith('ok') or 'days=' in lower:
-        level = 'ok'
-    # 其余形如 "<stage>: <error>" 保留为 error
-
-    return {
-        'ts': ts,
-        'uid': uid,
-        'kind': kind,
-        'level': level,
-        'credits': credits,
-        'message': rest,
-        # 同一条容器日志行的时间戳精确到纳秒，配合内容即可唯一标识，
-        # 因此反复采集不会重复入库
-        'dedup_key': hashlib.sha1(f'{ts}|{kind}|{uid}|{rest}'.encode('utf-8')).hexdigest(),
-    }
+    return None
 
 
 def _iso_to_epoch(s: str) -> int:
@@ -168,6 +282,7 @@ _MESSAGE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r'streak days=(\d+)'), '连续登录 {0} 天'),
     (re.compile(r'keepalive ok expires=(\S+)'), '令牌保活成功（有效期 {0}）'),
     (re.compile(r'连续 (\d+) 次 12153 session dead — 禁用'), '连续 {0} 次会话失效，账号已禁用'),
+    (re.compile(r'^(\d+) session dead$'), '会话失效（错误码 {0}）'),
     (re.compile(r'连续 (\d+) 次 12153 session dead'), '连续 {0} 次会话失效'),
 )
 
@@ -184,6 +299,7 @@ _MESSAGE_EXACT = {
 
 # 「阶段名: 错误详情」的失败行：把阶段名换成中文，错误详情保留原文
 _STAGE_LABELS = {
+    'refresh': '刷新令牌失败',
     'buddy-info': '获取 Buddy 信息失败',
     'agreement': '签署协议失败',
     'adopt': '领养失败',
@@ -204,6 +320,10 @@ _PHRASES: tuple[tuple[str, str], ...] = (
     ('no such host', '域名解析失败'),
     ('i/o timeout', '网络超时'),
     ('EOF', '连接被提前关闭'),
+    ('token invalid', '令牌无效'),
+    ('invalid token', '令牌无效'),
+    ('session dead', '会话失效'),
+    ('unauthorized', '未授权'),
 )
 
 
