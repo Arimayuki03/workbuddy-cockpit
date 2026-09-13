@@ -478,6 +478,13 @@ def update_manager(rep: Reporter) -> None:
             shutil.copyfile(new_marker, INSTALL_DIR / '.version')
             rep.log(f'更新版本标记：{new_marker.read_text(encoding="utf-8").strip()}')
 
+        # 文档同步：界面「更新日志」直接读 CHANGELOG.md，若不同步会一直停在旧版内容
+        for name in ('CHANGELOG.md', 'README.md'):
+            src = new_root / name
+            if src.is_file():
+                shutil.copyfile(src, INSTALL_DIR / name)
+                rep.log(f'同步 {name}')
+
     # 4) 依赖有变化则重装
     req = INSTALL_DIR / 'server' / 'requirements.txt'
     if req.is_file():

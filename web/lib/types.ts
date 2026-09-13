@@ -332,6 +332,44 @@ export interface Versions {
   upstream_dir: string;
 }
 
+/** 更新日志中的一条（level 1 = 二级缩进，作为子项展示） */
+export interface ChangelogItem {
+  level: number;
+  text: string;
+}
+
+export interface ChangelogSection {
+  /** 中文分类：安全 / 新增 / 修复 / 改进 / 说明 / 计划中 */
+  title: string;
+  items: ChangelogItem[];
+}
+
+export interface ChangelogVersion {
+  /** 版本号，未发布的开发内容为「未发布」 */
+  version: string;
+  /** 发布日期，未发布时为空串 */
+  date: string;
+  /** 是否为尚未发布的开发内容 */
+  unreleased: boolean;
+  sections: ChangelogSection[];
+}
+
+export interface Changelog {
+  /** CHANGELOG.md 是否可读 */
+  available: boolean;
+  /** 不可读时的原因 */
+  error?: string;
+  /** 文件路径（便于排查） */
+  path?: string;
+  /** 版本总数（未被截断时） */
+  total?: number;
+  versions: ChangelogVersion[];
+  /** 版本过多，列表被截断 */
+  truncated?: boolean;
+  /** 当前部署版本，用于高亮 */
+  current?: string;
+}
+
 export interface ReloadState {
   /** 正在执行重启 */
   running: boolean;

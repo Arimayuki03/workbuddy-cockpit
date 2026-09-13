@@ -12,6 +12,7 @@ import type {
   Page,
   ReloadState,
   RequestLog,
+  Changelog,
   SecurityConfig,
   StatsSummary,
   TaskLogResponse,
@@ -207,4 +208,6 @@ export const systemApi = {
   /** 固定上游版本（空串 = 取消固定，恢复跟随分支） */
   setUpstreamRef: (ref: string) =>
     post<{ok: boolean; upstream_ref: string}>('/api/system/upstream-ref', {ref}),
+  /** 更新日志（解析仓库根目录 CHANGELOG.md，离线可用） */
+  changelog: () => get<Changelog>('/api/system/changelog'),
 };
