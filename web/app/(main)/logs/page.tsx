@@ -188,7 +188,8 @@ export default function LogsPage() {
               <TableHead className="text-[11px] text-muted-foreground">IP</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">模型</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">状态</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">延迟</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">首字</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">总耗时</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">Token</TableHead>
               <TableHead className="pr-4 text-[11px] text-muted-foreground">实付</TableHead>
             </TableRow>
@@ -220,14 +221,23 @@ export default function LogsPage() {
                     <Badge variant="destructive" className="rounded-full">{l.status || 'ERR'}</Badge>
                   )}
                 </TableCell>
+                {/* 首字延迟：反映「上游多久开始回话」。回答越长总耗时越大，
+                    所以判断上游快慢只看这一列。非流式请求没有中间过程，显示 —。 */}
                 <TableCell
                   className={
                     'text-xs tabular-nums ' +
-                    (l.latency_ms >= 3000
+                    (l.first_token_ms != null && l.first_token_ms >= 3000
                       ? 'font-medium text-amber-600 dark:text-amber-400'
                       : 'text-muted-foreground')
                   }
                 >
+                  {l.first_token_ms != null ? (
+                    fmtLatency(l.first_token_ms)
+                  ) : (
+                    <span className="text-muted-foreground/50">—</span>
+                  )}
+                </TableCell>
+                <TableCell className="text-xs tabular-nums text-muted-foreground">
                   {fmtLatency(l.latency_ms)}
                 </TableCell>
                 <TableCell className="text-xs tabular-nums">
@@ -302,7 +312,13 @@ export default function LogsPage() {
                 ['模型', detail.model || '—'],
                 ['映射模型', detail.mapped_model || '—'],
                 ['状态码', String(detail.status)],
-                ['延迟', fmtLatency(detail.latency_ms)],
+                [
+                  '首字延迟',
+                  detail.first_token_ms != null
+                    ? fmtLatency(detail.first_token_ms)
+                    : '未采集（非流式请求）',
+                ],
+                ['总耗时', fmtLatency(detail.latency_ms)],
                 ['Prompt Token', fmtNumber(detail.prompt_tokens)],
                 ['Completion Token', fmtNumber(detail.completion_tokens)],
                 [

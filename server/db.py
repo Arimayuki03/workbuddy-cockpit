@@ -69,6 +69,11 @@ CREATE TABLE IF NOT EXISTS request_logs (
   prompt_tokens     INTEGER DEFAULT 0,
   completion_tokens INTEGER DEFAULT 0,
   latency_ms        INTEGER DEFAULT 0,
+  -- 首字延迟（time-to-first-token，毫秒）：仅流式请求有意义。
+  -- 与 latency_ms 不同——后者含模型生成全部内容的耗时，回答越长越大，
+  -- 无法反映上游响应速度；首字延迟才是「上游多久开始回话」。
+  -- NULL = 未采集到（非流式请求，或该版本之前的历史记录）。
+  first_token_ms    INTEGER,
   ua                TEXT,
   error             TEXT,
   stream            INTEGER DEFAULT 0,
@@ -165,6 +170,8 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # (表名, 列名, 列定义)
     ('request_logs', 'credit', 'REAL'),
     ('usage_daily', 'credit', 'REAL NOT NULL DEFAULT 0'),
+    # 首字延迟：可空（历史记录与非流式请求为 NULL）
+    ('request_logs', 'first_token_ms', 'INTEGER'),
 )
 
 
