@@ -50,11 +50,18 @@ function resultText(l: TaskLog): string {
   return l.message_cn || l.message;
 }
 
-/** 每页条数：签到行较矮、内容更同质，可以多放几条；任务行较高，少放 */
-const PAGE_SIZE = 20;
-const CHECKIN_PAGE_SIZE = 12;
-/** 手机端任务卡片比桌面表格行高得多，减少每页条数避免一次拉太长 */
-const PAGE_SIZE_MOBILE = 8;
+/**
+ * 单次拉取条数上限。
+ *
+ * 列表改为「固定高度 + 内部滚动」（与右侧「上游原始日志」一致），不再分页：
+ * 滚动比翻页直观，也不会出现「一页没填满、下面留一大片空白」。
+ * 上限用于控制 DOM 规模——记录只增不减，全量渲染会让页面越来越重；
+ * 需要更早的记录时用时间范围筛选收窄。
+ */
+const CHECKIN_LIMIT = 200;
+const TASK_LIMIT = 200;
+/** 手机端用更小的上限：卡片行高约是表格行的两倍，滚动也更费屏幕 */
+const TASK_LIMIT_MOBILE = 80;
 
 /** 时间范围选项（与请求日志页保持一致的说法） */
 const RANGES = [
@@ -73,53 +80,24 @@ const LEVEL_TONE: Record<string, string> = {
   error: 'text-red-600 dark:text-red-400',
 };
 
-/** 分页控件（与请求日志页保持一致的交互） */
-function Pager({
-  page,
-  pages,
-  size,
+/** 列表底部条：总数 + 命中上限时的说明 */
+function ListFooter({
   total,
-  noun,
-  onChange,
+  shown,
+  truncated,
 }: {
-  page: number;
-  pages: number;
-  /** 每页条数（两块列表不同） */
-  size: number;
   total: number;
-  noun: string;
-  onChange: (p: number) => void;
+  shown: number;
+  truncated: boolean;
 }) {
-  const from = total === 0 ? 0 : (page - 1) * size + 1;
-  const to = Math.min(page * size, total);
   return (
-    <div className="flex items-center justify-between border-t border-border/40 px-4 py-2.5">
-      <div className="text-[11px] tabular-nums text-muted-foreground">
-        共 {fmtNumber(total)} {noun}
-        {total > 0 && (
-          <span className="ml-1">· 第 {from}–{to} 条 · 第 {page} / {pages} 页</span>
-        )}
-      </div>
-      <div className="flex gap-1">
-        <Button
-          variant="outline"
-          size="icon"
-          className="h-7 w-7 rounded-md"
-          disabled={page <= 1}
-          onClick={() => onChange(Math.max(1, page - 1))}
-        >
-          <ChevronLeft className="h-3.5 w-3.5" />
-        </Button>
-        <Button
-          variant="outline"
-          size="icon"
-          className="h-7 w-7 rounded-md"
-          disabled={page >= pages}
-          onClick={() => onChange(Math.min(pages, page + 1))}
-        >
-          <ChevronRight className="h-3.5 w-3.5" />
-        </Button>
-      </div>
+    <div className="flex shrink-0 flex-wrap items-center gap-x-2 border-t border-border/40 px-4 py-2 text-[11px] text-muted-foreground">
+      <span className="tabular-nums">共 {fmtNumber(total)} 条</span>
+      {truncated && (
+        <span className="text-amber-600 dark:text-amber-400">
+          · 仅显示最近 {fmtNumber(shown)} 条，更早的请缩小时间范围
+        </span>
+      )}
     </div>
   );
 }
@@ -131,7 +109,6 @@ export default function TasksPage() {
   // （实测 500 条任务日志 = 19 屏、9000 个 DOM 节点）。
   const [checkinLogs, setCheckinLogs] = useState<CheckinLog[]>([]);
   const [checkinTotal, setCheckinTotal] = useState(0);
-  const [checkinPage, setCheckinPage] = useState(1);
   const [checkinDays, setCheckinDays] = useState('7');
 
   const [taskLogs, setTaskLogs] = useState<TaskLog[]>([]);
@@ -139,7 +116,6 @@ export default function TasksPage() {
   const [kindLabels, setKindLabels] = useState<Record<string, string>>({});
   const [taskFilter, setTaskFilter] = useState<string>('all');
   const [taskDays, setTaskDays] = useState('7');
-  const [taskPage, setTaskPage] = useState(1);
   /** 当前筛选下的总条数（不是全局统计）——分页必须用它算页数 */
   const [taskTotal, setTaskTotal] = useState(0);
 
@@ -151,7 +127,7 @@ export default function TasksPage() {
    * 桌面端横向空间够，仍三块并列。
    */
   const [mobileTab, setMobileTab] = useState<'checkin' | 'tasks' | 'raw'>('checkin');
-  /** 手机端用更小的页尺寸（卡片行高约是表格行的两倍） */
+  /** 手机端用更小的拉取上限（卡片行高约是表格行的两倍） */
   const [narrow, setNarrow] = useState(false);
   useEffect(() => {
     const mq = window.matchMedia('(max-width: 767px)');
@@ -160,20 +136,15 @@ export default function TasksPage() {
     mq.addEventListener('change', sync);
     return () => mq.removeEventListener('change', sync);
   }, []);
-  const taskPageSize = narrow ? PAGE_SIZE_MOBILE : PAGE_SIZE;
+  const taskLimit = narrow ? TASK_LIMIT_MOBILE : TASK_LIMIT;
 
   const load = useCallback(async () => {
     const [logRes, ulRes, taskRes] = await Promise.allSettled([
-      accountApi.checkinLogs(
-        CHECKIN_PAGE_SIZE,
-        (checkinPage - 1) * CHECKIN_PAGE_SIZE,
-        undefined,
-        Number(checkinDays),
-      ),
+      accountApi.checkinLogs(CHECKIN_LIMIT, 0, undefined, Number(checkinDays)),
       accountApi.upstreamLogs(300),
       accountApi.taskLogs(
-        taskPageSize,
-        (taskPage - 1) * taskPageSize,
+        taskLimit,
+        0,
         taskFilter === 'all' ? undefined : taskFilter,
         undefined,
         Number(taskDays),
@@ -193,7 +164,7 @@ export default function TasksPage() {
     if (logRes.status === 'rejected' && taskRes.status === 'rejected') {
       notify.err(errText(logRes.reason ?? taskRes.reason));
     }
-  }, [checkinPage, checkinDays, taskPage, taskFilter, taskDays, taskPageSize]);
+  }, [checkinDays, taskFilter, taskDays, taskLimit]);
 
   useEffect(() => {
     load();
@@ -207,9 +178,6 @@ export default function TasksPage() {
     setCollectBusy(true);
     try {
       const r = await accountApi.collectTaskLogs();
-      // 新记录排在最前，回到第 1 页才能看到刚采到的
-      setTaskPage(1);
-      setCheckinPage(1);
       await load();
       if (r.added > 0) notify.ok('已采集新记录', `新增 ${r.added} 条任务日志`);
       else notify.info('暂无新记录', '上游还没有产生新的自动任务日志');
@@ -229,8 +197,9 @@ export default function TasksPage() {
 
   // 筛选与分页都在服务端完成，这里直接用返回的当前页
   const filteredTasks = taskLogs;
-  const taskPages = Math.max(1, Math.ceil(taskTotal / taskPageSize));
-  const checkinPages = Math.max(1, Math.ceil(checkinTotal / CHECKIN_PAGE_SIZE));
+  // 命中上限说明还有更早的记录，界面上要讲清楚（避免以为是全部）
+  const checkinTruncated = checkinTotal > checkinLogs.length;
+  const taskTruncated = taskTotal > taskLogs.length;
 
   return (
     <div className="flex flex-col gap-4 md:gap-6">
@@ -267,12 +236,12 @@ export default function TasksPage() {
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div
           className={
-            'overflow-hidden rounded-[20px] bg-muted ' +
+            'flex h-[calc(100dvh-200px)] min-h-[320px] flex-col overflow-hidden rounded-[20px] bg-muted ' +
             (mobileTab === 'checkin' ? '' : 'hidden ') +
-            'md:block'
+            'md:h-[470px] md:flex'
           }
         >
-          <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 px-4 py-3">
+          <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1.5 px-4 py-3">
             <div className="flex min-w-0 items-center gap-2 text-sm font-medium">
               <CalendarCheck className="h-4 w-4 shrink-0" />
               <span className="shrink-0">签到记录</span>
@@ -281,7 +250,7 @@ export default function TasksPage() {
               </span>
             </div>
             <div className="flex items-center gap-2">
-              <Select value={checkinDays} onValueChange={(v) => { setCheckinDays(v); setCheckinPage(1); }}>
+              <Select value={checkinDays} onValueChange={setCheckinDays}>
                 <SelectTrigger className="h-7 w-[116px] rounded-full text-[11px]"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {RANGES.map((r) => (
@@ -311,6 +280,8 @@ export default function TasksPage() {
             </div>
           </div>
 
+          {/* 固定高度 + 内部滚动：与右侧「上游原始日志」一致，页面高度不随记录增长 */}
+          <div className="min-h-0 flex-1 overflow-auto">
           {checkinLogs.length ? (
             <>
               {/* 手机端：卡片 */}
@@ -383,22 +354,16 @@ export default function TasksPage() {
               暂无签到记录。在「账号管理」点「全部签到」或单个账号的 🎁 会在此留痕。
             </div>
           )}
+          </div>
 
-          <Pager
-            page={checkinPage}
-            pages={checkinPages}
-            size={CHECKIN_PAGE_SIZE}
-            total={checkinTotal}
-            noun="条记录"
-            onChange={setCheckinPage}
-          />
+          <ListFooter total={checkinTotal} shown={checkinLogs.length} truncated={checkinTruncated} />
         </div>
 
         <div
           className={
-            'flex flex-col overflow-hidden rounded-[20px] bg-muted ' +
+            'flex h-[calc(100dvh-200px)] min-h-[320px] flex-col overflow-hidden rounded-[20px] bg-muted ' +
             (mobileTab === 'raw' ? '' : 'hidden ') +
-            'md:flex'
+            'md:h-[470px] md:flex'
           }
         >
           <div className="flex shrink-0 items-center justify-between px-4 py-3">
@@ -432,14 +397,15 @@ export default function TasksPage() {
 
       {/* 自动任务与积分记录：上游把结果打在容器日志里且重建即丢，
           这里展示后台采集器落库后的长期留痕，便于核对积分收益 */}
+      {/* 固定高度：内层 flex-1 才受约束（没有高度时它只会跟着内容一起变长） */}
       <section
         className={
-          'overflow-hidden rounded-[20px] bg-muted ' +
+          'flex h-[calc(100dvh-200px)] min-h-[320px] flex-col overflow-hidden rounded-[20px] bg-muted ' +
           (mobileTab === 'tasks' ? '' : 'hidden ') +
-          'md:block'
+          'md:h-[560px] md:flex'
         }
       >
-        <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-3">
           <div className="flex items-center gap-2 text-sm font-medium">
             <Cat className="h-4 w-4" />
             自动任务与积分记录
@@ -448,7 +414,7 @@ export default function TasksPage() {
             </span>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Select value={taskDays} onValueChange={(v) => { setTaskDays(v); setTaskPage(1); }}>
+            <Select value={taskDays} onValueChange={setTaskDays}>
               <SelectTrigger className="h-7 w-[116px] rounded-full text-[11px]">
                 <SelectValue />
               </SelectTrigger>
@@ -503,7 +469,7 @@ export default function TasksPage() {
         </div>
 
         {taskLogs.length > 0 && (
-          <div className="flex flex-wrap items-center gap-1.5 px-4 pb-3">
+          <div className="flex shrink-0 flex-wrap items-center gap-1.5 px-4 pb-3">
             <Filter className="h-3 w-3 text-muted-foreground" />
             {[
               {id: 'all', label: '全部'},
@@ -514,7 +480,7 @@ export default function TasksPage() {
                 <button
                   key={t.id}
                   type="button"
-                  onClick={() => { setTaskFilter(t.id); setTaskPage(1); }}
+                  onClick={() => setTaskFilter(t.id)}
                   className={
                     'rounded-full px-2.5 py-1 text-[11px] transition-colors ' +
                     (active
@@ -531,7 +497,7 @@ export default function TasksPage() {
         )}
 
         {taskLogs.length ? (
-          <div className="pb-4">
+          <div className="min-h-0 flex-1 overflow-auto pb-4">
             {/* 手机端：卡片式；桌面：表格 */}
             <div className="space-y-1.5 px-3.5 md:hidden">
               {filteredTasks.map((l) => (
@@ -616,14 +582,7 @@ export default function TasksPage() {
           </div>
         )}
 
-        <Pager
-          page={taskPage}
-          pages={taskPages}
-          size={taskPageSize}
-          total={taskTotal}
-          noun="条记录"
-          onChange={setTaskPage}
-        />
+        <ListFooter total={taskTotal} shown={taskLogs.length} truncated={taskTruncated} />
       </section>
     </div>
   );
