@@ -35,6 +35,14 @@
   新增 `_migrate()`（`PRAGMA table_info` 检测后 `ALTER TABLE`），
   可重复执行、保留旧数据。升级不再需要手工动库
 
+### 计划中
+- **海外版（CodeBuddy 国际版）支持**：受上游限制，暂不可用。上游
+  `workbuddy2api` 的出站地址硬编码国内域名（`copilot.tencent.com` /
+  `www.codebuddy.cn`），且 `chatBase()` / `billingBase()` 不看账号的
+  `domain` 字段（该字段只作为 `X-Domain` 请求头发送，是企业标识而非区域标识）。
+  需上游先做成按账号/按域选择 base URL，本端再把自实现的登录/签到/余额地址
+  改为可配置。见 [Issue #1](https://github.com/ithtelab/workbuddy-manager/issues/1)
+
 ### 说明
 - 扣费字段来自上游，若上游版本较旧（未返回 `usage.credit`），界面统一显示 `—`，
   属于「无数据显示」而非异常
