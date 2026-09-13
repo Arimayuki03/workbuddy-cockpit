@@ -206,6 +206,63 @@ class UpstreamConfigRoundTrip(unittest.TestCase):
             with self.assertRaises(ValueError, msg=f'{bad!r} 应被拒绝'):
                 wb2api.save_upstream_config({'pool': {'idle_weight_per_hour': bad}})
 
+    # ── upstream 段的凭据与新增字段 ─────────────────────
+    def test_device_token_masked_in_view(self) -> None:
+        """device_token 是设备风控凭据，绝不能明文下发。"""
+        write_cfg(self.cfg_path, {
+            'upstream': {'device_token': 'DEVICE-SECRET-abcdef123456', 'client_name': 'WorkBuddy'},
+        })
+        view = wb2api.load_upstream_config()
+        raw = json.dumps(view, ensure_ascii=False)
+        self.assertNotIn('DEVICE-SECRET-abcdef123456', raw, '凭据不应出现在接口返回里')
+        self.assertTrue(view['upstream'].get('has_device_token'))
+        self.assertIn('device_token_masked', view['upstream'])
+
+    def test_device_token_empty_keeps_original(self) -> None:
+        """留空表示保持原值——前端拿到的是掩码，不能被当成清空。"""
+        write_cfg(self.cfg_path, {'upstream': {'device_token': 'ORIG'}})
+        wb2api.save_upstream_config({'upstream': {'device_token': ''}})
+        self.assertEqual(read_cfg(self.cfg_path)['upstream']['device_token'], 'ORIG')
+
+    def test_device_token_none_clears(self) -> None:
+        """显式 null 才清除（否则没有办法删掉它）。"""
+        write_cfg(self.cfg_path, {'upstream': {'device_token': 'ORIG', 'client_name': 'X'}})
+        wb2api.save_upstream_config({'upstream': {'device_token': None}})
+        up = read_cfg(self.cfg_path)['upstream']
+        self.assertNotIn('device_token', up)
+        self.assertEqual(up['client_name'], 'X', '不应误删同段其他键')
+
+    def test_device_token_new_value_replaces(self) -> None:
+        write_cfg(self.cfg_path, {'upstream': {'device_token': 'OLD'}})
+        wb2api.save_upstream_config({'upstream': {'device_token': 'NEW'}})
+        self.assertEqual(read_cfg(self.cfg_path)['upstream']['device_token'], 'NEW')
+
+    def test_device_token_rejects_bad_value(self) -> None:
+        write_cfg(self.cfg_path, {'upstream': {'device_token': 'ORIG'}})
+        for bad in ('a' + chr(10) + 'b', 'x' * 600):
+            with self.assertRaises(ValueError):
+                wb2api.save_upstream_config({'upstream': {'device_token': bad}})
+        self.assertEqual(read_cfg(self.cfg_path)['upstream']['device_token'], 'ORIG')
+
+    def test_upstream_new_text_fields(self) -> None:
+        write_cfg(self.cfg_path, {})
+        wb2api.save_upstream_config({'upstream': {
+            'client_name': 'WorkBuddy', 'client_version': '5.5.4',
+            'cli_version': '2.137.1', 'device_token_file': '/etc/tok',
+        }})
+        up = read_cfg(self.cfg_path)['upstream']
+        self.assertEqual(up['client_name'], 'WorkBuddy')
+        self.assertEqual(up['client_version'], '5.5.4')
+        self.assertEqual(up['cli_version'], '2.137.1')
+        self.assertEqual(up['device_token_file'], '/etc/tok')
+
+    def test_upstream_passthrough_ip_bool(self) -> None:
+        write_cfg(self.cfg_path, {})
+        wb2api.save_upstream_config({'upstream': {'passthrough_ip': True}})
+        self.assertIs(read_cfg(self.cfg_path)['upstream']['passthrough_ip'], True)
+        with self.assertRaises(ValueError):
+            wb2api.save_upstream_config({'upstream': {'passthrough_ip': 'yes'}})
+
     def test_missing_config_refuses_to_write(self) -> None:
         with self.assertRaises(FileNotFoundError):
             wb2api.save_upstream_config({'schedule': {'checkin_hours': [9]}})

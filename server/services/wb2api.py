@@ -208,8 +208,8 @@ def load_upstream_config() -> dict:
     读不到时返回 available=False 并附带原因，供前端明确提示并禁止保存，
     避免把空配置写回真实文件。
 
-    注意：不返回原始配置对象。原始配置含上游 API Key 与 Upstash token 的
-    明文，前端并不需要它们，不应通过接口下发。
+    注意：不返回原始配置对象。原始配置含上游 API Key、Upstash token 与
+    设备风控 token 的明文，前端并不需要它们，不应通过接口下发。
     """
     path = config.UPSTREAM_CONFIG
     cfg: dict | None = None
@@ -254,6 +254,21 @@ def load_upstream_config() -> dict:
         'token_masked': _mask(token) if token else '',
     }
 
+    # 出站设备风控 token（upstream.device_token）同样是凭据：
+    # 它相当于把一台可信设备的身份借出去，泄露可被他人复用。
+    # 与 Upstash token 一样只回传「是否已配置」+ 掩码。
+    upst = cfg.get('upstream')
+    upst = upst if isinstance(upst, dict) else {}
+    dev = str(upst.get('device_token') or '')
+    if 'upstream' in view and isinstance(view['upstream'], dict):
+        view['upstream'] = dict(view['upstream'])
+        view['upstream'].pop('device_token', None)
+    view['upstream'] = {
+        **(view.get('upstream') if isinstance(view.get('upstream'), dict) else {}),
+        'has_device_token': bool(dev),
+        'device_token_masked': _mask(dev) if dev else '',
+    }
+
     view['available'] = True
     view['config_path'] = str(path)
     return view
@@ -267,6 +282,16 @@ def _has_control_chars(v: str) -> bool:
 
 
 _HOURS_KEYS = ('checkin_hours', 'travel_hours', 'activity_hours', 'keepalive_hours')
+
+# upstream 段里的单行文本字段（会做控制字符与长度校验）
+_UPSTREAM_TEXT_KEYS = (
+    'user_agent',          # 出站 UA 显式覆盖
+    'client_version',      # WorkBuddy 客户端版本段
+    'cli_version',         # CLI 版本段
+    'client_name',         # 用量归属头 X-Product/X-IDE-Name/X-IDE-Type
+    'device_token_file',   # 设备 token 文件路径
+)
+_UPSTREAM_TEXT_MAX = 512
 
 # 整数/小数字段的取值范围：键 -> (最小, 最大, 单位)
 # 上限不是洁癖——这些值直接决定上游的行为强度与成本（例如
@@ -345,11 +370,37 @@ def _sanitize_section(section: str, incoming: dict) -> dict:
             if _has_control_chars(path):
                 raise ValueError('prompt.file 不能包含换行或控制字符')
             out[key] = path
-        elif section == 'upstream' and key == 'user_agent':
-            ua = str(raw or '').strip()
-            if _has_control_chars(ua):
-                raise ValueError('upstream.user_agent 不能包含换行或控制字符')
-            out[key] = ua
+        elif section == 'upstream' and key in _UPSTREAM_TEXT_KEYS:
+            # 单行文本：UA、客户端版本、用量归知名度、设备 token 文件路径
+            val = str(raw or '').strip()
+            if _has_control_chars(val):
+                raise ValueError(f'upstream.{key} 不能包含换行或控制字符')
+            if len(val) > _UPSTREAM_TEXT_MAX:
+                raise ValueError(f'upstream.{key} 过长（上限 {_UPSTREAM_TEXT_MAX} 字符）')
+            out[key] = val
+        elif section == 'upstream' and key == 'passthrough_ip':
+            if not isinstance(raw, bool):
+                raise ValueError('upstream.passthrough_ip 必须是布尔值')
+            out[key] = raw
+        elif section == 'upstream' and key == 'device_token':
+            # 敏感凭据，三种语义要分清：
+            #   null   → 显式清除（配置里删掉该键）
+            #   非空串 → 设为该值
+            #   空串   → 保持原值不变（前端回显的是掩码，留空不能被当成清空）
+            if raw is None:
+                out['__delete__'] = True
+                out.pop(key, None)
+                continue
+            tok = str(raw or '').strip()
+            if _has_control_chars(tok):
+                raise ValueError('upstream.device_token 不能包含换行或控制字符')
+            # 上游读该文件时也有大小限制（>1KB 忽略），这里给个更保守的上限
+            if len(tok) > _UPSTREAM_TEXT_MAX:
+                raise ValueError(f'upstream.device_token 过长（上限 {_UPSTREAM_TEXT_MAX} 字符）')
+            if tok:
+                out[key] = tok
+            else:
+                out.pop(key, None)
     return out
 
 
@@ -373,7 +424,11 @@ def save_upstream_config(patch: dict) -> dict:
                   'session_sticky', 'prompt', 'server', 'upstream'):
         if field in patch and isinstance(patch[field], dict):
             cfg.setdefault(field, {})
-            cfg[field].update(_sanitize_section(field, patch[field]))
+            clean = _sanitize_section(field, patch[field])
+            # __delete__ 表示调用方要求显式删除某些敏感键（见 _sanitize_section）
+            if clean.pop('__delete__', False):
+                cfg[field].pop('device_token', None)
+            cfg[field].update(clean)
 
     if 'upstash' in patch and isinstance(patch['upstash'], dict):
         incoming = patch['upstash']
