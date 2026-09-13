@@ -133,6 +133,79 @@ class ParseTaskLines(unittest.TestCase):
             tasklog.translate_message('report 3/5: timeout'), '活跃上报失败（第 3/5 条）'
         )
 
+    # ── 上游 2026-09-12 签到健壮性（PR #48）带来的新日志形态 ──────
+    def test_already_checkin_is_success_not_error(self) -> None:
+        """「今天已签到」是幂等成功，不能显示成失败。
+
+        上游改版后成功/已签到也打日志，且腾讯把它当业务错误返回，
+        不特判就会在界面上变成一整片红色「签到失败」。
+        """
+        for text in ('今日已签到', '今天已签到，请勿重复签到', 'already checked in'):
+            ev = tasklog.parse_line(f'{DOCKER}checkin 9b212d8c: {text}')
+            assert ev is not None, text
+            self.assertEqual(ev['level'], 'ok', text)
+
+    def test_stage_failure_lines_capture_uid(self) -> None:
+        """`checkin <uid> refresh|save: <err>` 是真实失败，要能记下账号。"""
+        ev = tasklog.parse_line(f'{DOCKER}checkin 9b212d8c refresh: token invalid')
+        assert ev is not None
+        self.assertEqual(ev['uid'], '9b212d8c')
+        self.assertEqual(ev['kind'], 'checkin')
+        self.assertEqual(ev['level'], 'error')
+        self.assertIn('refresh', ev['message'])
+
+        ev2 = tasklog.parse_line(f'{DOCKER}checkin 9b212d8c save: disk full')
+        assert ev2 is not None
+        self.assertEqual(ev2['uid'], '9b212d8c')
+        self.assertEqual(ev2['level'], 'error')
+
+    def test_done_summary_is_not_an_account(self) -> None:
+        """`checkin done: total=.. ok=..` 是每轮汇总，不得把 done 当账号。"""
+        ev = tasklog.parse_line(
+            f'{DOCKER}checkin done: total=3 ok=1 already=1 fail=1 skipped=0'
+        )
+        assert ev is not None
+        self.assertEqual(ev['uid'], '', '汇总行不应带账号 uid')
+        self.assertNotEqual(ev['uid'], 'done')
+        self.assertEqual(ev['kind'], 'checkin')
+        self.assertEqual(ev['level'], 'warn', '有失败时汇总应为 warn')
+        self.assertIn('共 3 个', ev['message'])
+
+    def test_done_summary_all_ok(self) -> None:
+        ev = tasklog.parse_line(f'{DOCKER}checkin done: total=2 ok=2 already=0 fail=0 skipped=0')
+        assert ev is not None
+        self.assertEqual(ev['level'], 'ok')
+
+    def test_scheduled_skip_is_not_an_account(self) -> None:
+        ev = tasklog.parse_line(f'{DOCKER}scheduled checkin skipped: outside window')
+        assert ev is not None
+        self.assertEqual(ev['uid'], '')
+        self.assertEqual(ev['level'], 'info')
+        self.assertIn('未执行', ev['message'])
+
+    def test_disabled_account_is_error_even_with_warn_prefix(self) -> None:
+        """账号被禁用是严重结果，不该因为上游只标 WARN 而降级。"""
+        ev = tasklog.parse_line(
+            f'{DOCKER}WARN: checkin 9b212d8c: 连续 3 次 12153 session dead — 禁用'
+        )
+        assert ev is not None
+        self.assertEqual(ev['level'], 'error')
+        self.assertIn('禁用', ev['message'])
+
+    def test_reserved_tokens_are_not_uids(self) -> None:
+        """阶段/汇总行里的英文单词不得被当成账号 uid。"""
+        for word in ('done', 'skipped', 'refresh', 'save', 'total', 'ok', 'fail'):
+            self.assertFalse(tasklog._is_uid(word), word)
+
+    def test_real_uid_shapes_accepted(self) -> None:
+        """真实 uid（8 位前缀或 uuid）必须被接受。
+
+        特别包含「前缀全为 a-f 字母」的 uuid——不能因为要求含数字而丢掉它。
+        """
+        for ok in ('9b212d8c', '89374120', 'abcdefab',
+                   '9b212d8c-f5f7-4ad6-aa20-1d576508c8c1'):
+            self.assertTrue(tasklog._is_uid(ok), ok)
+
     def test_unrelated_lines_ignored(self) -> None:
         for line in (
             '',
@@ -174,9 +247,9 @@ class ParseTaskLines(unittest.TestCase):
     def test_parse_lines_mixed(self) -> None:
         lines = [
             'listening on :7863',
-            f'{DOCKER}travel 1: claim ok record=1 reward=100',
-            f'{DOCKER}activity 2: streak days=1',
-            f'{DOCKER}travel 3: skip (daily limit reached)',
+            f'{DOCKER}travel 89374120: claim ok record=1 reward=100',
+            f'{DOCKER}activity 91203877: streak days=1',
+            f'{DOCKER}travel 88110234: skip (daily limit reached)',
         ]
         events = tasklog.parse_lines(lines)
         self.assertEqual(len(events), 3)
