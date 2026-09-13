@@ -281,7 +281,7 @@ export default function TasksPage() {
           </div>
 
           {/* 固定高度 + 内部滚动：与右侧「上游原始日志」一致，页面高度不随记录增长 */}
-          <div className="min-h-0 flex-1 overflow-auto">
+          <div className="scroll-slim min-h-0 flex-1 overflow-auto">
           {checkinLogs.length ? (
             <>
               {/* 手机端：卡片 */}
@@ -377,7 +377,7 @@ export default function TasksPage() {
             <span className="text-[11px] text-muted-foreground">来自容器日志</span>
           </div>
           {upstreamLines.length ? (
-            <div className="min-h-0 flex-1 overflow-auto px-4 pb-3">
+            <div className="scroll-slim min-h-0 flex-1 overflow-auto px-4 pb-3">
               <pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-muted-foreground">
                 {upstreamLines.slice(-200).join('\n')}
               </pre>
@@ -497,7 +497,7 @@ export default function TasksPage() {
         )}
 
         {taskLogs.length ? (
-          <div className="min-h-0 flex-1 overflow-auto pb-4">
+          <div className="scroll-slim min-h-0 flex-1 overflow-auto pb-4">
             {/* 手机端：卡片式；桌面：表格 */}
             <div className="space-y-1.5 px-3.5 md:hidden">
               {filteredTasks.map((l) => (
