@@ -516,7 +516,7 @@ export function UpdatePanel() {
         {logText ? (
           <div
             ref={logRef}
-            className="max-h-[320px] overflow-auto rounded-2xl bg-background/60 p-3"
+            className="scroll-slim max-h-[320px] overflow-auto rounded-2xl bg-background/60 p-3"
           >
             <pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-muted-foreground">
               {logText}

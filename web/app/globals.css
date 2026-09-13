@@ -137,6 +137,42 @@
   scrollbar-width: none;
 }
 
+/*
+ * 细滚动条：浏览器默认滚动条偏宽、带可见轨道，嵌在卡片里显得突兀。
+ * 用「透明边框 + background-clip」把视觉粗细压到 4px，但保留 10px 的可抓取区域，
+ * 兼顾观感与手感；颜色跟随主题令牌，深浅色都协调。
+ * 悬停时略加深，便于确认「这里能滚」。
+ */
+.scroll-slim {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--muted-foreground) 30%, transparent) transparent;
+}
+
+.scroll-slim::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.scroll-slim::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scroll-slim::-webkit-scrollbar-thumb {
+  background-color: color-mix(in oklab, var(--muted-foreground) 30%, transparent);
+  border-radius: 9999px;
+  /* 用透明边框缩小可见部分，实际可点击区域仍是 10px */
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+.scroll-slim::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in oklab, var(--muted-foreground) 55%, transparent);
+}
+
+.scroll-slim::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 button {
   cursor: pointer;
 }
