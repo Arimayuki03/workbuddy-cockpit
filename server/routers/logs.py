@@ -68,6 +68,7 @@ def list_logs(
             'ua': r['ua'],
             'error': r['error'],
             'stream': bool(r['stream']),
+            'credit': r['credit'],
         }
         for r in rows
     ]

@@ -1,7 +1,7 @@
 'use client';
 
 import {useCallback, useEffect, useState} from 'react';
-import {Activity, TrendingUp, KeyRound, Cpu, Wrench, RotateCcw} from 'lucide-react';
+import {Activity, TrendingUp, KeyRound, Cpu, Wrench, RotateCcw, Coins} from 'lucide-react';
 import {
   Bar,
   BarChart,
@@ -14,7 +14,7 @@ import {
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {statsApi, errText} from '@/lib/api';
 import type {StatsSummary, UsageBreakdown, UsagePoint} from '@/lib/types';
-import {fmtCompact, fmtNumber} from '@/lib/format';
+import {fmtCompact, fmtNumber, fmtCredit} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {StatCard} from '@/components/common/layout/StatCard';
 import {EmptyState} from '@/components/common/layout/EmptyState';
@@ -172,11 +172,15 @@ export default function StatsPage() {
           delay={0.05}
         />
         <StatCard
-          label="累计请求"
-          value={fmtCompact(summary?.total_requests)}
-          hint={`${fmtCompact(summary?.total_tokens)} Token`}
-          icon={Activity}
-          tone="neutral"
+          label="今日实付"
+          value={fmtCredit(summary?.today_credit)}
+          hint={
+            summary?.today_credit
+              ? `本周 ${fmtCredit(summary?.week_credit)}`
+              : '上游未返回扣费项'
+          }
+          icon={Coins}
+          tone="warning"
           delay={0.1}
         />
         <StatCard
@@ -260,7 +264,8 @@ function BreakdownPanel({
             <TableRow className="border-b border-border/60 hover:bg-transparent">
               <TableHead className="pl-0 text-[11px] text-muted-foreground">名称</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">请求</TableHead>
-              <TableHead className="pr-0 text-[11px] text-muted-foreground">Token</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">Token</TableHead>
+              <TableHead className="pr-0 text-[11px] text-muted-foreground">实付</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -284,7 +289,10 @@ function BreakdownPanel({
                     </div>
                   </TableCell>
                   <TableCell className="text-xs tabular-nums">{fmtNumber(it.requests)}</TableCell>
-                  <TableCell className="pr-0 text-xs tabular-nums">{fmtCompact(tokens)}</TableCell>
+                  <TableCell className="text-xs tabular-nums">{fmtCompact(tokens)}</TableCell>
+                  <TableCell className="pr-0 text-xs tabular-nums">
+                    {it.credit > 0 ? fmtCredit(it.credit) : <span className="text-muted-foreground/70">—</span>}
+                  </TableCell>
                 </TableRow>
               );
             })}

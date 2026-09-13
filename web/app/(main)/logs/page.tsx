@@ -6,7 +6,7 @@ import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {keyApi, logApi, errText} from '@/lib/api';
 import type {ApiKey, RequestLog} from '@/lib/types';
-import {fmtDateTime, fmtLatency, fmtNumber} from '@/lib/format';
+import {fmtCredit, fmtDateTime, fmtLatency, fmtNumber} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
@@ -188,7 +188,8 @@ export default function LogsPage() {
               <TableHead className="text-[11px] text-muted-foreground">模型</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">状态</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">延迟</TableHead>
-              <TableHead className="pr-4 text-[11px] text-muted-foreground">Token</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">Token</TableHead>
+              <TableHead className="pr-4 text-[11px] text-muted-foreground">实付</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -228,13 +229,22 @@ export default function LogsPage() {
                 >
                   {fmtLatency(l.latency_ms)}
                 </TableCell>
-                <TableCell className="pr-4 text-xs tabular-nums">
+                <TableCell className="text-xs tabular-nums">
                   {l.prompt_tokens + l.completion_tokens > 0 ? (
                     fmtNumber(l.prompt_tokens + l.completion_tokens)
                   ) : (
                     <span className="text-muted-foreground/70">—</span>
                   )}
                   {l.stream && <span className="ml-1 text-[10px] text-muted-foreground">流</span>}
+                </TableCell>
+                <TableCell className="pr-4 text-xs tabular-nums">
+                  {typeof l.credit === 'number' ? (
+                    <span className={l.credit > 0 ? 'text-amber-600 dark:text-amber-400' : ''}>
+                      {fmtCredit(l.credit)}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground/70" title="上游未返回该项（不等于免费）">—</span>
+                  )}
                 </TableCell>
               </TableRow>
             ))}
@@ -294,6 +304,12 @@ export default function LogsPage() {
                 ['延迟', fmtLatency(detail.latency_ms)],
                 ['Prompt Token', fmtNumber(detail.prompt_tokens)],
                 ['Completion Token', fmtNumber(detail.completion_tokens)],
+                [
+                  '实际扣费',
+                  typeof detail.credit === 'number'
+                    ? fmtCredit(detail.credit) + (detail.credit > 0 ? '' : '（未计费）')
+                    : '上游未返回',
+                ],
                 ['流式', detail.stream ? '是' : '否'],
                 ['User-Agent', detail.ua || '—'],
                 ['错误', detail.error || '—'],
