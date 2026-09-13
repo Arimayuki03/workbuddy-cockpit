@@ -162,6 +162,9 @@ if [ "${SRC_DIR}" != "${APP_DIR}" ]; then
   cp -r "${SRC_DIR}/server" "${APP_DIR}/"
   cp -r "${SRC_DIR}/deploy" "${APP_DIR}/"
   cp "${SRC_DIR}/.env.example" "${APP_DIR}/" 2>/dev/null || true
+  # 文档：界面的「更新日志」页直接读它（server/ 内另有一份副本兜底）
+  cp "${SRC_DIR}/CHANGELOG.md" "${APP_DIR}/" 2>/dev/null || true
+  cp "${SRC_DIR}/README.md" "${APP_DIR}/" 2>/dev/null || true
 fi
 
 # 静态前端：优先用发布包内的 web/out；否则尝试本地构建

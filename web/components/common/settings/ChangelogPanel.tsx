@@ -219,8 +219,9 @@ export function ChangelogPanel() {
           <div className="font-medium">更新日志不可用</div>
           <div className="text-muted-foreground">{error || data?.error}</div>
           <div className="text-muted-foreground">
-            更新日志随发布包一起分发（<code className="font-mono">CHANGELOG.md</code>）。
-            若你从源码运行，请确认仓库根目录存在该文件。
+            📄 更新日志随发布包一起分发（<code className="font-mono">CHANGELOG.md</code>）。
+            若你是从旧版本升级上来的，去「系统更新」执行一次更新即可补上；
+            从源码运行时，请确认仓库根目录存在该文件。
           </div>
         </div>
       </div>

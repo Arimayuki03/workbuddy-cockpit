@@ -81,6 +81,10 @@ jobs:
           # 文档一并打包（安全审查报告、设计说明等），便于离线查阅
           cp -r docs "$STAGE/" 2>/dev/null || true
           cp .env.example README.md CHANGELOG.md LICENSE "$STAGE/"
+          # 再放一份到 server/：一键更新必然整体替换 server/，而旧版更新器
+          # 不替换根目录文件。放进 server/ 后，任何部署（含从旧版升上来的）
+          # 都拿得到更新日志，避免界面报「未找到更新日志文件」。
+          cp CHANGELOG.md "$STAGE/server/CHANGELOG.md"
           # 写入版本标记：管理端「系统更新」页与安装流程据此显示当前版本
           echo "${TAG}" > "$STAGE/.version"
           # 不含运行时数据与凭据

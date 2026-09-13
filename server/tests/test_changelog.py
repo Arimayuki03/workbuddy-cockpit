@@ -129,6 +129,40 @@ class LoadChangelogTest(unittest.TestCase):
             self.assertFalse(data['available'])
             self.assertIn('读取更新日志失败', data['error'])
 
+    def test_falls_back_to_server_copy(self) -> None:
+        """老部署升级后根目录可能没有 CHANGELOG.md，此时用 server/ 里的副本。
+
+        这不是假想场景：v1.0.16 之前的更新器只替换 server/、web/out/、
+        deploy/ 与 .version，不碰根目录文件——实测真有部署报「未找到更新日志
+        文件」，且因为已是最新版、再点更新也不会补上。发布打包因此会在
+        server/ 放一份副本，这里锁定该回退必须生效。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'server').mkdir()
+            (root / 'server' / 'CHANGELOG.md').write_text(
+                '## [9.9.9] - 2026-01-01\n\n### 修复\n\n- 来自 server 副本\n',
+                encoding='utf-8',
+            )
+            with mock.patch.object(changelog.config, 'ROOT', root):
+                data = changelog.load_changelog()
+            self.assertTrue(data['available'])
+            self.assertEqual(data['versions'][0]['version'], '9.9.9')
+            self.assertTrue(data['path'].endswith(str(Path('server') / 'CHANGELOG.md')))
+
+    def test_root_copy_wins_over_server_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'server').mkdir()
+            (root / 'CHANGELOG.md').write_text(
+                '## [8.8.8] - 2026-01-01\n\n### 新增\n\n- 根目录优先\n', encoding='utf-8')
+            (root / 'server' / 'CHANGELOG.md').write_text(
+                '## [9.9.9] - 2026-01-01\n\n### 新增\n\n- server 副本\n', encoding='utf-8')
+            with mock.patch.object(changelog.config, 'ROOT', root):
+                data = changelog.load_changelog()
+            self.assertEqual(data['versions'][0]['version'], '8.8.8')
+            self.assertFalse(data['path'].endswith(str(Path('server') / 'CHANGELOG.md')))
+
 
 if __name__ == '__main__':
     unittest.main()
