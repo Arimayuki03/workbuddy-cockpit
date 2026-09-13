@@ -217,6 +217,8 @@ export interface TaskLog {
 
 export interface TaskLogResponse {
   logs: TaskLog[];
+  /** 当前筛选下的总条数（分页用；与 stats.total 在未筛选时一致） */
+  total: number;
   stats: {
     by_kind: Record<string, {count: number; credits: number}>;
     total: number;
@@ -226,6 +228,13 @@ export interface TaskLogResponse {
   collector: {at?: number; parsed?: number; added?: number; error?: string};
 }
 
+
+/** 签到记录分页返回 */
+export interface CheckinLogPage {
+  items: CheckinLog[];
+  /** 当前筛选下的总条数 */
+  total: number;
+}
 
 export interface UpdateLogLine {
   ts: number;

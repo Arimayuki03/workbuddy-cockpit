@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -147,6 +148,84 @@ class NicknameResolution(unittest.TestCase):
     def test_unknown_uid_returns_empty(self) -> None:
         got = self._resolve('ffffffff', [{'uid': 'aaaaaaaa-1111', 'nickname': '别人'}])
         self.assertEqual(got, '')
+
+
+class Pagination(unittest.TestCase):
+    """任务/签到日志的分页与筛选后计数。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_db = config.DB_PATH
+        config.DB_PATH = Path(self._tmp.name) / 'page.db'
+        db._conn = None
+        db.connect()
+        now = int(time.time())
+        # 每条相隔 1 天，这样 days 筛选才有区分度（用 600 秒间隔会全落在 24h 内）
+        db.add_task_logs([
+            {'ts': now - i * 86400, 'uid': 'u1',
+             'kind': 'activity' if i % 2 else 'travel',
+             'level': 'ok', 'credits': 0, 'message': f'm{i}', 'dedup_key': f'pk{i}'}
+            for i in range(120)
+        ])
+        for i in range(35):
+            db.add_checkin_log('u1' if i % 2 else 'u2', 'n', 'manual-batch', True, 0, 'ok')
+
+    def tearDown(self) -> None:
+        try:
+            if db._conn is not None:
+                db._conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        db._conn = None
+        config.DB_PATH = self._orig_db
+        self._tmp.cleanup()
+
+    def test_task_pages_do_not_overlap(self) -> None:
+        p1 = db.list_task_logs(limit=20, offset=0)
+        p2 = db.list_task_logs(limit=20, offset=20)
+        self.assertEqual(len(p1), 20)
+        self.assertEqual(len(p2), 20)
+        self.assertFalse({r['id'] for r in p1} & {r['id'] for r in p2}, '两页不应重叠')
+
+    def test_can_reach_last_page(self) -> None:
+        """分页的意义就是能翻到全部历史（原先硬截断在 500 条）。"""
+        total = db.count_task_logs()
+        self.assertEqual(total, 120)
+        last = db.list_task_logs(limit=20, offset=100)
+        self.assertEqual(len(last), 20, '最后一页应能取到剩余 20 条')
+
+    def test_offset_beyond_end_is_empty(self) -> None:
+        self.assertEqual(db.list_task_logs(limit=20, offset=9999), [])
+
+    def test_count_matches_kind_filter(self) -> None:
+        travel = db.count_task_logs(kind='travel')
+        self.assertEqual(travel, 60)
+        # 筛选后的 count 必须与「取满全部」的结果条数一致
+        self.assertEqual(len(db.list_task_logs(limit=500, kind='travel')), travel)
+
+    def test_days_filter(self) -> None:
+        all_n = db.count_task_logs()
+        recent = db.count_task_logs(days=1)
+        self.assertLess(recent, all_n, '时间范围应缩小结果集')
+        self.assertGreater(recent, 0)
+
+    def test_stats_respect_days(self) -> None:
+        """概览必须与列表同一时间范围，否则数字对不上。"""
+        st = db.task_log_stats(days=1)
+        self.assertEqual(st['total'], db.count_task_logs(days=1))
+
+    def test_checkin_pagination(self) -> None:
+        self.assertEqual(db.count_checkin_logs(), 35)
+        first = db.list_checkin_logs(limit=20, offset=0)
+        second = db.list_checkin_logs(limit=20, offset=20)
+        self.assertEqual(len(first), 20)
+        self.assertEqual(len(second), 15, '最后一页取剩余')
+        self.assertFalse({r['id'] for r in first} & {r['id'] for r in second})
+
+    def test_limit_is_capped(self) -> None:
+        """limit 上限收紧到 500，避免一次拉全量。"""
+        self.assertLessEqual(len(db.list_task_logs(limit=99999)), 500)
+        self.assertLessEqual(len(db.list_checkin_logs(limit=99999)), 500)
 
 
 if __name__ == '__main__':

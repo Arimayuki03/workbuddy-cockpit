@@ -1,9 +1,11 @@
 'use client';
 
-import {useCallback, useEffect, useMemo, useState} from 'react';
+import {useCallback, useEffect, useState} from 'react';
 import {
   CalendarCheck,
   Cat,
+  ChevronLeft,
+  ChevronRight,
   Filter,
   History,
   RefreshCw,
@@ -28,6 +30,13 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 
 /** 来源说明（本端触发的签到） */
 const SOURCE_LABELS: Record<string, string> = {
@@ -41,6 +50,18 @@ function resultText(l: TaskLog): string {
   return l.message_cn || l.message;
 }
 
+/** 每页条数：签到行较矮、内容更同质，可以多放几条；任务行较高，少放 */
+const PAGE_SIZE = 20;
+const CHECKIN_PAGE_SIZE = 12;
+
+/** 时间范围选项（与请求日志页保持一致的说法） */
+const RANGES = [
+  {value: '1', label: '近 24 小时'},
+  {value: '7', label: '近 7 天'},
+  {value: '30', label: '近 30 天'},
+  {value: '90', label: '近 90 天'},
+];
+
 /** 任务日志的结果等级配色 */
 const LEVEL_TONE: Record<string, string> = {
   credit: 'text-emerald-600 dark:text-emerald-400',
@@ -50,33 +71,111 @@ const LEVEL_TONE: Record<string, string> = {
   error: 'text-red-600 dark:text-red-400',
 };
 
+/** 分页控件（与请求日志页保持一致的交互） */
+function Pager({
+  page,
+  pages,
+  size,
+  total,
+  noun,
+  onChange,
+}: {
+  page: number;
+  pages: number;
+  /** 每页条数（两块列表不同） */
+  size: number;
+  total: number;
+  noun: string;
+  onChange: (p: number) => void;
+}) {
+  const from = total === 0 ? 0 : (page - 1) * size + 1;
+  const to = Math.min(page * size, total);
+  return (
+    <div className="flex items-center justify-between border-t border-border/40 px-4 py-2.5">
+      <div className="text-[11px] tabular-nums text-muted-foreground">
+        共 {fmtNumber(total)} {noun}
+        {total > 0 && (
+          <span className="ml-1">· 第 {from}–{to} 条 · 第 {page} / {pages} 页</span>
+        )}
+      </div>
+      <div className="flex gap-1">
+        <Button
+          variant="outline"
+          size="icon"
+          className="h-7 w-7 rounded-md"
+          disabled={page <= 1}
+          onClick={() => onChange(Math.max(1, page - 1))}
+        >
+          <ChevronLeft className="h-3.5 w-3.5" />
+        </Button>
+        <Button
+          variant="outline"
+          size="icon"
+          className="h-7 w-7 rounded-md"
+          disabled={page >= pages}
+          onClick={() => onChange(Math.min(pages, page + 1))}
+        >
+          <ChevronRight className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export default function TasksPage() {
   const {isAdmin} = useAuth();
+
+  // 两块列表都分页：历史只增不减，若一次全渲染，页面会随记录数无限变长
+  // （实测 500 条任务日志 = 19 屏、9000 个 DOM 节点）。
   const [checkinLogs, setCheckinLogs] = useState<CheckinLog[]>([]);
-  const [upstreamLines, setUpstreamLines] = useState<string[]>([]);
+  const [checkinTotal, setCheckinTotal] = useState(0);
+  const [checkinPage, setCheckinPage] = useState(1);
+  const [checkinDays, setCheckinDays] = useState('7');
+
   const [taskLogs, setTaskLogs] = useState<TaskLog[]>([]);
   const [taskStats, setTaskStats] = useState<TaskLogResponse['stats'] | null>(null);
   const [kindLabels, setKindLabels] = useState<Record<string, string>>({});
   const [taskFilter, setTaskFilter] = useState<string>('all');
+  const [taskDays, setTaskDays] = useState('7');
+  const [taskPage, setTaskPage] = useState(1);
+  /** 当前筛选下的总条数（不是全局统计）——分页必须用它算页数 */
+  const [taskTotal, setTaskTotal] = useState(0);
+
+  const [upstreamLines, setUpstreamLines] = useState<string[]>([]);
   const [collectBusy, setCollectBusy] = useState(false);
 
   const load = useCallback(async () => {
     const [logRes, ulRes, taskRes] = await Promise.allSettled([
-      accountApi.checkinLogs(200),
+      accountApi.checkinLogs(
+        CHECKIN_PAGE_SIZE,
+        (checkinPage - 1) * CHECKIN_PAGE_SIZE,
+        undefined,
+        Number(checkinDays),
+      ),
       accountApi.upstreamLogs(300),
-      accountApi.taskLogs(500),
+      accountApi.taskLogs(
+        PAGE_SIZE,
+        (taskPage - 1) * PAGE_SIZE,
+        taskFilter === 'all' ? undefined : taskFilter,
+        undefined,
+        Number(taskDays),
+      ),
     ]);
-    if (logRes.status === 'fulfilled') setCheckinLogs(logRes.value);
+    if (logRes.status === 'fulfilled') {
+      setCheckinLogs(logRes.value.items);
+      setCheckinTotal(logRes.value.total);
+    }
     if (ulRes.status === 'fulfilled') setUpstreamLines(ulRes.value.lines);
     if (taskRes.status === 'fulfilled') {
       setTaskLogs(taskRes.value.logs);
+      setTaskTotal(taskRes.value.total);
       setTaskStats(taskRes.value.stats);
       setKindLabels(taskRes.value.kinds);
     }
     if (logRes.status === 'rejected' && taskRes.status === 'rejected') {
       notify.err(errText(logRes.reason ?? taskRes.reason));
     }
-  }, []);
+  }, [checkinPage, checkinDays, taskPage, taskFilter, taskDays]);
 
   useEffect(() => {
     load();
@@ -90,6 +189,9 @@ export default function TasksPage() {
     setCollectBusy(true);
     try {
       const r = await accountApi.collectTaskLogs();
+      // 新记录排在最前，回到第 1 页才能看到刚采到的
+      setTaskPage(1);
+      setCheckinPage(1);
       await load();
       if (r.added > 0) notify.ok('已采集新记录', `新增 ${r.added} 条任务日志`);
       else notify.info('暂无新记录', '上游还没有产生新的自动任务日志');
@@ -107,10 +209,10 @@ export default function TasksPage() {
     return l.nickname || uid;
   }
 
-  const filteredTasks = useMemo(
-    () => taskLogs.filter((l) => taskFilter === 'all' || l.kind === taskFilter),
-    [taskLogs, taskFilter],
-  );
+  // 筛选与分页都在服务端完成，这里直接用返回的当前页
+  const filteredTasks = taskLogs;
+  const taskPages = Math.max(1, Math.ceil(taskTotal / PAGE_SIZE));
+  const checkinPages = Math.max(1, Math.ceil(checkinTotal / CHECKIN_PAGE_SIZE));
 
   return (
     <div className="flex flex-col gap-4 md:gap-6">
@@ -120,7 +222,8 @@ export default function TasksPage() {
       />
 
       {/* 签到记录 + 上游原始日志 */}
-      <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      {/* items-start：两块各自决定高度，签到不再被右栏拉伸、右栏也不留大片空白 */}
+      <section className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
         <div className="overflow-hidden rounded-[20px] bg-muted">
           <div className="flex items-center justify-between px-4 py-3">
             <div className="flex items-center gap-2 text-sm font-medium">
@@ -130,7 +233,16 @@ export default function TasksPage() {
                 （本端触发：手动 / 批量 / 添加账号）
               </span>
             </div>
-            {isAdmin && checkinLogs.length > 0 && (
+            <div className="flex items-center gap-2">
+              <Select value={checkinDays} onValueChange={(v) => { setCheckinDays(v); setCheckinPage(1); }}>
+                <SelectTrigger className="h-7 w-[116px] rounded-full text-[11px]"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {RANGES.map((r) => (
+                    <SelectItem key={r.value} value={r.value} className="text-xs">{r.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            {isAdmin && checkinTotal > 0 && (
               <ConfirmDialog
                 title="清空签到记录？"
                 description="仅删除本端的签到历史记录，不影响账号与上游数据。"
@@ -149,36 +261,39 @@ export default function TasksPage() {
                 }
               />
             )}
+            </div>
           </div>
 
           {checkinLogs.length ? (
             <>
               {/* 手机端：卡片 */}
-              <div className="space-y-1.5 px-3.5 pb-4 md:hidden">
-                {checkinLogs.slice(0, 60).map((l) => (
-                  <div key={l.id} className="rounded-xl bg-background/60 px-3 py-2">
+              <div className="space-y-1 px-3.5 pb-4 md:hidden">
+                {checkinLogs.map((l) => (
+                  <div key={l.id} className="rounded-xl bg-background/60 px-3 py-1.5">
                     <div className="flex items-center justify-between gap-2">
                       <span className="truncate text-xs font-medium">{l.nickname || l.uid || '—'}</span>
-                      {l.success ? (
-                        <Badge variant="secondary" className="shrink-0 rounded-full text-emerald-600 dark:text-emerald-400">
-                          {l.message || '成功'}
-                        </Badge>
-                      ) : (
-                        <Badge variant="destructive" className="shrink-0 rounded-full" title={l.message}>
-                          {l.message || '失败'}
-                        </Badge>
-                      )}
+                      <span
+                        className={
+                          'shrink-0 text-[11px] font-medium ' +
+                          (l.success
+                            ? 'text-emerald-600 dark:text-emerald-400'
+                            : 'text-red-600 dark:text-red-400')
+                        }
+                        title={l.message}
+                      >
+                        {l.message || (l.success ? '成功' : '失败')}
+                      </span>
                     </div>
-                    <div className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground">
-                      <span>{SOURCE_LABELS[l.source] || l.source}</span>
-                      <span className="tabular-nums">{fmtDateTime(l.ts)}</span>
+                    <div className="mt-0.5 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+                      <span className="truncate tabular-nums">{fmtDateTime(l.ts)}</span>
+                      <span className="shrink-0">{SOURCE_LABELS[l.source] || l.source}</span>
                     </div>
                   </div>
                 ))}
               </div>
 
               <div className="hidden md:block">
-                <Table>
+                <Table className="[&_td]:py-1 [&_th]:h-8">
                   <TableHeader>
                     <TableRow className="border-b border-border/60 hover:bg-transparent">
                       <TableHead className="pl-4 text-[11px] text-muted-foreground">时间</TableHead>
@@ -188,7 +303,7 @@ export default function TasksPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {checkinLogs.slice(0, 60).map((l) => (
+                    {checkinLogs.map((l) => (
                       <TableRow key={l.id} className="border-b border-border/40">
                         <TableCell className="pl-4 text-xs tabular-nums text-muted-foreground">
                           {fmtDateTime(l.ts)}
@@ -198,15 +313,17 @@ export default function TasksPage() {
                           {SOURCE_LABELS[l.source] || l.source}
                         </TableCell>
                         <TableCell className="pr-4">
-                          {l.success ? (
-                            <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">
-                              {l.message || '成功'}
-                            </Badge>
-                          ) : (
-                            <Badge variant="destructive" className="rounded-full" title={l.message}>
-                              {l.message || '失败'}
-                            </Badge>
-                          )}
+                          <span
+                            className={
+                              'text-[11px] font-medium ' +
+                              (l.success
+                                ? 'text-emerald-600 dark:text-emerald-400'
+                                : 'text-red-600 dark:text-red-400')
+                            }
+                            title={l.message}
+                          >
+                            {l.message || (l.success ? '成功' : '失败')}
+                          </span>
                         </TableCell>
                       </TableRow>
                     ))}
@@ -219,6 +336,15 @@ export default function TasksPage() {
               暂无签到记录。在「账号管理」点「全部签到」或单个账号的 🎁 会在此留痕。
             </div>
           )}
+
+          <Pager
+            page={checkinPage}
+            pages={checkinPages}
+            size={CHECKIN_PAGE_SIZE}
+            total={checkinTotal}
+            noun="条记录"
+            onChange={setCheckinPage}
+          />
         </div>
 
         <div className="overflow-hidden rounded-[20px] bg-muted">
@@ -233,7 +359,7 @@ export default function TasksPage() {
             <span className="text-[11px] text-muted-foreground">来自容器日志</span>
           </div>
           {upstreamLines.length ? (
-            <div className="max-h-[320px] overflow-auto px-4 pb-3">
+            <div className="max-h-[446px] overflow-auto px-4 pb-3">
               <pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-muted-foreground">
                 {upstreamLines.slice(-60).join('\n')}
               </pre>
@@ -261,6 +387,18 @@ export default function TasksPage() {
             </span>
           </div>
           <div className="flex items-center gap-2">
+            <Select value={taskDays} onValueChange={(v) => { setTaskDays(v); setTaskPage(1); }}>
+              <SelectTrigger className="h-7 w-[116px] rounded-full text-[11px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {RANGES.map((r) => (
+                  <SelectItem key={r.value} value={r.value} className="text-xs">
+                    {r.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             {taskStats && taskStats.total > 0 && (
               <Badge variant="secondary" className="rounded-full tabular-nums">
                 共 {fmtNumber(taskStats.total)} 条
@@ -281,7 +419,7 @@ export default function TasksPage() {
               <RefreshCw className={collectBusy ? 'animate-spin' : ''} />
               立即采集
             </Button>
-            {isAdmin && taskLogs.length > 0 && (
+            {isAdmin && taskTotal > 0 && (
               <ConfirmDialog
                 title="清空任务记录？"
                 description="仅删除管理端采集留存的记录，不影响账号与上游运行。"
@@ -315,7 +453,7 @@ export default function TasksPage() {
                 <button
                   key={t.id}
                   type="button"
-                  onClick={() => setTaskFilter(t.id)}
+                  onClick={() => { setTaskFilter(t.id); setTaskPage(1); }}
                   className={
                     'rounded-full px-2.5 py-1 text-[11px] transition-colors ' +
                     (active
@@ -416,6 +554,15 @@ export default function TasksPage() {
             想立刻看到结果，点右上角「立即采集」。
           </div>
         )}
+
+        <Pager
+          page={taskPage}
+          pages={taskPages}
+          size={PAGE_SIZE}
+          total={taskTotal}
+          noun="条记录"
+          onChange={setTaskPage}
+        />
       </section>
     </div>
   );
