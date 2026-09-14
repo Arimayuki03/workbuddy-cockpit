@@ -105,21 +105,57 @@ def add_user(body: UserIn, user: dict = Depends(security.require_admin)) -> dict
 
 @router.patch('/users/{username}')
 def update_user(username: str, body: UserPatch, user: dict = Depends(security.require_admin)) -> dict:
+    """改密码 / 改角色。
+
+    两种改动都必须**吊销该用户既有会话**：
+      - 改密码：否则被盗会话在改密码后仍能用到过期（7 天）——本次事故里攻击者
+        改掉 admin 密码后，真正管理员手里的旧会话不该还能管理后台
+      - 改角色：权限必须立即生效，不能等 cookie 过期（载荷里的 role 只是快照）
+
+    吊销按用户进行（递增其 sv），不影响其他已登录用户。
+    """
     cfg = security.load_users()
     target = next((u for u in cfg.get('users', []) if u.get('username') == username), None)
     if not target:
         raise HTTPException(status_code=404, detail='用户不存在')
 
+    changed_pwd = changed_role = False
     if body.password:
-        target['pwd_hash'] = security.make_hash(body.password)
+        pw = str(body.password)
+        # 现在不再接受空/极短口令：管理端是公网入口，弱口令等于没有防护
+        if len(pw) < 8:
+            raise HTTPException(status_code=400, detail='密码至少 8 位')
+        target['pwd_hash'] = security.make_hash(pw)
+        changed_pwd = True
     if body.role and body.role != target.get('role'):
         admins = [u for u in cfg.get('users', []) if u.get('role') == 'admin']
         if target.get('role') == 'admin' and len(admins) <= 1:
             raise HTTPException(status_code=400, detail='至少保留一个管理员')
         target['role'] = body.role
+        changed_role = True
+
+    if changed_pwd or changed_role:
+        try:
+            target['sv'] = int(target.get('sv') or 0) + 1
+        except (TypeError, ValueError):
+            target['sv'] = 1
 
     security.save_users(cfg)
-    return {'username': target['username'], 'role': target.get('role', 'viewer')}
+    if changed_pwd or changed_role:
+        parts = []
+        if changed_pwd:
+            parts.append('改密码')
+        if changed_role:
+            parts.append('改角色')
+        security.audit(user, 'update_user', username, '、'.join(parts))
+    # 把自己的密码改了，当前会话也会失效——前端据此提示重新登录
+    self_revoked = bool(changed_pwd and username == user.get('username'))
+    return {
+        'username': target['username'],
+        'role': target.get('role', 'viewer'),
+        'sessions_revoked': changed_pwd or changed_role,
+        'relogin_required': self_revoked,
+    }
 
 
 @router.delete('/users/{username}')
@@ -136,4 +172,21 @@ def delete_user(username: str, user: dict = Depends(security.require_admin)) -> 
         raise HTTPException(status_code=400, detail='不能删除当前登录用户')
     cfg['users'] = [u for u in users if u.get('username') != username]
     security.save_users(cfg)
+    security.audit(user, 'delete_user', username)
     return {'ok': True}
+
+
+@router.get('/audit-logs')
+def audit_logs(
+    limit: int = 200,
+    offset: int = 0,
+    user: dict = Depends(security.require_admin),
+) -> dict:
+    """管理端审计日志（登录、改密码、增删用户、改安全配置等）。
+
+    仅管理员可读：里面含用户名与来源 IP，属于敏感信息。
+    """
+    return {
+        'items': db.list_audit_logs(limit=limit, offset=offset),
+        'total': db.count_audit_logs(),
+    }

@@ -1668,11 +1668,22 @@ export default function SettingsPage() {
                             size="sm"
                             className="h-7 rounded-full text-xs"
                             onClick={async () => {
-                              const pwd = window.prompt(`为「${u.username}」设置新密码：`);
+                              const pwd = window.prompt(
+                                `为「${u.username}」设置新密码（至少 8 位）：`);
                               if (!pwd) return;
                               try {
-                                await settingsApi.updateUser(u.username, {password: pwd});
-                                notify.ok('密码已更新');
+                                const r = await settingsApi.updateUser(u.username, {password: pwd});
+                                // 改密码会吊销该用户既有会话。若改的是自己，
+                                // 当前登录态也随之失效——必须明确告知要去重新登录，
+                                // 否则用户会以为「界面卡住了」（下次请求就是 401）。
+                                if (r?.relogin_required) {
+                                  notify.ok('密码已更新', '当前登录状态已失效，请用新密码重新登录');
+                                  window.setTimeout(() => {
+                                    window.location.href = '/login';
+                                  }, 1800);
+                                  return;
+                                }
+                                notify.ok('密码已更新', '该用户的其他登录状态已全部失效');
                               } catch (e) {
                                 notify.err(errText(e));
                               }

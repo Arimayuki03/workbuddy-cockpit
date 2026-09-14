@@ -205,7 +205,7 @@ async def account_checkin(filename: str, user: dict = Depends(security.require_a
 async def account_credits(
     filename: str,
     force: bool = False,
-    user: dict = Depends(security.current_user),
+    user: dict = Depends(security.require_admin),
 ) -> dict:
     """查询单个账号的实时积分余额（直接向腾讯查询，带 60s 缓存）。
 
@@ -222,7 +222,7 @@ async def account_credits(
 @router.post('/accounts/refresh-credits')
 async def refresh_all_credits(
     force: bool = True,
-    user: dict = Depends(security.current_user),
+    user: dict = Depends(security.require_admin),
 ) -> dict:
     """并发查询所有账号的积分，返回 {uid: credits} 与每条是否来自缓存。
 

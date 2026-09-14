@@ -126,9 +126,18 @@ def _unsign(token: str, secret: str) -> dict | None:
 
 
 def issue_token(username: str, role: str) -> str:
+    """签发会话 cookie。
+
+    载荷里带 `sv`（session version）：该用户当前的会话版本号。改密码 / 改角色 /
+    「吊销会话」都会递增它，于是**已签发的 cookie 立即失效**——否则被盗会话
+    即使改了密码也还能继续用到 7 天过期。role 仍写进载荷仅作展示参考，
+    鉴权一律以用户表为准（见 current_user）。
+    """
     cfg = load_users()
+    sv = session_version(cfg, username)
     payload = json.dumps(
-        {'username': username, 'role': role, 'exp': int(time.time()) + config.SESSION_DAYS * 86400}
+        {'username': username, 'role': role, 'sv': sv,
+         'exp': int(time.time()) + config.SESSION_DAYS * 86400}
     )
     return _sign(payload, cfg['secret'])
 
@@ -156,14 +165,30 @@ MAX_TRACKED = 5000
 
 
 def _prune(store: dict[str, list]) -> None:
-    """超限时清掉已过期条目；仍超限则整体清空（宁可放宽，不可被撑爆）。"""
+    """超限时淘汰**已经过了锁定窗口**的条目，绝不整体清空。
+
+    为什么不能清空：这些字典承载登录失败计数。原实现超限即 `store.clear()`，
+    于是攻击者只要用大量不存在的用户名（或伪造来源 IP）把字典灌满，就能
+    **顺手把 admin 的锁定计数一起抹掉**，之后可以无限猜密码。
+    「宁可放宽也不被撑爆」这个取舍对内存成立，但对**安全计数器**不成立。
+
+    淘汰规则按安全性排序：
+      1. 只淘汰 `first` 已超过 LOCK_SECONDS 的条目（它们本来就不再锁定谁）
+      2. 仍在锁定窗口内的条目**一条都不动**——哪怕因此略微超出上限
+    这样上限不再是硬保证，但超出的部分有界（窗口内最多被灌这么多条），
+    而「锁定不可被抹掉」这个安全属性是硬的。上限的意义是防内存爆炸，
+    LOCK_SECONDS 只有 10 分钟，窗口内的条目数受请求速率与时间共同约束。
+    """
     if len(store) <= MAX_TRACKED:
         return
     now = time.time()
-    for k in [k for k, v in store.items() if (now - v[1]) >= LOCK_SECONDS]:
+    expired = [k for k, v in store.items() if (now - v[1]) >= LOCK_SECONDS]
+    if not expired:
+        # 全都在锁定窗口内：不清空、不淘汰。宁可暂时超出上限，也不能放宽锁定。
+        return
+    # 优先淘汰最旧的过期条目，留一点余量避免每次请求都触发
+    for k in sorted(expired, key=lambda k: store[k][1])[: len(expired)]:
         store.pop(k, None)
-    if len(store) > MAX_TRACKED:
-        store.clear()
 
 
 def login_blocked(ip: str, username: str | None = None) -> bool:
@@ -203,18 +228,96 @@ def clear_fail(ip: str, username: str | None = None) -> None:
         _user_fail.pop(username.lower(), None)
 
 
+# ── 会话吊销 ─────────────────────────────────────────────
+# 每个用户带一个会话版本号 sv（存在 users.json 的该用户条目上，缺省 0）。
+# 递增它 = 立即让该用户已签发的所有 cookie 失效。用于：
+#   - 改密码后（被盗会话不能继续用）
+#   - 改角色后（旧权限快照作废）
+#   - 管理员手动「吊销会话」
+# 为什么不用全局 epoch：那会连带把其他用户的登录踢掉，属于过度杀伤。
+def session_version(cfg: dict, username: str) -> int:
+    for u in cfg.get('users', []):
+        if u.get('username') == username:
+            try:
+                return int(u.get('sv') or 0)
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
+def revoke_sessions(username: str) -> int:
+    """递增该用户的会话版本，返回新值。其全部既有 cookie 立即失效。"""
+    cfg = load_users()
+    new_sv = 0
+    for u in cfg.get('users', []):
+        if u.get('username') == username:
+            try:
+                new_sv = int(u.get('sv') or 0) + 1
+            except (TypeError, ValueError):
+                new_sv = 1
+            u['sv'] = new_sv
+            break
+    save_users(cfg)
+    return new_sv
+
+
+def audit(actor: dict | None, action: str, target: str = '', detail: str = '') -> None:
+    """记录一条管理端审计日志。
+
+    为什么必须做：本次事故中，攻击者改掉管理员密码、建了自己的账号，而**服务端
+    没有留下任何痕迹**——只能靠反代 access log 去猜。管理端是公网入口，
+    敏感操作（登录、改密码、增删用户、改安全配置）必须可追溯。
+
+    审计属于旁路，任何异常都不能影响请求本身（与请求日志同样的处理原则）。
+    """
+    try:
+        from . import db
+        db.add_audit_log(
+            (actor or {}).get('username') or 'anonymous',
+            str(action),
+            str(target or ''),
+            str(detail or '')[:500],
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # ── FastAPI 依赖 ─────────────────────────────────────────
 def current_user(request: Request) -> dict:
+    """解析请求身份。**这是管理端唯一的身份入口**。
+
+    仅接受签名 cookie，并且必须**回查用户表**：
+
+      - role 以表里的为准，不用 cookie 里的快照（否则降权后旧 cookie 仍是管理员）
+      - 用户已被删除 → 拒绝（否则删号后其 cookie 在有效期内仍然通行）
+      - 会话版本不匹配 → 拒绝（改密码 / 吊销后旧 cookie 立即失效）
+
+    安全事件记录（2026-09-14）：这里**曾经**接受 `X-API-Key` 头，只要它出现在
+    `users.json` 的 `api_keys` 数组里就直接授予 admin。那个数组没有任何代码
+    去写、没有管理界面，唯一作用就是这条提权后门；而它在早前的路径穿越里
+    与 secret 一起泄露，直接导致生产站管理员被改密码。**已彻底移除**：
+    管理端身份只认签名 cookie。下游调用请用网关的 `/v1/*`（那套密钥走
+    SQLite api_keys 表、只授权模型调用，与后台权限无关）。
+    """
     cfg = load_users()
     token = request.cookies.get(config.COOKIE_NAME)
-    if token:
-        obj = _unsign(token, cfg['secret'])
-        if obj:
-            return {'username': obj.get('username'), 'role': obj.get('role', 'viewer')}
-    api_key = request.headers.get('x-api-key')
-    if api_key and api_key in cfg.get('api_keys', []):
-        return {'username': 'api', 'role': 'admin'}
-    raise HTTPException(status_code=401, detail='未登录')
+    if not token:
+        raise HTTPException(status_code=401, detail='未登录')
+    obj = _unsign(token, cfg['secret'])
+    if not obj:
+        raise HTTPException(status_code=401, detail='未登录')
+
+    username = str(obj.get('username') or '')
+    if not username:
+        raise HTTPException(status_code=401, detail='未登录')
+    row = next((u for u in cfg.get('users', []) if u.get('username') == username), None)
+    if not row:
+        # 用户已被删除：其 token 不应继续有效
+        raise HTTPException(status_code=401, detail='未登录')
+    if int(obj.get('sv') or 0) != session_version(cfg, username):
+        # 改密码 / 改角色 / 手动吊销之后，旧 token 作废
+        raise HTTPException(status_code=401, detail='登录状态已失效，请重新登录')
+    return {'username': username, 'role': row.get('role', 'viewer')}
 
 
 def require_admin(user: dict = Depends(current_user)) -> dict:

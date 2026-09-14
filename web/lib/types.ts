@@ -495,3 +495,22 @@ export interface PlaygroundModels {
   source: CatalogSourceKind;
   source_label: string;
 }
+
+/* ── 管理端审计日志 ─────────────────────────────────── */
+
+export interface AuditLog {
+  id: number;
+  ts: number;
+  /** 操作者用户名（anonymous 表示未认证） */
+  actor: string;
+  /** login / login_failed / update_user / delete_user ... */
+  action: string;
+  target: string;
+  detail: string;
+  ip: string;
+}
+
+export interface AuditLogPage {
+  items: AuditLog[];
+  total: number;
+}

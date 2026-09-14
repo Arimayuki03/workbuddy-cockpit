@@ -94,6 +94,19 @@ CREATE TABLE IF NOT EXISTS usage_daily (
   PRIMARY KEY (day, key_id, model)
 );
 
+-- 管理端审计日志：登录、改密码、增删用户、改安全配置等敏感操作留痕。
+-- 为什么单独一张表：这些操作不产生请求日志（那是网关的），出了事无从追溯。
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts       INTEGER NOT NULL,
+  actor    TEXT NOT NULL DEFAULT '',   -- 操作者用户名（anonymous = 未认证）
+  action   TEXT NOT NULL DEFAULT '',   -- login / update_user / delete_user ...
+  target   TEXT NOT NULL DEFAULT '',   -- 被操作对象（如被改的用户名）
+  detail   TEXT NOT NULL DEFAULT '',
+  ip       TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_logs(ts);
+
 CREATE TABLE IF NOT EXISTS ip_rules (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   kind       TEXT    NOT NULL,
@@ -355,6 +368,32 @@ def add_task_logs(entries: list[dict]) -> int:
         )
         conn.commit()
         return conn.total_changes - before
+
+
+def add_audit_log(actor: str, action: str, target: str = '',
+                  detail: str = '', ip: str = '') -> None:
+    """写一条管理端审计日志。由 security.audit 调用（那里已兜底异常）。"""
+    execute(
+        'INSERT INTO audit_logs(ts, actor, action, target, detail, ip) VALUES(?, ?, ?, ?, ?, ?)',
+        (int(time.time()), actor[:64], action[:32], target[:128], detail[:500], ip[:64]),
+    )
+
+
+def list_audit_logs(limit: int = 200, offset: int = 0) -> list[dict]:
+    rows = query(
+        'SELECT * FROM audit_logs ORDER BY id DESC LIMIT ? OFFSET ?',
+        (min(1000, max(1, limit)), max(0, int(offset))),
+    )
+    return [dict(r) for r in rows]
+
+
+def count_audit_logs() -> int:
+    row = query_one('SELECT COUNT(*) AS n FROM audit_logs')
+    return int(row['n']) if row else 0
+
+
+def clear_audit_logs() -> None:
+    execute('DELETE FROM audit_logs')
 
 
 def _task_log_where(
