@@ -295,7 +295,7 @@ def list_checkin_logs(
     clause, args = _checkin_where(uid, days)
     rows = query(
         f'SELECT * FROM checkin_logs{clause} ORDER BY id DESC LIMIT ? OFFSET ?',
-        (*args, min(500, max(1, limit)), max(0, int(offset))),
+        (*args, min(2000, max(1, limit)), max(0, int(offset))),
     )
     return [
         {
@@ -387,7 +387,7 @@ def list_task_logs(
     clause, args = _task_log_where(uid, kind, days)
     rows = query(
         f'SELECT * FROM task_logs{clause} ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?',
-        (*args, min(500, max(1, limit)), max(0, int(offset))),
+        (*args, min(2000, max(1, limit)), max(0, int(offset))),
     )
     return [
         {

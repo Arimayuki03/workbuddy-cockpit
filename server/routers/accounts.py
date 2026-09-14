@@ -267,15 +267,70 @@ def checkin_logs(
     days: int | None = None,
     user: dict = Depends(security.current_user),
 ) -> dict:
-    """签到记录（分页）。
+    """签到记录（分页）：**本端触发的 + 上游自动签到的**统一视图。
 
-    返回 items + total（**当前筛选下**的总数）。历史只增不减，
-    不分页的话列表会无限增长；total 也必须是筛选后的值，
-    否则界面会拿全量数字去算页数，出现空页。
+    为什么要合并：签到记录原先只写本端触发的（手动 / 批量 / 添加账号），而上游
+    定时签到的结果由日志采集器写进 task_logs。于是「自动签到」在签到记录里
+    永远看不到——用户反馈的「自动签到不显示」就是这个。
+
+    上游对签到成功是静默的（只打一行 `checkin done: total=.. ok=..` 汇总 + 失败明细），
+    所以自动签到侧提供的是**每轮汇总/异常行**，不是逐账号成功明细；这一点在
+    界面上如实标注，不假装有更细的数据。
+
+    两张表各自条数都不大，按 ts 归并后在 Python 侧分页，避免为跨表分页写
+    UNION + 双重 LIMIT 的复杂 SQL。
+
+    候选量必须覆盖到「当前页的末尾」，不能固定取前 N 条：合并是按时间排序的，
+    若只取各表最近的 500 条，落在 500 名之后的记录会永远翻不到，而 total 又是
+    真实全量——界面会显示「共 810 条」却翻不出后面 300 条。因此按 offset+limit
+    取候选（各表都取这么多，够覆盖最坏情况：全部记录都来自同一张表）。
     """
+    start = max(0, int(offset))
+    size = min(500, max(1, int(limit)))
+    # 各表都取到 start+size，保证合并后第 start..start+size 条一定在候选里
+    want = start + size
+
+    local = db.list_checkin_logs(limit=want, uid=uid, offset=0, days=days)
+    local_total = db.count_checkin_logs(uid=uid, days=days)
+    local_items = [{**r, 'auto': False} for r in local]
+
+    # 上游自动签到（采集器落库的 kind='checkin'）
+    auto_rows = db.list_task_logs(limit=want, uid=uid, kind='checkin', offset=0, days=days)
+    auto_total = db.count_task_logs(uid=uid, kind='checkin', days=days)
+    auto_items = [
+        {
+            # 与 checkin_logs 的 id 空间不同，加偏移前缀避免前端 key 冲突
+            'id': 10**9 + int(r['id']),
+            'ts': r['ts'],
+            'uid': r['uid'],
+            'nickname': r.get('nickname') or '',
+            'source': 'auto',
+            'kind': 'checkin',
+            # 汇总行不代表单个账号成功，success 仅用于界面着色，不参与判定
+            'success': r.get('level') != 'error',
+            'code': None,
+            'message': r.get('message_cn') or r.get('message') or '',
+            'auto': True,
+        }
+        for r in auto_rows
+    ]
+
+    merged = sorted(local_items + auto_items, key=lambda x: x['ts'], reverse=True)
+
+    # 自动侧的行也要解析昵称（上游只带 uid 前 8 位）；本端的已有昵称
+    resolve_nick = _nickname_resolver()
+    for it in merged:
+        if not it.get('nickname'):
+            it['nickname'] = resolve_nick(str(it.get('uid') or ''))
+
+    start = max(0, int(offset))
+    end = start + min(500, max(1, int(limit)))
     return {
-        'items': db.list_checkin_logs(limit=limit, uid=uid, offset=offset, days=days),
-        'total': db.count_checkin_logs(uid=uid, days=days),
+        'items': merged[start:end],
+        'total': local_total + auto_total,
+        # 分别给出，便于界面说明「本端 N 条 / 自动 M 条」
+        'local_total': local_total,
+        'auto_total': auto_total,
     }
 
 
@@ -283,6 +338,42 @@ def checkin_logs(
 def clear_checkin_logs(user: dict = Depends(security.require_admin)) -> dict:
     db.clear_checkin_logs()
     return {'ok': True}
+
+
+def _nickname_resolver() -> object:
+    """构造 uid → 昵称的解析函数。
+
+    上游 2026-09-12 起把日志里的 uid 截成前 8 位，而账号表里是完整 uuid，
+    无法直接相等匹配，因此按前缀解析；前缀命中多个账号（理论可能）时不猜，
+    保留 uid 原文。签到记录与任务记录都用它，避免两处口径不一致。
+    """
+    nick_by_uid: dict[str, str] = {}
+    nick_by_prefix: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    try:
+        for acc in wb2api.list_auth_accounts():
+            auid = str(acc.get('uid') or '')
+            nick = str(acc.get('nickname') or '')
+            if not auid or not nick:
+                continue
+            nick_by_uid[auid] = nick
+            prefix = auid[:8]
+            if prefix in nick_by_prefix and nick_by_prefix[prefix] != nick:
+                ambiguous.add(prefix)
+            else:
+                nick_by_prefix[prefix] = nick
+    except Exception:  # noqa: BLE001
+        pass
+
+    def resolve(uid: str) -> str:
+        if not uid:
+            return ''
+        if uid in nick_by_uid:
+            return nick_by_uid[uid]
+        prefix = uid[:8]
+        return '' if prefix in ambiguous else nick_by_prefix.get(prefix, '')
+
+    return resolve
 
 
 @router.get('/task-logs')
@@ -304,39 +395,12 @@ def task_logs(
     """
     logs = db.list_task_logs(limit=limit, uid=uid, kind=kind, offset=offset, days=days)
 
-    # uid → 昵称。上游 2026-09-12 起把日志里的 uid 截成前 8 位，
-    # 而账号表里是完整 uuid，无法直接相等匹配，因此按前缀解析；
-    # 前缀命中多个账号（理论可能）时不猜，保留 uid 原文。
-    nick_by_uid: dict[str, str] = {}
-    nick_by_prefix: dict[str, str] = {}
-    ambiguous: set[str] = set()
-    try:
-        for acc in wb2api.list_auth_accounts():
-            auid = str(acc.get('uid') or '')
-            nick = str(acc.get('nickname') or '')
-            if not auid or not nick:
-                continue
-            nick_by_uid[auid] = nick
-            prefix = auid[:8]
-            if prefix in nick_by_prefix and nick_by_prefix[prefix] != nick:
-                ambiguous.add(prefix)
-            else:
-                nick_by_prefix[prefix] = nick
-    except Exception:  # noqa: BLE001
-        pass
-
+    resolve_nick = _nickname_resolver()
     for row in logs:
         # 结果文案中文化：数据库留英文原文（排查要看上游原话），
         # 接口额外给出 message_cn 供界面展示
         row['message_cn'] = tasklog.translate_message(row.get('message', ''))
-        row_uid = str(row.get('uid') or '')
-        if not row_uid:
-            row['nickname'] = ''
-        elif row_uid in nick_by_uid:
-            row['nickname'] = nick_by_uid[row_uid]
-        else:
-            prefix = row_uid[:8]
-            row['nickname'] = '' if prefix in ambiguous else nick_by_prefix.get(prefix, '')
+        row['nickname'] = resolve_nick(str(row.get('uid') or ''))
 
     return {
         'logs': logs,

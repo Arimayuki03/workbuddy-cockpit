@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from . import config, db, security
 from .iputil import client_ip
 from .routers import (
-    accounts, auth, gateway, keys, logs, models,
+    accounts, auth, gateway, keys, logs, models, playground,
     security as security_router, settings, stats, system,
 )
 from .services import tasklog
@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title='WorkBuddy Manager',
-    version='1.0.20',
+    version='1.0.21',
     lifespan=lifespan,
     # 生产环境默认关闭交互式文档与 OpenAPI 描述：
     # 它们会把管理接口全貌（路径、参数、结构）暴露给任何未认证访问者，
@@ -62,6 +62,7 @@ app.include_router(security_router.router)
 app.include_router(settings.router)
 app.include_router(system.router)
 app.include_router(models.router)
+app.include_router(playground.router)
 app.include_router(gateway.router)
 
 

@@ -38,11 +38,12 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 
-/** 来源说明（本端触发的签到） */
+/** 来源说明（本端触发的签到 + 上游自动签到） */
 const SOURCE_LABELS: Record<string, string> = {
   manual: '手动',
   'manual-batch': '批量',
   add: '添加账号',
+  auto: '上游自动',
 };
 
 /** 结果文案：优先中文，英文原文作为悬浮提示保留 */
@@ -109,6 +110,10 @@ export default function TasksPage() {
   // （实测 500 条任务日志 = 19 屏、9000 个 DOM 节点）。
   const [checkinLogs, setCheckinLogs] = useState<CheckinLog[]>([]);
   const [checkinTotal, setCheckinTotal] = useState(0);
+  /** 其中本端触发的条数（清空按钮据此显示） */
+  const [checkinLocalTotal, setCheckinLocalTotal] = useState(0);
+  /** 其中上游自动签到的条数（清空按钮的说明据此措辞） */
+  const [checkinAutoTotal, setCheckinAutoTotal] = useState(0);
   const [checkinDays, setCheckinDays] = useState('7');
 
   const [taskLogs, setTaskLogs] = useState<TaskLog[]>([]);
@@ -153,6 +158,8 @@ export default function TasksPage() {
     if (logRes.status === 'fulfilled') {
       setCheckinLogs(logRes.value.items);
       setCheckinTotal(logRes.value.total);
+      setCheckinLocalTotal(logRes.value.local_total ?? logRes.value.total);
+      setCheckinAutoTotal(logRes.value.auto_total ?? 0);
     }
     if (ulRes.status === 'fulfilled') setUpstreamLines(ulRes.value.lines);
     if (taskRes.status === 'fulfilled') {
@@ -201,6 +208,21 @@ export default function TasksPage() {
   const checkinTruncated = checkinTotal > checkinLogs.length;
   const taskTruncated = taskTotal > taskLogs.length;
 
+  /**
+   * 概览数字必须跟着筛选走。
+   *
+   * taskStats 是**未筛选**的区间汇总，而列表是按 kind 筛选的：筛选后若还用
+   * 未筛选的数字，会出现「共 62 条」配一个空列表的矛盾显示（用户反馈的
+   * 「余额查询 / 令牌保活 / 自动签到 点进去一片空白」就是这个）。
+   * by_kind 里同时有 count 与 credits，正好给出该筛选下的准确值。
+   */
+  const activeKind = taskFilter !== 'all' ? taskStats?.by_kind?.[taskFilter] : undefined;
+  const shownCount = taskFilter === 'all' ? (taskStats?.total ?? 0) : (activeKind?.count ?? 0);
+  const shownCredits =
+    taskFilter === 'all' ? (taskStats?.total_credits ?? 0) : (activeKind?.credits ?? 0);
+  /** 区间内是否有任何记录——决定筛选栏是否渲染（不能按筛选结果判断，否则会消失） */
+  const hasAnyTask = (taskStats?.total ?? 0) > 0;
+
   return (
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
@@ -246,7 +268,7 @@ export default function TasksPage() {
               <CalendarCheck className="h-4 w-4 shrink-0" />
               <span className="shrink-0">签到记录</span>
               <span className="hidden truncate text-[11px] font-normal text-muted-foreground sm:inline">
-                （本端触发：手动 / 批量 / 添加账号）
+                （本端触发 + 上游自动签到）
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -258,10 +280,21 @@ export default function TasksPage() {
                   ))}
                 </SelectContent>
               </Select>
-            {isAdmin && checkinTotal > 0 && (
+            {/*
+              清空只删本端记录（上游自动签到的留痕由「自动任务」侧管理），
+              所以：
+              - 按钮只在确实有本端记录时出现，否则点了没反应像是坏了
+              - 文案写明范围，避免用户以为能把自动签到也清掉
+            */}
+            {isAdmin && checkinLocalTotal > 0 && (
               <ConfirmDialog
                 title="清空签到记录？"
-                description="仅删除本端的签到历史记录，不影响账号与上游数据。"
+                description={
+                  checkinAutoTotal > 0
+                    ? `将删除本端触发的 ${fmtNumber(checkinLocalTotal)} 条签到历史（手动 / 批量 / 添加账号）。` +
+                      `上游自动签到的 ${fmtNumber(checkinAutoTotal)} 条留痕不在此处删除，可在「自动任务」中清理。`
+                    : '仅删除本端的签到历史记录，不影响账号与上游数据。'
+                }
                 confirmText="清空"
                 destructive
                 onConfirm={async () => {
@@ -426,12 +459,12 @@ export default function TasksPage() {
                 ))}
               </SelectContent>
             </Select>
-            {taskStats && taskStats.total > 0 && (
+            {shownCount > 0 && (
               <Badge variant="secondary" className="hidden shrink-0 rounded-full tabular-nums sm:inline-flex">
-                共 {fmtNumber(taskStats.total)} 条
-                {taskStats.total_credits > 0 && (
+                共 {fmtNumber(shownCount)} 条
+                {shownCredits > 0 && (
                   <span className="ml-1 text-emerald-600 dark:text-emerald-400">
-                    +{fmtNumber(taskStats.total_credits)} 积分
+                    +{fmtNumber(shownCredits)} 积分
                   </span>
                 )}
               </Badge>
@@ -468,7 +501,10 @@ export default function TasksPage() {
           </div>
         </div>
 
-        {taskLogs.length > 0 && (
+        {/* 筛选栏的渲染条件是「区间内有任何记录」而不是「当前筛选有记录」：
+            否则点到一个没有记录的类型后，筛选栏会连同列表一起消失，
+            用户再也切不回「全部」——这是被反馈的「点进去一片空白」的另一半原因。 */}
+        {hasAnyTask && (
           <div className="flex shrink-0 flex-wrap items-center gap-1.5 px-4 pb-3">
             <Filter className="h-3 w-3 text-muted-foreground" />
             {[
@@ -476,26 +512,43 @@ export default function TasksPage() {
               ...Object.entries(kindLabels).map(([id, label]) => ({id, label})),
             ].map((t) => {
               const active = taskFilter === t.id;
+              // 每个类型都显示**自己**的条数（含 0）：这样点「余额查询」前就能
+              // 看出它是空的，不会以为点进去该有内容。这正是原先让人踩空的地方。
+              const n =
+                t.id === 'all'
+                  ? taskStats?.total
+                  : taskStats?.by_kind?.[t.id]?.count;
+              const isEmpty = t.id !== 'all' && !n;
               return (
                 <button
                   key={t.id}
                   type="button"
                   onClick={() => setTaskFilter(t.id)}
+                  title={isEmpty ? `${t.label}：当前范围内没有记录` : undefined}
                   className={
                     'rounded-full px-2.5 py-1 text-[11px] transition-colors ' +
                     (active
                       ? 'bg-foreground text-background'
-                      : 'bg-background/60 text-muted-foreground hover:text-foreground')
+                      : isEmpty
+                        ? 'bg-background/40 text-muted-foreground/50 hover:text-muted-foreground'
+                        : 'bg-background/60 text-muted-foreground hover:text-foreground')
                   }
                 >
                   {t.label}
-                  {taskStats?.by_kind?.[t.id]?.count ? ` ${taskStats.by_kind[t.id].count}` : ''}
+                  {n !== undefined && <span className="ml-1 tabular-nums">{n}</span>}
                 </button>
               );
             })}
           </div>
         )}
 
+        {/*
+          空态分两种，不能混为一谈：
+          - hasAnyTask：区间内有数据，只是当前筛选为空 → 提示换个类型
+          - 否则：这个区间真的没记录 → 引导去采集
+          若只看 taskLogs.length，筛选到空时会落到「全局无记录」的文案上，
+          明明别的类型有记录却告诉用户「暂无记录」，既误导又像数据丢了。
+        */}
         {taskLogs.length ? (
           <div className="scroll-slim min-h-0 flex-1 overflow-auto pb-4">
             {/* 手机端：卡片式；桌面：表格 */}
@@ -567,10 +620,13 @@ export default function TasksPage() {
                 </TableBody>
               </Table>
             </div>
-
-            {!filteredTasks.length && (
-              <div className="py-8 text-center text-xs text-muted-foreground">该类型下暂无记录。</div>
-            )}
+          </div>
+        ) : hasAnyTask ? (
+          <div className="px-4 py-10 text-center text-xs leading-5 text-muted-foreground">
+            <Filter className="mx-auto mb-2 h-4 w-4" />
+            「{kindLabels[taskFilter] || taskFilter}」在当前时间范围内没有记录。
+            <br />
+            点上方的「全部」可看其它类型，也可以放宽时间范围再试。
           </div>
         ) : (
           <div className="px-4 py-10 text-center text-xs leading-5 text-muted-foreground">
@@ -582,7 +638,11 @@ export default function TasksPage() {
           </div>
         )}
 
-        <ListFooter total={taskTotal} shown={taskLogs.length} truncated={taskTruncated} />
+        <ListFooter
+          total={taskFilter === 'all' ? (taskStats?.total ?? taskTotal) : (activeKind?.count ?? taskTotal)}
+          shown={taskLogs.length}
+          truncated={taskTruncated}
+        />
       </section>
     </div>
   );
