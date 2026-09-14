@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -426,7 +427,10 @@ def update_manager(rep: Reporter) -> None:
     # 2) 下载并解压到临时目录
     with tempfile.TemporaryDirectory(prefix='wbm-update-') as tmpdir:
         tmp = Path(tmpdir)
-        archive = tmp / pkg['name']
+        # 只用文件名部分：pkg['name'] 来自网络响应，虽然 GitHub 不允许名字含
+        # 路径分隔符，但"用远端数据拼本地路径"与早前的路径穿越是同一类错误，
+        # 这里按同名原则做净化（Path(...).name 会丢掉任何目录成分）
+        archive = tmp / Path(str(pkg.get('name') or 'pkg.tar.gz')).name
         download(pkg['browser_download_url'], archive, rep)
 
         rep.log('解压…')
@@ -528,13 +532,57 @@ def read_local_version() -> str:
 
 
 def _safe_extract(tf: tarfile.TarFile, dest: Path) -> None:
-    """防目录穿越：拒绝绝对路径与 .. 路径。"""
+    """解压发布包，严格限制在 dest 之内。
+
+    安全（曾有两个可复现的逃逸，属供应链风险）：更新器以 root 运行、包来自
+    Release，一旦有人能控制该 Release，包里的路径逃逸就等于 **root 任意文件写入**
+    ——实测可覆盖 /root/.ssh/authorized_keys 直接拿到服务器 SSH 登录。
+    原实现有两个绕过：
+
+      1. `str(target).startswith(str(base))` 是**字符串前缀**匹配：
+         `/tmp/wbm-update-abc` 与 `/tmp/wbm-update-abc-sibling` 是不同目录，
+         但前缀相同 → 成员名 `../wbm-update-abc-sibling/x` 可逃逸。
+         （本机实测确实写出了 dest 之外的文件。）
+      2. **符号链接成员未校验**：检查阶段链接还没创建，`resolve()` 看不穿它；
+         解压时先建 `link -> /任意/目录`，再写 `link/x` 就落到了外面。
+         另外 Python 3.12 的 `extractall` 默认 `filter=None`（等价 fully_trusted），
+         还会按包内 mode 执行 chmod（含 setuid 位）。
+
+    修法（三条同时做，互为纵深）：
+      - 拒绝一切链接类成员（symlink/hardlink）——正常发布包不需要它们
+      - 用 `Path.is_relative_to` 取代字符串前缀比较
+      - 优先用 `filter='data'`（Python 3.12+）由标准库再兜一层；
+        老版本没有该参数，则退化为已做的逐成员校验
+    """
     base = dest.resolve()
     for member in tf.getmembers():
-        target = (dest / member.name).resolve()
-        if not str(target).startswith(str(base)):
-            raise RuntimeError(f'压缩包含非法路径：{member.name}')
-    tf.extractall(dest)
+        # 1) 链接成员一律拒绝：它们是逃逸的载体，发布包没有理由包含
+        if member.issym() or member.islnk():
+            raise RuntimeError(f'压缩包含链接成员，已拒绝：{member.name}')
+        name = member.name
+        # 2) 绝对路径与 .. 直接拒绝（比"算出来再比较"更早、更明确）
+        if name.startswith('/') or name.startswith('\\') or '..' in Path(name).parts:
+            raise RuntimeError(f'压缩包含非法路径：{name}')
+        target = (base / name).resolve()
+        # 3) 包含性判断用 is_relative_to，不用字符串前缀
+        if target != base and not target.is_relative_to(base):
+            raise RuntimeError(f'压缩包含非法路径：{name}')
+
+    try:
+        tf.extractall(dest, filter='data')  # Python 3.12+：再由标准库校验一遍
+    except TypeError:
+        # 老版本 Python 无 filter 参数；上面的逐成员校验已是等价防护
+        tf.extractall(dest)
+    # 兜底：清掉可能被带进来的特殊权限位（filter='data' 已处理，这里防老版本）
+    for root, _dirs, files in os.walk(dest):
+        for fn in files:
+            p = Path(root) / fn
+            try:
+                mode = p.stat().st_mode
+                if mode & (stat.S_ISUID | stat.S_ISGID):
+                    os.chmod(p, stat.S_IMODE(mode) & ~(stat.S_ISUID | stat.S_ISGID))
+            except OSError:
+                pass
 
 
 # ── 入口 ─────────────────────────────────────────────────
