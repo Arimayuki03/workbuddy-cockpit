@@ -106,11 +106,19 @@ async def auth_poll(
 
     realm_of_result = result.get('realm') or 'cn'
 
+    # 探测 dict：billing 域身份头（X-User-Id / X-Domain 等）需要这些字段，
+    # 与 _auth_dict 同构；device_token 此刻还没有（落盘时由外部写入）
+    auth_probe = {
+        'access_token': result['access_token'],
+        'uid': result['uid'],
+        'enterprise_id': result.get('enterprise_id', ''),
+        'realm': realm_of_result,
+        'domain': result.get('domain', ''),
+    }
+
     # 国际版：先做地区注册（未注册会导致后续聊天报 14017）
     region_msg = ''
     if realm_of_result == 'global':
-        auth_probe = {'access_token': result['access_token'], 'uid': result['uid'],
-                      'realm': 'global', 'domain': result.get('domain', '')}
         if region:
             ok_r, region_msg = await tencent.submit_region(auth_probe, region)
         else:
@@ -124,7 +132,7 @@ async def auth_poll(
                 region_msg = f'{region_msg}；{trial_msg}'.strip('；')
 
     # 自动签到（幂等，不阻断落盘）。国际版无签到体系，checkin 会直接跳过
-    code, message = await tencent.checkin(result['access_token'], realm_of_result)
+    code, message = await tencent.checkin(auth_probe, realm_of_result)
     db.add_checkin_log(
         str(result.get('uid', '')), str(result.get('nickname', '')),
         'add', code in (0, 10001), code, message,
@@ -148,7 +156,12 @@ async def auth_poll(
 
 
 def _auth_dict(raw: dict) -> dict:
-    """把授权文件内容整理成探测 / 查询积分所需的字段（含版本，供端点分派）。"""
+    """把授权文件内容整理成探测 / 查询积分所需的字段（含版本，供端点分派）。
+
+    device_token 是**每号**的设备风控 token（auth 文件顶层 device_token 键，
+    与 workbuddy2api 的解析位置一致）；缺省留空，由 realm.device_token_for
+    回退到上游 config 的全局值或文件。
+    """
     acct = raw.get('account') or {}
     auth = raw.get('auth') or {}
     return {
@@ -157,6 +170,7 @@ def _auth_dict(raw: dict) -> dict:
         'enterprise_id': acct.get('enterpriseId', ''),
         'domain': auth.get('domain', ''),
         'realm': auth.get('realm'),
+        'device_token': str(raw.get('device_token') or ''),
     }
 
 
@@ -182,7 +196,15 @@ async def account_checkin(filename: str, user: dict = Depends(security.require_a
         db.add_checkin_log(uid, nickname, 'manual', False, None, '该账号无有效 accessToken')
         return {'code': -1, 'message': '该账号无有效 accessToken'}
 
-    code, message = await tencent.checkin(token, realm_of(auth))
+    # 传完整 auth dict：billing 域要带 X-User-Id 等身份头（对齐上游 BillingHeaders）
+    code, message = await tencent.checkin({
+        'access_token': token,
+        'uid': uid,
+        'enterprise_id': str(acct.get('enterpriseId') or ''),
+        'domain': str(auth.get('domain') or ''),
+        'realm': auth.get('realm'),
+        'device_token': str(raw.get('device_token') or ''),
+    }, realm_of(auth))
     # 0 = 签到成功；10001 = 今日已签到，同样视为成功；
     # -2 = 该版本无签到体系（国际版），不是失败，也不该记成失败
     ok = code in (0, 10001)
@@ -307,7 +329,15 @@ async def checkin_all(user: dict = Depends(security.require_admin)) -> dict:
             return {'nickname': nickname, 'ok': False, 'code': -2, 'message': msg}
 
         async with sem:
-            code, message = await tencent.checkin(token, realm_of(auth))
+            # 传完整 auth dict：billing 域要带 X-User-Id 等身份头
+            code, message = await tencent.checkin({
+                'access_token': token,
+                'uid': str((raw.get('account') or {}).get('uid') or uid),
+                'enterprise_id': str((raw.get('account') or {}).get('enterpriseId') or ''),
+                'domain': str(auth.get('domain') or ''),
+                'realm': auth.get('realm'),
+                'device_token': str(raw.get('device_token') or ''),
+            }, realm_of(auth))
         ok = code in (0, 10001)
         db.add_checkin_log(uid, nickname, 'manual-batch', ok, code, message)
         return {'nickname': nickname, 'ok': ok, 'code': code, 'message': message}
@@ -579,12 +609,15 @@ async def account_test(filename: str, user: dict = Depends(security.require_admi
     raw = _load(filename)
     acct = raw.get('account') or {}
     auth = raw.get('auth') or {}
-    # 探测需要 uid / enterpriseId / domain 以复刻上游请求头
+    # 探测需要 uid / enterpriseId / domain 以复刻上游请求头，
+    # device_token 用于 X-Device-Token（上游 chat 域同样注入）
     ok, message = await tencent.probe_account({
         'access_token': auth.get('accessToken', ''),
         'uid': acct.get('uid', ''),
         'enterprise_id': acct.get('enterpriseId', ''),
         'domain': auth.get('domain', ''),
+        'realm': auth.get('realm'),
+        'device_token': str(raw.get('device_token') or ''),
     })
     return {'ok': ok, 'message': message}
 
