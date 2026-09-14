@@ -7,7 +7,7 @@
 
 ---
 
-## [未发布]
+## [1.0.28] - 2026-09-14
 
 ### 修复
 - **连通性测试报 `code=11-128 first message is not system prompt`**：上游要求
