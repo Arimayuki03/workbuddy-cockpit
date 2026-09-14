@@ -35,10 +35,14 @@ async def login(request: Request) -> JSONResponse:
     if not user or not security.verify_pwd(password, user.get('pwd_hash', '')):
         # 同时记 IP 与用户名：前者防单机爆破，后者防换 IP 打同一账号
         security.record_fail(ip, username)
+        # 登录失败也要留痕：本次事故中攻击者拿到了会话，但服务端没有任何记录
+        security.audit({'username': username or '(空)'}, 'login_failed', username,
+                       f'来源 {ip}')
         raise HTTPException(status_code=401, detail='用户名或密码错误')
 
     security.clear_fail(ip, username)
     token = security.issue_token(username, user.get('role', 'viewer'))
+    security.audit(user, 'login', username, f'来源 {ip}')
     resp = JSONResponse({'ok': True, 'username': username, 'role': user.get('role', 'viewer')})
     resp.set_cookie(
         config.COOKIE_NAME,

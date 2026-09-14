@@ -9,6 +9,7 @@ import type {
   IpAccessLog,
   IpRule,
   Me,
+  AuditLogPage,
   ModelCatalog,
   ModelListResponse,
   Page,
@@ -212,10 +213,14 @@ export const settingsApi = {
   saveModelMap: (body: Record<string, string>) =>
     post<Record<string, string>>('/api/settings/model-map', body),
   users: () => get<UserItem[]>('/api/users'),
+  /** 管理端审计日志（登录/改密码/增删用户等，仅管理员可读） */
+  auditLogs: (limit = 200) => get<AuditLogPage>('/api/audit-logs', {limit}),
   addUser: (body: {username: string; password: string; role: string}) =>
     post<UserItem>('/api/users', body),
+  /** 改密码 / 改角色；会吊销该用户的既有会话（改自己则需重新登录） */
   updateUser: (username: string, body: {password?: string; role?: string}) =>
-    patch<UserItem>(`/api/users/${encodeURIComponent(username)}`, body),
+    patch<UserItem & {sessions_revoked?: boolean; relogin_required?: boolean}>(
+      `/api/users/${encodeURIComponent(username)}`, body),
   removeUser: (username: string) => del<{ok: boolean}>(`/api/users/${encodeURIComponent(username)}`),
 };
 

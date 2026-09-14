@@ -5,9 +5,11 @@ import {ShieldCheck, Plus, Trash2, Ban, CircleCheck, Network} from 'lucide-react
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {securityApi, errText} from '@/lib/api';
-import type {IpAccessLog, IpRule, SecurityConfig} from '@/lib/types';
+import type {AuditLog, IpAccessLog, IpRule, SecurityConfig} from '@/lib/types';
 import {fmtDateTime} from '@/lib/format';
+import {FileClock} from 'lucide-react';
 import {PageHeader} from '@/components/common/layout/PageHeader';
+import {settingsApi} from '@/lib/api';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {useAuth} from '@/lib/auth-context';
@@ -32,12 +34,22 @@ import {
   TableRow,
 } from '@/components/ui/table';
 
+const AUDIT_LABELS: Record<string, string> = {
+  login: '登录成功',
+  login_failed: '登录失败',
+  update_user: '修改用户',
+  delete_user: '删除用户',
+  add_user: '新增用户',
+};
+
 export default function SecurityPage() {
   const {isAdmin} = useAuth();
   const [config, setConfig] = useState<SecurityConfig>({enabled: false, mode: 'blacklist'});
   const [rules, setRules] = useState<IpRule[]>([]);
   const [logs, setLogs] = useState<IpAccessLog[]>([]);
   const [loading, setLoading] = useState(true);
+  /** 管理端审计日志：登录、改密码、增删用户等敏感操作留痕 */
+  const [audit, setAudit] = useState<AuditLog[]>([]);
 
   const [newKind, setNewKind] = useState<'allow' | 'deny'>('deny');
   const [newCidr, setNewCidr] = useState('');
@@ -46,14 +58,16 @@ export default function SecurityPage() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [c, r, l] = await Promise.allSettled([
+    const [c, r, l, a] = await Promise.allSettled([
       securityApi.config(),
       securityApi.rules(),
       securityApi.logs(200),
+      settingsApi.auditLogs(200),
     ]);
     if (c.status === 'fulfilled') setConfig(c.value);
     if (r.status === 'fulfilled') setRules(r.value);
     if (l.status === 'fulfilled') setLogs(l.value);
+    if (a.status === 'fulfilled') setAudit(a.value.items);
     setLoading(false);
   }, []);
 
@@ -288,6 +302,75 @@ export default function SecurityPage() {
             description="网关收到请求后会在此留痕"
             className="flex flex-col items-center justify-center py-14 text-center"
           />
+        )}
+      </section>
+
+      {/* 管理端审计日志：本次安全事件暴露的问题之一就是「改密码不留痕」，
+          只能靠反代日志去猜。这里把敏感操作（登录成败、改密码、增删用户）
+          长期留痕，便于事后追溯与发现异常尝试。 */}
+      <section className="overflow-hidden rounded-[20px] bg-muted">
+        <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <FileClock className="h-4 w-4" />
+            管理端审计日志
+            <span className="hidden text-[11px] font-normal text-muted-foreground sm:inline">
+              登录 / 改密码 / 增删用户等敏感操作
+            </span>
+          </div>
+          <Badge variant="secondary" className="shrink-0 rounded-full tabular-nums">
+            共 {audit.length} 条
+          </Badge>
+        </div>
+        {audit.length ? (
+          <Table>
+            <TableHeader>
+              <TableRow className="border-b border-border/60 hover:bg-transparent">
+                <TableHead className="pl-4 text-[11px] text-muted-foreground">时间</TableHead>
+                <TableHead className="text-[11px] text-muted-foreground">操作</TableHead>
+                <TableHead className="text-[11px] text-muted-foreground">操作者</TableHead>
+                <TableHead className="text-[11px] text-muted-foreground">对象</TableHead>
+                <TableHead className="pr-4 text-[11px] text-muted-foreground">详情</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {audit.map((a) => (
+                <TableRow key={a.id} className="border-b border-border/40">
+                  <TableCell className="pl-4 text-xs tabular-nums text-muted-foreground">
+                    {fmtDateTime(a.ts)}
+                  </TableCell>
+                  <TableCell>
+                    <Badge
+                      variant="secondary"
+                      className={
+                        'rounded-full text-[10px] ' +
+                        (a.action === 'login_failed'
+                          ? 'bg-red-500/12 text-red-600 dark:text-red-400'
+                          : a.action === 'login'
+                            ? 'text-emerald-600 dark:text-emerald-400'
+                            : '')
+                      }
+                    >
+                      {AUDIT_LABELS[a.action] || a.action}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="text-xs">{a.actor || '—'}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{a.target || '—'}</TableCell>
+                  <TableCell className="max-w-[420px] truncate pr-4 text-[11px] text-muted-foreground" title={a.detail}>
+                    {a.detail || '—'}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        ) : (
+          !loading && (
+            <EmptyState
+              icon={FileClock}
+              title="暂无审计记录"
+              description="登录、改密码、增删用户等操作会在此留痕（升级后开始记录）"
+              className="flex flex-col items-center justify-center py-14 text-center"
+            />
+          )
         )}
       </section>
     </div>
