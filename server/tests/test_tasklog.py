@@ -303,3 +303,76 @@ class ParseTaskLines(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class ScriptTaskKindsTest(unittest.TestCase):
+    """第五、六类任务（开学季 / 夜猫）的日志解析。
+
+    上游 2026-09-14 把这两类从宿主机 crontab 迁入内置调度器。它们不是
+    「每账号一个 uid」的形态，而是整批跑一个脚本，日志只有成败两行：
+        <kind>: ok (<script>)
+        WARN: <kind> (<script>): <err>
+    与既有四种形态（都要求 `<kind> <token>:`）不同，不加专门处理就会
+    在「任务记录」里完全不可见——这是实测确认过的缺口。
+    """
+
+    def test_success_line(self) -> None:
+        ev = tasklog.parse_line('school: ok (scripts/school_open_day_2026.py)')
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev['kind'], 'school')
+        self.assertEqual(ev['level'], 'ok')
+        self.assertIn('成功', ev['message'])
+
+    def test_failure_line(self) -> None:
+        ev = tasklog.parse_line('WARN: school (scripts/school_open_day_2026.py): exit status 1')
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev['kind'], 'school')
+        self.assertEqual(ev['level'], 'warn')
+        self.assertIn('exit status 1', ev['message'])
+
+    def test_cat_both_forms(self) -> None:
+        ok = tasklog.parse_line('cat: ok (scripts/task_runner.py)')
+        self.assertEqual((ok['kind'], ok['level']), ('cat', 'ok'))
+        bad = tasklog.parse_line('WARN: cat (scripts/task_runner.py): exit status 2')
+        self.assertEqual((bad['kind'], bad['level']), ('cat', 'warn'))
+
+    def test_timestamp_parsed(self) -> None:
+        ev = tasklog.parse_line(
+            '2026-09-14T12:00:01.123456789Z school: ok (scripts/x.py)')
+        self.assertGreater(ev['ts'], 0, 'docker 时间戳应被解析')
+
+    def test_labels_present(self) -> None:
+        """两类任务要有中文名，否则筛选栏会显示英文 key。"""
+        self.assertIn('school', tasklog.KIND_LABELS)
+        self.assertIn('cat', tasklog.KIND_LABELS)
+
+    def test_existing_forms_not_hijacked(self) -> None:
+        """加了新分支后，原有的 uid 形态不能被新规则吞掉。"""
+        ev = tasklog.parse_line('checkin 9b212d8c: 签到成功')
+        self.assertEqual(ev['kind'], 'checkin')
+        self.assertEqual(ev['uid'], '9b212d8c')
+        # 汇总行仍走汇总分支（不是被当成脚本任务）
+        ev2 = tasklog.parse_line('checkin done: total=3 ok=1 already=0 fail=0 skipped=0')
+        self.assertEqual(ev2['kind'], 'checkin')
+        self.assertIn('本轮签到完成', ev2['message'])
+
+
+class ScheduleHoursValidationTest(unittest.TestCase):
+    """新增的两类任务时刻必须能被保存（白名单外的键会被静默丢弃）。"""
+
+    def test_school_and_cat_hours_in_whitelist(self) -> None:
+        from server.services.wb2api import _HOURS_KEYS, _sanitize_section
+        self.assertIn('school_hours', _HOURS_KEYS)
+        self.assertIn('cat_hours', _HOURS_KEYS)
+        out = _sanitize_section('schedule', {'school_hours': [12], 'cat_hours': [1, 2]})
+        self.assertEqual(out['school_hours'], [12])
+        self.assertEqual(out['cat_hours'], [1, 2])
+
+    def test_out_of_range_rejected(self) -> None:
+        from server.services.wb2api import _sanitize_section
+        for bad in ({'school_hours': [24]}, {'cat_hours': [-1]}, {'school_hours': []}):
+            with self.assertRaises(ValueError, msg=str(bad)):
+                _sanitize_section('schedule', bad)
+
+
+if __name__ == '__main__':
+    unittest.main()

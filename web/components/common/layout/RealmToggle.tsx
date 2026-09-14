@@ -73,8 +73,9 @@ export function RealmNote({className}: {className?: string}) {
     >
       <Globe className="mt-0.5 h-3.5 w-3.5 shrink-0" />
       <span>
-        当前为<b>国际版</b>视图（workbuddy.ai）。国际版<b>没有签到 / 猫猫旅行 / 活跃上报</b>
-        体系，积分只来自一次性 trial，因此任务类页面为空属正常，不是数据丢失。
+        当前为<b>国际版</b>视图（workbuddy.ai）。国际版<b>没有签到 / 猫猫旅行 /
+        开学季 / 夜猫任务</b>（积分只来自一次性 trial），保活与活跃上报照常执行，
+        因此任务类页面记录较少属正常，不是数据丢失。
       </span>
     </div>
   );
