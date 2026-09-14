@@ -10,6 +10,8 @@ import {
   RefreshCw,
   RotateCcw,
   Server,
+  ShieldCheck,
+  ShieldOff,
   Sparkles,
   Terminal,
   X,
@@ -209,7 +211,28 @@ export function UpdatePanel() {
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           <div className="rounded-2xl bg-background/60 px-3.5 py-3">
             <div className="text-[11px] text-muted-foreground">管理端</div>
-            <div className="mt-1 text-sm font-semibold tabular-nums">{versions?.manager || status?.version || '—'}</div>
+            <div className="mt-1 flex items-center gap-1.5 text-sm font-semibold tabular-nums">
+              {versions?.manager || status?.version || '—'}
+              {/* 供应链防护：本次更新的包是否经过签名校验，必须让用户看得见 */}
+              {status?.signature?.status === 'verified' && (
+                <span
+                  className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400"
+                  title={`发布包已验签通过${status.signature.detail ? `（${status.signature.detail}）` : ''}`}
+                >
+                  <ShieldCheck className="h-3 w-3" />
+                  已验签
+                </span>
+              )}
+              {status?.signature?.status === 'skipped' && (
+                <span
+                  className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+                  title="本次更新跳过了签名校验（WB_SKIP_SIGNATURE=1），包内容未经验证"
+                >
+                  <ShieldOff className="h-3 w-3" />
+                  未验签
+                </span>
+              )}
+            </div>
           </div>
           <div className="rounded-2xl bg-background/60 px-3.5 py-3">
             <div className="text-[11px] text-muted-foreground">上游连接</div>
@@ -399,9 +422,19 @@ export function UpdatePanel() {
             <div className="text-[11px] text-muted-foreground">
               {status?.ok
                 ? (status?.duration ? `耗时 ${status.duration} 秒。` : '') +
-                  '服务已重启，建议刷新页面确认版本号。'
+                  '服务已重启，建议刷新页面确认版本号。' +
+                  (status?.signature?.status === 'verified' ? ' 本次发布包已通过签名校验。' : '')
                 : '请查看下方日志排查；账号与配置未受影响。'}
             </div>
+            {status?.ok && status?.signature?.status === 'skipped' && (
+              <div className="flex items-start gap-1.5 pt-1 text-[11px] text-amber-600 dark:text-amber-400">
+                <ShieldOff className="mt-0.5 h-3 w-3 shrink-0" />
+                <span>
+                  本次更新<b>跳过了签名校验</b>（WB_SKIP_SIGNATURE=1），包内容未经验证。
+                  如非更换签名密钥等紧急情况，请去掉该开关后重新更新一次。
+                </span>
+              </div>
+            )}
           </div>
           <button
             type="button"

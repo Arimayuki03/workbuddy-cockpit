@@ -4,6 +4,15 @@
 #   git tag v1.0.0 && git push origin v1.0.0
 #
 # 产物为可直接部署的压缩包（含 server/ 与已构建的 web/out/）。
+#
+# ── 关于签名（重要）──────────────────────────────────────────
+# 本工作流**不持有签名私钥**，也不代替维护者签名：
+#   * 私钥绝不进 CI —— 恶意 PR 合并后能改 workflow 里的任意步骤，
+#     把密钥放在这里等于直接交给攻击者。
+#   * 签名在维护者本机完成（见步骤末尾的 step summary 与
+#     docs/release-signing.md），.sig 作为 Release 资产上传。
+#   * 用户侧 deploy/update.py 强制验签，未签名的 Release 会被拒绝安装；
+#     本 workflow 在检测到已签名后也**不再覆盖 tar.gz**，避免使签名失效。
 name: Release
 
 on:
@@ -128,14 +137,35 @@ jobs:
           echo "--- 发布说明预览 ---"
           head -20 RELEASE_NOTES.md
 
+      - name: 检查是否已有签名资产
+        id: sigcheck
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.vars.outputs.tag }}"
+          STAGE="${{ steps.pack.outputs.stage }}"
+          if gh release view "$TAG" >/dev/null 2>&1 && \
+             gh release view "$TAG" --json assets -q '.assets[].name' | grep -qx "${STAGE}.tar.gz.sig"; then
+            echo "has_sig=1" >> $GITHUB_OUTPUT
+            echo "Release 已带签名资产 .tar.gz.sig"
+          else
+            echo "has_sig=0" >> $GITHUB_OUTPUT
+            echo "尚未签名（正常：签名由维护者在本机完成，见下方说明）"
+          fi
+
       - name: 创建 Release 并上传产物
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.vars.outputs.tag }}"
           STAGE="${{ steps.pack.outputs.stage }}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG 已存在，改为上传/覆盖产物"
+          if [ "${{ steps.sigcheck.outputs.has_sig }}" = "1" ]; then
+            # 一旦有签名就绝不再覆盖 tar.gz：重新打包会产生不同的字节流，
+            # 使已上传的 .sig 失效，而用户侧的更新器会因此拒绝安装。
+            echo "Release $TAG 已带 .tar.gz.sig 签名，**不覆盖既有产物**（覆盖会使签名失效）"
+            echo "确需重新发布：先删除 Release（含 .sig），再重跑本流程并重新签名"
+          elif gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在（未签名），改为上传/覆盖产物"
             gh release upload "$TAG" "${STAGE}.tar.gz" "${STAGE}.zip" --clobber
           else
             gh release create "$TAG" \
@@ -143,6 +173,31 @@ jobs:
               --notes-file RELEASE_NOTES.md \
               "${STAGE}.tar.gz" "${STAGE}.zip"
           fi
+          echo ""
+          echo "== 发版必做：本机签名并上传 =="
+          echo "  正常流程：先让 CI 建好 Release，再由你在本机对下载下来的产物签名上传。"
+          echo "  命令见下方 step summary 与 docs/release-signing.md。"
+
+      - name: 校验签名（已上传 .sig 时）
+        if: steps.sigcheck.outputs.has_sig == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.vars.outputs.tag }}"
+          STAGE="${{ steps.pack.outputs.stage }}"
+          gh release download "$TAG" --pattern "${STAGE}.tar.gz" --pattern "${STAGE}.tar.gz.sig" --dir . --clobber
+          if [ ! -f deploy/release-signing-key.pub ]; then
+            echo "::warning::仓库缺少 deploy/release-signing-key.pub，无法比对公钥"
+            exit 0
+          fi
+          if grep -q 'AAAA_REPLACE_ME' deploy/release-signing-key.pub; then
+            echo "::warning::deploy/release-signing-key.pub 仍是占位值，无法比对公钥"
+            exit 0
+          fi
+          printf 'release %s\n' "$(cat deploy/release-signing-key.pub)" > /tmp/allowed_signers
+          ssh-keygen -Y verify -f /tmp/allowed_signers -I release -n file \
+            -s "${STAGE}.tar.gz.sig" < "${STAGE}.tar.gz"
+          echo "✓ 签名与仓库内公钥匹配"
 
       - name: 部署说明
         run: |
@@ -153,8 +208,27 @@ jobs:
           - `${{ steps.pack.outputs.stage }}.tar.gz`
           - `${{ steps.pack.outputs.stage }}.zip`
 
+          > ⚠️ **本工作流不签名**。私钥不允许进 CI —— 恶意 PR 合并后可以改
+          > workflow 里的任意步骤，密钥放这里等于直接交给攻击者。
+          > 因此签名由维护者在**本机**对最终产物执行：
+
+          ```bash
+          # 在本机（私钥所在机器）：
+          gh release download ${{ steps.vars.outputs.tag }} \
+            --pattern '${{ steps.pack.outputs.stage }}.tar.gz'
+          ssh-keygen -Y sign -f ~/.ssh/workbuddy-release -n file \
+            '${{ steps.pack.outputs.stage }}.tar.gz'
+          gh release upload ${{ steps.vars.outputs.tag }} \
+            '${{ steps.pack.outputs.stage }}.tar.gz.sig'
+          ```
+
+          > 一键更新（deploy/update.py）会校验该签名，**没有 .sig 的 Release
+          > 会被所有用户拒绝安装**。所以这一步不是可选的。
+
           部署方式（解压后）：
           ```bash
+          # 下载后先验签，再安装（手动部署同样建议校验）
+          bash deploy/verify-release.sh ${{ steps.pack.outputs.stage }}.tar.gz
           tar xzf ${{ steps.pack.outputs.stage }}.tar.gz
           cd ${{ steps.pack.outputs.stage }}
           sudo bash deploy/install.sh
