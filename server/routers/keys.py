@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .. import keysvc, security
+from ..iputil import client_ip
 
 router = APIRouter(prefix='/api/keys', tags=['keys'])
 

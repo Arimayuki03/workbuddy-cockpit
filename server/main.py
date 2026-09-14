@@ -27,6 +27,7 @@ async def lifespan(app: FastAPI):
     config.ensure_dirs()
     db.connect()
     security.load_users()  # 首次启动会自动生成管理员并打印一次密码
+    _warn_if_exposed()
     # 后台采集上游自动任务日志（旅行/活跃/签到/保活），容器日志会被重建清掉，
     # 这里解析后落库长期保留，界面才能看到「这趟旅行领了多少积分」
     tasklog.start_collector()
@@ -34,6 +35,23 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         tasklog.stop_collector()
+
+
+def _warn_if_exposed() -> None:
+    """监听所有网卡时提醒：确保前面有反代，不要把 7864 直接暴露到公网。
+
+    为什么只警告不自动改：标准部署（1Panel 反代到本机端口）与"直连公网"用的是
+    同一个 0.0.0.0，自动改成 127.0.0.1 会把前者一起改坏。IP 伪造的问题已在
+    `iputil.client_ip` 从源头修掉（只在 TCP 对端来自可信网段时才采信转发头），
+    这里的提示是纵深防御——少一层暴露就少一类风险。
+    """
+    if config.HOST not in ('0.0.0.0', '::'):
+        return
+    logger.warning(
+        '服务监听在 %s（所有网卡）：请确认 7864 端口没有直接暴露到公网，'
+        '仅在反向代理后使用；直连会让来源 IP 类管控与登录锁定失去意义。',
+        config.HOST,
+    )
 
 
 app = FastAPI(

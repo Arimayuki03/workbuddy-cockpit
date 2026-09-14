@@ -25,8 +25,11 @@ def list_logs(
     args: list[object] = []
 
     if days:
+        # 钳到 [1, 3650]：超大值会在 SQLite 绑定时溢出（曾 500），
+        # 负值则会把过滤条件变成「未来之后」，语义上无意义
+        d = min(3650, max(1, int(days)))
         where.append('l.ts >= ?')
-        args.append(int(time.time()) - days * 86400)
+        args.append(int(time.time()) - d * 86400)
     if key_id and key_id not in ('all', ''):
         # 非数字会 int() 抛错 → 500。这里显式拦成 400，避免用非法输入探测
         try:

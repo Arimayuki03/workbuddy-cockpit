@@ -286,15 +286,33 @@ def add_checkin_log(
     )
 
 
+# days 参数的统一上限。**必须有上限**：超大整数在 SQLite 绑定时会溢出抛错
+# （实测 /api/logs?days=999999999999999 返回 500）。db 层是唯一的收敛点，
+# 在这里钳一次就覆盖了所有调用方（logs/stats/accounts 各处）。
+_DAYS_MAX = 3650
+
+
+def clamp_days(days: int | None) -> int | None:
+    """把 days 钳到 [1, _DAYS_MAX]；None/非法值返回 None（= 不按时间过滤）。"""
+    if days is None:
+        return None
+    try:
+        d = int(days)
+    except (TypeError, ValueError):
+        return None
+    return min(_DAYS_MAX, max(1, d))
+
+
 def _checkin_where(uid: str | None = None, days: int | None = None) -> tuple[str, list[Any]]:
     where: list[str] = []
     args: list[Any] = []
     if uid:
         where.append('uid = ?')
         args.append(uid)
-    if days:
+    d = clamp_days(days)
+    if d:
         where.append('ts >= ?')
-        args.append(int(time.time()) - days * 86400)
+        args.append(int(time.time()) - d * 86400)
     return ((' WHERE ' + ' AND '.join(where)) if where else '', args)
 
 
@@ -424,9 +442,10 @@ def _task_log_where(
     if kind:
         where.append('kind = ?')
         args.append(kind)
-    if days:
+    d = clamp_days(days)
+    if d:
         where.append('ts >= ?')
-        args.append(int(time.time()) - days * 86400)
+        args.append(int(time.time()) - d * 86400)
     return ((' WHERE ' + ' AND '.join(where)) if where else '', args)
 
 

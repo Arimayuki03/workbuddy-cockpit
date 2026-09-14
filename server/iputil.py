@@ -24,24 +24,53 @@ def _clean_ip(value: str) -> str:
     return raw
 
 
+def _is_trusted_proxy(peer: str) -> bool:
+    """TCP 对端是否落在可信代理网段内。
+
+    仅当对端确实是我们配置的反代（同机回环或指定私网）时，才采信它写入的
+    转发头。这样「服务直接暴露」时伪造的 X-Real-IP 不会被采信。
+    """
+    if not peer:
+        return False
+    try:
+        addr = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    for cidr in config.TRUSTED_PROXY_CIDRS:
+        try:
+            if addr in ipaddress.ip_network(cidr, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def client_ip(request: Request) -> str:
     """解析真实客户端 IP。
 
-    安全要点（曾存在漏洞）：`X-Forwarded-For` 是**客户端可伪造**的 ——
-    反向代理通常用 `$proxy_add_x_forwarded_for` **追加**而非覆盖，
-    因此第一个元素完全由请求方控制。若直接取第一个值，攻击者可冒充任意
-    IP，从而绕过 IP 白/黑名单、每密钥 IP 限制与登录失败锁定。
+    安全要点（曾有漏洞，且被实测绕过）：`X-Forwarded-For` 与 `X-Real-IP` 都是
+    **客户端可伪造**的普通请求头。反向代理以 `$remote_addr` 覆盖写入 X-Real-IP
+    只是"通常如此"，前提是**请求确实经过那个反代**。服务直接暴露时
+    （systemd 默认监听 0.0.0.0），攻击者加一行 `X-Real-IP: 9.9.9.9`
+    就能冒充任意来源 IP，从而绕过全局 IP 白/黑名单、密钥 IP 白名单与 max_ips、
+    以及登录失败按 IP 锁定 —— 全部 IP 类管控形同虚设。
 
     取值优先级（按可信度）：
-      1) `X-Real-IP` —— 本机反代以 `$remote_addr` **覆盖**写入，不可伪造
-      2) `X-Forwarded-For` —— 从**右往左**数第 N 个（N 为可信代理跳数）；
-         右侧是本机反代追加的真实地址，左侧才是可伪造部分
-      3) TCP 对端地址
+      1) 仅当 **TCP 对端来自可信代理网段** 时，才采信 `X-Real-IP`
+      2) 同上条件下，从 `X-Forwarded-For` **右往左**数第 N 个（N = 可信跳数）；
+         右侧是反代追加的真实地址，左侧才是可伪造部分
+      3) TCP 对端地址（可信度最高，永远可回退）
 
-    若前面还挂了 CDN，请把 `WB_TRUSTED_PROXY_HOPS` 调成 CDN + 反代的层数。
+    若前面还挂了 CDN，请把 `WB_TRUSTED_PROXY_HOPS` 调成 CDN + 反代的层数，
+    并把 `WB_TRUSTED_PROXY_CIDRS` 加上 CDN 的回源网段。
     """
+    peer = request.client.host if request.client else ''
+
     if not config.TRUST_PROXY:
-        return request.client.host if request.client else '0.0.0.0'
+        return peer or '0.0.0.0'
+    # 关键：对端不可信时，转发头一律不看（这正是之前被绕过的地方）
+    if not _is_trusted_proxy(peer):
+        return peer or '0.0.0.0'
 
     real = _clean_ip(request.headers.get('x-real-ip', ''))
     if real:
@@ -55,7 +84,7 @@ def client_ip(request: Request) -> str:
             idx = len(parts) - hops
             return parts[idx] if idx >= 0 else parts[0]
 
-    return request.client.host if request.client else '0.0.0.0'
+    return peer or '0.0.0.0'
 
 
 def ip_matches(ip: str, cidr: str) -> bool:

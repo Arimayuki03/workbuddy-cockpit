@@ -10,8 +10,24 @@ from .. import db, security
 router = APIRouter(prefix='/api/stats', tags=['stats'])
 
 
+# days 的取值范围。**必须有上限**：超大整数在 SQLite 绑定时溢出抛错
+# （实测 /api/logs?days=999999999999999 返回 500）。
+# 10 年足够覆盖任何正常查询，同时避免溢出与全表扫描。
+_DAYS_MAX = 3650
+
+
+def _clamp_days(days: int | None, default: int) -> int:
+    """把 days 钳到 [1, _DAYS_MAX]；非法值退回默认。"""
+    try:
+        d = int(days) if days is not None else default
+    except (TypeError, ValueError):
+        return default
+    return min(_DAYS_MAX, max(1, d))
+
+
 def _since(days: int) -> str:
-    return time.strftime('%Y-%m-%d', time.localtime(time.time() - (days - 1) * 86400))
+    d = _clamp_days(days, 30)
+    return time.strftime('%Y-%m-%d', time.localtime(time.time() - (d - 1) * 86400))
 
 
 @router.get('/summary')

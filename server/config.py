@@ -49,6 +49,22 @@ TRUST_PROXY = _env('WB_TRUST_PROXY', '1') == '1'
 # 可信反向代理跳数：用于从 X-Forwarded-For 右侧取真实客户端 IP。
 # 前面直接是 1Panel/OpenResty 时保持 1；若还挂了 CDN 则设为 CDN+反代的层数。
 TRUSTED_PROXY_HOPS = _env_int('WB_TRUSTED_PROXY_HOPS', 1)
+# 可信代理的**来源网段**（逗号分隔，支持 CIDR）。
+#
+# 为什么需要它：仅凭「配置里开了 TRUST_PROXY」就无条件采信 X-Real-IP 是错的——
+# 服务直接暴露（systemd 默认 0.0.0.0）时，X-Real-IP 只是普通客户端头，
+# 任何人加一个 `X-Real-IP: 9.9.9.9` 就能冒充任意来源 IP，从而绕过
+# 全局 IP 白/黑名单、密钥 IP 白名单与 max_ips、以及登录失败按 IP 锁定。
+# 现在只在**TCP 对端确实来自这些网段**时才采信转发头，否则一律用对端地址。
+#
+# 默认含回环 + 常见私网：标准部署（反代与本体同机）开箱即用；
+# 若反代在另一台机器，把它所在的网段加进来即可。
+TRUSTED_PROXY_CIDRS = [
+    c.strip() for c in _env(
+        'WB_TRUSTED_PROXY_CIDRS',
+        '127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7',
+    ).split(',') if c.strip()
+]
 # 是否暴露 /docs、/openapi.json、/redoc。生产环境建议关闭（默认关闭）。
 ENABLE_DOCS = _env('WB_ENABLE_DOCS', '0') == '1'
 # 显式出口代理（可选，如 http://127.0.0.1:7890）。

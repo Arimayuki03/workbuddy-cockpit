@@ -393,3 +393,80 @@ class UserAdminHttpTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class KeysAuditRegressionTest(unittest.TestCase):
+    """v1.0.23 回归：创建/删除密钥因漏导入 client_ip 而 500。
+
+    这是我改审计时引入的疏漏——调用点用了 `client_ip(request)`，但文件头只
+    `from .. import keysvc, security`，没导入它。后果是所有升级者的**密钥功能
+    完全不可用**（创建与删除都 500），属核心功能故障。
+    外部安全报告以 500 的形式发现；这里补测试，避免同类"加了调用忘了导入"再发生。
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import os
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls._dir = Path(cls._tmp.name)
+        cls._orig_db = config.DB_PATH
+        cls._orig_users = config.USERS_FILE
+        cls._orig_static = config.STATIC_DIR
+        config.DB_PATH = cls._dir / 'k.db'
+        config.USERS_FILE = cls._dir / 'users.json'
+        config.STATIC_DIR = cls._dir / 'no-static'
+        os.environ['WB_ADMIN_PASSWORD'] = 'keys-admin-pw'
+        _users_file(cls._dir, users=[
+            {'username': 'admin', 'role': 'admin',
+             'pwd_hash': security.make_hash('keys-admin-pw')},
+        ], api_keys=[])
+        db._conn = None
+        db.connect()
+        from server.main import app
+        cls.app = app
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if db._conn is not None:
+            db._conn.close()
+        db._conn = None
+        config.DB_PATH = cls._orig_db
+        config.USERS_FILE = cls._orig_users
+        config.STATIC_DIR = cls._orig_static
+        try:
+            cls._tmp.cleanup()
+        except PermissionError:
+            pass
+
+    def setUp(self) -> None:
+        _users_file(self._dir, users=[
+            {'username': 'admin', 'role': 'admin',
+             'pwd_hash': security.make_hash('keys-admin-pw')},
+        ], api_keys=[])
+        self.c = TestClient(self.app)
+        self.c.post('/api/login', json={'username': 'admin', 'password': 'keys-admin-pw'})
+
+    def test_create_key_returns_200_with_secret_once(self) -> None:
+        r = self.c.post('/api/keys', json={'name': 'test-key'})
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertTrue(str(body.get('key', '')).startswith('wbk_'),
+                        '创建时必须回一次明文密钥')
+
+    def test_delete_key_returns_200(self) -> None:
+        created = self.c.post('/api/keys', json={'name': 'to-delete'}).json()
+        r = self.c.delete(f"/api/keys/{created['id']}")
+        self.assertEqual(r.status_code, 200, r.text)
+
+    def test_update_key_returns_200(self) -> None:
+        created = self.c.post('/api/keys', json={'name': 'to-update'}).json()
+        r = self.c.patch(f"/api/keys/{created['id']}", json={'max_ips': 3})
+        self.assertEqual(r.status_code, 200, r.text)
+
+    def test_create_key_is_audited(self) -> None:
+        self.c.post('/api/keys', json={'name': 'audited'})
+        rows = self.c.get('/api/audit-logs').json()['items']
+        self.assertIn('create_key', {it['action'] for it in rows})
+
+
+if __name__ == '__main__':
+    unittest.main()
