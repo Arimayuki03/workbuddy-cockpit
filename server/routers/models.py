@@ -25,7 +25,13 @@ async def model_catalog(
     force: bool = False,
     user: dict = Depends(security.current_user),
 ) -> dict:
-    """指定版本的模型清单 + 统计。force=true 绕过 5 分钟缓存。"""
+    """指定版本的模型清单 + 统计。
+
+    force=true 会**直连腾讯**重新拉取（跳过 5 分钟缓存）。它消耗账号池的调用
+    额度、也有风控风险，因此只允许管理员触发；普通登录用户仍可用缓存版本。
+    """
+    if force and user.get('role') != 'admin':
+        force = False
     r = 'global' if str(realm).strip().lower() == 'global' else 'cn'
     data = await modelcatalog.catalog(r, force=force)
     models = data.get('models') or []

@@ -62,8 +62,11 @@ def set_upstream_ref(body: UpstreamRefIn, user: dict = Depends(security.require_
 def check_update(force: bool = False, user: dict = Depends(security.current_user)) -> dict:
     """检测是否有新版本（管理端与上游）。
 
-    结果缓存 6 小时以免触发 GitHub 限流；`force=true` 可强制刷新。
+    结果缓存 6 小时以免触发 GitHub 限流；`force=true` 可强制刷新，
+    但会打 GitHub API（未认证配额有限），因此只允许管理员强制刷新。
     """
+    if force and user.get('role') != 'admin':
+        force = False
     return updater.check_updates(force=force)
 
 

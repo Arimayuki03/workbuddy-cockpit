@@ -38,13 +38,32 @@ def verify_pwd(pwd: str, stored: str) -> bool:
 
 # ── 用户存储 ─────────────────────────────────────────────
 def load_users() -> dict:
+    """读取 users.json。
+
+    **绝不因解析失败而自动重建**：原实现在文件损坏（半写、磁盘满、进程被杀、
+    手工改坏）时直接 `bootstrap_users()`，那会**生成新 secret + 新随机密码的
+    admin 并原地覆盖写回**——结果是全部账号（含其他管理员）被静默清空、
+    所有人的会话失效，而新密码只打印在 stderr 里。一次瞬时故障就足以让
+    管理面「重启」，且现场被覆盖、无法复盘。实测复现过。
+
+    现在：文件不存在 → 首次启动，正常 bootstrap；
+          文件存在但读不了/解析不了 → 抛错，让请求失败并保留现场。
+    """
     config.ensure_dirs()
     if not config.USERS_FILE.exists():
         return bootstrap_users()
     try:
-        return json.loads(config.USERS_FILE.read_text(encoding='utf-8'))
-    except Exception:
-        return bootstrap_users()
+        data = json.loads(config.USERS_FILE.read_text(encoding='utf-8'))
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f'用户文件损坏，拒绝自动重建以保护现场：{config.USERS_FILE}（{exc}）。'
+            '请先备份该文件，再用备份恢复；若确需重置，手动删除该文件后重启。'
+        ) from exc
+    if not isinstance(data, dict) or not isinstance(data.get('users'), list):
+        raise RuntimeError(f'用户文件结构异常：{config.USERS_FILE}')
+    if not data.get('secret'):
+        raise RuntimeError(f'用户文件缺少 secret：{config.USERS_FILE}')
+    return data
 
 
 def _restrict_permissions(path) -> None:
@@ -63,23 +82,48 @@ def _restrict_permissions(path) -> None:
 
 
 def save_users(data: dict) -> None:
+    """原子写入 users.json。
+
+    为什么必须原子：原实现直接 `O_TRUNC` 覆盖，**写窗口内被杀进程/断电/磁盘满
+    就会留下半截文件**，进而触发（修复前的）自动重建 → 全部账号被清空。
+    现在改为「写临时文件 → fsync → os.replace」：替换是原子的，读者要么看到
+    旧内容、要么看到新内容，永远不会看到半截。
+
+    临时文件同样以 0600 创建，避免"先写后改权限"之间出现可被他人读取的窗口。
+
+    **失败时绝不退化成非原子直写**：那样等于把刚堵上的损坏路径又打开一次。
+    替换失败就报错，让调用方看到（旧文件此时仍完好，可安全重试）。
+    """
     config.ensure_dirs()
-    # 先以 0600 创建/覆盖：避免"先写后改权限"之间出现一段可被他人读取的窗口
-    fd = None
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    target = config.USERS_FILE
+    tmp = target.with_name(f'.{target.name}.tmp')
+
+    # 支持不支持 O_CREAT 指定 mode 的平台：退化为默认权限创建后再 chmod
     try:
-        fd = os.open(str(config.USERS_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     except OSError:
-        pass
-    if fd is not None:
-        try:
+        fd = None
+
+    try:
+        if fd is not None:
             with os.fdopen(fd, 'w', encoding='utf-8') as fh:
-                json.dump(data, fh, ensure_ascii=False, indent=2)
-            _restrict_permissions(config.USERS_FILE)
-            return
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())  # 落盘后再替换，避免断电留下空/半截文件
+        else:
+            # 先写临时文件（非目标文件），仍然保证目标只在原子替换时改变
+            tmp.write_text(payload, encoding='utf-8')
+        _restrict_permissions(tmp)
+        os.replace(tmp, target)  # 原子替换：要么旧、要么新，不会半截
+        _restrict_permissions(target)
+    except OSError:
+        try:
+            os.unlink(tmp)
         except OSError:
-            pass  # 退回到普通写入（例如某些平台不支持 os.open 的 mode）
-    config.USERS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-    _restrict_permissions(config.USERS_FILE)
+            pass
+        # 旧文件未被触碰，保持完好；把失败暴露出去让上层处理
+        raise
 
 
 def bootstrap_users() -> dict:

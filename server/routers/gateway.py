@@ -311,6 +311,11 @@ async def _chat(request: Request, upstream_path: str):
         return err
 
     requested_model = body.get('model') if isinstance(body, dict) else None
+    # model 必须是字符串：非字符串（对象/数组/数字）会让后面的 _map_model 与
+    # 上游处理出现意外行为（历史上有过 dict 触发 dict.get 未哈希 → 500）。
+    # 这里直接拒掉，也顺带让模型白名单的判定有确定的输入。
+    if requested_model is not None and not isinstance(requested_model, str):
+        return _oai_error('model 必须是字符串', 400, 'invalid_request_error', 'invalid_model')
     key, ip, err = _authorize(request, requested_model)
     if err:
         return err
@@ -418,10 +423,16 @@ async def chat_v2(request: Request):
 # ── 存活探测 ─────────────────────────────────────────────
 @router.get('/healthz')
 async def gateway_health() -> dict:
+    """未认证的存活探测。
+
+    **只回布尔**：上游 `/healthz` 会带 total / healthy 等账号池统计，
+    直接透传等于把池子规模告诉任何未认证访问者（实测线上确实返回了 total）。
+    探测方只需要「上游是否可用」，不需要知道池子里有几个号。
+    """
     try:
         async with config.http_client(5, connect=2) as client:
             resp = await client.get(f'{config.WB2API_BASE}/healthz')
-        body = resp.json() if resp.headers.get('content-type', '').startswith('application/json') else {}
-        return {'service': 'workbuddy-manager', 'upstream_ok': resp.status_code == 200, **body}
-    except Exception as exc:  # noqa: BLE001
-        return {'service': 'workbuddy-manager', 'upstream_ok': False, 'error': str(exc)}
+        return {'service': 'workbuddy-manager', 'upstream_ok': resp.status_code == 200}
+    except Exception:  # noqa: BLE001
+        # 不回异常详情：那会暴露上游地址与网络拓扑
+        return {'service': 'workbuddy-manager', 'upstream_ok': False}

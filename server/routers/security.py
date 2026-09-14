@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .. import db, security
+from ..iputil import client_ip
 from ..iputil import ip_matches
 
 router = APIRouter(prefix='/api/security', tags=['security'])
@@ -35,9 +36,13 @@ def read_config(user: dict = Depends(security.current_user)) -> dict:
 
 
 @router.post('/config')
-def write_config(body: ConfigIn, user: dict = Depends(security.require_admin)) -> dict:
+def write_config(body: ConfigIn, request: Request,
+                 user: dict = Depends(security.require_admin)) -> dict:
     cfg = body.model_dump()
     db.set_setting('security', cfg)
+    # 改 IP 管控开关/模式会直接影响对外放行策略，必须留痕
+    security.audit(user, 'update_security', '',
+                   f"enabled={cfg.get('enabled')} mode={cfg.get('mode')}；来源 {client_ip(request)}")
     return cfg
 
 
