@@ -326,6 +326,13 @@ const POOL_FIELDS: Field[] = [
     step: 0.5,
     def: 5,
   },
+  {
+    key: 'expiring_soon',
+    kind: 'duration',
+    label: '快过期积分窗口',
+    desc: '到期时间落在此窗口内的积分会被标记为「快过期」，选号时优先消耗掉，避免白白过期。留空或填 0 = 关闭该优化',
+    def: '168h',
+  },
 ];
 
 const FEATURES_FIELDS: Field[] = [
@@ -413,8 +420,8 @@ const UPSTREAM_FIELDS: Field[] = [
     key: 'client_name',
     kind: 'text',
     label: '客户端名称',
-    desc: '用量归属头（X-Product / X-IDE-Name / X-IDE-Type）的取值，影响官网「使用端」显示。填 WorkBuddy 可对齐官方桌面端；留空保持旧行为',
-    placeholder: '留空 = SaaS（旧行为）',
+    desc: '用量归属头（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）的取值，影响官网「使用端」显示。留空 = 对齐官方桌面端（WorkBuddy）；填 SaaS 可还原旧行为',
+    placeholder: '留空 = WorkBuddy（对齐官方桌面端）',
     def: '',
   },
   {
