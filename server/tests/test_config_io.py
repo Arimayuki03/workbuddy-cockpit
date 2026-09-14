@@ -143,6 +143,32 @@ class UpstreamConfigRoundTrip(unittest.TestCase):
         with self.assertRaises(ValueError):
             wb2api.save_upstream_config({'prompt': {'file': '/a\nb'}})
 
+    def test_both_prompt_modes_still_accepted(self) -> None:
+        """两种模式都必须能写入 —— 上游只是改了**缺省值**，没有删掉 custom。
+
+        上游 2026-09-14 把 prompt.mode 缺省从 custom 改成 passthrough（透传
+        客户端原始 system），显式配 custom 仍受支持。管理端不该因为默认值
+        变了就拒绝其中任何一个。
+        """
+        for mode in ('passthrough', 'custom'):
+            write_cfg(self.cfg_path, {'prompt': {'mode': 'passthrough'}})
+            wb2api.save_upstream_config({'prompt': {'mode': mode}})
+            self.assertEqual(read_cfg(self.cfg_path)['prompt']['mode'], mode)
+
+    def test_empty_prompt_section_is_not_invented(self) -> None:
+        """配置里没有 prompt 段时，不该被管理端凭空造出来。
+
+        这条守的是「UI 默认值 = 上游默认值」这个不变量：前端把缺省字段显示为
+        默认值，保存时只提交**改动过**的键；这里从后端确认「没改就不写」，
+        否则老配置会在一次无关的保存里多出 prompt 段（虽然值相同，但属于
+        不该发生的写入）。
+        """
+        write_cfg(self.cfg_path, {'pool': {'max_in_flight': 3}})
+        wb2api.save_upstream_config({'pool': {'max_in_flight': 5}})
+        cfg = read_cfg(self.cfg_path)
+        self.assertNotIn('prompt', cfg, '不该凭空写入 prompt 段')
+        self.assertEqual(cfg['pool']['max_in_flight'], 5)
+
     def test_server_max_body_mb_validation(self) -> None:
         write_cfg(self.cfg_path, {'server': {'max_body_mb': 8}})
         wb2api.save_upstream_config({'server': {'max_body_mb': 32}})
