@@ -1,6 +1,6 @@
 'use client';
 
-import {useCallback, useEffect, useState} from 'react';
+import {useCallback, useEffect, useMemo, useState} from 'react';
 import {Users, CircleCheck, TriangleAlert, Activity, Server, Coins} from 'lucide-react';
 import {
   Area,
@@ -13,6 +13,7 @@ import {
 } from 'recharts';
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {accountApi, statsApi, upstreamApi} from '@/lib/api';
+import {useRealm} from '@/lib/realm-context';
 import type {Account, StatsSummary, UpstreamStatus, UsagePoint} from '@/lib/types';
 import {expiryBarPercent, expiryVisual, fmtCompact, fmtNumber, fmtRemain} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
@@ -22,6 +23,7 @@ import {Badge} from '@/components/ui/badge';
 import {notify} from '@/lib/toast';
 
 export default function DashboardPage() {
+  const {realm, label: realmName} = useRealm();
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [summary, setSummary] = useState<StatsSummary | null>(null);
   const [daily, setDaily] = useState<UsagePoint[]>([]);
@@ -29,6 +31,7 @@ export default function DashboardPage() {
   /** 实时积分（按 uid），叠加到 accounts 上；上游 /status 的 credits 可能滞后数小时 */
   const [liveCredits, setLiveCredits] = useState<Record<string, number>>({});
 
+  // 切换版本后要重新取实时积分：两个版本的账号池不同，credits 也不能混
   const load = useCallback(async () => {
     const results = await Promise.allSettled([
       accountApi.list(),
@@ -51,7 +54,7 @@ export default function DashboardPage() {
       );
     }
     if (results.slice(0, 4).some((r) => r.status === 'rejected')) notify.err('部分数据加载失败');
-  }, []);
+  }, [realm]);
 
   useEffect(() => {
     load();
@@ -60,14 +63,49 @@ export default function DashboardPage() {
   // 账号健康度与用量会持续变化，用心跳刷新避免展示陈旧数据
   useHeartbeat(load, 30000);
 
-  const valid = accounts.filter((a) => !a.is_expired).length;
-  const expiring = accounts.filter((a) => a.remain_seconds > 0 && a.remain_seconds < 3600).length;
+  /**
+   * 按当前版本过滤。
+   *
+   * 账号池里两种版本的账号都有，不过滤的话切到国际版仍会看到国内版的
+   * 账号数、积分与健康快照（用户反馈过这个问题）。realm 为空的存量账号
+   * 视为国内版，与后端判定一致。
+   */
+  const scoped = useMemo(
+    () => accounts.filter((a) => (a.realm ?? 'cn') === realm),
+    [accounts, realm],
+  );
+
+  const valid = scoped.filter((a) => !a.is_expired).length;
+  const expiring = scoped.filter((a) => a.remain_seconds > 0 && a.remain_seconds < 3600).length;
   // 积分余额合计（仅统计已同步到的账号）
   // 优先用实时查询到的积分，其次上游 /status 的（可能滞后的）值
   const credOf = (a: Account) => liveCredits[a.uid] ?? a.credits;
-  const creditsKnown = accounts.filter((a) => typeof credOf(a) === 'number');
+  const creditsKnown = scoped.filter((a) => typeof credOf(a) === 'number');
   const totalCredits = creditsKnown.reduce((sum, a) => sum + (credOf(a) || 0), 0);
   const creditsLow = creditsKnown.filter((a) => (credOf(a) || 0) < 200).length;
+
+  /**
+   * 「反代上游」面板按版本重算。
+   *
+   * 上游 /status 返回的是**整个账号池**（含两个版本），它的 healthy/cooling/
+   * disabled 是全局计数，直接用会在国际版视图下显示国内版的账号数。
+   * /status 的每个账号条目带 realm，因此这里按版本自己统计。
+   */
+  const pool = useMemo(() => {
+    const items = (upstream?.accounts || []) as Record<string, unknown>[];
+    const mine = items.filter((it) => {
+      const r = String((it as {realm?: string}).realm || 'cn');
+      return r === realm;
+    });
+    return {
+      total: mine.length,
+      healthy: mine.filter((it) => Boolean((it as {healthy?: boolean}).healthy)).length,
+      cooling: mine.filter((it) => Boolean((it as {cooling?: boolean}).cooling)).length,
+      disabled: mine.filter((it) => Boolean((it as {disabled?: boolean}).disabled)).length,
+      /** 上游是否返回了账号明细——没返回时上面几个数不可信，界面要说明 */
+      known: items.length > 0,
+    };
+  }, [upstream, realm]);
 
   const chartData = daily.map((d) => ({
     day: d.day.slice(5),
@@ -81,14 +119,14 @@ export default function DashboardPage() {
           因此不再放手动刷新按钮（移动端还省下一行） */}
       <PageHeader
         title="仪表盘"
-        description="账号池健康度、反代网关与今日用量总览（每 30 秒自动刷新）"
+        description={`${realmName}账号池健康度、反代网关与今日用量总览（每 30 秒自动刷新）`}
       />
 
       <section className="grid grid-cols-2 gap-3 lg:grid-cols-5 md:gap-4">
         <StatCard
           label="账号总数"
-          value={fmtNumber(accounts.length)}
-          hint="已纳管账号"
+          value={fmtNumber(scoped.length)}
+          hint={`${realmName}已纳管`}
           icon={Users}
           tone="neutral"
           delay={0}
@@ -96,10 +134,10 @@ export default function DashboardPage() {
         <StatCard
           label="有效期内"
           value={fmtNumber(valid)}
-          hint={valid === accounts.length ? '全部正常' : `${accounts.length - valid} 个异常`}
+          hint={valid === scoped.length ? '全部正常' : `${scoped.length - valid} 个异常`}
           icon={CircleCheck}
           tone="success"
-          hintTone={valid === accounts.length ? 'success' : 'warning'}
+          hintTone={valid === scoped.length ? 'success' : 'warning'}
           delay={0.05}
         />
         <StatCard
@@ -129,7 +167,7 @@ export default function DashboardPage() {
         <StatCard
           label="今日 Token"
           value={fmtCompact(summary?.today_tokens)}
-          hint={`${fmtNumber(summary?.today_requests)} 次请求`}
+          hint={`${fmtNumber(summary?.today_requests)} 次请求 · 含两种版本`}
           icon={Activity}
           tone="info"
           delay={0.2}
@@ -140,7 +178,8 @@ export default function DashboardPage() {
         <div className="rounded-[20px] bg-muted p-4 lg:col-span-2">
           <div className="mb-3 flex items-center justify-between">
             <div className="text-sm font-medium">近 14 天调用趋势</div>
-            <div className="text-[11px] text-muted-foreground">请求数 / Token</div>
+            {/* 调用记录是全局的（不按版本拆分），如实标注而不是假装已过滤 */}
+            <div className="text-[11px] text-muted-foreground">请求数 · 含两种版本</div>
           </div>
           <div className="h-[220px] w-full">
             {chartData.length ? (
@@ -199,9 +238,10 @@ export default function DashboardPage() {
                 )}
               </div>
               {([
-                ['健康账号', upstream.healthy ?? 0],
-                ['冷却中', upstream.cooling ?? 0],
-                ['已禁用', upstream.disabled ?? 0],
+                // 账号类计数按当前版本重算；粘性会话与 Redis 无版本之分，保持全局
+                ['健康账号', pool.known ? pool.healthy : '—'],
+                ['冷却中', pool.known ? pool.cooling : '—'],
+                ['已禁用', pool.known ? pool.disabled : '—'],
                 ['粘性会话', upstream.sticky_sessions ?? 0],
                 ['Redis 模式', upstream.redis_mode ?? '—'],
               ] as [string, string | number][]).map(([k, v]) => (
@@ -220,9 +260,9 @@ export default function DashboardPage() {
 
       <section className="rounded-[20px] bg-muted p-4">
         <div className="mb-3 text-sm font-medium">账号健康快照</div>
-        {accounts.length ? (
+        {scoped.length ? (
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {accounts.slice(0, 9).map((a) => {
+            {scoped.slice(0, 9).map((a) => {
               const pct = expiryBarPercent(a.remain_seconds, a.ttl_seconds);
               const vis = expiryVisual(a.remain_seconds);
               return (
