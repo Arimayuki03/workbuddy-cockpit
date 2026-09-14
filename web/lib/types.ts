@@ -76,6 +76,60 @@ export interface ModelListResponse {
   count: number;
 }
 
+/* ── 模型中心（模型目录）────────────────────────────────── */
+
+/** 模型目录里的一条：比 /v1/models 多显示名与推理档位 */
+export interface CatalogModel {
+  id: string;
+  /** 显示名，来自腾讯模型接口；上游回退数据为空串 */
+  name: string;
+  /** 上下文窗口（token，0 = 未知） */
+  context_length: number;
+  /** 最大输出（token，0 = 未知） */
+  max_output_tokens: number;
+  /** 支持的推理档位，如 ['low','high','max']；空数组 = 非推理模型或未提供 */
+  efforts: string[];
+  /** 系列归属（按 id 前缀推导，仅用于分组浏览） */
+  series: string;
+}
+
+export interface CatalogSummary {
+  total: number;
+  /** 带推理档位的模型数 */
+  reasoning: number;
+  /** 上下文 ≥128K 的模型数 */
+  large_context: number;
+  /** 最大上下文（token） */
+  max_context: number;
+  /** 涉及系列 */
+  series: string[];
+  unique_ids: number;
+}
+
+/**
+ * 数据来源：
+ * - `tencent`：直连腾讯模型接口，字段最全（含显示名与推理档位）
+ * - `upstream`：回退到上游 /v1/models，字段有限
+ * - `none`：两者都拿不到
+ */
+export type CatalogSourceKind = 'tencent' | 'upstream' | 'none';
+
+export interface ModelCatalog {
+  models: CatalogModel[];
+  source: CatalogSourceKind;
+  /** 来源的中文说明，直接用于界面标注 */
+  source_label: string;
+  /** 本次数据取自哪个账号（回退时为 workbuddy2api） */
+  via: string;
+  /** 逐次尝试的失败原因，便于排查（不展示给普通用户也要留着） */
+  errors: string[];
+  /** 命中缓存时为 true */
+  cached: boolean;
+  /** 缓存已存在多少秒 */
+  cache_age: number;
+  summary: CatalogSummary;
+}
+
 export interface ApiKey {
   id: number;
   name: string;

@@ -8,6 +8,7 @@ import type {
   IpAccessLog,
   IpRule,
   Me,
+  ModelCatalog,
   ModelListResponse,
   Page,
   ReloadState,
@@ -126,6 +127,12 @@ export const accountApi = {
 export const upstreamApi = {
   status: () => get<UpstreamStatus>('/api/status'),
   models: () => get<ModelListResponse>('/api/models'),
+};
+
+/* ── 模型中心 ───────────────────────────────────────── */
+export const modelApi = {
+  /** 模型目录；force=true 绕过 5 分钟缓存 */
+  catalog: (force = false) => get<ModelCatalog>('/api/model-catalog', {force}),
 };
 
 /* ── API 密钥 ───────────────────────────────────────── */
