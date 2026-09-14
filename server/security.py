@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import time
 
@@ -46,9 +47,39 @@ def load_users() -> dict:
         return bootstrap_users()
 
 
+def _restrict_permissions(path) -> None:
+    """把敏感文件权限收紧到仅属主可读写（0600）。
+
+    users.json 里存着**签发会话 Cookie 的 secret**——拿到它就能伪造任意角色
+    （含 admin）的登录态。因此它属于最高敏感级，不应让同主机的其他用户读到。
+    Windows 上 os.chmod 只影响只读位，无实际意义，故静默忽略失败。
+    """
+    import os
+    import stat
+    try:
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+
+
 def save_users(data: dict) -> None:
     config.ensure_dirs()
+    # 先以 0600 创建/覆盖：避免"先写后改权限"之间出现一段可被他人读取的窗口
+    fd = None
+    try:
+        fd = os.open(str(config.USERS_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    except OSError:
+        pass
+    if fd is not None:
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+                json.dump(data, fh, ensure_ascii=False, indent=2)
+            _restrict_permissions(config.USERS_FILE)
+            return
+        except OSError:
+            pass  # 退回到普通写入（例如某些平台不支持 os.open 的 mode）
     config.USERS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+    _restrict_permissions(config.USERS_FILE)
 
 
 def bootstrap_users() -> dict:
