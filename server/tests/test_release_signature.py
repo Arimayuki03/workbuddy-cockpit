@@ -323,6 +323,55 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn('.sig', wf, '发布流程未涉及签名文件')
 
 
+class PubkeyConsistencyTest(unittest.TestCase):
+    """信任锚只有一份，但被写在了两个地方：
+
+      * `deploy/update.py` 的 RELEASE_PUBKEY —— 更新器**实际使用**的
+      * `deploy/release-signing-key.pub`   —— CI 校验与人工核对时读的
+
+    两者一旦不一致，就会出现最坏的组合：CI 说「签名与仓库公钥匹配」，
+    用户侧却全部拒绝安装（或反过来，CI 报假警）。密钥轮换时最容易漏改
+    其中一个，因此把「必须完全一致」钉死在测试里。
+    """
+
+    def _norm(self, line: str) -> str:
+        # keytype + base64 是信任的全部；注释（第三段）不参与校验
+        parts = line.split()
+        self.assertGreaterEqual(len(parts), 2, f'不是合法的公钥行：{line!r}')
+        return f'{parts[0]} {parts[1]}'
+
+    def test_embedded_pubkey_matches_pub_file(self) -> None:
+        src = (_ROOT / 'deploy' / 'update.py').read_text(encoding='utf-8')
+        # 取出内嵌公钥（可能被拆成多行字符串拼接）
+        m = re.search(r'RELEASE_PUBKEY = os\.environ\.get\(.*?\) or \(\s*((?:\s*\'[^\']*\'\s*)+)\)',
+                      src, re.S)
+        if m is None:
+            m = re.search(r'RELEASE_PUBKEY = os\.environ\.get\(.*?\) or (\'[^\']*\')', src, re.S)
+        self.assertIsNotNone(m, '没解析出 RELEASE_PUBKEY，测试需要跟着改')
+        chunks = re.findall(r"'([^']*)'", m.group(1) if m.lastindex else m.group(0))
+        embedded = ''.join(chunks).strip()
+
+        pub_file = (_ROOT / 'deploy' / 'release-signing-key.pub').read_text(encoding='utf-8').strip()
+        # .pub 可能有多行（轮换期），取第一行有效公钥
+        file_key = next((ln for ln in pub_file.splitlines()
+                         if ln.strip().startswith(('ssh-ed25519', 'ssh-rsa', 'ecdsa-'))), '')
+        self.assertTrue(file_key, 'deploy/release-signing-key.pub 里没有公钥行')
+        self.assertEqual(
+            self._norm(embedded), self._norm(file_key),
+            '内嵌公钥与 deploy/release-signing-key.pub 不一致 —— 轮换时漏改了其中一个',
+        )
+
+    def test_verify_script_signer_id_matches_updater(self) -> None:
+        """verify-release.sh 的 -I 身份必须与更新器一致，否则手动验签会误报失败。"""
+        src = (_ROOT / 'deploy' / 'update.py').read_text(encoding='utf-8')
+        m = re.search(r"RELEASE_SIGNER_ID = os\.environ\.get\('WB_RELEASE_SIGNER'\) or '([^']+)'", src)
+        self.assertIsNotNone(m)
+        signer_id = m.group(1)
+        script = (_ROOT / 'deploy' / 'verify-release.sh').read_text(encoding='utf-8')
+        self.assertIn(f'SIGNER_ID="{signer_id}"', script,
+                      'verify-release.sh 的签名者身份与更新器不一致')
+
+
 class VerifyReleaseScriptTest(unittest.TestCase):
     """手动安装的独立校验脚本必须存在，且默认拒绝、不静默放行。"""
 

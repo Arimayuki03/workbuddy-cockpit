@@ -17,27 +17,51 @@
 
 ---
 
-## 一、首次配置（只需做一次，在你自己电脑上）
+## 一、密钥配置（已完成，以下为存档与轮换参考）
 
-私钥**只留在你本机**，绝不进仓库、绝不进 CI（原因见第四节）。
+当前使用的签名公钥（已内嵌进 `deploy/update.py` 并写入
+`deploy/release-signing-key.pub`）：
 
-```bash
-# 1) 生成签名密钥（-C 只是注释；建议设口令，泄露时多一层）
-ssh-keygen -t ed25519 -f ~/.ssh/workbuddy-release -C "workbuddy release signing"
-
-# 2) 把公钥贴进仓库两处（内容相同，缺一不可）：
-#    deploy/release-signing-key.pub   —— 供人工/脚本核对
-#    deploy/update.py → RELEASE_PUBKEY 常量 —— 更新器实际使用的信任锚
-cat ~/.ssh/workbuddy-release.pub
+```
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHEGhxZQjEEK/RbtgcRLuuWji0fVB4E2dVKMnhtLlCkx workbuddy release signing
+指纹：SHA256:xmHLJDKH/vYtAp59XwXPVE4A/CwXAOpxTlYh7KC677Y
 ```
 
-把公钥换成 `deploy/release-signing-key.pub` 的内容，并把同一行赋给
-`deploy/update.py` 里的 `RELEASE_PUBKEY`（引用该文件也可以，但**内嵌更安全**：
-文件可能随包一起被替换，常量不会）。然后提交这次改动。
+**每次签名前用指纹核对一次**（确认你没拿错密钥）：
+
+```bash
+ssh-keygen -lf ~/.ssh/workbuddy-release.pub
+# 应输出上面的 SHA256 指纹
+```
+
+私钥位于 `~/.ssh/workbuddy-release`，**只在本机**（不进仓库、不进 CI）。
+
+### 轮换密钥时（或首次在新机器上配置）
+
+```bash
+# 1) 生成新密钥
+ssh-keygen -t ed25519 -f ~/.ssh/workbuddy-release -C "workbuddy release signing"
+
+# 2) 公钥要更新**两处**（内容必须一致，有测试盯着这件事）
+#    - deploy/update.py → RELEASE_PUBKEY 常量（更新器实际使用的信任锚）
+#    - deploy/release-signing-key.pub    （CI 与人工核对时读的）
+cat ~/.ssh/workbuddy-release.pub
+
+# 3) 提交后，通知用户手动更新一次（他们手上的旧公钥验不过新签名）
+```
+
+> 给私钥加/改口令（**不改变公钥**，因此不需要动仓库、不需要重新签名）：
+> ```bash
+> ssh-keygen -p -f ~/.ssh/workbuddy-release
+> ```
+> 当前密钥未设口令。加了之后每次签名会提示输入口令，也可以配合
+> ssh-agent 缓存（`ssh-add ~/.ssh/workbuddy-release`）。这是本机的安全
+> 权衡：不设口令则「偷到文件即可签名」，设了则多一道。
 
 > **首次启用有鸡生蛋问题**：已经部署的实例还没有验签能力，需要**手动更新
 > 一次**到带验签的版本（或用 `WB_SKIP_SIGNATURE=1` 走一次）。从那之后的
-> 自动更新才受保护。
+> 自动更新才受保护。已验证 v1.0.23 的更新器会同步 `deploy/`，所以那次
+> 手动更新后验签逻辑确实会就位。
 
 ---
 

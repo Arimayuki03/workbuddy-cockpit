@@ -61,8 +61,10 @@ STEP_TIMEOUT = int(os.environ.get('WB_UPDATE_STEP_TIMEOUT') or 900)
 #
 # 用 OpenSSH 自带的 ssh-keygen（8.0+，服务器上必有），不引入新依赖。
 # 公钥**内嵌在代码里**而不是读文件：文件可能被一并替换，那信任锚就没了。
+# 对应私钥 ~/.ssh/workbuddy-release 仅存在于维护者本机（绝不进仓库、不进 CI）。
 RELEASE_PUBKEY = os.environ.get('WB_RELEASE_PUBKEY') or (
-    'ssh-ed25519 AAAA_REPLACE_ME_WITH_YOUR_REAL_PUBLIC_KEY release-signing'
+    'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHEGhxZQjEEK/RbtgcRLuuWji0fVB4E2dVKMnhtLlCkx '
+    'workbuddy release signing'
 )
 # 签名者身份（allowed_signers 的第一列），仅作标识，不参与信任判断
 RELEASE_SIGNER_ID = os.environ.get('WB_RELEASE_SIGNER') or 'release'
