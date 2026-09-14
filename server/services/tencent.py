@@ -194,6 +194,74 @@ async def fetch_credits(auth: dict) -> tuple[bool, int | float | None, str]:
         return False, None, f'查询异常: {exc}'
 
 
+async def fetch_models(access_token: str) -> tuple[bool, list | str]:
+    """拉取该账号可用的 CLI 模型（含显示名、上下文、最大输出、推理档位）。
+
+    为什么要管理端自己拉、而不是用上游的 /v1/models：上游把腾讯返回的
+    `name`（显示名）和 `reasoning.supportedEfforts`（推理档位）**丢掉了**，
+    只暴露 id / context_length / max_output_tokens。要做「模型中心」这类
+    带显示名与能力的展示，只能照上游约定直连腾讯接口（同一路径、同一信封）。
+
+    口径与上游 FetchModels 保持一致：
+      - 只取 agents 里名为 `cli` 的模型 id 列表（那才是对 CLI 暴露的）
+      - `disabled` 的条目不收录
+    返回 (ok, models 或错误信息)。不含任何凭据。
+    """
+    if not access_token:
+        return False, '该账号无有效 accessToken'
+    url = f'{config.TENCENT_BASE}/console/enterprises/personal/models'
+    headers = {**config.TENCENT_HEADERS, 'Authorization': f'Bearer {access_token}'}
+    try:
+        async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
+            resp = await client.get(url, headers=headers)
+        code, data = _envelope(resp)
+        if code != 0 or not isinstance(data, dict):
+            return False, f'模型接口返回 code={code}'
+    except Exception as exc:  # noqa: BLE001
+        return False, f'模型接口异常: {exc}'
+
+    raw_models = data.get('models') if isinstance(data.get('models'), list) else []
+    agents = data.get('agents') if isinstance(data.get('agents'), list) else []
+
+    cli_ids: list[str] = []
+    for ag in agents:
+        if isinstance(ag, dict) and ag.get('name') == 'cli':
+            ids = ag.get('models')
+            if isinstance(ids, list):
+                cli_ids = [str(x) for x in ids if x]
+            break
+
+    info: dict[str, dict] = {}
+    for m in raw_models:
+        if not isinstance(m, dict) or not m.get('id'):
+            continue
+        reasoning = m.get('reasoning') if isinstance(m.get('reasoning'), dict) else {}
+        efforts = reasoning.get('supportedEfforts')
+        info[str(m['id'])] = {
+            'id': str(m['id']),
+            'name': str(m.get('name') or '').strip(),
+            'context_length': _as_int(m.get('maxInputTokens')),
+            'max_output_tokens': _as_int(m.get('maxOutputTokens')),
+            'disabled': bool(m.get('disabled')),
+            'efforts': [str(x) for x in efforts if x] if isinstance(efforts, list) else [],
+        }
+
+    # cli 列表为空时退回全部未禁用模型：上游此时直接报错，但管理端只是展示，
+    # 给个可用列表比整页空白更有用（来源会在 UI 上如实标注）。
+    ids = cli_ids or list(info.keys())
+    out = [info[i] for i in ids if i in info and not info[i]['disabled']]
+    if not out:
+        return False, '模型接口未返回任何可用模型'
+    return True, out
+
+
+def _as_int(v: object) -> int:
+    try:
+        return int(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
 def _extract_resource_accounts(data: object) -> list | None:
     """不同层级的信封包装，尽量把套餐数组取出来。"""
     cur = data

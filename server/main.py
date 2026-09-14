@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from . import config, db, security
 from .iputil import client_ip
 from .routers import (
-    accounts, auth, gateway, keys, logs,
+    accounts, auth, gateway, keys, logs, models,
     security as security_router, settings, stats, system,
 )
 from .services import tasklog
@@ -61,6 +61,7 @@ app.include_router(stats.router)
 app.include_router(security_router.router)
 app.include_router(settings.router)
 app.include_router(system.router)
+app.include_router(models.router)
 app.include_router(gateway.router)
 
 

@@ -7,6 +7,7 @@ import {
   Users,
   ClipboardList,
   KeyRound,
+  Boxes,
   ScrollText,
   TrendingUp,
   ShieldCheck,
@@ -417,6 +418,11 @@ export function ManagementBar() {
       title: '密钥',
       icon: <KeyRound {...IconOptions} />,
       href: '/keys',
+    },
+    {
+      title: '模型',
+      icon: <Boxes {...IconOptions} />,
+      href: '/models',
     },
     {
       title: 'divider',
