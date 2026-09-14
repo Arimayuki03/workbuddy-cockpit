@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from .. import config, db, security
 from ..services import (
@@ -73,9 +73,26 @@ async def models(
 
 
 @router.post('/auth/start')
-async def auth_start(realm: str = 'cn', user: dict = Depends(security.require_admin)) -> dict:
-    """发起扫码登录。realm 决定国内版 / 国际版端点（默认国内版）。"""
-    r = 'global' if str(realm).strip().lower() == 'global' else 'cn'
+async def auth_start(
+    realm: str | None = Query(
+        None,
+        description='国内版 cn / 国际版 global；也可用 JSON body 传 {"realm": "..."}',
+    ),
+    body: dict | None = Body(None),
+    user: dict = Depends(security.require_admin),
+) -> dict:
+    """发起扫码登录。realm 决定国内版 / 国际版端点（缺省国内版）。
+
+    **参数来源要同时接受 body 与 query**：前端 post() 把参数放在 JSON body 里，
+    而早先这里声明的是普通标量参数 —— FastAPI 对标量默认按 **query** 解析，
+    body 里的 realm 被静默忽略、恒回落到默认值 'cn'。后果是：切到「国际版」
+    点添加账号，拿到的仍是国内版二维码（`copilot.tencent.com`），且**不报错**。
+    现同时接受两处，body 优先（与前端一致），query 保留兼容旧调用方。
+    """
+    raw = realm
+    if isinstance(body, dict) and body.get('realm') is not None:
+        raw = str(body.get('realm'))
+    r = 'global' if str(raw or '').strip().lower() == 'global' else 'cn'
     try:
         return await tencent.start_login(r)
     except RuntimeError as exc:
