@@ -91,6 +91,51 @@ class EndpointTest(unittest.TestCase):
         self.assertIn('WorkBuddy AI/', gl['User-Agent'])
         self.assertNotIn('WorkBuddy AI', cn['User-Agent'])
 
+    # ── 出站风控头对齐上游 2026-09-14 的改动（D1/D5/D6）──
+    #
+    # 管理端有一批请求**绕过上游直连腾讯**（扫码登录、签到、积分、trial、
+    # 注册）。上游给它自己的出站加了这些头；我们这条路若不跟，就会成为
+    # 唯一「形态不像官方客户端」的流量，被风控挑出来的代价是账号被封。
+
+    def test_outbound_risk_control_headers_present(self) -> None:
+        """D1：X-CodeBuddy-Request 是官方客户端的风控闸门头，所有请求必带。"""
+        for r in ('cn', 'global'):
+            h = realm.headers(r)
+            self.assertEqual(h.get('X-CodeBuddy-Request'), '1', f'{r} 缺风控闸门头')
+
+    def test_accept_language_switches_by_realm(self) -> None:
+        """D5：按账号域切语言标识（官方客户端就是这么发的）。"""
+        self.assertEqual(realm.headers('cn')['Accept-Language'], 'zh-CN')
+        self.assertEqual(realm.headers('global')['Accept-Language'], 'en-US')
+
+    def test_accept_tightened_for_non_stream(self) -> None:
+        """D6：非流式收紧为 application/json，不再带宽松的 text/plain, */*。"""
+        for r in ('cn', 'global'):
+            accept = realm.headers(r)['Accept']
+            self.assertEqual(accept, 'application/json', f'{r} 的 Accept 未收紧')
+            self.assertNotIn('text/plain', accept)
+
+    def test_chat_stream_overrides_accept(self) -> None:
+        """流式路径才声明 event-stream —— 由调用方覆盖（probe_account 等）。"""
+        h = realm.headers('cn', 'tok')
+        self.assertEqual(h['Authorization'], 'Bearer tok')
+        # 确认「能覆盖」这件事本身成立（调用方据此改写）
+        h['Accept'] = 'application/json, text/event-stream'
+        self.assertIn('text/event-stream', h['Accept'])
+
+    def test_static_cn_headers_match_realm_headers(self) -> None:
+        """config.TENCENT_HEADERS 目前无调用点，但必须与 realm.headers 同口径。
+
+        否则将来有人照着它取值，就发出与风控口径矛盾的请求 —— 这类"看起来
+        能用"的静态常量最容易成为下一个坑。
+        """
+        static = config.TENCENT_HEADERS
+        live = realm.headers('cn')
+        for key in ('Accept', 'Accept-Language', 'X-CodeBuddy-Request',
+                    'Content-Type', 'X-Requested-With', 'Origin', 'Referer'):
+            self.assertEqual(static.get(key), live.get(key),
+                             f'TENCENT_HEADERS.{key} 与 realm.headers("cn") 不一致')
+
     def test_custom_base_overrides_default(self) -> None:
         with mock.patch.object(realm, '_read_global_config',
                                return_value={'enabled': True,

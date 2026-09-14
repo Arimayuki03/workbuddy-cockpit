@@ -85,10 +85,17 @@ TENCENT_CHECKIN = 'https://www.codebuddy.cn/v2/billing/meter/daily-checkin'
 TENCENT_BILLING = 'https://www.codebuddy.cn/v2/billing/meter/get-user-resource'
 # 国内版通用请求头。国际版用 realm.headers('global') 取（Origin/UA 都不同）——
 # 这里的常量保留为 CN 默认值，供既有调用点与不区分版本处使用。
+#
+# 当前所有腾讯出站都走 realm.headers()（含风控头 X-CodeBuddy-Request /
+# Accept-Language，见 realm.py 注释），本常量暂无调用点。保留但它也必须与
+# 那边口径一致：否则将来有人照着这里取值，就会发出「形态不像官方客户端」
+# 的请求（Accept 的宽松值与 D6 收紧后的口径相矛盾）。
 TENCENT_HEADERS = {
     'Content-Type': 'application/json',
-    'Accept': 'application/json, text/plain, */*',
+    'Accept': 'application/json',
+    'Accept-Language': 'zh-CN',
     'X-Requested-With': 'XMLHttpRequest',
+    'X-CodeBuddy-Request': '1',
     'User-Agent': 'CLI/2.63.2 CodeBuddy/2.63.2',
     'Origin': 'https://www.codebuddy.cn',
     'Referer': 'https://www.codebuddy.cn/',
