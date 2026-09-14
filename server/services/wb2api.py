@@ -12,7 +12,17 @@ from .. import config
 
 
 def _safe_file(filename: str) -> Path:
+    """把请求里的文件名解析为 auths 目录下的真实路径，非法即抛错。
+
+    穿越防线（`/`、反斜杠、`..`）是根本；此外只接受 `workbuddy-*.json`
+    这一种形态，避免越权读到目录里的其他文件（例如隐藏文件或临时文件）。
+    """
     if '/' in filename or '\\' in filename or '..' in filename:
+        raise ValueError('非法的文件名')
+    if '\x00' in filename:
+        raise ValueError('非法的文件名')
+    # 白名单形态：账号文件一律是 workbuddy-<uid>.json
+    if not re.fullmatch(r'workbuddy-[0-9A-Za-z_-]{1,80}\.json', filename):
         raise ValueError('非法的文件名')
     target = config.AUTH_DIR / filename
     if target.suffix != '.json':

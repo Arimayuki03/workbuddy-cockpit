@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+
+import logging
 
 from . import config, db, security
 from .iputil import client_ip
@@ -15,6 +18,8 @@ from .routers import (
     security as security_router, settings, stats, system,
 )
 from .services import tasklog
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -33,7 +38,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title='WorkBuddy Manager',
-    version='1.0.21',
+    version='1.0.22',
     lifespan=lifespan,
     # 生产环境默认关闭交互式文档与 OpenAPI 描述：
     # 它们会把管理接口全貌（路径、参数、结构）暴露给任何未认证访问者，
@@ -124,6 +129,44 @@ def sysinfo(user: dict = Depends(security.current_user)) -> dict:
 
 
 # ── 静态前端（Next.js 静态导出）────────────────────────
+def _looks_like_traversal(full_path: str) -> bool:
+    """判断请求路径是否像目录穿越尝试（用于记日志，不参与拦截决策）。
+
+    拦截一律由 `_safe_static_path` 的包含性校验负责，这里只是让安全事件
+    留下痕迹：静态路径原本不记录任何访问日志，万一被利用了也无从发现。
+    """
+    p = (full_path or '').replace(chr(92), '/')
+    return '..' in p.split('/') or p.startswith('/') or ':' in p
+
+
+def _safe_static_path(full_path: str) -> Path | None:
+    """把请求路径解析为静态目录下的真实文件；越界或非法一律返回 None。
+
+    安全（重要）：这里曾直接把请求路径拼到 STATIC_DIR 上，未做任何越界校验。
+    由于 ASGI 会先对 %2f 解码，`/..%2f..%2fdata%2fusers.json` 这类请求
+    在 `Path / str` 拼接后指向了部署目录**之外**，导致任意文件读取——
+    实测可读到 `users.json`（内含签发会话的 secret，可据此伪造 admin 会话）、
+    `.env`、上游 `config.json`（api_key）与 `auths/*.json`（账号 accessToken）。
+
+    修法：用 `resolve()` 归一化后，强制要求结果仍位于 STATIC_DIR 之内。
+    这是防目录穿越的标准做法，能同时覆盖 `..`、编码斜杠、绝对路径与
+    符号链接等各变体；不合规的直接当作 404，不泄露任何信息。
+    """
+    if not full_path:
+        return None
+    try:
+        root = config.STATIC_DIR.resolve()
+        # 绝对路径（如 full_path 以 / 开头或形如 C:\...）会被 Path 当作新根，
+        # 这里先剥掉前导分隔符，再统一在后面做包含性校验。
+        candidate = (root / full_path.lstrip('/\\')).resolve()
+    except (OSError, ValueError, RuntimeError):
+        # resolve() 在符号链接成环等情况下可能抛错：一律视为不可访问
+        return None
+    if candidate != root and root not in candidate.parents:
+        return None
+    return candidate if candidate.is_file() else None
+
+
 if config.STATIC_DIR.is_dir():
     app.mount('/_next', StaticFiles(directory=str(config.STATIC_DIR / '_next')), name='next-assets')
     if (config.STATIC_DIR / 'favicon.ico').exists():
@@ -137,12 +180,18 @@ if config.STATIC_DIR.is_dir():
 
     @app.get('/{full_path:path}', include_in_schema=False)
     def spa(full_path: str):
-        # 优先命中导出的静态页面 / 资源，否则回退到 404 页面
-        candidate = config.STATIC_DIR / full_path
-        if candidate.is_file():
-            return FileResponse(candidate)
-        index_candidate = config.STATIC_DIR / full_path / 'index.html'
-        if index_candidate.is_file():
+        # 优先命中导出的静态页面 / 资源，否则回退到 404 页面。
+        # 所有路径都必须先通过 _safe_static_path（越界即 None → 404）。
+        #
+        # 越界尝试会记一条 WARN 日志：这类请求 100% 是攻击或扫描行为，
+        # 之前不记录任何痕迹，出事后无从追溯。日志只写路径，不含内容。
+        if _looks_like_traversal(full_path):
+            logger.warning('拦截疑似路径穿越请求: %r', full_path[:300])
+        target = _safe_static_path(full_path)
+        if target is not None:
+            return FileResponse(target)
+        index_candidate = _safe_static_path(f'{full_path}/index.html')
+        if index_candidate is not None:
             return FileResponse(index_candidate)
         not_found = config.STATIC_DIR / '404.html'
         if not_found.is_file():
