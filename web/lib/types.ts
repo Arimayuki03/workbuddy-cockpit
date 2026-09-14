@@ -367,6 +367,12 @@ export interface UpdateStatus {
   pid?: number;
   /** 日志原文（便于复制反馈） */
   log_tail?: string;
+  /**
+   * 发布包签名校验结果（供应链防护）。
+   * verified = 已验签通过；skipped = 走了 WB_SKIP_SIGNATURE 绕过开关（有风险）；
+   * none 或缺失 = 未执行验签（如旧版本更新器）。
+   */
+  signature?: {status: 'verified' | 'skipped' | 'none'; detail?: string};
 }
 
 export interface VersionSide {

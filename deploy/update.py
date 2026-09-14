@@ -49,6 +49,26 @@ UPSTREAM_REF_FILE = Path(os.environ.get('WB_UPSTREAM_REF_FILE') or DATA_DIR / 'u
 
 STEP_TIMEOUT = int(os.environ.get('WB_UPDATE_STEP_TIMEOUT') or 900)
 
+# ── 发布包签名校验 ───────────────────────────────────────
+# 为什么必须有：一键更新会把 Release 产物以 **root** 直接落盘并重启服务。
+# 而「能发 Release」的门槛比想象中低——能合并 PR 的协作者、或被钓鱼的维护者
+# 账号都能发版。于是「合并恶意 PR → 发版 → 用户点更新」是一条完整链路，
+# 一次得手就是**所有部署同时沦陷**（SolarWinds / event-stream 的形态）。
+#
+# 签名把「能改代码」与「能发布可信产物」变成两件事：私钥离线保管、不进仓库
+# 也不进 CI（进了 CI 的话，恶意 PR 可以改 workflow 把密钥偷走，签名就白做了）。
+# 攻击者即使拿到合并权限发了版，**签不出名，所有用户的更新会中止**。
+#
+# 用 OpenSSH 自带的 ssh-keygen（8.0+，服务器上必有），不引入新依赖。
+# 公钥**内嵌在代码里**而不是读文件：文件可能被一并替换，那信任锚就没了。
+RELEASE_PUBKEY = os.environ.get('WB_RELEASE_PUBKEY') or (
+    'ssh-ed25519 AAAA_REPLACE_ME_WITH_YOUR_REAL_PUBLIC_KEY release-signing'
+)
+# 签名者身份（allowed_signers 的第一列），仅作标识，不参与信任判断
+RELEASE_SIGNER_ID = os.environ.get('WB_RELEASE_SIGNER') or 'release'
+# 置 1 可跳过验签，供更换密钥等紧急情况使用；会在日志里显式告警
+SKIP_SIGNATURE = os.environ.get('WB_SKIP_SIGNATURE') == '1'
+
 
 # ── 状态写入 ─────────────────────────────────────────────
 class Reporter:
@@ -94,6 +114,16 @@ class Reporter:
         从而区分「更新成功、只是被重启带走」与「真的崩了」。
         """
         self.state['target_version'] = str(tag or '').strip().lstrip('vV')
+        self.flush()
+
+    def set_signature(self, status: str, detail: str = '') -> None:
+        """记录签名校验结果，供界面显示「已验签 / 未验签」。
+
+        status: verified（验签通过）/ skipped（走了绕过开关）/ none（未执行）
+        界面据此给出安心的绿色标记或醒目告警 —— 这是「本次更新是否经过
+        完整性验证」唯一的用户可见信号，不能只留在日志里。
+        """
+        self.state['signature'] = {'status': status, 'detail': detail}
         self.flush()
 
     def flush(self) -> None:
@@ -156,6 +186,103 @@ def download(url: str, dest: Path, rep: Reporter) -> None:
     rep.log(f'  完成（{size / 1024 / 1024:.2f} MB）')
     if size < 100_000:
         raise RuntimeError('下载内容异常偏小，可能是错误页面')
+
+
+def check_signature(archive: Path, sig_path: Path, rep: Reporter) -> None:
+    """用内置公钥校验 `archive` 的签名文件 `sig_path`；不通过即抛错。
+
+    拆成独立函数是刻意的：「验签」是这条信任链的核心，必须是一个**只依赖
+    两个文件 + 内置公钥**的纯函数，便于测试直接调用（不必去 mock 网络层——
+    曾经因为 mock 标准库导致测试之间互相污染，那种脆弱性本身也是风险）。
+    """
+    if SKIP_SIGNATURE:
+        rep.log('⚠️ 已通过 WB_SKIP_SIGNATURE 跳过签名校验——'
+                '只有在更换签名密钥等紧急情况下才应这样做，本次更新未经验证', 'warn')
+        rep.set_signature('skipped', '已手动跳过（WB_SKIP_SIGNATURE=1）')
+        return
+
+    if 'AAAA_REPLACE_ME' in RELEASE_PUBKEY:
+        raise RuntimeError(
+            '发布包签名公钥未配置（仍是占位值），已拒绝自动更新。\n'
+            '  这是故意的：没有可信公钥时，任何"从 GitHub 下载的包"都可能是'
+            '被篡改的产物。\n'
+            '  请把维护者提供的公钥写入 deploy/update.py 的 RELEASE_PUBKEY，'
+            '或设 WB_RELEASE_PUBKEY 环境变量；'
+            '确需临时跳过可设 WB_SKIP_SIGNATURE=1（不推荐）。'
+        )
+
+    if not sig_path.is_file():
+        raise RuntimeError(
+            '该 Release 没有可用的签名文件，已拒绝安装。\n'
+            '  正常发布流程会附带 .tar.gz.sig；缺失说明发布流程可能被改动。'
+        )
+
+    # ssh-keygen 要求 allowed_signers 格式（纯 .pub 文件不接受）
+    signers = archive.parent / 'allowed_signers'
+    signers.write_text(f'{RELEASE_SIGNER_ID} {RELEASE_PUBKEY.strip()}\n', encoding='utf-8')
+
+    rep.log('校验发布包签名…')
+    cmd = ['ssh-keygen', '-Y', 'verify',
+           '-f', str(signers),
+           '-I', RELEASE_SIGNER_ID,
+           '-n', 'file',
+           '-s', str(sig_path)]
+    try:
+        with open(archive, 'rb') as fh:
+            proc = subprocess.run(cmd, stdin=fh, capture_output=True, timeout=60)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            '系统缺少 ssh-keygen，无法校验发布包签名（OpenSSH 8.0+ 自带）。'
+            '请安装 openssh-client 后重试。'
+        ) from exc
+    out = ((proc.stdout or b'') + (proc.stderr or b'')).decode('utf-8', errors='replace').strip()
+    if proc.returncode != 0 or 'Good' not in out:
+        # 区分「验签不通过」与「工具太老不会验」：两者都拒绝（fail-closed），
+        # 但成因不同——旧版 ssh-keygen 会把用法错误也报成失败，若不点明，
+        # 使用者会以为包被篡改，白白排查半天。
+        if 'invalid option' in out.lower() or 'unknown option' in out.lower():
+            raise RuntimeError(
+                '❌ 系统 ssh-keygen 过旧，不支持 -Y 验签（需要 OpenSSH 8.0+）。\n'
+                f'  ssh-keygen: {out[:300]}\n'
+                '  请升级 openssh-client（Debian/Ubuntu：apt install --only-upgrade openssh-client）。'
+            )
+        raise RuntimeError(
+            '❌ 发布包签名校验失败，已拒绝安装（可能是发布流程被篡改或产物被替换）。\n'
+            f'  ssh-keygen: {out[:300]}\n'
+            '  如果你的部署确实需要跳过，可临时设 WB_SKIP_SIGNATURE=1，'
+            '但那等于放弃这道防线，请先确认包来源。'
+        )
+    rep.log(f'✓ 签名校验通过（{out[:80]}）')
+    rep.set_signature('verified', out[:120])
+
+
+def download_signature(sig_url: str, archive: Path, rep: Reporter) -> Path:
+    """下载签名文件到包旁边，返回其路径。失败时抛错（不返回"空签名"）。"""
+    sig_path = archive.with_suffix(archive.suffix + '.sig')
+    if not sig_url:
+        return sig_path  # 让 check_signature 报「缺少签名文件」并给出清晰指引
+    rep.log('下载签名文件…')
+    try:
+        req = urllib.request.Request(sig_url, headers={'User-Agent': 'workbuddy-manager-updater'})
+        with urllib.request.urlopen(req, timeout=60) as resp, open(sig_path, 'wb') as fh:
+            shutil.copyfileobj(resp, fh)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f'该 Release 没有可用的签名文件，已拒绝安装：{exc}\n'
+            '  正常发布流程会附带 .tar.gz.sig；缺失说明发布流程可能被改动。'
+        ) from exc
+    return sig_path
+
+
+def verify_release_signature(archive: Path, sig_url: str, rep: Reporter) -> None:
+    """校验发布包的签名；不通过就抛错中止（绝不继续安装）。
+
+    这是「包本身可信吗」的唯一防线——路径校验（_safe_extract）只能保证
+    「包里的路径不逃逸」，防不了「包整体就是恶意的」。两者缺一不可。
+    签名覆盖整个 tar.gz，因此包内容被改一个字节都会验签失败。
+    """
+    sig_path = download_signature(sig_url, archive, rep)
+    check_signature(archive, sig_path, rep)
 
 
 # ── 上游更新 ─────────────────────────────────────────────
@@ -423,6 +550,8 @@ def update_manager(rep: Reporter) -> None:
     pkg = next((a for a in assets if str(a.get('name', '')).endswith('.tar.gz')), None)
     if not pkg:
         raise RuntimeError('该 Release 未提供 .tar.gz 产物')
+    sig = next((a for a in assets
+                if str(a.get('name', '')).endswith('.tar.gz.sig')), None)
 
     # 2) 下载并解压到临时目录
     with tempfile.TemporaryDirectory(prefix='wbm-update-') as tmpdir:
@@ -432,6 +561,13 @@ def update_manager(rep: Reporter) -> None:
         # 这里按同名原则做净化（Path(...).name 会丢掉任何目录成分）
         archive = tmp / Path(str(pkg.get('name') or 'pkg.tar.gz')).name
         download(pkg['browser_download_url'], archive, rep)
+
+        # 验签必须在下解压之前：先确认「这个包是你签的」，再谈包里的内容
+        verify_release_signature(
+            archive,
+            str(sig.get('browser_download_url') or '') if sig else '',
+            rep,
+        )
 
         rep.log('解压…')
         with tarfile.open(archive, 'r:gz') as tf:
@@ -470,10 +606,34 @@ def update_manager(rep: Reporter) -> None:
             shutil.rmtree(target_web, ignore_errors=True)
         shutil.copytree(new_web_out, target_web)
 
-        # deploy/ 里的脚本也可能更新（如 systemd 单元）
-        if (new_root / 'deploy').is_dir():
-            shutil.copytree(new_root / 'deploy', INSTALL_DIR / 'deploy', dirs_exist_ok=True)
-            rep.log('同步 deploy/')
+        # deploy/ 里的脚本**不自动替换**——它含本次更新用的验签逻辑与公钥，
+        # 是整条信任链的锚点。若允许包内 deploy/ 覆盖它，攻击者只要在某次
+        # 更新里带一个改过的 update.py，之后所有更新就都不验签了
+        # （等于一次得手、永久失效）。
+        #
+        # 因此：包内带了 deploy/ 就在日志里提示差异，由管理员**手动**决定是否
+        # 覆盖（例如 systemd 单元确实需要更新时）。正常发版不会改这里。
+        new_deploy = new_root / 'deploy'
+        if new_deploy.is_dir():
+            here = Path(__file__).resolve()
+            changed = []
+            for src in sorted(new_deploy.rglob('*')):
+                if not src.is_file():
+                    continue
+                rel = src.relative_to(new_deploy)
+                dst = INSTALL_DIR / 'deploy' / rel
+                try:
+                    if not dst.is_file() or dst.read_bytes() != src.read_bytes():
+                        changed.append(str(rel))
+                except OSError:
+                    changed.append(str(rel))
+            if changed:
+                rep.log('⚠️ 新包内的 deploy/ 与本地不同，**已跳过同步**（保护验签逻辑）：'
+                        + '、'.join(changed[:8])
+                        + ('…' if len(changed) > 8 else ''), 'warn')
+                rep.log(f'   如需更新，请手动比对后覆盖：{here.parent}（本次未改动）', 'warn')
+            else:
+                rep.log('deploy/ 与包内一致，无需同步')
 
         # 版本标记：界面「当前版本」与更新提醒都以它为准，必须一并替换，
         # 否则更新后仍显示旧版本，并一直提示「发现新版本可用」
