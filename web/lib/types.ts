@@ -30,6 +30,12 @@ export interface Account {
   last_success?: string | null;
   last_used?: number | null;
   source: 'file' | 'pool';
+  /** 账号所属版本（cn / global）；存量账号按域名回退，无该字段时视为 cn */
+  realm?: 'cn' | 'global';
+  /** 该版本是否支持签到体系（国际版没有） */
+  checkin_supported?: boolean;
+  /** auth 文件里的 domain，便于确认归属 */
+  domain?: string;
 }
 
 export interface AccountsResponse {
@@ -262,6 +268,8 @@ export interface UpstreamConfig {
   prompt?: Record<string, unknown>;
   server?: Record<string, unknown>;
   upstream?: Record<string, unknown>;
+  /** 国际版（workbuddy.ai）路由：enabled / chat_base / billing_base */
+  global?: Record<string, unknown>;
   upstash?: UpstashConfig;
 }
 

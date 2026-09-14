@@ -32,6 +32,24 @@ class ChatIn(BaseModel):
     stream: bool = True
     temperature: float | None = None
     max_tokens: int | None = None
+    # 版本：cn / global。**必须显式指定**——上游的裸模型名默认走国内版，
+    # 测试台若只在界面上切了版本、请求却发裸名，会选到国内版账号池，
+    # 出现「切到国际版却调用国内模型」的错配。这里据此给模型名加前缀。
+    realm: str = Field(default='cn', max_length=16)
+
+
+def _qualified_model(model: str, realm: str) -> str:
+    """给模型名加版本前缀，让上游显式选域。
+
+    上游请求侧语法是 `[realm:]model`（小写），前缀不传上游 body。
+    已经有前缀的（用户手输）不重复添加；国内版不加前缀以兼容裸名默认行为。
+    """
+    m = (model or '').strip()
+    if m.lower().startswith(('cn:', 'global:')):
+        return m
+    if realm == 'global':
+        return f'global:{m}'
+    return m
 
 
 @router.post('/chat')
@@ -44,8 +62,10 @@ async def chat(body: ChatIn, request: Request, user: dict = Depends(security.req
     upstream_key = config.upstream_api_key()
     ip = client_ip(request)
     started = time.time()
+    realm = 'global' if str(body.realm).strip().lower() == 'global' else 'cn'
+    model_sent = _qualified_model(body.model, realm)
     payload: dict = {
-        'model': body.model,
+        'model': model_sent,
         'messages': body.messages,
         'stream': body.stream,
     }
@@ -145,15 +165,20 @@ async def chat(body: ChatIn, request: Request, user: dict = Depends(security.req
 
 
 @router.get('/models')
-async def playground_models(user: dict = Depends(security.current_user)) -> dict:
+async def playground_models(
+    realm: str = 'cn',
+    user: dict = Depends(security.current_user),
+) -> dict:
     """测试台的模型下拉：复用模型目录，带上可用的推理档位。
 
     与「模型中心」同源，因此界面上的档位与实际模型能力一致，不会出现
     「选了一个该模型不支持的档位、被上游静默降级」的困惑。
+    按版本取：国际版的模型与国内版几乎不重叠。
     """
     from ..services import modelcatalog
 
-    data = await modelcatalog.catalog()
+    r = 'global' if str(realm).strip().lower() == 'global' else 'cn'
+    data = await modelcatalog.catalog(r)
     return {
         'models': [
             {'id': m['id'], 'name': m.get('name') or m['id'],
@@ -162,4 +187,5 @@ async def playground_models(user: dict = Depends(security.current_user)) -> dict
         ],
         'source': data.get('source'),
         'source_label': data.get('source_label'),
+        'realm': r,
     }

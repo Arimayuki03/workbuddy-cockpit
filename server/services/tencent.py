@@ -1,4 +1,9 @@
-"""腾讯 CodeBuddy 登录 / 签到协议客户端（对齐 workbuddy2api cmd/login）。"""
+"""腾讯 CodeBuddy 登录 / 签到协议客户端（对齐 workbuddy2api cmd/login）。
+
+国内版与国际版共用**同一套路径**，只是 base 与 Origin/Referer/UA 随版本变；
+少数接口的候选路径顺序两边相反（见 realm.billing_paths 的注释）。
+本模块内所有请求都经 realm 层取端点，不再直接引用写死的域名。
+"""
 from __future__ import annotations
 
 import json
@@ -8,8 +13,24 @@ from typing import Any
 import httpx
 
 from .. import config
+from .realm import (
+    CN,
+    GLOBAL,
+    Realm,
+    billing_base,
+    billing_paths,
+    chat_base,
+    chat_paths,
+    headers as realm_headers,
+    realm_of,
+    resolve_realm,
+    supports_checkin,
+)
 
-_state_cache: dict[str, float] = {}
+# 扫码 state 缓存：state -> (登记时间, 发起时的版本)。
+# 记 realm 是为了在回调时校验一致——若用户先开国内版的码、又切到国际版再轮询，
+# 不校验就会把国际版的 token 写进国内版的会话流程（上游 validateRealmMatch 同此意图）。
+_state_cache: dict[str, tuple[float, Realm]] = {}
 STATE_TTL = 300
 
 
@@ -24,45 +45,67 @@ def _envelope(resp: httpx.Response) -> tuple[int, Any]:
     return resp.status_code, env
 
 
-async def start_login() -> dict:
+def _hdr(realm: Realm, token: str | None = None) -> dict:
+    """该版本的通用请求头（Origin/Referer/UA 随版本变）。"""
+    return realm_headers(realm, token)
+
+
+async def start_login(realm: Realm = CN) -> dict:
+    """发起扫码登录。realm 决定用哪套端点与 Origin（默认国内版）。"""
     async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
         resp = await client.post(
-            f'{config.TENCENT_BASE}/v2/plugin/auth/state',
+            f'{chat_base(realm)}/v2/plugin/auth/state',
             params={'platform': 'CLI'},
             json={},
-            headers=config.TENCENT_HEADERS,
+            headers=_hdr(realm),
         )
     code, data = _envelope(resp)
     if code != 0 or not data:
         raise RuntimeError(f'获取授权链接失败 code={code}')
     state = data.get('state') or ''
     if state:
-        _state_cache[state] = time.time()
-    return {'state': state, 'authUrl': data.get('authUrl') or ''}
+        _state_cache[state] = (time.time(), realm)
+    return {'state': state, 'authUrl': data.get('authUrl') or '', 'realm': realm}
 
 
 def is_pending(state: str) -> bool:
     return state in _state_cache
 
 
+def state_realm(state: str) -> Realm | None:
+    """该 state 登记时用的版本；未知返回 None。"""
+    entry = _state_cache.get(state)
+    return entry[1] if entry else None
+
+
 def drop_state(state: str) -> None:
     _state_cache.pop(state, None)
 
 
-async def poll_login(state: str) -> dict:
-    """轮询扫码结果。waiting / expired / ready(含 token 与账号信息)。"""
-    created = _state_cache.get(state)
-    if created is None:
+async def poll_login(state: str, realm: Realm | None = None) -> dict:
+    """轮询扫码结果。waiting / expired / ready(含 token 与账号信息)。
+
+    realm 用于校验一致性：轮询方声明的版本必须与发起时一致，
+    否则返回 realm_mismatch 而不是把另一个版本的凭证混进来。
+    不传 realm 时沿用登记时的版本（兼容既有调用）。
+    """
+    entry = _state_cache.get(state)
+    if entry is None:
         return {'status': 'invalid'}
+    created, reg_realm = entry
     if time.time() - created > STATE_TTL:
         drop_state(state)
         return {'status': 'expired'}
+    if realm is not None and realm != reg_realm:
+        # 不 drop：用户可能切错了版本，切回去还能继续用这张码
+        return {'status': 'realm_mismatch', 'expected': reg_realm, 'got': realm}
+    realm = reg_realm
 
     async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
         resp = await client.get(
-            f'{config.TENCENT_BASE}/v2/plugin/auth/token',
+            f'{chat_base(realm)}/v2/plugin/auth/token',
             params={'state': state},
-            headers=config.TENCENT_HEADERS,
+            headers=_hdr(realm),
         )
         code, data = _envelope(resp)
         if code != 0 or not data or not data.get('accessToken'):
@@ -74,9 +117,9 @@ async def poll_login(state: str) -> dict:
         domain = data.get('domain', '')
 
         acct_resp = await client.get(
-            f'{config.TENCENT_BASE}/v2/plugin/login/account',
+            f'{chat_base(realm)}/v2/plugin/login/account',
             params={'state': state},
-            headers={**config.TENCENT_HEADERS, 'Authorization': f'Bearer {access_token}'},
+            headers=_hdr(realm, access_token),
         )
     _, acct = _envelope(acct_resp)
     acct = acct or {}
@@ -94,15 +137,23 @@ async def poll_login(state: str) -> dict:
         'refresh_token': refresh_token,
         'expires_at': int(time.time()) + expires_in,
         'domain': domain,
+        'realm': realm,
     }
 
 
 def write_auth_file(account: dict) -> tuple[str, bool]:
-    """严格按 workbuddy2api 的嵌套结构落盘，返回 (文件名, 是否覆盖)。"""
+    """严格按 workbuddy2api 的嵌套结构落盘，返回 (文件名, 是否覆盖)。
+
+    realm 写在 `auth` 对象内（与 domain 同级）——上游就是从这里读的。
+    落盘用的是 resolve_realm（**不含逃生门**）：否则一旦 global.enabled=false，
+    新登的国际版账号会被永久写成 cn（上游 BackfillRealm 注释专门警告过这点）。
+    """
     uid = account['uid']
     config.AUTH_DIR.mkdir(parents=True, exist_ok=True)
     target = config.AUTH_DIR / f'workbuddy-{uid}.json'
     existed = target.exists()
+    domain = account.get('domain', '')
+    resolved = resolve_realm(account.get('realm'), domain)
     payload = {
         'account': {
             'uid': uid,
@@ -113,21 +164,29 @@ def write_auth_file(account: dict) -> tuple[str, bool]:
             'accessToken': account['access_token'],
             'refreshToken': account.get('refresh_token', ''),
             'expiresAt': account['expires_at'],
-            'domain': account.get('domain', ''),
+            'domain': domain,
+            'realm': resolved,
         },
     }
     target.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding='utf-8')
     return target.name, existed
 
 
-async def checkin(access_token: str) -> tuple[int, str]:
-    """每日签到。10001 = 今日已签到，属正常幂等。"""
+async def checkin(access_token: str, realm: Realm = CN) -> tuple[int, str]:
+    """每日签到。10001 = 今日已签到，属正常幂等。
+
+    **国际版没有签到体系**：上游调度器对 global 账号直接过滤、不发起任何请求
+    （理由是避免风控）。这里同样直接返回、不打接口——否则会白吃一个 4xx，
+    还可能被当成异常行为。
+    """
+    if not supports_checkin(realm):
+        return -2, '国际版无签到体系，已跳过'
     try:
         async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
             resp = await client.post(
-                config.TENCENT_CHECKIN,
+                f'{billing_base(realm)}{billing_paths(realm, "daily-checkin")[0]}',
                 json={},
-                headers={**config.TENCENT_HEADERS, 'Authorization': f'Bearer {access_token}'},
+                headers=_hdr(realm, access_token),
             )
         code, _ = _envelope(resp)
         if code == 0:
@@ -139,6 +198,20 @@ async def checkin(access_token: str) -> tuple[int, str]:
         return -1, f'签到异常: {exc}'
 
 
+def _pick_accounts(data: object) -> list | None:
+    """从 billing 响应里取套餐数组（兼容多层信封）。"""
+    return _extract_resource_accounts(data)
+
+
+def _credits_of(accounts: list) -> float:
+    total = 0.0
+    for item in accounts:
+        if not isinstance(item, dict):
+            continue
+        total += _package_remain(item)
+    return max(0.0, total)
+
+
 async def fetch_credits(auth: dict) -> tuple[bool, int | float | None, str]:
     """查询账号**实时**积分余额。
 
@@ -148,11 +221,13 @@ async def fetch_credits(auth: dict) -> tuple[bool, int | float | None, str]:
 
     口径与上游保持一致：优先取套餐的 CycleCapacityRemain，
     无 Cycle 字段时退回 CapacityRemain（见 upstream.UserResource）。
+    billing 路径按版本分派（国际版无 /v2 前缀优先，与国内版相反）。
     返回 (ok, credits, message)。
     """
     access_token = str(auth.get('access_token') or '')
     if not access_token:
         return False, None, '该账号无有效 accessToken'
+    realm = realm_of(auth)
 
     now = time.time()
     body = {
@@ -165,15 +240,17 @@ async def fetch_credits(auth: dict) -> tuple[bool, int | float | None, str]:
             '%Y-%m-%d %H:%M:%S', time.localtime(now + 365 * 101 * 24 * 3600)
         ),
     }
-    headers = {
-        **config.TENCENT_HEADERS,
-        'Accept': 'application/json',
-        'Authorization': f'Bearer {access_token}',
-    }
-
     try:
+        # 路径按版本分派；国际版以无 /v2 前缀为首选、404 时回落（与国内版相反）
+        resp = None
         async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
-            resp = await client.post(config.TENCENT_BILLING, json=body, headers=headers)
+            for path in billing_paths(realm, 'user-resource'):
+                resp = await client.post(
+                    f'{billing_base(realm)}{path}', json=body, headers=_hdr(realm, access_token)
+                )
+                if resp.status_code != 404:
+                    break
+        assert resp is not None
         code, data = _envelope(resp)
         if code != 0 or not data:
             return False, None, f'查询失败 code={code}'
@@ -194,7 +271,7 @@ async def fetch_credits(auth: dict) -> tuple[bool, int | float | None, str]:
         return False, None, f'查询异常: {exc}'
 
 
-async def fetch_models(access_token: str) -> tuple[bool, list | str]:
+async def fetch_models(auth: dict) -> tuple[bool, list | str]:
     """拉取该账号可用的 CLI 模型（含显示名、上下文、最大输出、推理档位）。
 
     为什么要管理端自己拉、而不是用上游的 /v1/models：上游把腾讯返回的
@@ -205,18 +282,34 @@ async def fetch_models(access_token: str) -> tuple[bool, list | str]:
     口径与上游 FetchModels 保持一致：
       - 只取 agents 里名为 `cli` 的模型 id 列表（那才是对 CLI 暴露的）
       - `disabled` 的条目不收录
+    路径按版本分派：国际版 `/v2/enterprises/personal/models` 优先、
+    `/console/...` 回落；国内版直接 `/console/...`。
     返回 (ok, models 或错误信息)。不含任何凭据。
     """
+    access_token = str(auth.get('access_token') or '')
     if not access_token:
         return False, '该账号无有效 accessToken'
-    url = f'{config.TENCENT_BASE}/console/enterprises/personal/models'
-    headers = {**config.TENCENT_HEADERS, 'Authorization': f'Bearer {access_token}'}
+    realm = realm_of(auth)
+    paths = (
+        ['/v2/enterprises/personal/models', '/console/enterprises/personal/models']
+        if realm == GLOBAL
+        else ['/console/enterprises/personal/models']
+    )
     try:
+        data = None
+        last_code = -1
         async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
-            resp = await client.get(url, headers=headers)
-        code, data = _envelope(resp)
-        if code != 0 or not isinstance(data, dict):
-            return False, f'模型接口返回 code={code}'
+            for path in paths:
+                resp = await client.get(
+                    f'{chat_base(realm)}{path}', headers=_hdr(realm, access_token)
+                )
+                code, body = _envelope(resp)
+                last_code = code
+                if code == 0 and isinstance(body, dict):
+                    data = body
+                    break
+        if not isinstance(data, dict):
+            return False, f'模型接口返回 code={last_code}'
     except Exception as exc:  # noqa: BLE001
         return False, f'模型接口异常: {exc}'
 
@@ -305,8 +398,10 @@ async def probe_account(auth: dict, model: str = 'glm-5.2') -> tuple[bool, str]:
     （见 workbuddy2api payload.go 中强制 obj["stream"]=true 的处理）。
     因此这里发起流式请求，读到首个数据块即判定可用，随即断开。
 
-    请求头复刻上游 ChatHeaders：缺失字段用 X-No-* 约定，
-    并带上 X-Product: SaaS 与 X-User-Id，避免因请求不完整被拒。
+    请求头复刻上游 ChatHeaders：缺失字段用 X-No-* 约定。
+    国内版带 X-Enterprise-Id / X-Domain（有值则带、否则 X-No-*）；
+    国际版按上游 injectGlobalChatHeaders 固定 `X-No-Enterprise-Id: 1` +
+    `X-Domain: www.workbuddy.ai`，且 chat 路径以 /console 优先、404 回落 /v2。
     """
     import time as _time
 
@@ -314,16 +409,22 @@ async def probe_account(auth: dict, model: str = 'glm-5.2') -> tuple[bool, str]:
     if not access_token:
         return False, '该账号无有效 accessToken'
 
+    realm = realm_of(auth)
     uid = str(auth.get('uid') or '')
     enterprise_id = str(auth.get('enterprise_id') or '')
     domain = str(auth.get('domain') or '')
-    base = domain if domain.startswith('http') else config.TENCENT_BASE
+    # 账号自带的 domain 若已是完整 URL，说明部署方指定了 base，优先采用
+    base = domain if domain.startswith('http') else chat_base(realm)
 
-    headers = dict(config.TENCENT_HEADERS)
-    headers['Authorization'] = f'Bearer {access_token}'
+    headers = _hdr(realm, access_token)
     headers['X-User-Id' if uid else 'X-No-User-Id'] = uid or '1'
-    headers['X-Enterprise-Id' if enterprise_id else 'X-No-Enterprise-Id'] = enterprise_id or '1'
-    headers['X-Domain' if domain else 'X-No-Department-Info'] = domain or '1'
+    if realm == GLOBAL:
+        # 镜像上游：国际版声明「个人账号无企业 ID」并断言国际域
+        headers['X-No-Enterprise-Id'] = '1'
+        headers['X-Domain'] = 'www.workbuddy.ai'
+    else:
+        headers['X-Enterprise-Id' if enterprise_id else 'X-No-Enterprise-Id'] = enterprise_id or '1'
+        headers['X-Domain' if domain else 'X-No-Department-Info'] = domain or '1'
     headers['X-Product'] = 'SaaS'
 
     payload = {
@@ -336,19 +437,23 @@ async def probe_account(auth: dict, model: str = 'glm-5.2') -> tuple[bool, str]:
     started = _time.time()
     try:
         async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
-            async with client.stream(
-                'POST', f'{base}/v2/chat/completions', json=payload, headers=headers,
-            ) as resp:
-                if resp.status_code >= 400:
-                    raw = (await resp.aread()).decode('utf-8', errors='replace')
-                    code, msg = _parse_error_body(raw, resp.status_code)
-                    return False, _explain_code(code, msg)
-                # 读到首个非空数据块即可确认账号可用，无需等流结束
-                async for chunk in resp.aiter_bytes():
-                    if chunk:
-                        elapsed = int((_time.time() - started) * 1000)
-                        return True, f'连通正常（{model}，{elapsed}ms）'
-                return False, '上游未返回任何数据'
+            for path in chat_paths(realm):
+                async with client.stream(
+                    'POST', f'{base}{path}', json=payload, headers=headers,
+                ) as resp:
+                    if resp.status_code in (404, 405) and path != chat_paths(realm)[-1]:
+                        continue  # 换下一条候选路径（上游同此回落逻辑）
+                    if resp.status_code >= 400:
+                        raw = (await resp.aread()).decode('utf-8', errors='replace')
+                        code, msg = _parse_error_body(raw, resp.status_code)
+                        return False, _explain_code(code, msg)
+                    # 读到首个非空数据块即可确认账号可用，无需等流结束
+                    async for chunk in resp.aiter_bytes():
+                        if chunk:
+                            elapsed = int((_time.time() - started) * 1000)
+                            return True, f'连通正常（{model}，{elapsed}ms）'
+                    return False, '上游未返回任何数据'
+        return False, '所有候选路径均不可用'
     except Exception as exc:  # noqa: BLE001
         return False, f'请求异常: {exc}'
 
@@ -385,3 +490,118 @@ def _explain_code(code: int | str, msg: str = '') -> str:
     if hint:
         parts.append(f'（{hint}）')
     return ' '.join(parts)
+
+
+# ── 国际版：地区注册与 trial ──────────────────────────────
+# 国际版新号必须先完成地区注册，否则聊天会报 14017「trial not activated」。
+# 端口与流程对齐上游 scripts/global_region.py（从其反编译结果整理）：
+#   GET  /auth/realms/copilot/overseas/user/register?userId=<uid>  查是否已注册
+#   POST /console/login/account                                     提交地区
+#   POST /billing/ide/trial                                         领一次性 trial
+# 注意：**地区由使用者决定**，这里只提供提交能力，不替用户选国家。
+INTERNATIONAL_REGIONS: tuple[tuple[str, str], ...] = (
+    # (IOS2 代码, 地区中文名) —— 国际版官网给出的可选短名单
+    ('HK', '中国香港'),
+    ('MO', '中国澳门'),
+    ('SG', '新加坡'),
+    ('TH', '泰国'),
+    ('PH', '菲律宾'),
+    ('MY', '马来西亚'),
+    ('ID', '印度尼西亚'),
+)
+
+
+async def registration_status(auth: dict) -> tuple[bool, str]:
+    """查该国际版账号是否已完成地区注册。
+
+    返回 (ok, 说明)。ok=True 表示**已完成**（无需再注册）。
+    国内版无此步骤，直接返回已完成。
+    """
+    realm = realm_of(auth)
+    if realm != GLOBAL:
+        return True, '国内版无需地区注册'
+    uid = str(auth.get('uid') or '')
+    token = str(auth.get('access_token') or '')
+    if not uid or not token:
+        return False, '缺少 uid 或 accessToken，无法查询注册状态'
+    url = f'{billing_base(realm)}/auth/realms/copilot/overseas/user/register'
+    try:
+        async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
+            resp = await client.get(url, params={'userId': uid}, headers=_hdr(realm, token))
+        code, data = _envelope(resp)
+        if code == 200 or code == 0:
+            return True, '地区注册已完成'
+        if code == 500:
+            return False, '尚未完成地区注册'
+        # 「region required」也是未注册的一种表述
+        text = str(data or '')
+        if 'region required' in text.lower():
+            return False, '尚未完成地区注册'
+        return False, f'注册状态未知 code={code}'
+    except Exception as exc:  # noqa: BLE001
+        return False, f'查询注册状态异常: {exc}'
+
+
+async def submit_region(auth: dict, region_code: str) -> tuple[bool, str]:
+    """提交国际版账号的地区。
+
+    region_code 取 INTERNATIONAL_REGIONS 里的代码（如 'HK'）。
+    提交成功后建议再调 registration_status 复核（上游脚本也是这么做的）。
+    """
+    realm = realm_of(auth)
+    if realm != GLOBAL:
+        return False, '国内版无需地区注册'
+    code_upper = (region_code or '').strip().upper()
+    valid = {c for c, _ in INTERNATIONAL_REGIONS}
+    if code_upper not in valid:
+        return False, f'不支持的地区代码 {region_code!r}（可选：{"、".join(sorted(valid))}）'
+    token = str(auth.get('access_token') or '')
+    if not token:
+        return False, '缺少 accessToken'
+
+    body = {
+        'countryCode': [code_upper],
+        'countryFullName': [code_upper],
+        'countryName': [code_upper],
+    }
+    try:
+        async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
+            resp = await client.post(
+                f'{billing_base(realm)}/console/login/account',
+                json=body,
+                headers=_hdr(realm, token),
+            )
+        code, data = _envelope(resp)
+        if code == 0 or code == 200:
+            return True, f'地区已提交（{code_upper}）'
+        return False, f'提交地区失败 code={code}'
+    except Exception as exc:  # noqa: BLE001
+        return False, f'提交地区异常: {exc}'
+
+
+async def claim_trial(auth: dict) -> tuple[bool, str]:
+    """领取国际版的一次性 trial 加油包。
+
+    14051 = 已领过，按幂等处理（算成功）。
+    """
+    realm = realm_of(auth)
+    if realm != GLOBAL:
+        return False, '国内版无 trial 加油包'
+    token = str(auth.get('access_token') or '')
+    if not token:
+        return False, '缺少 accessToken'
+    try:
+        async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
+            resp = await client.post(
+                f'{billing_base(realm)}/billing/ide/trial',
+                json={},
+                headers=_hdr(realm, token),
+            )
+        code, data = _envelope(resp)
+        if code == 0:
+            return True, 'trial 已领取'
+        if code == 14051 or '14051' in str(data or ''):
+            return True, 'trial 此前已领取（幂等）'
+        return False, f'领取 trial 失败 code={code}'
+    except Exception as exc:  # noqa: BLE001
+        return False, f'领取 trial 异常: {exc}'

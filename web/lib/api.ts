@@ -1,4 +1,5 @@
 import axios, {AxiosError} from 'axios';
+import type {Realm} from './realm-context';
 import type {
   Account,
   CheckinLogPage,
@@ -74,14 +75,21 @@ export const authApi = {
 /* ── 账号 ───────────────────────────────────────────── */
 export const accountApi = {
   list: () => get<AccountsResponse>('/api/accounts'),
-  start: () => post<{state: string; authUrl: string}>('/api/auth/start'),
-  poll: (state: string) =>
+  /** 发起扫码登录；realm 决定国内版 / 国际版端点 */
+  start: (realm: Realm = 'cn') =>
+    post<{state: string; authUrl: string; realm: Realm}>('/api/auth/start', {realm}),
+  /** 轮询扫码结果。region 仅国际版需要（新号必须先做地区注册） */
+  poll: (state: string, realm?: Realm, region?: string) =>
     get<{
-      status: 'waiting' | 'success' | 'expired' | 'invalid';
+      status: 'waiting' | 'success' | 'expired' | 'invalid' | 'realm_mismatch';
       uid?: string;
       nickname?: string;
       updated?: boolean;
-    }>('/api/auth/poll', {state}),
+      realm?: Realm;
+      region_note?: string;
+      expected?: Realm;
+      got?: Realm;
+    }>('/api/auth/poll', {state, realm, region}),
   remove: (file: string) => del<{success: boolean}>(`/api/accounts/${encodeURIComponent(file)}`),
   checkin: (file: string) =>
     post<{code: number; message: string; credits?: number | null}>(
@@ -107,12 +115,12 @@ export const accountApi = {
       '/api/accounts/checkin-all',
     ),
   /** 签到记录（分页）。days 用于时间范围筛选 */
-  checkinLogs: (limit = 20, offset = 0, uid?: string, days?: number) =>
-    get<CheckinLogPage>('/api/checkin-logs', {limit, offset, uid, days}),
+  checkinLogs: (limit = 20, offset = 0, uid?: string, days?: number, realm?: Realm) =>
+    get<CheckinLogPage>('/api/checkin-logs', {limit, offset, uid, days, realm}),
   clearCheckinLogs: () => post<{ok: boolean}>('/api/checkin-logs/clear'),
   /** 自动任务记录（分页）。kind / days 为筛选条件 */
-  taskLogs: (limit = 20, offset = 0, kind?: string, uid?: string, days?: number) =>
-    get<TaskLogResponse>('/api/task-logs', {limit, offset, kind, uid, days}),
+  taskLogs: (limit = 20, offset = 0, kind?: string, uid?: string, days?: number, realm?: Realm) =>
+    get<TaskLogResponse>('/api/task-logs', {limit, offset, kind, uid, days, realm}),
   collectTaskLogs: () => post<{ok: boolean; parsed: number; added: number}>('/api/task-logs/collect'),
   clearTaskLogs: () => post<{ok: boolean}>('/api/task-logs/clear'),
   upstreamLogs: (limit = 200) =>
@@ -127,19 +135,22 @@ export const accountApi = {
 /* ── 上游状态 ───────────────────────────────────────── */
 export const upstreamApi = {
   status: () => get<UpstreamStatus>('/api/status'),
-  models: () => get<ModelListResponse>('/api/models'),
+  /** 上游模型简表；realm 非空时只返回该版本的条目 */
+  models: (realm?: Realm) => get<ModelListResponse>('/api/models', {realm}),
 };
 
 /* ── 模型中心 ───────────────────────────────────────── */
 export const modelApi = {
-  /** 模型目录；force=true 绕过 5 分钟缓存 */
-  catalog: (force = false) => get<ModelCatalog>('/api/model-catalog', {force}),
+  /** 指定版本的模型目录；force=true 绕过 5 分钟缓存 */
+  catalog: (realm: Realm = 'cn', force = false) =>
+    get<ModelCatalog>('/api/model-catalog', {realm, force}),
 };
 
 /* ── 聊天测试台 ─────────────────────────────────────── */
 export const playgroundApi = {
-  /** 可选模型 + 各自支持的推理档位（与模型中心同源） */
-  models: () => get<PlaygroundModels>('/api/playground/models'),
+  /** 指定版本的可选模型 + 各自支持的推理档位（与模型中心同源） */
+  models: (realm: Realm = 'cn') =>
+    get<PlaygroundModels>('/api/playground/models', {realm}),
 };
 
 /* ── API 密钥 ───────────────────────────────────────── */

@@ -6,7 +6,10 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import config, db, security
-from ..services import credits as creditsvc, reload, tasklog, tencent, wb2api
+from ..services import (
+    credits as creditsvc, modelcatalog, reload, tasklog, tencent, wb2api,
+)
+from ..services.realm import realm_of, supports_checkin
 
 router = APIRouter(prefix='/api', tags=['accounts'])
 
@@ -36,12 +39,18 @@ async def upstream_status(user: dict = Depends(security.current_user)) -> dict:
 
 
 @router.get('/models')
-async def models(user: dict = Depends(security.current_user)) -> dict:
+async def models(
+    realm: str | None = None,
+    user: dict = Depends(security.current_user),
+) -> dict:
     """上游可用模型列表。
 
     返回结构化对象而非裸数组，是为了带上 source：上游在动态拉取失败时会
     回退到**内置静态表**（老版本写死的，数量少得多），两者外观一样。前端
     据此如实标注来源，避免让人误以为是自己账号/配置有问题。
+
+    realm 非空时只返回该版本的条目：上游清单里带 `cn:` / `global:` 前缀，
+    不过滤会把两个版本的模型混在一起显示。
     """
     ok, data = await wb2api.get_models()
     if not ok:
@@ -52,32 +61,70 @@ async def models(user: dict = Depends(security.current_user)) -> dict:
         items = data['data']
     else:
         items = []
+    source_items = items
+    if realm:
+        r = 'global' if str(realm).strip().lower() == 'global' else 'cn'
+        items = [m for m in items if modelcatalog._belongs(m, r)]
     return {
         'models': items,
-        'source': wb2api.models_source(items),
+        'source': wb2api.models_source(source_items),
         'count': len(items),
     }
 
 
 @router.post('/auth/start')
-async def auth_start(user: dict = Depends(security.require_admin)) -> dict:
+async def auth_start(realm: str = 'cn', user: dict = Depends(security.require_admin)) -> dict:
+    """发起扫码登录。realm 决定国内版 / 国际版端点（默认国内版）。"""
+    r = 'global' if str(realm).strip().lower() == 'global' else 'cn'
     try:
-        return await tencent.start_login()
+        return await tencent.start_login(r)
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get('/auth/poll')
-async def auth_poll(state: str, user: dict = Depends(security.require_admin)) -> dict:
+async def auth_poll(
+    state: str,
+    realm: str | None = None,
+    region: str | None = None,
+    user: dict = Depends(security.require_admin),
+) -> dict:
+    """轮询扫码结果；成功则落盘并触发上游重载。
+
+    region：国际版账号的地区代码（如 HK）。国际版新号必须先完成地区注册，
+    否则聊天会报 14017；地区由用户在弹窗里选，这里只负责提交，不替他决定。
+    """
     if not state:
         return {'status': 'invalid'}
 
-    result = await tencent.poll_login(state)
+    r = None
+    if realm is not None:
+        r = 'global' if str(realm).strip().lower() == 'global' else 'cn'
+    result = await tencent.poll_login(state, r)
     if result.get('status') != 'ready':
         return result
 
-    # 自动签到（幂等，不阻断落盘）
-    code, message = await tencent.checkin(result['access_token'])
+    realm_of_result = result.get('realm') or 'cn'
+
+    # 国际版：先做地区注册（未注册会导致后续聊天报 14017）
+    region_msg = ''
+    if realm_of_result == 'global':
+        auth_probe = {'access_token': result['access_token'], 'uid': result['uid'],
+                      'realm': 'global', 'domain': result.get('domain', '')}
+        if region:
+            ok_r, region_msg = await tencent.submit_region(auth_probe, region)
+        else:
+            done, why = await tencent.registration_status(auth_probe)
+            if not done:
+                region_msg = '尚未完成地区注册，请在弹窗中选择地区后重试（否则聊天会报 14017）'
+        # 注册完成后再领一次性 trial（失败不阻断，已领过按幂等）
+        if region_msg == '' or region_msg.startswith('地区已提交'):
+            ok_t, trial_msg = await tencent.claim_trial(auth_probe)
+            if ok_t:
+                region_msg = f'{region_msg}；{trial_msg}'.strip('；')
+
+    # 自动签到（幂等，不阻断落盘）。国际版无签到体系，checkin 会直接跳过
+    code, message = await tencent.checkin(result['access_token'], realm_of_result)
     db.add_checkin_log(
         str(result.get('uid', '')), str(result.get('nickname', '')),
         'add', code in (0, 10001), code, message,
@@ -93,13 +140,15 @@ async def auth_poll(state: str, user: dict = Depends(security.require_admin)) ->
         'status': 'success',
         'uid': result['uid'],
         'nickname': result['nickname'],
+        'realm': realm_of_result,
         'updated': existed,
         'file': filename,
+        'region_note': region_msg,
     }
 
 
 def _auth_dict(raw: dict) -> dict:
-    """把授权文件内容整理成探测 / 查询积分所需的字段。"""
+    """把授权文件内容整理成探测 / 查询积分所需的字段（含版本，供端点分派）。"""
     acct = raw.get('account') or {}
     auth = raw.get('auth') or {}
     return {
@@ -107,6 +156,7 @@ def _auth_dict(raw: dict) -> dict:
         'uid': acct.get('uid', ''),
         'enterprise_id': acct.get('enterpriseId', ''),
         'domain': auth.get('domain', ''),
+        'realm': auth.get('realm'),
     }
 
 
@@ -132,8 +182,9 @@ async def account_checkin(filename: str, user: dict = Depends(security.require_a
         db.add_checkin_log(uid, nickname, 'manual', False, None, '该账号无有效 accessToken')
         return {'code': -1, 'message': '该账号无有效 accessToken'}
 
-    code, message = await tencent.checkin(token)
-    # 0 = 签到成功；10001 = 今日已签到，同样视为成功
+    code, message = await tencent.checkin(token, realm_of(auth))
+    # 0 = 签到成功；10001 = 今日已签到，同样视为成功；
+    # -2 = 该版本无签到体系（国际版），不是失败，也不该记成失败
     ok = code in (0, 10001)
     db.add_checkin_log(uid, nickname, 'manual', ok, code, message)
 
@@ -237,7 +288,8 @@ async def checkin_all(user: dict = Depends(security.require_admin)) -> dict:
         nickname = acc.get('nickname', '')
         try:
             raw = wb2api.read_account_file(filename)
-            token = (raw.get('auth') or {}).get('accessToken', '')
+            auth = raw.get('auth') or {}
+            token = auth.get('accessToken', '')
         except Exception as exc:  # noqa: BLE001
             msg = f'读取失败: {exc}'
             db.add_checkin_log(uid, nickname, 'manual-batch', False, None, msg)
@@ -248,8 +300,14 @@ async def checkin_all(user: dict = Depends(security.require_admin)) -> dict:
             db.add_checkin_log(uid, nickname, 'manual-batch', False, None, msg)
             return {'nickname': nickname, 'ok': False, 'message': msg}
 
+        # 国际版没有签到体系：直接跳过（不记失败，也不打上游请求）
+        if not supports_checkin(realm_of(auth)):
+            msg = '国际版无签到体系，已跳过'
+            db.add_checkin_log(uid, nickname, 'manual-batch', False, -2, msg)
+            return {'nickname': nickname, 'ok': False, 'code': -2, 'message': msg}
+
         async with sem:
-            code, message = await tencent.checkin(token)
+            code, message = await tencent.checkin(token, realm_of(auth))
         ok = code in (0, 10001)
         db.add_checkin_log(uid, nickname, 'manual-batch', ok, code, message)
         return {'nickname': nickname, 'ok': ok, 'code': code, 'message': message}
@@ -265,6 +323,7 @@ def checkin_logs(
     uid: str | None = None,
     offset: int = 0,
     days: int | None = None,
+    realm: str | None = None,
     user: dict = Depends(security.current_user),
 ) -> dict:
     """签到记录（分页）：**本端触发的 + 上游自动签到的**统一视图。
@@ -316,6 +375,11 @@ def checkin_logs(
     ]
 
     merged = sorted(local_items + auto_items, key=lambda x: x['ts'], reverse=True)
+
+    # 按版本过滤（realm 为空则不过滤，保持既有调用行为）
+    realm_map = _realm_uid_filter(realm)
+    if realm_map is not None:
+        merged = [it for it in merged if _uid_matches_realm(str(it.get('uid') or ''), realm_map, realm)]
 
     # 自动侧的行也要解析昵称（上游只带 uid 前 8 位）；本端的已有昵称
     resolve_nick = _nickname_resolver()
@@ -376,6 +440,46 @@ def _nickname_resolver() -> object:
     return resolve
 
 
+def _realm_uid_filter(realm: str | None) -> dict[str, str] | None:
+    """构造「哪些 uid 属于该版本」的映射；realm 为空返回 None（不过滤）。
+
+    日志表里只有 uid，没有 realm 列（本方案选择不改数据库），所以按
+    账号表把 uid 映射到版本再筛。上游日志里的 uid 是前 8 位，这里同时
+    支持完整 uid 与前缀两种匹配。
+
+    注意：账号已被删除时其历史日志无从判断版本，一律按「不属于任何版本」
+    处理——宁可少显示，也不要把国际版账号的日志挂到国内版视图下。
+    """
+    if not realm:
+        return None
+    r = 'global' if str(realm).strip().lower() == 'global' else 'cn'
+    try:
+        accounts = wb2api.list_auth_accounts()
+    except Exception:  # noqa: BLE001
+        return {}
+    return {
+        str(a.get('uid')): str(a.get('realm') or 'cn')
+        for a in accounts
+        if a.get('uid')
+    }
+
+
+def _uid_matches_realm(uid: str, realm_map: dict[str, str] | None, realm: str) -> bool:
+    """该日志行的 uid 是否属于指定版本（realm_map 为 None 时恒 True）。"""
+    if realm_map is None:
+        return True
+    u = str(uid or '')
+    if not u:
+        return False
+    want = 'global' if str(realm).strip().lower() == 'global' else 'cn'
+    full = realm_map.get(u)
+    if full is not None:
+        return full == want
+    # 上游只给前 8 位：前缀唯一命中才算，命中多个视为不确定、不展示
+    hits = {v for k, v in realm_map.items() if k[:8] == u[:8]}
+    return len(hits) == 1 and hits.pop() == want
+
+
 @router.get('/task-logs')
 def task_logs(
     limit: int = 200,
@@ -383,6 +487,7 @@ def task_logs(
     uid: str | None = None,
     kind: str | None = None,
     days: int | None = None,
+    realm: str | None = None,
     user: dict = Depends(security.current_user),
 ) -> dict:
     """上游自动任务留痕（猫猫旅行 / 活跃上报 / 自动签到 / 保活）。
@@ -395,6 +500,12 @@ def task_logs(
     """
     logs = db.list_task_logs(limit=limit, uid=uid, kind=kind, offset=offset, days=days)
 
+    # 按版本过滤（realm 为空则不过滤）。日志表无 realm 列，按账号表映射 uid
+    realm_map = _realm_uid_filter(realm)
+    if realm_map is not None:
+        logs = [r for r in logs
+                if _uid_matches_realm(str(r.get('uid') or ''), realm_map, realm)]
+
     resolve_nick = _nickname_resolver()
     for row in logs:
         # 结果文案中文化：数据库留英文原文（排查要看上游原话），
@@ -402,10 +513,31 @@ def task_logs(
         row['message_cn'] = tasklog.translate_message(row.get('message', ''))
         row['nickname'] = resolve_nick(str(row.get('uid') or ''))
 
+    # 统计也要按同一口径：不过滤时用数据库聚合（快），过滤时按筛后的行算，
+    # 否则会出现「徽标说 62 条、列表只有 3 条」的矛盾
+    stats = db.task_log_stats(days=days)
+    total = db.count_task_logs(uid=uid, kind=kind, days=days)
+    if realm_map is not None:
+        all_rows = db.list_task_logs(limit=2000, uid=uid, kind=kind, offset=0, days=days)
+        kept = [r for r in all_rows
+                if _uid_matches_realm(str(r.get('uid') or ''), realm_map, realm)]
+        total = len(kept)
+        by_kind: dict[str, dict] = {}
+        for r in kept:
+            k = str(r.get('kind') or '')
+            slot = by_kind.setdefault(k, {'count': 0, 'credits': 0})
+            slot['count'] += 1
+            slot['credits'] += int(r.get('credits') or 0)
+        stats = {
+            'by_kind': by_kind,
+            'total': len(kept),
+            'total_credits': sum(v['credits'] for v in by_kind.values()),
+        }
+
     return {
         'logs': logs,
-        'total': db.count_task_logs(uid=uid, kind=kind, days=days),
-        'stats': db.task_log_stats(days=days),
+        'total': total,
+        'stats': stats,
         'kinds': tasklog.KIND_LABELS,
         'collector': tasklog.state(),
     }

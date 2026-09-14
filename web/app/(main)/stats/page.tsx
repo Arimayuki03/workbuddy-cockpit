@@ -85,7 +85,7 @@ export default function StatsPage() {
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
         title="用量统计"
-        description="按时间、模型与密钥维度统计 Token 消耗与请求量（每 60 秒自动刷新）"
+        description="按时间、模型与密钥维度统计 Token 消耗与请求量（每 60 秒自动刷新；含两种版本，不按版本过滤）"
         actions={
           <>
             <Select value={days} onValueChange={setDays}>

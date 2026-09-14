@@ -422,7 +422,40 @@ const UPSTREAM_FIELDS: Field[] = [
   },
 ];
 
-type Group = 'schedule' | 'prompt' | 'cooldown' | 'features' | 'session' | 'pool' | 'server' | 'upstream';
+/**
+ * 国际版（global）配置。
+ *
+ * 上游从 2026-09-14 起单实例同时支持国内版与国际版：账号按自身 realm 路由，
+ * global.enabled=false 是「锁死纯 CN」的逃生门（关掉后国际版账号会被当 CN 打向
+ * 国内端点，上游文档称之为配置错误）。两个 base 留空即用 https://www.workbuddy.ai。
+ */
+const GLOBAL_FIELDS: Field[] = [
+  {
+    key: 'enabled',
+    kind: 'bool',
+    label: '启用国际版路由',
+    desc: '开启后，realm=global 的账号走 workbuddy.ai（国际版模型与端点）。关闭 = 锁死纯 CN：此时国际版账号会被当成国内版账号发往国内端点，属配置错误',
+    def: true,
+  },
+  {
+    key: 'chat_base',
+    kind: 'text',
+    label: '国际版 Chat 基址',
+    desc: '国际版的聊天 / 登录 / 模型接口基址，留空用内置默认 https://www.workbuddy.ai',
+    placeholder: '留空 = https://www.workbuddy.ai',
+    def: '',
+  },
+  {
+    key: 'billing_base',
+    kind: 'text',
+    label: '国际版 Billing 基址',
+    desc: '国际版的积分 / trial 接口基址，留空用内置默认 https://www.workbuddy.ai',
+    placeholder: '留空 = https://www.workbuddy.ai',
+    def: '',
+  },
+];
+
+type Group = 'schedule' | 'prompt' | 'cooldown' | 'features' | 'session' | 'pool' | 'server' | 'upstream' | 'global';
 
 /** 高级 JSON 编辑器里可直写的上游配置段 */
 type WireSection =
@@ -433,7 +466,8 @@ type WireSection =
   | 'session_sticky'
   | 'prompt'
   | 'server'
-  | 'upstream';
+  | 'upstream'
+  | 'global';
 
 interface GroupDef {
   id: Group;
@@ -500,6 +534,13 @@ const GROUPS: GroupDef[] = [
     title: '出站标识',
     desc: '网关向腾讯发起请求时的客户端标识',
     fields: UPSTREAM_FIELDS,
+  },
+  {
+    id: 'global',
+    section: 'global',
+    title: '国际版',
+    desc: '国际版（workbuddy.ai）路由开关与基址。关闭即锁死纯 CN',
+    fields: GLOBAL_FIELDS,
   },
 ];
 
@@ -624,6 +665,7 @@ export default function SettingsPage() {
     session: defaultValues(SESSION_FIELDS),
     server: defaultValues(SERVER_FIELDS),
     upstream: defaultValues(UPSTREAM_FIELDS),
+    global: defaultValues(GLOBAL_FIELDS),
   });
   /** 加载时的原始值，用于只提交改动过的项 */
   const original = useRef<Record<Group, Record<string, FieldValue>>>({
@@ -635,6 +677,7 @@ export default function SettingsPage() {
     session: defaultValues(SESSION_FIELDS),
     server: defaultValues(SERVER_FIELDS),
     upstream: defaultValues(UPSTREAM_FIELDS),
+    global: defaultValues(GLOBAL_FIELDS),
   });
   /** 高级模式（直接编辑 JSON） */
   const [advanced, setAdvanced] = useState(false);
@@ -646,6 +689,7 @@ export default function SettingsPage() {
   const [promptText, setPromptText] = useState('');
   const [serverText, setServerText] = useState('');
   const [upText, setUpText] = useState('');
+  const [globalText, setGlobalText] = useState('');
 
   const [modelMap, setModelMap] = useState<Record<string, string>>({});
   const [mapAlias, setMapAlias] = useState('');
@@ -677,6 +721,7 @@ export default function SettingsPage() {
           session: pickValues(SESSION_FIELDS, v.session_sticky),
           server: pickValues(SERVER_FIELDS, v.server),
           upstream: pickValues(UPSTREAM_FIELDS, v.upstream),
+          global: pickValues(GLOBAL_FIELDS, v.global),
         };
         setForm(picked);
         original.current = {
@@ -688,6 +733,7 @@ export default function SettingsPage() {
           session: {...picked.session},
           server: {...picked.server},
           upstream: {...picked.upstream},
+          global: {...picked.global},
         };
         setSchedText(JSON.stringify(v.schedule ?? {}, null, 2));
         setCoolText(JSON.stringify(v.cooldown ?? {}, null, 2));
@@ -697,6 +743,7 @@ export default function SettingsPage() {
         setPromptText(JSON.stringify(v.prompt ?? {}, null, 2));
         setServerText(JSON.stringify(v.server ?? {}, null, 2));
         setUpText(JSON.stringify(v.upstream ?? {}, null, 2));
+        setGlobalText(JSON.stringify(v.global ?? {}, null, 2));
         // url 可回显；token 不回显明文，留空表示不修改
         setUpstashForm({url: v.upstash?.url || '', token: ''});
       }
@@ -1426,6 +1473,7 @@ export default function SettingsPage() {
                   ['prompt', promptText, setPromptText],
                   ['server', serverText, setServerText],
                   ['upstream', upText, setUpText],
+                  ['global', globalText, setGlobalText],
                 ] as const).map(([name, val, setter]) => (
                   <div key={name} className="space-y-2">
                     <div className="flex items-center justify-between">

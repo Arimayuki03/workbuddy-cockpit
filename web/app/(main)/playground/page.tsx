@@ -23,6 +23,7 @@ import {notify} from '@/lib/toast';
 import {fmtCredit} from '@/lib/format';
 import {cn} from '@/lib/utils';
 import {useAuth} from '@/lib/auth-context';
+import {useRealm} from '@/lib/realm-context';
 
 interface Msg {
   role: 'user' | 'assistant';
@@ -37,6 +38,7 @@ interface Msg {
 
 export default function PlaygroundPage() {
   const {isAdmin} = useAuth();
+  const {realm, label: realmName} = useRealm();
   const [models, setModels] = useState<ChatModelOption[]>([]);
   const [model, setModel] = useState('');
   const [effort, setEffort] = useState('');
@@ -52,17 +54,25 @@ export default function PlaygroundPage() {
 
   const loadModels = useCallback(async () => {
     try {
-      const r = await playgroundApi.models();
+      const r = await playgroundApi.models(realm);
       setModels(r.models || []);
-      setModel((cur) => cur || r.models?.[0]?.id || '');
+      // 切版本后旧模型多半不在新列表里，直接选第一个，避免发出去被上游拒
+      setModel(r.models?.[0]?.id || '');
+      setEffort('');
     } catch (e) {
       notify.err(errText(e));
     }
-  }, []);
+  }, [realm]);
 
   useEffect(() => {
     loadModels();
   }, [loadModels]);
+
+  // 切换版本 = 换了一套账号池与模型，旧对话留着会造成误解（模型不同、额度不同）
+  useEffect(() => {
+    setMsgs([]);
+    setSessionCredit(0);
+  }, [realm]);
 
   // 自动滚到底部，但用户主动向上翻看时不要抢滚动位置
   useEffect(() => {
@@ -97,7 +107,7 @@ export default function PlaygroundPage() {
         signal: ac.signal,
         body: JSON.stringify({
           model,
-          effort: undefined,
+          realm,
           reasoning_effort: effort,
           stream: true,
           messages: nextMsgs.map((m) => ({role: m.role, content: m.content})),
@@ -196,7 +206,7 @@ export default function PlaygroundPage() {
       setStreaming(false);
       abortRef.current = null;
     }
-  }, [input, msgs, model, effort, streaming]);
+  }, [input, msgs, model, effort, realm, streaming]);
 
   const stop = () => abortRef.current?.abort();
 
@@ -216,7 +226,7 @@ export default function PlaygroundPage() {
     <div className="flex min-h-0 flex-1 flex-col gap-4 md:gap-6">
       <PageHeader
         title="聊天测试台"
-        description="直接用上游账号试调模型，不需要先创建 API 密钥；真实消耗积分，仅管理员可用"
+        description={`${realmName}账号试调模型，不需要先创建 API 密钥；真实消耗积分，仅管理员可用`}
         actions={
           <>
             <Button
