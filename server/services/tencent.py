@@ -481,7 +481,17 @@ async def probe_account(auth: dict, model: str = 'glm-5.2') -> tuple[bool, str]:
 
     payload = {
         'model': model,
-        'messages': [{'role': 'user', 'content': 'ping'}],
+        # **首条必须是 system**：上游要求 messages[0].role == 'system'，否则返回
+        # 11-128「first message is not system prompt」。
+        #
+        # 为什么以前不报错：过去 prompt.mode 缺省是 custom，上游会用自有提示词
+        # 在头部插一条 system；改用缺省 passthrough（2026-09-14 起）后不再插入，
+        # 客户端原样透传 —— 我们这条只带 user 的探测就被拒了。
+        # 探测请求是我们自己造的（不是真实客户端），所以这里显式补上。
+        'messages': [
+            {'role': 'system', 'content': 'You are a helpful assistant.'},
+            {'role': 'user', 'content': 'ping'},
+        ],
         'max_tokens': 1,
         'stream': True,
     }
@@ -522,20 +532,32 @@ def _parse_error_body(raw: str, status: int) -> tuple[int | str, str]:
 
 
 # 已知业务码 -> 可读说明（来源：workbuddy2api 源码与实测）
-_CODE_HINTS: dict[int, str] = {
+#
+# 注意键**必须带引号**：`11-128` 不加引号会被 Python 当成算术表达式
+# （11 - 128 = -117），于是这个提示永远匹配不上，而且真正收到 "11-128" 时
+# int() 还会抛异常被静默吞掉。上游这个错误码是不带引号的形态，必须按字符串存。
+_CODE_HINTS: dict[int | str, str] = {
     0: '成功',
     10001: '今日已签到',
     11101: '上游不接受非流式请求（协议问题，非账号问题）',
-    11128: 'developer 角色需归一化为 system（上游拒绝）',
+    '11-128': '首条消息必须是 system（网关提示词未注入时客户端需自带）',
     12153: '会话已失效，需重新登录',
 }
 
 
 def _explain_code(code: int | str, msg: str = '') -> str:
-    try:
-        hint = _CODE_HINTS.get(int(code))
-    except (TypeError, ValueError):
-        hint = None
+    """把上游错误码翻译成人能看懂的一句话。
+
+    码可能是数字（int/json number）也可能是带横线的字符串（"11-128"），
+    所以查找要**先按原值、再按 int**，并对 int() 失败做好兜底。
+    """
+    key: int | str = code
+    if key not in _CODE_HINTS:
+        try:
+            key = int(code)
+        except (TypeError, ValueError):
+            key = code  # 保持原样（如 "11-128"），按字符串查
+    hint = _CODE_HINTS.get(key)
     parts = [f'上游返回 code={code}']
     if msg:
         parts.append(msg)
