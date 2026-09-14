@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from typing import Literal
 
 from .. import config
@@ -49,6 +50,8 @@ CN_ORIGIN = 'https://www.codebuddy.cn'
 # 读上游 config.json 的缓存：改动要在 10 秒内生效，又不必每请求读盘
 _CFG_TTL = 10
 _cfg_cache: dict = {'at': 0.0, 'data': None}
+# upstream 段的独立缓存（device_token 等；与 global 段互不影响）
+_up_cfg_cache: dict = {'at': 0.0, 'data': None}
 
 
 def _read_global_config() -> dict:
@@ -78,6 +81,8 @@ def _read_global_config() -> dict:
 def invalidate() -> None:
     """清空配置缓存（保存设置后调用，让改动立即生效）。"""
     _cfg_cache.update({'at': 0.0, 'data': None})
+    _up_cfg_cache.update({'at': 0.0, 'data': None})
+    _dt_cache.update({'path': '', 'at': 0.0, 'token': ''})
 
 
 def global_enabled() -> bool:
@@ -205,7 +210,7 @@ def headers(realm: Realm, token: str | None = None) -> dict:
     """该 realm 的通用请求头（Origin/Referer/UA 随 realm 变）。
 
     token 非空时附 Authorization。注意这里只给「通用头」；
-    各接口特有的头（X-User-Id 等）由调用方补。
+    各接口特有的头（X-User-Id 等）由调用方补，或走 billing_headers()。
 
     风控头对齐上游 2026-09-14 的改动（D1/D5/D6）——管理端有一批请求**绕过
     上游直连腾讯**（扫码登录、签到、积分、trial、注册），上游给它的出站加了
@@ -215,6 +220,14 @@ def headers(realm: Realm, token: str | None = None) -> dict:
       * Accept                  非流式收紧为 application/json（D6，原先是
                                 `application/json, text/plain, */*`）
     聊天（流式）路径的 Accept 由调用方覆盖为流式形态，见 tencent.probe_account。
+
+    关于「登录流程是否也该带 D1/D5」——上游自己的登录工具 cmd/login/main.go
+    至今**没跟**（仍是旧的宽松 Accept、无这两个头）。我们选择跟，理由是：
+      1. D1 的注释说这是「官方客户端风控闸门头，所有 API 请求必带」——
+         判断依据来自官方客户端行为，与哪个上游进程实现无关；
+      2. 登录是**最敏感**的一步（换 token、拿账号信息），形态不符的代价最高；
+      3. 多带这两个头不会让请求变坏：上游网关自己也在发同样的组合。
+    即：以「官方客户端行为」为参照，而不是以「上游某个工具的现状」为参照。
     """
     origin = origin_of(realm)
     h = {
@@ -235,6 +248,98 @@ def headers(realm: Realm, token: str | None = None) -> dict:
 def accept_language(realm: Realm) -> str:
     """Accept-Language 按账号域切：global → en-US，cn → zh-CN（对齐上游 D5）。"""
     return 'en-US' if realm == GLOBAL else 'zh-CN'
+
+
+# ── device token（X-Device-Token 设备风控头）────────────────
+# 上游把它注入 **chat 与 billing 两个域**（resolveDeviceToken），三级回退：
+#   auth 每号 device_token > config upstream.device_token > upstream.device_token_file
+# 文件读取有 5 分钟缓存与 1KB 上限（见 device_token.go），这里镜像其语义。
+# 它是**凭据**：只进请求头，不得写日志、不得回显前端。
+_DT_FILE_TTL = 300
+_dt_cache: dict = {'path': '', 'at': 0.0, 'token': ''}
+
+
+def _read_upstream_sec() -> dict:
+    """读上游 config.json 的 `upstream` 段（10 秒缓存，同 global 段）。"""
+    now = time.time()
+    cached = _up_cfg_cache.get('data')
+    if cached is not None and now - float(_up_cfg_cache['at']) < _CFG_TTL:
+        return cached
+    data: dict = {}
+    try:
+        raw = json.loads(config.UPSTREAM_CONFIG.read_text(encoding='utf-8'))
+        up = raw.get('upstream') if isinstance(raw, dict) else None
+        if isinstance(up, dict):
+            data = up
+    except Exception:  # noqa: BLE001
+        pass
+    _up_cfg_cache.update({'at': now, 'data': data})
+    return data
+
+
+def device_token_for(auth: dict | None) -> str:
+    """出站设备风控 token，三级回退（对齐上游 resolveDeviceToken）。取不到返回空串。"""
+    if isinstance(auth, dict):
+        v = str(auth.get('device_token') or '').strip()
+        if v:
+            return v
+    up = _read_upstream_sec()
+    v = str(up.get('device_token') or '').strip()
+    if v:
+        return v
+    path = str(up.get('device_token_file') or '').strip()
+    if not path:
+        return ''
+    now = time.time()
+    if _dt_cache.get('path') == path and now - float(_dt_cache.get('at') or 0) < _DT_FILE_TTL:
+        return str(_dt_cache.get('token') or '')
+    tok = ''
+    try:
+        p = Path(path)
+        # 与上游一致：目录 / 超 1KB / 读失败一律当作没有（不报错，不 panic）
+        if p.is_file() and p.stat().st_size <= 1024:
+            tok = p.read_text(encoding='utf-8', errors='replace').strip()
+    except Exception:  # noqa: BLE001
+        tok = ''
+    _dt_cache.update({'path': path, 'at': now, 'token': tok})
+    return tok
+
+
+def billing_headers(realm: Realm, auth: dict | None = None) -> dict:
+    """billing 域请求头（对齐上游 BillingHeaders）。
+
+    与 `headers()` 的差别是**身份头**——上游 billing 域（签到 / 积分 / trial /
+    注册激活）一直带这些，而 chat 域的身份头由各调用方按接口补齐：
+
+      X-User-Id       账号 uid（非空才发）
+      X-Enterprise-Id / X-Tenant-Id   企业账号的两个同值头
+      X-Domain        账号域（非空才发）
+      X-Device-Token  设备风控 token（三级回退，空则不发）
+
+    管理端直连这批接口时此前一个都不带，是「形态不像官方客户端」的主要来源；
+    上游 Go 侧测试也明确断言 trial 必须携带 X-User-Id（trial_test.go）。
+
+    注意 UA：上游 billing 域仅当配置了 client_name 才设 UA（billingUA），
+    默认不设（Go 默认 UA 更不像官方客户端）。这里统一用 WorkBuddy 形态，
+    比默认更接近官方客户端，属有意为之。
+    """
+    auth = auth if isinstance(auth, dict) else {}
+    token = str(auth.get('access_token') or '')
+    h = headers(realm, token or None)
+    uid = str(auth.get('uid') or '')
+    if uid:
+        h['X-User-Id'] = uid
+    ent = str(auth.get('enterprise_id') or '')
+    if ent:
+        h['X-Enterprise-Id'] = ent
+        h['X-Tenant-Id'] = ent
+    domain = str(auth.get('domain') or '')
+    if domain:
+        h['X-Domain'] = domain
+    dt = device_token_for(auth)
+    if dt:
+        h['X-Device-Token'] = dt
+    return h
 
 
 def supports_checkin(realm: Realm) -> bool:

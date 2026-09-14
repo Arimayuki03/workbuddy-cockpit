@@ -18,9 +18,11 @@ from .realm import (
     GLOBAL,
     Realm,
     billing_base,
+    billing_headers,
     billing_paths,
     chat_base,
     chat_paths,
+    device_token_for,
     headers as realm_headers,
     realm_of,
     resolve_realm,
@@ -48,6 +50,21 @@ def _envelope(resp: httpx.Response) -> tuple[int, Any]:
 def _hdr(realm: Realm, token: str | None = None) -> dict:
     """该版本的通用请求头（Origin/Referer/UA 随版本变）。"""
     return realm_headers(realm, token)
+
+
+def _billing_hdr(realm: Realm, auth: dict | str | None = None) -> dict:
+    """billing 域请求头（带身份头，对齐上游 BillingHeaders）。
+
+    billing 域（签到 / 积分 / trial / 注册）在上游一直携带 X-User-Id 等身份头，
+    我们此前只发通用头——Go 侧测试明确断言 trial 必须带 X-User-Id，签到与查
+    积分同理。这里统一走 realm.billing_headers。
+
+    auth 允许传 token 字符串（兼容既有调用），此时只有 Authorization，
+    身份头缺失——新调用点应尽量传完整 dict。
+    """
+    if isinstance(auth, str):
+        return realm_headers(realm, auth)
+    return billing_headers(realm, auth)
 
 
 async def start_login(realm: Realm = CN) -> dict:
@@ -147,6 +164,10 @@ def write_auth_file(account: dict) -> tuple[str, bool]:
     realm 写在 `auth` 对象内（与 domain 同级）——上游就是从这里读的。
     落盘用的是 resolve_realm（**不含逃生门**）：否则一旦 global.enabled=false，
     新登的国际版账号会被永久写成 cn（上游 BackfillRealm 注释专门警告过这点）。
+
+    device_token 是顶层键（与上游 auth 解析位置一致）。**重新登录不能把它冲掉**：
+    它是设备风控凭据，用户手动写入后若因换 token 重登而丢失，会静默降级风控
+    形态——所以这里读旧文件保留，而不是当作字段缺失。
     """
     uid = account['uid']
     config.AUTH_DIR.mkdir(parents=True, exist_ok=True)
@@ -154,6 +175,17 @@ def write_auth_file(account: dict) -> tuple[str, bool]:
     existed = target.exists()
     domain = account.get('domain', '')
     resolved = resolve_realm(account.get('realm'), domain)
+
+    # 保留旧的 device_token（若有）。读失败不影响主流程。
+    old_device_token = ''
+    if existed:
+        try:
+            old = json.loads(target.read_text(encoding='utf-8'))
+            if isinstance(old, dict):
+                old_device_token = str(old.get('device_token') or '')
+        except Exception:  # noqa: BLE001
+            old_device_token = ''
+
     payload = {
         'account': {
             'uid': uid,
@@ -168,16 +200,21 @@ def write_auth_file(account: dict) -> tuple[str, bool]:
             'realm': resolved,
         },
     }
+    if old_device_token:
+        payload['device_token'] = old_device_token
     target.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding='utf-8')
     return target.name, existed
 
 
-async def checkin(access_token: str, realm: Realm = CN) -> tuple[int, str]:
+async def checkin(access_token: str | dict, realm: Realm = CN) -> tuple[int, str]:
     """每日签到。10001 = 今日已签到，属正常幂等。
 
     **国际版没有签到体系**：上游调度器对 global 账号直接过滤、不发起任何请求
     （理由是避免风控）。这里同样直接返回、不打接口——否则会白吃一个 4xx，
     还可能被当成异常行为。
+
+    access_token 可传字符串（只有 Authorization）或完整 auth dict
+    （额外带上 X-User-Id 等身份头——上游 billing 域一直这么做，见 BillingHeaders）。
     """
     if not supports_checkin(realm):
         return -2, '国际版无签到体系，已跳过'
@@ -186,7 +223,7 @@ async def checkin(access_token: str, realm: Realm = CN) -> tuple[int, str]:
             resp = await client.post(
                 f'{billing_base(realm)}{billing_paths(realm, "daily-checkin")[0]}',
                 json={},
-                headers=_hdr(realm, access_token),
+                headers=_billing_hdr(realm, access_token),
             )
         code, _ = _envelope(resp)
         if code == 0:
@@ -242,11 +279,13 @@ async def fetch_credits(auth: dict) -> tuple[bool, int | float | None, str]:
     }
     try:
         # 路径按版本分派；国际版以无 /v2 前缀为首选、404 时回落（与国内版相反）
+        # 头走 billing 域（带 X-User-Id 等身份头，对齐上游 BillingHeaders）
+        hdr = _billing_hdr(realm, auth)
         resp = None
         async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
             for path in billing_paths(realm, 'user-resource'):
                 resp = await client.post(
-                    f'{billing_base(realm)}{path}', json=body, headers=_hdr(realm, access_token)
+                    f'{billing_base(realm)}{path}', json=body, headers=hdr
                 )
                 if resp.status_code != 404:
                     break
@@ -429,6 +468,11 @@ async def probe_account(auth: dict, model: str = 'glm-5.2') -> tuple[bool, str]:
         headers['X-Enterprise-Id' if enterprise_id else 'X-No-Enterprise-Id'] = enterprise_id or '1'
         headers['X-Domain' if domain else 'X-No-Department-Info'] = domain or '1'
     headers['X-Product'] = 'SaaS'
+    # 设备风控头：上游 chat 域同样注入（ChatHeaders → injectDeviceToken）。
+    # 三级回退 auth 每号 > config 全局 > 文件；取不到就不发（与上游一致）。
+    _dt = device_token_for(auth)
+    if _dt:
+        headers['X-Device-Token'] = _dt
 
     payload = {
         'model': model,
@@ -529,8 +573,10 @@ async def registration_status(auth: dict) -> tuple[bool, str]:
         return False, '缺少 uid 或 accessToken，无法查询注册状态'
     url = f'{billing_base(realm)}/auth/realms/copilot/overseas/user/register'
     try:
+        # 上游参照实现（scripts/global_region.py activate_region）明确带 X-User-Id，
+        # 这里走 billing 域头（含身份头），保持一致
         async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
-            resp = await client.get(url, params={'userId': uid}, headers=_hdr(realm, token))
+            resp = await client.get(url, params={'userId': uid}, headers=_billing_hdr(realm, auth))
         code, data = _envelope(resp)
         if code == 200 or code == 0:
             return True, '地区注册已完成'
@@ -550,6 +596,16 @@ async def submit_region(auth: dict, region_code: str) -> tuple[bool, str]:
 
     region_code 取 INTERNATIONAL_REGIONS 里的代码（如 'HK'）。
     提交成功后建议再调 registration_status 复核（上游脚本也是这么做的）。
+
+    请求体形状**照上游参照实现 scripts/global_region.py**（其注释标注「实测」）：
+
+        {"attributes": {"countryCode": [Code],        ← 数字地区码（如 810000）
+                        "countryFullName": [EnName],  ← 英文全名（如 China Hong Kong）
+                        "countryName": [IOS2]}}       ← 短码（如 HK）
+
+    三个字段**取值各不相同**，此前我们错把三者都填成 IOS2，且少了 attributes
+    外层——上游是按这三个字段落库的，填错会把地区归属写歪。
+    这里按 IOS2 先查回真实条目，取不到就退回只用 IOS2（不至于提交非法值）。
     """
     realm = realm_of(auth)
     if realm != GLOBAL:
@@ -562,17 +618,20 @@ async def submit_region(auth: dict, region_code: str) -> tuple[bool, str]:
     if not token:
         return False, '缺少 accessToken'
 
-    body = {
-        'countryCode': [code_upper],
-        'countryFullName': [code_upper],
-        'countryName': [code_upper],
+    ios2, en_name, numeric = await _region_fields(code_upper)
+
+    attrs = {
+        'countryCode': [numeric],
+        'countryFullName': [en_name],
+        'countryName': [ios2],
     }
+    body = {'attributes': attrs}
     try:
         async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
             resp = await client.post(
                 f'{billing_base(realm)}/console/login/account',
                 json=body,
-                headers=_hdr(realm, token),
+                headers=_billing_hdr(realm, auth),
             )
         code, data = _envelope(resp)
         if code == 0 or code == 200:
@@ -580,6 +639,42 @@ async def submit_region(auth: dict, region_code: str) -> tuple[bool, str]:
         return False, f'提交地区失败 code={code}'
     except Exception as exc:  # noqa: BLE001
         return False, f'提交地区异常: {exc}'
+
+
+async def _region_fields(ios2: str) -> tuple[str, str, str]:
+    """按 IOS2 短码查该地区的 (IOS2, EnName, Code)。
+
+    地区列表来自上游接口 `/billing/area/get-country-code`（响应 data 是内嵌
+    JSON 字符串）。查不到时退回 (IOS2, IOS2, IOS2)——提交非法值会被上游拒绝，
+    好过替用户瞎猜一个。
+    """
+    fallback = (ios2, ios2, ios2)
+    try:
+        async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
+            resp = await client.post(
+                f'{billing_base(GLOBAL)}/billing/area/get-country-code',
+                json={'filterForbidden': 1},
+                headers=_hdr(GLOBAL),
+            )
+        code, data = _envelope(resp)
+        if code != 0 or data is None:
+            return fallback
+        # 响应 data 可能是内嵌 JSON 字符串（上游脚本明确处理了这一层）
+        inner = json.loads(data) if isinstance(data, str) else data
+        if not isinstance(inner, dict):
+            return fallback
+        lst = ((inner.get('data') or {}).get('list')
+               if isinstance(inner.get('data'), dict) else None) or []
+        for item in lst:
+            if isinstance(item, dict) and str(item.get('IOS2') or '').upper() == ios2:
+                return (
+                    str(item.get('IOS2') or ios2),
+                    str(item.get('EnName') or ios2),
+                    str(item.get('Code') or ios2),
+                )
+    except Exception:  # noqa: BLE001
+        pass
+    return fallback
 
 
 async def claim_trial(auth: dict) -> tuple[bool, str]:
@@ -598,7 +693,7 @@ async def claim_trial(auth: dict) -> tuple[bool, str]:
             resp = await client.post(
                 f'{billing_base(realm)}/billing/ide/trial',
                 json={},
-                headers=_hdr(realm, token),
+                headers=_billing_hdr(realm, auth),
             )
         code, data = _envelope(resp)
         if code == 0:
