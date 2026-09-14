@@ -323,12 +323,17 @@ export default function AccountsPage() {
   /** 单账号操作按钮组 */
   function renderActions(a: Account) {
     const busy = busyFile === a.file;
+    // 国际版没有签到体系（上游对 global 账号直接过滤，不发请求）。
+    // 这一行的「签到」按钮对国际版账号只会返回「已跳过」，属误导，故不显示。
+    const canCheckin = (a.realm ?? 'cn') === 'cn';
     return (
       <div className="flex justify-end gap-1">
-        <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title="签到" disabled={busy}
-          onClick={() => run(a.file, () => accountApi.checkin(a.file), '操作完成')}>
-          <Gift className="h-3.5 w-3.5" />
-        </Button>
+        {canCheckin && (
+          <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title="签到" disabled={busy}
+            onClick={() => run(a.file, () => accountApi.checkin(a.file), '操作完成')}>
+            <Gift className="h-3.5 w-3.5" />
+          </Button>
+        )}
         <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title="连通性测试" disabled={busy}
           onClick={() => run(a.file, () => accountApi.test(a.file), '测试完成')}>
           <Zap className="h-3.5 w-3.5" />
@@ -371,7 +376,11 @@ export default function AccountsPage() {
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
         title="账号管理"
-        description="腾讯 CodeBuddy 账号池：Token 有效期、签到与连通性（每 30 秒自动刷新）"
+        description={
+          realm === 'global'
+            ? '腾讯 CodeBuddy 账号池（国际版）：Token 有效期与连通性（每 30 秒自动刷新）'
+            : '腾讯 CodeBuddy 账号池：Token 有效期、签到与连通性（每 30 秒自动刷新）'
+        }
         actions={
           <>
             {isAdmin && (
@@ -401,7 +410,10 @@ export default function AccountsPage() {
               <span className="hidden sm:inline">刷新积分</span>
               <span className="sm:hidden">积分</span>
             </Button>
-            {isAdmin && (
+            {/* 「全部签到」仅国内版显示：国际版**没有签到体系**（上游调度器对
+                global 账号直接过滤，不发请求）。显示一个按下去只会得到「已跳过」
+                的按钮是误导，直接不给。 */}
+            {isAdmin && realm === 'cn' && (
               <Button
                 size="sm"
                 variant="outline"
