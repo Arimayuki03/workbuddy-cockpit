@@ -206,12 +206,23 @@ def headers(realm: Realm, token: str | None = None) -> dict:
 
     token 非空时附 Authorization。注意这里只给「通用头」；
     各接口特有的头（X-User-Id 等）由调用方补。
+
+    风控头对齐上游 2026-09-14 的改动（D1/D5/D6）——管理端有一批请求**绕过
+    上游直连腾讯**（扫码登录、签到、积分、trial、注册），上游给它的出站加了
+    这些头，我们这条路若不加就会成为唯一「形态不像官方客户端」的流量：
+      * X-CodeBuddy-Request: 1  官方客户端风控闸门头，所有 API 请求必带（D1）
+      * Accept-Language         按账号域切 zh-CN / en-US（D5）
+      * Accept                  非流式收紧为 application/json（D6，原先是
+                                `application/json, text/plain, */*`）
+    聊天（流式）路径的 Accept 由调用方覆盖为流式形态，见 tencent.probe_account。
     """
     origin = origin_of(realm)
     h = {
         'Content-Type': 'application/json',
-        'Accept': 'application/json, text/plain, */*',
+        'Accept': 'application/json',
+        'Accept-Language': accept_language(realm),
         'X-Requested-With': 'XMLHttpRequest',
+        'X-CodeBuddy-Request': '1',
         'User-Agent': _ua(realm),
         'Origin': origin,
         'Referer': f'{origin}/',
@@ -219,6 +230,11 @@ def headers(realm: Realm, token: str | None = None) -> dict:
     if token:
         h['Authorization'] = f'Bearer {token}'
     return h
+
+
+def accept_language(realm: Realm) -> str:
+    """Accept-Language 按账号域切：global → en-US，cn → zh-CN（对齐上游 D5）。"""
+    return 'en-US' if realm == GLOBAL else 'zh-CN'
 
 
 def supports_checkin(realm: Realm) -> bool:

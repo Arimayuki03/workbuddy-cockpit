@@ -417,6 +417,9 @@ async def probe_account(auth: dict, model: str = 'glm-5.2') -> tuple[bool, str]:
     base = domain if domain.startswith('http') else chat_base(realm)
 
     headers = _hdr(realm, access_token)
+    # chat 是流式路径：Accept 覆盖为流式形态（对齐上游 D6 —— 非流式默认收紧为
+    # application/json，只有 chat 才声明 text/event-stream）
+    headers['Accept'] = 'application/json, text/event-stream'
     headers['X-User-Id' if uid else 'X-No-User-Id'] = uid or '1'
     if realm == GLOBAL:
         # 镜像上游：国际版声明「个人账号无企业 ID」并断言国际域
