@@ -17,6 +17,7 @@ from .realm import (
     CN,
     GLOBAL,
     Realm,
+    attribution_headers,
     billing_base,
     billing_headers,
     billing_paths,
@@ -468,6 +469,10 @@ async def probe_account(auth: dict, model: str = 'glm-5.2') -> tuple[bool, str]:
         headers['X-Enterprise-Id' if enterprise_id else 'X-No-Enterprise-Id'] = enterprise_id or '1'
         headers['X-Domain' if domain else 'X-No-Department-Info'] = domain or '1'
     headers['X-Product'] = 'SaaS'
+    # 用量归属头：默认伪造官方桌面端指纹（X-Agent-Purpose + X-IDE-* 四头），
+    # 与上游 2026-09-14 起的 injectAttribution 默认值一致——此前只有
+    # X-Product=SaaS，在官网用量归因里是显眼的「网关特征」。
+    headers.update(attribution_headers())
     # 设备风控头：上游 chat 域同样注入（ChatHeaders → injectDeviceToken）。
     # 三级回退 auth 每号 > config 全局 > 文件；取不到就不发（与上游一致）。
     _dt = device_token_for(auth)

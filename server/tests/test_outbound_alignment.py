@@ -133,6 +133,30 @@ class BillingHeaderTest(_Base):
         self.assertEqual(h.get('Authorization'), 'Bearer TOK')
         self.assertEqual(h.get('X-CodeBuddy-Request'), '1', 'D1 风控闸门头')
 
+    def test_billing_ua_is_single_segment(self) -> None:
+        """billing 域 UA 是**单段** WorkBuddy/<ver>（官方白名单接口的覆写形态）。
+
+        上游 2026-09-14 起默认如此；三段式（带 CLI 段）是 chat 域的形态。
+        """
+        _run(tencent.checkin(self.AUTH, 'cn'))
+        ua = self._last()[2]['headers'].get('User-Agent', '')
+        self.assertTrue(ua.startswith('WorkBuddy/'), ua)
+        self.assertNotIn('CLI/', ua, 'billing 域不该带 CLI 段')
+        self.assertNotIn(' ', ua, '单段 UA 不含空格')
+
+    def test_saas_client_name_opts_out(self) -> None:
+        """显式 client_name="SaaS" 还原旧行为：**不设** UA（交给 HTTP 客户端默认）。
+
+        上游此时 req.Header 里就没有 User-Agent（billingUA 返回空）。我们跟着
+        把通用头里的 UA 摘掉，否则会发出「三段式（chat 形态）UA 打到 billing 域」
+        这种两边都不是的形态。
+        """
+        with mock.patch.object(realm, '_read_upstream_sec', return_value={'client_name': 'SaaS'}):
+            realm.invalidate()
+            self.assertEqual(realm.billing_ua(), '')
+            h = realm.billing_headers('cn', {'access_token': 't'})
+        self.assertNotIn('User-Agent', h, 'SaaS 模式下 billing 域不设 UA（对齐上游）')
+
     def test_fetch_credits_carries_identity_headers(self) -> None:
         _run(tencent.fetch_credits(self.AUTH))
         _, url, kw = self._last()
@@ -297,6 +321,78 @@ class DeviceTokenTest(_Base):
         plain = realm.headers('cn', 't')
         self.assertNotIn('X-Device-Token', plain)
         self.assertNotIn('SECRET_DT', json.dumps(plain))
+
+
+class AttributionFingerprintTest(_Base):
+    """chat 路径的用量归属头：默认伪造官方桌面端指纹。
+
+    上游 2026-09-14 起把默认从「X-Product=SaaS、不设 X-IDE-*」**翻转**为
+    「X-Agent-Purpose=conversation + X-IDE-* 四头」，理由是空的 client/agentPurpose
+    在官网用量归因里是显眼的「网关特征」。我们的 probe 此前停留在旧行为。
+    """
+
+    AUTH = {'access_token': 'TOK', 'uid': 'u1', 'realm': 'cn'}
+
+    def _patch_cfg(self, up: dict):
+        p = mock.patch.object(realm, '_read_upstream_sec', return_value=up)
+        p.start()
+        self.addCleanup(p.stop)
+        realm.invalidate()
+
+    def test_default_fingerprint_matches_desktop(self) -> None:
+        self._patch_cfg({})  # 未配置 client_name
+        h = realm.attribution_headers()
+        self.assertEqual(h.get('X-Agent-Purpose'), 'conversation')
+        self.assertEqual(h.get('X-IDE-Name'), 'WorkBuddy')
+        self.assertEqual(h.get('X-IDE-Type'), 'WorkBuddy')
+        self.assertEqual(h.get('X-Product'), 'WorkBuddy')
+        self.assertTrue(h.get('X-IDE-Version'), 'X-IDE-Version 应是客户端版本段')
+
+    def test_saas_restores_old_behavior(self) -> None:
+        """显式配 SaaS 时只有 X-Product=SaaS、不设 X-IDE-*（还原旧行为）。"""
+        self._patch_cfg({'client_name': 'SaaS'})
+        h = realm.attribution_headers()
+        self.assertEqual(h, {'X-Product': 'SaaS'})
+
+    def test_custom_name_follows_value(self) -> None:
+        self._patch_cfg({'client_name': 'MyClient'})
+        h = realm.attribution_headers()
+        self.assertEqual(h.get('X-Product'), 'MyClient')
+        self.assertEqual(h.get('X-IDE-Name'), 'MyClient')
+
+    def test_probe_sends_attribution_headers(self) -> None:
+        """探测请求带上完整归属头组（此前只有 X-Product=SaaS）。"""
+        self._patch_cfg({})
+        _run(tencent.probe_account(self.AUTH, 'glm-5.2'))
+        h = self._last()[2]['headers']
+        self.assertEqual(h.get('X-Agent-Purpose'), 'conversation')
+        self.assertEqual(h.get('X-IDE-Name'), 'WorkBuddy')
+        self.assertEqual(h.get('X-IDE-Version'), realm.client_version())
+
+
+class ExpiringSoonFieldTest(unittest.TestCase):
+    """pool.expiring_soon 的校验与会话：新增字段不能因为白名单不认识被静默丢弃。
+
+    它与普通时长字段有一处语义差异：**空串与 "0" 是「禁用」而不是非法值**。
+    """
+
+    def test_duration_accepted(self) -> None:
+        from server.services import wb2api
+        for val in ('168h', '7d', '30m'):
+            out = wb2api._sanitize_section('pool', {'expiring_soon': val})
+            self.assertEqual(out['expiring_soon'], val)
+
+    def test_empty_and_zero_mean_disabled(self) -> None:
+        from server.services import wb2api
+        for val in ('', '0'):
+            out = wb2api._sanitize_section('pool', {'expiring_soon': val})
+            self.assertEqual(out['expiring_soon'], val,
+                             '空/0 表示禁用，不该被拒绝也不该被改写')
+
+    def test_garbage_rejected(self) -> None:
+        from server.services import wb2api
+        with self.assertRaises(ValueError):
+            wb2api._sanitize_section('pool', {'expiring_soon': '一星期'})
 
 
 class WriteAuthFilePreservesDeviceTokenTest(unittest.TestCase):

@@ -455,6 +455,14 @@ def _sanitize_section(section: str, incoming: dict) -> dict:
             if not _DURATION_RE.match(raw.strip()):
                 raise ValueError(f'{key} 时长格式有误，应为 30s / 10m / 2h / 1d')
             out[key] = raw.strip()
+        elif section == 'pool' and key == 'expiring_soon':
+            # 快过期积分窗口（上游 2026-09-14 新增）：选号时优先消耗窗口内到期的
+            # 积分。语义与普通时长不同——**空串或 "0" 表示禁用分桶**，不是非法值，
+            # 所以不能套上面那条「必须匹配时长格式」的规则（否则用户没法关掉）。
+            val = str(raw or '').strip()
+            if val and val != '0' and not _DURATION_RE.match(val):
+                raise ValueError('expiring_soon 时长格式有误，应为 168h / 7d；留空或 0 = 禁用')
+            out[key] = val
         elif key in _INT_RANGES:
             # 统一区间校验（activity_report_count 等；见 _INT_RANGES 注释）
             out[key] = _check_int(key, raw)

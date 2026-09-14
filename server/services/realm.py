@@ -152,12 +152,58 @@ def cli_version() -> str:
 
 
 def _ua(realm: Realm) -> str:
-    """出站 UA。镜像上游 defaultWorkBuddyUAFor：
+    """chat 域出站 UA。镜像上游 defaultWorkBuddyUAFor：
     `WorkBuddy/<ver> <platform>/<ver> CLI/<cli>`，国际版的平台段是 `WorkBuddy AI`。
     """
     ver = client_version()
     platform = 'WorkBuddy AI' if realm == GLOBAL else 'WorkBuddy'
     return f'WorkBuddy/{ver} {platform}/{ver} CLI/{cli_version()}'
+
+
+def billing_ua() -> str:
+    """billing 域出站 UA：**单段** `WorkBuddy/<ver>`（不带 CLI 段）。
+
+    镜像上游 billingUA：官方客户端在 banner/签到这类白名单接口显式覆写 UA
+    为 `WorkBuddy/<pkgVer>`，RestOperations 层的 CLI 扩展段被业务层固化覆盖。
+    上游 2026-09-14 起把这条从「仅当配置 client_name 才用」改为**默认生效**
+    （原默认是不设 UA，用 Go 客户端自带的默认值——那才是最不像官方客户端的形态）。
+
+    显式配置 client_name="SaaS" 时返回空串 = 不覆写 UA（还原旧行为）。
+    """
+    if attribution_client_name() == 'SaaS':
+        return ''
+    return f'WorkBuddy/{client_version()}'
+
+
+def attribution_client_name() -> str:
+    """用量归属名，镜像上游 attributionClientName。
+
+    配置（upstream.client_name）非空取该值；**空则默认 "WorkBuddy"**——
+    上游 2026-09-14 起把默认从「SaaS（不设 X-IDE-*）」翻转成「WorkBuddy 桌面端
+    指纹」，理由是空的 client/agentPurpose 在官网用量归因里是显眼的「网关特征」。
+    显式配 "SaaS" 可还原旧行为。
+    """
+    up = _read_upstream_sec()
+    name = str(up.get('client_name') or '').strip()
+    return name or 'WorkBuddy'
+
+
+def attribution_headers() -> dict:
+    """chat 路径的用量归属头（镜像上游 injectAttribution）。
+
+    默认（含未配置）伪造官方 WorkBuddy 桌面端头组，与官方 banner 白名单
+    （application-manifest.js）同形；显式 client_name="SaaS" 还原旧行为。
+    """
+    name = attribution_client_name()
+    if name == 'SaaS':
+        return {'X-Product': 'SaaS'}
+    return {
+        'X-Agent-Purpose': 'conversation',
+        'X-IDE-Name': name,
+        'X-IDE-Type': name,
+        'X-IDE-Version': client_version(),
+        'X-Product': name,
+    }
 
 
 def origin_of(realm: Realm) -> str:
@@ -319,13 +365,19 @@ def billing_headers(realm: Realm, auth: dict | None = None) -> dict:
     管理端直连这批接口时此前一个都不带，是「形态不像官方客户端」的主要来源；
     上游 Go 侧测试也明确断言 trial 必须携带 X-User-Id（trial_test.go）。
 
-    注意 UA：上游 billing 域仅当配置了 client_name 才设 UA（billingUA），
-    默认不设（Go 默认 UA 更不像官方客户端）。这里统一用 WorkBuddy 形态，
-    比默认更接近官方客户端，属有意为之。
+    UA 用**单段** `WorkBuddy/<ver>`（billing_ua）：官方客户端在这类白名单接口
+    显式覆写 UA，上游 2026-09-14 起已改为默认如此（此前默认是不设 UA）。
     """
     auth = auth if isinstance(auth, dict) else {}
     token = str(auth.get('access_token') or '')
     h = headers(realm, token or None)
+    # billing 域 UA：覆写为单段 WorkBuddy/<ver>；显式 client_name="SaaS" 时
+    # **移除**该头（还原旧行为——上游此时不设 UA，交给 HTTP 客户端默认值）
+    _bua = billing_ua()
+    if _bua:
+        h['User-Agent'] = _bua
+    else:
+        h.pop('User-Agent', None)
     uid = str(auth.get('uid') or '')
     if uid:
         h['X-User-Id'] = uid
