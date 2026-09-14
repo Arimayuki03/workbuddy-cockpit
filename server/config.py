@@ -63,9 +63,12 @@ SECURE_COOKIE = _env('WB_SECURE_COOKIE', 'auto')  # auto | true | false
 CORS_ORIGINS = [o for o in _env('WB_CORS_ORIGINS', '').split(',') if o]
 
 TENCENT_BASE = 'https://copilot.tencent.com'
+TENCENT_BILLING_BASE = 'https://www.codebuddy.cn'  # 国内版 billing 基址
 TENCENT_CHECKIN = 'https://www.codebuddy.cn/v2/billing/meter/daily-checkin'
 # 积分余额查询（与上游 BillingBaseCN 一致）
 TENCENT_BILLING = 'https://www.codebuddy.cn/v2/billing/meter/get-user-resource'
+# 国内版通用请求头。国际版用 realm.headers('global') 取（Origin/UA 都不同）——
+# 这里的常量保留为 CN 默认值，供既有调用点与不区分版本处使用。
 TENCENT_HEADERS = {
     'Content-Type': 'application/json',
     'Accept': 'application/json, text/plain, */*',

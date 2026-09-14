@@ -24,6 +24,7 @@ import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {AddAccountDialog} from '@/components/common/accounts/AddAccountDialog';
 import {useAuth} from '@/lib/auth-context';
+import {realmLabel, useRealm} from '@/lib/realm-context';
 import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
 import {
@@ -36,6 +37,7 @@ import {
 } from '@/components/ui/table';
 
 export default function AccountsPage() {
+  const {realm, label: realmName} = useRealm();
   const {isAdmin} = useAuth();
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [upstream, setUpstream] = useState<UpstreamStatus | null>(null);
@@ -162,6 +164,18 @@ export default function AccountsPage() {
       } satisfies Account;
     });
   }, [accounts, upstream]);
+
+  /**
+   * 按当前版本过滤。
+   *
+   * 上游是单实例双版本共存，账号池里两种账号都有；不区分的话切到国际版
+   * 仍会看到国内版账号（反之亦然），「切换」就没有意义了。
+   * 存量账号没有 realm 字段，后端按域名回退（多为 cn），与升级前一致。
+   */
+  const visible = useMemo(
+    () => merged.filter((a) => (a.realm ?? 'cn') === realm),
+    [merged, realm],
+  );
 
   /** 执行单账号操作（签到 / 测活 / 刷新 / 删除），成功后同步底栏计数 */
   async function run(file: string, fn: () => Promise<unknown>, okMsg: string) {
@@ -364,7 +378,7 @@ export default function AccountsPage() {
               variant="outline"
               className="rounded-full"
               onClick={refreshCredits}
-              disabled={creditsBusy || !merged.length}
+              disabled={creditsBusy || !visible.length}
               title="直接向腾讯查询各账号当前积分（上游缓存的积分可能滞后数小时）"
             >
               <Coins className={creditsBusy ? 'animate-pulse' : ''} />
@@ -377,7 +391,7 @@ export default function AccountsPage() {
                 variant="outline"
                 className="rounded-full"
                 onClick={checkinAll}
-                disabled={checkinAllBusy || !merged.length}
+                disabled={checkinAllBusy || !visible.length}
               >
                 <CalendarCheck className={checkinAllBusy ? 'animate-pulse' : ''} />
                 全部签到
@@ -397,7 +411,7 @@ export default function AccountsPage() {
         {/* 手机端：卡片列表。表格 6 列在窄屏需要横向滚动，读一行要来回拖，
             改为纵向卡片后信息一眼可见 */}
         <div className="divide-y divide-border/40 md:hidden">
-          {merged.map((a) => (
+          {visible.map((a) => (
             <div key={a.file} className="space-y-2.5 px-3.5 py-3">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-2.5">
@@ -427,7 +441,7 @@ export default function AccountsPage() {
               {isAdmin && renderActions(a)}
             </div>
           ))}
-          {!merged.length && !loading && (
+          {!visible.length && !loading && (
             <div className="px-4 py-12 text-center text-xs text-muted-foreground">暂无账号</div>
           )}
           {loading && !merged.length && (
@@ -449,7 +463,7 @@ export default function AccountsPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {merged.map((a) => (
+            {visible.map((a) => (
               <TableRow key={a.file} className="border-b border-border/40">
                 <TableCell className="pl-4">
                   <div className="flex items-center gap-2.5">
@@ -457,6 +471,17 @@ export default function AccountsPage() {
                     <span className={'truncate text-sm font-medium ' + (a.is_expired ? 'text-muted-foreground' : '')}>
                       {a.nickname || '未命名'}
                     </span>
+                    <Badge
+                      variant="secondary"
+                      className={
+                        'shrink-0 rounded-md px-1.5 py-0 text-[10px] ' +
+                        ((a.realm ?? 'cn') === 'global'
+                          ? 'bg-sky-500/10 text-sky-700 dark:text-sky-400'
+                          : '')
+                      }
+                    >
+                      {realmLabel(a.realm)}
+                    </Badge>
                   </div>
                 </TableCell>
                 <TableCell className="font-mono text-xs text-muted-foreground">{a.uid}</TableCell>
@@ -470,7 +495,7 @@ export default function AccountsPage() {
         </Table>
         </div>
 
-        {!merged.length && !loading && (
+        {!visible.length && !loading && (
           <EmptyState
             icon={Users}
             title="暂无账号"

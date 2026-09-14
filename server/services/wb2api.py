@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 
 from .. import config
+from . import realm as _realm
+from .realm import realm_of, supports_checkin
 
 
 def _safe_file(filename: str) -> Path:
@@ -130,6 +132,16 @@ def list_auth_accounts() -> list[dict]:
                 'ttl_seconds': ttl,
                 # 令牌签发时间 ≈ 最近一次刷新时间（刷新会换发新令牌），解不出为 None
                 'issued_at': issued,
+                # 账号所属版本（cn / global）。上游据此路由到不同上游，
+                # 管理端据此做视图过滤与端点分派；存量文件无 realm 字段时
+                # 按 domain 回退，domain 也为空则判 cn（行为与升级前一致）
+                'realm': realm_of({'realm': raw.get('realm') or auth.get('realm'),
+                                   'domain': auth.get('domain')}),
+                'domain': str(auth.get('domain') or ''),
+                # 该版本是否支持签到体系（国际版没有，调用方据此跳过而不是打 4xx）
+                'checkin_supported': supports_checkin(
+                    realm_of({'realm': raw.get('realm') or auth.get('realm'),
+                              'domain': auth.get('domain')})),
                 'source': 'file',
             }
         )
@@ -464,6 +476,22 @@ def _sanitize_section(section: str, incoming: dict) -> dict:
             if not isinstance(raw, bool):
                 raise ValueError('upstream.passthrough_ip 必须是布尔值')
             out[key] = raw
+        elif section == 'global' and key == 'enabled':
+            # 逃生门开关：false = 锁死纯 CN（上游语义），必须是真布尔
+            if not isinstance(raw, bool):
+                raise ValueError('global.enabled 必须是布尔值')
+            out[key] = raw
+        elif section == 'global' and key in ('chat_base', 'billing_base'):
+            # Base 地址：单行文本。留空 = 用内置默认（www.workbuddy.ai）
+            val = str(raw or '').strip().rstrip('/')
+            if _has_control_chars(val):
+                raise ValueError(f'global.{key} 不能包含换行或控制字符')
+            if len(val) > _UPSTREAM_TEXT_MAX:
+                raise ValueError(f'global.{key} 过长（上限 {_UPSTREAM_TEXT_MAX} 字符）')
+            if val and not val.startswith(('http://', 'https://')):
+                # 上游是按 base + 路径拼接的，缺协议会拼出非法 URL
+                raise ValueError(f'global.{key} 需以 http:// 或 https:// 开头')
+            out[key] = val
         elif section == 'upstream' and key == 'device_token':
             # 敏感凭据，三种语义要分清：
             #   null   → 显式清除（配置里删掉该键）
@@ -503,7 +531,7 @@ def save_upstream_config(patch: dict) -> dict:
         raise ValueError('上游配置文件不是合法的 JSON 对象，已取消保存')
 
     for field in ('schedule', 'pool', 'cooldown', 'features',
-                  'session_sticky', 'prompt', 'server', 'upstream'):
+                  'session_sticky', 'prompt', 'server', 'upstream', 'global'):
         if field in patch and isinstance(patch[field], dict):
             cfg.setdefault(field, {})
             clean = _sanitize_section(field, patch[field])
@@ -534,6 +562,9 @@ def save_upstream_config(patch: dict) -> dict:
         }
 
     path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding='utf-8')
+    # 保存后立即让 realm 的配置缓存失效：否则 global.enabled / 两个 base 的改动
+    # 最长要 10 秒后才生效，用户会以为没保存成功
+    _realm.invalidate()
     return load_upstream_config()
 
 

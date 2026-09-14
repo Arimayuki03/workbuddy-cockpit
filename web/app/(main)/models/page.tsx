@@ -26,6 +26,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import {modelApi, errText} from '@/lib/api';
+import {useRealm} from '@/lib/realm-context';
 import {notify} from '@/lib/toast';
 import {cn} from '@/lib/utils';
 import type {CatalogModel, ModelCatalog} from '@/lib/types';
@@ -89,6 +90,7 @@ function StatCard({
 }
 
 export default function ModelsPage() {
+  const {realm, label: realmName} = useRealm();
   const [data, setData] = useState<ModelCatalog | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -99,10 +101,12 @@ export default function ModelsPage() {
   /** 能力筛选：全部 / 支持推理 / 大上下文 */
   const [cap, setCap] = useState<'all' | 'reasoning' | 'large'>('all');
 
+  // realm 变化时重新拉取：两个版本的模型清单不同，且后端已按版本分开缓存
   const load = useCallback(async (force = false) => {
     if (force) setRefreshing(true);
+    else setLoading(true);
     try {
-      const res = await modelApi.catalog(force);
+      const res = await modelApi.catalog(realm, force);
       setData(res);
       setError('');
     } catch (e) {
@@ -111,9 +115,13 @@ export default function ModelsPage() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [realm]);
 
   useEffect(() => {
+    // 切版本时清掉筛选状态，避免「上一版的系列筛选把新版过滤成空」
+    setSeries('all');
+    setCap('all');
+    setQ('');
     load();
   }, [load]);
 
@@ -141,7 +149,7 @@ export default function ModelsPage() {
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
         title="模型中心"
-        description="账号实际可用的模型及上下文、输出与推理能力（数据取自腾讯模型接口）"
+        description={`${realmName}账号可用的模型及上下文、输出与推理能力（数据取自腾讯模型接口）`}
         actions={
           <Button
             variant="outline"

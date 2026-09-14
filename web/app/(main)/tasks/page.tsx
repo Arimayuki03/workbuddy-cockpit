@@ -3,6 +3,7 @@
 import {useCallback, useEffect, useState} from 'react';
 import {
   CalendarCheck,
+  Globe,
   Cat,
   ChevronLeft,
   ChevronRight,
@@ -20,6 +21,7 @@ import {fmtDateTime, fmtNumber} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {useAuth} from '@/lib/auth-context';
+import {useRealm} from '@/lib/realm-context';
 import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
 import {
@@ -105,6 +107,7 @@ function ListFooter({
 
 export default function TasksPage() {
   const {isAdmin} = useAuth();
+  const {realm, label: realmName} = useRealm();
 
   // 两块列表都分页：历史只增不减，若一次全渲染，页面会随记录数无限变长
   // （实测 500 条任务日志 = 19 屏、9000 个 DOM 节点）。
@@ -145,7 +148,7 @@ export default function TasksPage() {
 
   const load = useCallback(async () => {
     const [logRes, ulRes, taskRes] = await Promise.allSettled([
-      accountApi.checkinLogs(CHECKIN_LIMIT, 0, undefined, Number(checkinDays)),
+      accountApi.checkinLogs(CHECKIN_LIMIT, 0, undefined, Number(checkinDays), realm),
       accountApi.upstreamLogs(300),
       accountApi.taskLogs(
         taskLimit,
@@ -153,6 +156,7 @@ export default function TasksPage() {
         taskFilter === 'all' ? undefined : taskFilter,
         undefined,
         Number(taskDays),
+        realm,
       ),
     ]);
     if (logRes.status === 'fulfilled') {
@@ -171,7 +175,7 @@ export default function TasksPage() {
     if (logRes.status === 'rejected' && taskRes.status === 'rejected') {
       notify.err(errText(logRes.reason ?? taskRes.reason));
     }
-  }, [checkinDays, taskFilter, taskDays, taskLimit]);
+  }, [checkinDays, taskFilter, taskDays, taskLimit, realm]);
 
   useEffect(() => {
     load();
@@ -227,7 +231,7 @@ export default function TasksPage() {
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
         title="任务记录"
-        description="签到结果、上游自动任务与积分收益（每 30 秒自动刷新）"
+        description={`${realmName}的签到结果、上游自动任务与积分收益（每 30 秒自动刷新）`}
       />
 
       {/* 移动端：三块整合成一张卡片，用分段切换，避免又长又碎 */}
@@ -627,6 +631,17 @@ export default function TasksPage() {
             「{kindLabels[taskFilter] || taskFilter}」在当前时间范围内没有记录。
             <br />
             点上方的「全部」可看其它类型，也可以放宽时间范围再试。
+          </div>
+        ) : realm === 'global' ? (
+          /* 国际版没有任务体系：这不是「还没采集到」，而是上游根本不跑这些任务。
+             写字说明白，否则用户会以为是采集器坏了。 */
+          <div className="px-4 py-10 text-center text-xs leading-5 text-muted-foreground">
+            <Globe className="mx-auto mb-2 h-4 w-4 text-sky-500/70" />
+            国际版（workbuddy.ai）<b>没有签到 / 猫猫旅行 / 活跃上报</b>体系，
+            上游对这类账号直接跳过、不发起任何请求（避免风控）。
+            <br />
+            国际版的积分只来自一次性 trial 加油包，因此这里为空是正常的。
+            切回「国内版」可查看国内账号的任务记录。
           </div>
         ) : (
           <div className="px-4 py-10 text-center text-xs leading-5 text-muted-foreground">

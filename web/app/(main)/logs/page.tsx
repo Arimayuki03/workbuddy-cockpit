@@ -100,7 +100,7 @@ export default function LogsPage() {
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
         title="请求日志"
-        description="反代网关的每一次调用记录，含状态、延迟与 Token 计量（每 60 秒自动刷新）"
+        description="反代网关的每一次调用记录，含状态、延迟与 Token 计量（每 60 秒自动刷新；含国内版与国际版调用，不按版本过滤）"
         actions={
           <>
             {isAdmin && (
