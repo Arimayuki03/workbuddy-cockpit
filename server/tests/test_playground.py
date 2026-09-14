@@ -158,17 +158,32 @@ class MergedCheckinLogs(unittest.TestCase):
 
 
 class PlaygroundAuth(unittest.TestCase):
-    """测试台必须仅管理员可用。"""
+    """测试台必须仅管理员可用。
+
+    必须**显式固定 USERS_FILE**：否则它会在「已存在的 data/users.json」与
+    「bootstrap 生成」之间漂移，测试结果取决于运行环境（CI 无该文件、
+    本地有），曾因此在 CI 上失败而本地通过。
+    """
 
     @classmethod
     def setUpClass(cls) -> None:
         cls._tmp = tempfile.TemporaryDirectory()
         cls._orig_db = config.DB_PATH
+        cls._orig_users = config.USERS_FILE
         cls._orig_static = config.STATIC_DIR
         config.DB_PATH = Path(cls._tmp.name) / 'p.db'
+        config.USERS_FILE = Path(cls._tmp.name) / 'users.json'
         config.STATIC_DIR = Path(cls._tmp.name) / 'nonexistent-static'
         import os
         os.environ.setdefault('WB_ADMIN_PASSWORD', 'test-admin-pw')
+        # 显式写出该文件：不依赖 bootstrap 的副作用，也不依赖运行目录里有没有残留
+        from server import security
+        security.save_users({
+            'secret': 'playground-test-secret',
+            'users': [{'username': 'admin', 'role': 'admin',
+                       'pwd_hash': security.make_hash('test-admin-pw')}],
+            'api_keys': [],
+        })
         db._conn = None
         db.connect()
         from server.main import app
@@ -180,8 +195,12 @@ class PlaygroundAuth(unittest.TestCase):
             db._conn.close()
         db._conn = None
         config.DB_PATH = cls._orig_db
+        config.USERS_FILE = cls._orig_users
         config.STATIC_DIR = cls._orig_static
-        cls._tmp.cleanup()
+        try:
+            cls._tmp.cleanup()
+        except PermissionError:
+            pass
 
     def test_requires_login(self) -> None:
         r = self.client.post('/api/playground/chat', json={
