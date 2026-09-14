@@ -1,10 +1,13 @@
 """上游配置、模型映射与管理端用户。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+import secrets
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .. import db, security
+from ..iputil import client_ip
 from ..services import reload, wb2api
 
 router = APIRouter(prefix='/api', tags=['settings'])
@@ -17,7 +20,8 @@ def get_upstream(user: dict = Depends(security.current_user)) -> dict:
 
 
 @router.post('/settings/upstream')
-async def save_upstream(body: dict, user: dict = Depends(security.require_admin)) -> dict:
+async def save_upstream(body: dict, request: Request,
+                        user: dict = Depends(security.require_admin)) -> dict:
     # 必须是 async：同步路由会被 FastAPI 放进线程池执行，那里没有事件循环，
     # 无法调度后台重载任务（request_restart 将拿不到 running loop）。
     try:
@@ -26,6 +30,10 @@ async def save_upstream(body: dict, user: dict = Depends(security.require_admin)
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # 改上游配置会影响全部账号行为，且可能写入 device_token/base 等敏感项，必须留痕
+    security.audit(user, 'update_upstream', '',
+                   f"段={','.join(sorted(k for k in body if isinstance(body.get(k), dict)))}"
+                   f'；来源 {client_ip(request)}')
     # 上游只在启动时读 config.json，保存后自动重载使其生效
     result['reload_scheduled'] = reload.request_restart()
     return result
@@ -92,19 +100,34 @@ def list_users(user: dict = Depends(security.current_user)) -> list[dict]:
 
 
 @router.post('/users')
-def add_user(body: UserIn, user: dict = Depends(security.require_admin)) -> dict:
+def add_user(body: UserIn, request: Request,
+             user: dict = Depends(security.require_admin)) -> dict:
+    """新建管理用户。
+
+    审计是必须的：上次入侵里攻击者正是「先建自己的账号、再正常登录」，
+    而这一步当时没有任何记录。新建用户写随机 sv，避免同名重建后旧 cookie 复活。
+    """
+    pw = str(body.password)
+    if len(pw) < 8:
+        raise HTTPException(status_code=400, detail='密码至少 8 位')
     cfg = security.load_users()
     if any(u.get('username') == body.username for u in cfg.get('users', [])):
         raise HTTPException(status_code=409, detail='用户名已存在')
-    cfg.setdefault('users', []).append(
-        {'username': body.username, 'role': body.role, 'pwd_hash': security.make_hash(body.password)}
-    )
+    cfg.setdefault('users', []).append({
+        'username': body.username,
+        'role': body.role,
+        'pwd_hash': security.make_hash(pw),
+        # 随机初始 sv：删除同名用户再重建时，不会让旧会话「复活」
+        'sv': secrets.randbelow(1 << 30),
+    })
     security.save_users(cfg)
+    security.audit(user, 'add_user', body.username, f'角色={body.role}；来源 {client_ip(request)}')
     return {'username': body.username, 'role': body.role}
 
 
 @router.patch('/users/{username}')
-def update_user(username: str, body: UserPatch, user: dict = Depends(security.require_admin)) -> dict:
+def update_user(username: str, body: UserPatch, request: Request,
+                user: dict = Depends(security.require_admin)) -> dict:
     """改密码 / 改角色。
 
     两种改动都必须**吊销该用户既有会话**：
@@ -147,7 +170,7 @@ def update_user(username: str, body: UserPatch, user: dict = Depends(security.re
             parts.append('改密码')
         if changed_role:
             parts.append('改角色')
-        security.audit(user, 'update_user', username, '、'.join(parts))
+        security.audit(user, 'update_user', username, '、'.join(parts) + f'；来源 {client_ip(request)}')
     # 把自己的密码改了，当前会话也会失效——前端据此提示重新登录
     self_revoked = bool(changed_pwd and username == user.get('username'))
     return {
@@ -159,7 +182,8 @@ def update_user(username: str, body: UserPatch, user: dict = Depends(security.re
 
 
 @router.delete('/users/{username}')
-def delete_user(username: str, user: dict = Depends(security.require_admin)) -> dict:
+def delete_user(username: str, request: Request,
+                user: dict = Depends(security.require_admin)) -> dict:
     cfg = security.load_users()
     users = cfg.get('users', [])
     target = next((u for u in users if u.get('username') == username), None)
@@ -172,7 +196,7 @@ def delete_user(username: str, user: dict = Depends(security.require_admin)) -> 
         raise HTTPException(status_code=400, detail='不能删除当前登录用户')
     cfg['users'] = [u for u in users if u.get('username') != username]
     security.save_users(cfg)
-    security.audit(user, 'delete_user', username)
+    security.audit(user, 'delete_user', username, f'来源 {client_ip(request)}')
     return {'ok': True}
 
 

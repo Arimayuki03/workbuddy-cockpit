@@ -370,12 +370,27 @@ def add_task_logs(entries: list[dict]) -> int:
         return conn.total_changes - before
 
 
+def _clean(text: object, limit: int = 500) -> str:
+    """把外部文本清成单行：去控制字符并截断。
+
+    为什么必须做：登录取的用户名、网关记的 UA/路径都来自外部输入，若含换行
+    就能在日志/审计里**伪造出额外的行**，污染排查与事后追溯。日志是给人看的，
+    单行是硬要求。
+    """
+    t = str(text if text is not None else '')
+    # 先按字符过滤控制字符（含 \r \n），再兜底替换残留的转义序列
+    t = ''.join(ch for ch in t if ch >= ' ')
+    t = t.replace(chr(13), ' ').replace(chr(10), ' ')
+    return t[:limit]
+
+
 def add_audit_log(actor: str, action: str, target: str = '',
                   detail: str = '', ip: str = '') -> None:
     """写一条管理端审计日志。由 security.audit 调用（那里已兜底异常）。"""
     execute(
         'INSERT INTO audit_logs(ts, actor, action, target, detail, ip) VALUES(?, ?, ?, ?, ?, ?)',
-        (int(time.time()), actor[:64], action[:32], target[:128], detail[:500], ip[:64]),
+        (int(time.time()), _clean(actor, 64), _clean(action, 32),
+         _clean(target, 128), _clean(detail, 500), _clean(ip, 64)),
     )
 
 

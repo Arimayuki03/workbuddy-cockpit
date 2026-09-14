@@ -136,8 +136,16 @@ def validate(key: dict, ip: str, model: str | None) -> str | None:
         if ip not in ips and len(ips) >= key['max_ips']:
             return f'密钥已绑定 {len(ips)} 个 IP，超出上限 {key["max_ips"]}'
 
-    if key['models'] and model and model not in key['models']:
-        return f'模型 {model} 不在密钥白名单内'
+    # 模型白名单：**不能因为 model 缺失就跳过检查**。
+    # 原写法 `if key['models'] and model and model not in ...` 在 body 不带 model
+    # （或传空串/非字符串）时整段跳过，于是限定单模型的密钥可用「不带 model」的
+    # 请求走上游默认模型——白名单形同虚设。请求侧已在网关把缺失/非法的 model
+    # 拦成 400；这里再兜一层，任何非字符串或空值一律拒绝。
+    if key['models']:
+        if not isinstance(model, str) or not model.strip():
+            return '请求未指定 model，而该密钥启用了模型白名单'
+        if model not in key['models']:
+            return f'模型 {model} 不在密钥白名单内'
     return None
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from .. import db, keysvc, security
 
@@ -28,8 +28,13 @@ def list_logs(
         where.append('l.ts >= ?')
         args.append(int(time.time()) - days * 86400)
     if key_id and key_id not in ('all', ''):
+        # 非数字会 int() 抛错 → 500。这里显式拦成 400，避免用非法输入探测
+        try:
+            kid = int(key_id)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail='key_id 必须是数字或 all') from None
         where.append('l.key_id = ?')
-        args.append(int(key_id))
+        args.append(kid)
     if model:
         where.append('(l.model LIKE ? OR l.mapped_model LIKE ?)')
         args.extend([f'%{model}%', f'%{model}%'])
