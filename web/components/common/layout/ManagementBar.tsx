@@ -8,6 +8,7 @@ import {
   ClipboardList,
   KeyRound,
   Boxes,
+  MessageSquare,
   ScrollText,
   TrendingUp,
   ShieldCheck,
@@ -423,6 +424,11 @@ export function ManagementBar() {
       title: '模型',
       icon: <Boxes {...IconOptions} />,
       href: '/models',
+    },
+    {
+      title: '测试台',
+      icon: <MessageSquare {...IconOptions} />,
+      href: '/playground',
     },
     {
       title: 'divider',

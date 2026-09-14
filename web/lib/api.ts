@@ -11,6 +11,7 @@ import type {
   ModelCatalog,
   ModelListResponse,
   Page,
+  PlaygroundModels,
   ReloadState,
   RequestLog,
   Changelog,
@@ -133,6 +134,12 @@ export const upstreamApi = {
 export const modelApi = {
   /** 模型目录；force=true 绕过 5 分钟缓存 */
   catalog: (force = false) => get<ModelCatalog>('/api/model-catalog', {force}),
+};
+
+/* ── 聊天测试台 ─────────────────────────────────────── */
+export const playgroundApi = {
+  /** 可选模型 + 各自支持的推理档位（与模型中心同源） */
+  models: () => get<PlaygroundModels>('/api/playground/models'),
 };
 
 /* ── API 密钥 ───────────────────────────────────────── */

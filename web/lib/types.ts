@@ -277,13 +277,15 @@ export interface CheckinLog {
   ts: number;
   uid: string;
   nickname: string;
-  /** 触发来源：manual 手动 / manual-batch 批量 / add 添加账号时 */
+  /** 触发来源：manual 手动 / manual-batch 批量 / add 添加账号 / auto 上游自动 */
   source: string;
   /** 类型：checkin 签到 / keepalive 保活 */
   kind: string;
   success: boolean;
   code: number | null;
   message: string;
+  /** true = 来自上游自动签到（采集器落库），false = 本端触发 */
+  auto?: boolean;
 }
 
 /** 上游自动任务留痕（猫猫旅行 / 活跃上报 / 自动签到 / 保活） */
@@ -321,8 +323,12 @@ export interface TaskLogResponse {
 /** 签到记录分页返回 */
 export interface CheckinLogPage {
   items: CheckinLog[];
-  /** 当前筛选下的总条数 */
+  /** 当前筛选下的总条数（本端触发 + 上游自动） */
   total: number;
+  /** 其中本端触发的条数 */
+  local_total?: number;
+  /** 其中上游自动签到的条数 */
+  auto_total?: number;
 }
 
 export interface UpdateLogLine {
@@ -464,4 +470,20 @@ export interface ReloadState {
 export interface Page<T> {
   total: number;
   items: T[];
+}
+
+/* ── 聊天测试台 ─────────────────────────────────────── */
+
+export interface PlaygroundModel {
+  id: string;
+  name: string;
+  /** 支持的推理档位；空数组 = 该模型不支持调整 */
+  efforts: string[];
+  series: string;
+}
+
+export interface PlaygroundModels {
+  models: PlaygroundModel[];
+  source: CatalogSourceKind;
+  source_label: string;
 }
