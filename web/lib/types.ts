@@ -22,6 +22,8 @@ export interface Account {
   /** 来自 workbuddy2api /status 的运行时字段，可能为空 */
   healthy?: boolean | null;
   disabled?: boolean | null;
+  /** 被上游禁用时的原因（如 11140 request illegal 需重新登录）；空串表示未给出 */
+  disabled_reason?: string | null;
   in_flight?: number | null;
   cooling?: boolean | null;
   success_count?: number | null;

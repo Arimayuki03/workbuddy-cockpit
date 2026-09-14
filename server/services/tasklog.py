@@ -71,6 +71,30 @@ _SCHED_SKIP_LINE = re.compile(
     r'(?:(WARN|ERR):\s+)?scheduled\s+(' + _KINDS + r')\s+skipped:\s*(.*)$'
 )
 
+# ── 脚本类任务（第五、六类）──────────────────────────────
+# 上游 2026-09-14 把「开学季」与「夜猫」从宿主机 crontab 迁入内置调度器，
+# 它们不是「每账号一个 uid」的形态，而是**整批跑一个脚本**，因此日志只有
+# 成败两行（见 internal/scheduler/school.go 的 runScript）：
+#     <kind>: ok (<script>)             成功
+#     WARN: <kind> (<script>): <err>    失败
+# 上面四种形态都要求 `<kind> <token>:`，匹配不到这种，需单独处理——
+# 否则这两类任务在「任务记录」里完全不可见。
+_SCRIPT_KINDS = 'school|cat'
+# 注意：这里不能用 \b 词边界——被补丁脚本写入时会被解释成退格符（\x08）。
+# 用 (?:^|\s) 显式匹配行首或空白，效果等价且不会被转义吃掉。
+_SCRIPT_OK_LINE = re.compile(
+    r'(?:^|\s)(' + _SCRIPT_KINDS + r'):\s*ok\s*(?:\(([^)]*)\))?\s*$'
+)
+_SCRIPT_FAIL_LINE = re.compile(
+    r'(?:WARN|ERR):\s*(' + _SCRIPT_KINDS + r')\s*(?:\(([^)]*)\))?\s*:\s*(.*)$'
+)
+
+# 脚本类任务的中文名（与 KIND_LABELS 合并展示）
+SCRIPT_KIND_LABELS = {
+    'school': '开学季任务',
+    'cat': '夜猫任务',
+}
+
 # 幂等成功标志：腾讯把「今天已签到」当业务错误返回，但语义上是成功。
 # 与上游 IsAlreadyCheckin 的判定保持一致（已签到 / already）。
 _ALREADY_MARKERS = ('已签到', 'already', '重复签到')
@@ -85,6 +109,9 @@ KIND_LABELS = {
     # 余额变动流水：由 credits.record_balance 写入，
     # 用于覆盖上游不打日志的获取渠道（签到、活跃上报等）
     'credit': '积分变动',
+    # 脚本类任务（开学季 / 夜猫）：整批跑脚本，日志只有成败两行
+    'school': '开学季任务',
+    'cat': '夜猫任务',
 }
 
 # 明确表示「什么都没做，也不算失败」的前缀
@@ -192,6 +219,21 @@ def parse_line(line: str) -> dict | None:
         body = m_ts.group(2)
     else:
         body = raw
+
+    # 脚本类任务（开学季 / 夜猫）：`<kind>: ok (...)` 与 `WARN: <kind> (...): err`
+    # 先判——它们的 kind 不在 _KINDS 里，不会被下面的形态误吞；
+    # 但放在最前面更省事，也便于将来扩更多脚本类任务。
+    m = _SCRIPT_OK_LINE.search(body)
+    if m:
+        script = (m.group(2) or '').strip()
+        return _event(ts, m.group(1), '', 'ok', 0,
+                      f'执行成功（{script}）' if script else '执行成功')
+    m = _SCRIPT_FAIL_LINE.search(body)
+    if m:
+        script = (m.group(2) or '').strip()
+        err = (m.group(3) or '').strip()
+        msg = f'{script}：{err}' if script else err
+        return _event(ts, m.group(1), '', 'warn', 0, f'执行失败（{msg}）')
 
     # 形态 3：每轮汇总（先判，避免 `checkin done:` 被当成 uid=done）
     m = _SUMMARY_LINE.search(body)

@@ -447,7 +447,7 @@ export default function TasksPage() {
             <Cat className="h-4 w-4" />
             自动任务与积分记录
             <span className="hidden text-[11px] font-normal text-muted-foreground sm:inline">
-              猫猫旅行 / 活跃上报 / 自动签到 / 保活
+              猫猫旅行 / 活跃上报 / 自动签到 / 保活 / 开学季 / 夜猫
             </span>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -637,11 +637,11 @@ export default function TasksPage() {
              写字说明白，否则用户会以为是采集器坏了。 */
           <div className="px-4 py-10 text-center text-xs leading-5 text-muted-foreground">
             <Globe className="mx-auto mb-2 h-4 w-4 text-sky-500/70" />
-            国际版（workbuddy.ai）<b>没有签到 / 猫猫旅行 / 活跃上报</b>体系，
-            上游对这类账号直接跳过、不发起任何请求（避免风控）。
+            国际版（workbuddy.ai）<b>没有签到 / 猫猫旅行 / 开学季 / 夜猫任务</b>——
+            上游对这类账号直接跳过、不发起请求（避免风控）；积分只来自一次性 trial。
             <br />
-            国际版的积分只来自一次性 trial 加油包，因此这里为空是正常的。
-            切回「国内版」可查看国内账号的任务记录。
+            <b>保活与活跃上报照常执行</b>，有记录时会显示在这里。
+            要看签到与旅行请切回「国内版」。
           </div>
         ) : (
           <div className="px-4 py-10 text-center text-xs leading-5 text-muted-foreground">

@@ -169,6 +169,10 @@ def merge_pool_status(accounts: list[dict], status: dict) -> list[dict]:
         a['credits'] = int(credits) if isinstance(credits, (int, float)) else None
         a['cooling'] = bool(p.get('cooling'))
         a['disabled'] = bool(p.get('disabled'))
+        # 禁用原因：上游对 11140（request illegal，需重新 OAuth 登录）会**硬禁用**
+        # 账号（到期也不自愈），对 14017（试用未激活）只软冷却。展示原因才能
+        # 让用户知道该去重新登录，而不是干等冷却。
+        a['disabled_reason'] = str(p.get('disabled_reason') or '')
         a['success_count'] = p.get('success_count')
         a['in_flight'] = p.get('in_flight')
         a['breaker_fails'] = p.get('breaker_fails')
@@ -375,7 +379,11 @@ def _has_control_chars(v: str) -> bool:
     return any(ord(ch) < 32 for ch in v)
 
 
-_HOURS_KEYS = ('checkin_hours', 'travel_hours', 'activity_hours', 'keepalive_hours')
+# 整点数组字段。上游 2026-09-14 起把 school（开学季）与 cat（夜猫）从宿主机
+# crontab 迁入内置调度器，任务类型由 4 类变 6 类——这里必须同步，
+# 否则设置页保存这两项会被当成未知键丢弃（白名单外的字段静默忽略）。
+_HOURS_KEYS = ('checkin_hours', 'travel_hours', 'activity_hours', 'keepalive_hours',
+               'school_hours', 'cat_hours')
 
 # upstream 段里的单行文本字段（会做控制字符与长度校验）
 _UPSTREAM_TEXT_KEYS = (

@@ -215,6 +215,34 @@ const SCHEDULE_FIELDS: Field[] = [
     def: [22],
   },
   {
+    key: 'school_enabled',
+    kind: 'bool',
+    label: '开学季任务',
+    desc: '自动完成开学季任务中心的活动并抽空抽奖余额（仅国内版；国际版由脚本内部跳过）',
+    def: true,
+  },
+  {
+    key: 'school_hours',
+    kind: 'hours',
+    label: '开学季时刻',
+    desc: '在哪些整点执行开学季任务（0-23，可多个）。活动未开启时会自动跳过，不算失败',
+    def: [12],
+  },
+  {
+    key: 'cat_enabled',
+    kind: 'bool',
+    label: '夜猫任务',
+    desc: '在夜猫窗口（23:00–08:00）补做一次夜猫任务；窗口外会自动跳过',
+    def: true,
+  },
+  {
+    key: 'cat_hours',
+    kind: 'hours',
+    label: '夜猫时刻',
+    desc: '在哪些整点尝试夜猫任务（0-23，可多个）。默认凌晨 1 点；窗口内每天最多补一次',
+    def: [1],
+  },
+  {
     key: 'activity_report_count',
     kind: 'num',
     label: '每次上报条数',
@@ -483,7 +511,7 @@ const GROUPS: GroupDef[] = [
     id: 'schedule',
     section: 'schedule',
     title: '定时任务',
-    desc: '四类任务各自独立排程：签到 / 猫猫旅行 / 活跃上报 / 保活。可分别开关并设置执行时刻',
+    desc: '六类任务各自独立排程：签到 / 猫猫旅行 / 活跃上报 / 保活 / 开学季 / 夜猫。可分别开关并设置执行时刻',
     fields: SCHEDULE_FIELDS,
   },
   {

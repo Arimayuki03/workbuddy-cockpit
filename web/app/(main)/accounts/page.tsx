@@ -158,6 +158,7 @@ export default function AccountsPage() {
         ...a,
         healthy: typeof p.healthy === 'boolean' ? p.healthy : null,
         disabled: typeof p.disabled === 'boolean' ? p.disabled : null,
+        disabled_reason: typeof p.disabled_reason === 'string' ? p.disabled_reason : '',
         in_flight: typeof p.in_flight === 'number' ? p.in_flight : null,
         cooling: typeof p.cooling === 'boolean' ? p.cooling : null,
         last_used: typeof p.last_used === 'number' ? p.last_used : null,
@@ -214,7 +215,22 @@ export default function AccountsPage() {
 
   /** 账号状态徽章（表格与移动端卡片共用） */
   function renderStatus(a: Account) {
-    if (a.disabled === true) return <Badge variant="destructive" className="rounded-full">● 已禁用</Badge>;
+    if (a.disabled === true) {
+      // 上游对 11140（request illegal）是**硬禁用**、到期也不自愈，必须重新登录
+      // 才能恢复；只说「已禁用」会让人干等。原因里含 11140/request illegal 时
+      // 直接提示要重新授权。
+      const reason = String(a.disabled_reason || '');
+      const needRelogin = /11140|request illegal/i.test(reason);
+      return (
+        <Badge
+          variant="destructive"
+          className="rounded-full"
+          title={reason ? `禁用原因：${reason}` : undefined}
+        >
+          ● {needRelogin ? '已禁用（需重新登录）' : '已禁用'}
+        </Badge>
+      );
+    }
     if (a.is_expired) return <Badge variant="destructive" className="rounded-full">● 已过期</Badge>;
     if (a.cooling)
       return (
