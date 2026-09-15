@@ -240,18 +240,20 @@ async def get_models() -> tuple[bool, list | dict]:
 
 
 def models_source(items: list) -> str:
-    """判断这份模型列表来自上游「动态拉取」还是「内置静态表」。
+    """判断这份模型列表来自上游「动态拉取」还是「静态回退」。
 
-    为什么需要区分：上游 `/v1/models` 优先用池里随机一个健康账号去动态拉取
-    （成功则缓存 1 小时），**拉取失败就回退到编译进二进制的静态表**，且失败后
-    还有 5 分钟负缓存。两者外观一样，但静态表是老版本写死的、数量少得多——
-    界面若一律标「来自上游实时列表」，用户会以为账号/配置有问题，实际是上游
-    在走回退。实测有部署只显示 6 个模型，且顺序与旧版静态表完全一致。
+    注意（上游 2026-09-15 起，commit 1b7ce4a）：上游已**删除** CN/global 的静态
+    兜底表，改为纯动态——动态拉取失败或池中无对应账号时返回**空列表**，不再回退
+    到编译进二进制的固定名单。因此下面的 `static` 只可能来自仍在跑老版本上游的
+    部署（那种情况下如实标「非实时」依然有用）。
 
-    判据：动态条目会带 `max_output_tokens`（上游 modelList 里动态分支才写这个
-    键），静态表条目只有 id/object/created/owned_by/context_length。
-    这是上游内部实现细节，故只作展示提示；判不出来返回 'unknown'，前端
-    据此回退到中性文案，绝不因此报错。
+    判据（取上游内部实现细节）：
+      * 动态条目带 `max_output_tokens`（上游 modelList 的动态分支才写该键）；
+      * 老版本上游的静态表**只覆盖 CN**，条目为裸名或 `cn:` 前缀；
+      * 故「无该键 + 没有 global 条目」才判 static——国际版的探测结果在窄表
+        形态下同样没有 max_output_tokens，若不加前缀约束会被误报成静态回退。
+
+    判不出来返回 'unknown'，前端据此回退到中性文案，绝不因此报错。
     """
     if not isinstance(items, list) or not items:
         return 'unknown'
@@ -260,10 +262,12 @@ def models_source(items: list) -> str:
         return 'unknown'
     if any('max_output_tokens' in x for x in dicts):
         return 'dynamic'
-    # 没有该键且条目结构齐全 → 基本可判定为静态回退表
-    if all('id' in x for x in dicts):
-        return 'static'
-    return 'unknown'
+    if not all('id' in x for x in dicts):
+        return 'unknown'
+    # 老上游静态表不含 international 条目；有 global: 说明这次拉取是真实探测结果
+    if any(str(x.get('id') or '').startswith('global:') for x in dicts):
+        return 'dynamic'
+    return 'static'
 
 
 async def restart_container() -> tuple[bool, str]:

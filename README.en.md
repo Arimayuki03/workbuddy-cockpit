@@ -151,8 +151,8 @@ ideas belong in [this repository](https://github.com/ithtelab/workbuddy-manager/
   (credits expiring inside the window are spent first; empty or 0 disables it)
 - **Feature flags / session stickiness** — outbound fingerprint sanitisation, session
   binding TTL and cleanup interval
-- **Available models** — fetched live from the upstream with the source stated
-  (dynamic / built-in static fallback), plus a manual "Refetch" (the upstream caches for
+- **Available models** — fetched live from the upstream with the source stated,
+  plus a manual "Refetch" (the upstream caches for
   one hour). The list is fetched using one randomly chosen account, so **what you see
   depends on that account's entitlements**
 - Everything is validated on input (hours limited to 0-23, deduplicated and sorted;

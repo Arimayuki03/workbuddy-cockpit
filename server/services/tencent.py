@@ -325,12 +325,15 @@ async def fetch_models(auth: dict) -> tuple[bool, list | str]:
     只暴露 id / context_length / max_output_tokens。要做「模型中心」这类
     带显示名与能力的展示，只能照上游约定直连腾讯接口（同一路径、同一信封）。
 
-    口径与上游 FetchModels 保持一致：
-      - 只取 agents 里名为 `cli` 的模型 id 列表（那才是对 CLI 暴露的）
-      - `disabled` 的条目不收录
-      - **过滤非对话模型**（上游 2026-09-14 新增）：见 `_non_chat_model`。
-        不过滤的话，模型中心会列出嵌入/补全/图片生成这类模型，用户选中后
-        聊天直接报 `code=11102`（上游明确说「选了报错」）。
+    口径与上游一致，但**两个版本的口径不同**（上游两域各走各的解析）：
+      - 国内版（上游 FetchModels）：取 agents 里名为 `cli` 的模型 id 列表，
+        并过滤非对话模型（见 `_non_chat_model`，不过滤会列出选不了的东西，
+        用户选中后聊天报 `code=11102`）；
+      - 国际版（上游 parseGlobalModelNames）：取 `data.models` **全量**，
+        不看 agents、也不套国内版的非对话规则——国际版模型目录不由国内版
+        的 `cli` 白名单定义，套用会漏掉国际版实际可用的模型
+        （如 `deepseek-v4.1-flash`，上游 issue #84 就是为它在国际版的档位做的）。
+      - 两域共同：`disabled` 的条目不收录，跳过无 id 的条目。
     路径按版本分派：国际版 `/v2/enterprises/personal/models` 优先、
     `/console/...` 回落；国内版直接 `/console/...`。
     返回 (ok, models 或错误信息)。不含任何凭据。
@@ -355,24 +358,37 @@ async def fetch_models(auth: dict) -> tuple[bool, list | str]:
                 )
                 code, body = _envelope(resp)
                 last_code = code
-                if code == 0 and isinstance(body, dict):
+                if code == 0 and isinstance(body, (dict, list)):
                     data = body
                     break
-        if not isinstance(data, dict):
+        if not isinstance(data, (dict, list)):
             return False, f'模型接口返回 code={last_code}'
     except Exception as exc:  # noqa: BLE001
         return False, f'模型接口异常: {exc}'
 
+    # 窄表形态：data 直接是模型名字符串数组（上游 parseGlobalModelNames 兼容该形态）。
+    # 此时没有 id/name/上下文等任何元数据，只能给出裸 id。
+    if isinstance(data, list):
+        names = [str(x).strip() for x in data if str(x).strip()]
+        if not names:
+            return False, '模型接口未返回任何可用模型'
+        # 去重保序：同一模型不应因为接口重复下发而在页面上出现两次
+        seen: set[str] = set()
+        out = [{'id': n} for n in names if not (n in seen or seen.add(n))]
+        return True, out
+
     raw_models = data.get('models') if isinstance(data.get('models'), list) else []
     agents = data.get('agents') if isinstance(data.get('agents'), list) else []
 
+    # 国内版才用 agents 的 `cli` 白名单；国际版取全量（见 docstring）。
     cli_ids: list[str] = []
-    for ag in agents:
-        if isinstance(ag, dict) and ag.get('name') == 'cli':
-            ids = ag.get('models')
-            if isinstance(ids, list):
-                cli_ids = [str(x) for x in ids if x]
-            break
+    if realm != GLOBAL:
+        for ag in agents:
+            if isinstance(ag, dict) and ag.get('name') == 'cli':
+                ids = ag.get('models')
+                if isinstance(ids, list):
+                    cli_ids = [str(x) for x in ids if x]
+                break
 
     info: dict[str, dict] = {}
     for m in raw_models:
@@ -409,11 +425,17 @@ async def fetch_models(auth: dict) -> tuple[bool, list | str]:
             'only_reasoning': bool(m.get('onlyReasoning')),
             # 推理摘要模式（如 "auto"）；与 supportedEfforts 不同源
             'reasoning_summary': str(reasoning.get('summary') or '').strip(),
-            '_non_chat': _non_chat_model(mid, _as_int(m.get('maxOutputTokens')), tags),
+            # 非对话过滤**只用于国内版**（上游只在它的 CN 解析里做 nonChatModel）。
+            # 国际版标记恒为 False：那套规则（nes- / 输出≤256 / text-to-image）
+            # 来自国内版 harness，套到国际版上会重犯「用国内版口径裁剪国际版」的
+            # 错误——被裁掉的模型在页面上无从解释，用户只会看到「少了东西」。
+            '_non_chat': realm != GLOBAL and _non_chat_model(
+                mid, _as_int(m.get('maxOutputTokens')), tags),
         }
 
-    # cli 列表为空时退回全部未禁用模型：上游此时直接报错，但管理端只是展示，
-    # 给个可用列表比整页空白更有用（来源会在 UI 上如实标注）。
+    # 国内版：cli 列表为空时退回全部未禁用模型。上游此时直接报错，但管理端只是
+    # 展示，给个可用列表比整页空白更有用（来源会在 UI 上如实标注）。
+    # 国际版：上面未取 cli_ids（空）→ 天然走全量。
     ids = cli_ids or list(info.keys())
     out: list[dict] = []
     for i in ids:
