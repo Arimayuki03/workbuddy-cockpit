@@ -31,9 +31,9 @@ IP access control, request logs and usage stats — all in one panel.
 ## What is this
 
 [`workbuddy2api`](https://github.com/Sliverkiss/workbuddy2api) wraps a Tencent CodeBuddy
-account pool into an OpenAI-compatible API (written in Go). It is powerful but
-**command-line only**: adding an account means running a script, checking status means
-`curl /status`, and handing out API keys has no interface at all.
+account pool into an OpenAI-compatible API (written in Go). Its capabilities are complete,
+but they are command-line only: adding an account means running a script, checking status
+means `curl /status`, and handing out API keys has no interface at all.
 
 This project fills that gap — a web console you can safely run on the public internet:
 
@@ -49,19 +49,22 @@ This project fills that gap — a web console you can safely run on the public i
 > **Not a single line of workbuddy2api is modified.** Account rotation, concurrency and
 > circuit breaking stay its job; this project is a separate console and gateway.
 
-**Division of responsibility** (matching the upstream's own positioning): the upstream is
-an **upstream gateway only** (it talks to CodeBuddy and exposes the OpenAI Chat protocol),
-while this project is its **independent front-end panel**, deployed decoupled from it. So
-this project's boundaries are:
+**How this relates to workbuddy2api**: this project is the **visual companion** to it —
+it makes a capable upstream gateway visible and manageable. The two fit together naturally:
 
-- **Panel plus OpenAI-protocol forwarding only** — it does not convert `/v1` into Anthropic
-  Messages, Gemini or any other downstream protocol (that belongs to a downstream gateway)
-- **It does not replace the upstream** — account scheduling, token refresh and circuit
-  breaking are all still done by workbuddy2api; this project only reads its `/status` and
-  calls its APIs
-- The upstream lists this project among its "community front-end panels". We keep the
-  coupling loose: when the upstream adds capabilities we adapt, but **the upstream never
-  has to change code for the panel**
+- **The upstream provides the capabilities, the panel presents them**: account scheduling,
+  token refresh and circuit breaking are workbuddy2api's job; the panel visualises those
+  capabilities and adds the operational side — key distribution, IP control, usage stats
+- **We learn from each other and evolve together**: when the upstream gains a capability
+  this project follows, and operational needs discovered on the panel side feed back to the
+  upstream. The upstream lists this project among its "community front-end panels", and we
+  hope to make that ecosystem better together
+- **The upstream stays focused on its core**: the panel does not ask the upstream to change
+  code for it, so the upstream can stay lean
+
+Contributions are welcome: upstream improvements go to
+[workbuddy2api](https://github.com/Sliverkiss/workbuddy2api), while panel-related issues and
+ideas belong in [this repository](https://github.com/ithtelab/workbuddy-manager/issues).
 
 ---
 
