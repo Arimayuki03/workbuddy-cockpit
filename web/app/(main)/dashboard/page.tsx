@@ -85,25 +85,38 @@ export default function DashboardPage() {
   const creditsLow = creditsKnown.filter((a) => (credOf(a) || 0) < 200).length;
 
   /**
-   * 「反代上游」面板按版本重算。
+   * 「反代上游」面板的计数，取自上游 `/status` 的 `realm_totals`。
    *
-   * 上游 /status 返回的是**整个账号池**（含两个版本），它的 healthy/cooling/
-   * disabled 是全局计数，直接用会在国际版视图下显示国内版的账号数。
-   * /status 的每个账号条目带 realm，因此这里按版本自己统计。
+   * 走过的弯路记在这里，免得后人重蹈：
+   *   1. 最初读 `upstream.healthy` —— 那是**全局**汇总，切到国际版会显示
+   *      两个版本加起来的数；
+   *   2. 于是改成从 `accounts` 明细里自己数，却读了明细条目上的 healthy ——
+   *      而**账号明细里根本没有 healthy 字段**（它是汇总层才有的），布尔转换
+   *      恒为 false，面板因此全显示 0。
+   * 上游其实已经按版本分好组了（`realm_totals.cn` / `.global`），直接用即可——
+   * 口径与上游状态机完全一致，也不用我们去猜 healthy 该怎么算。
    */
   const pool = useMemo(() => {
-    const items = (upstream?.accounts || []) as Record<string, unknown>[];
-    const mine = items.filter((it) => {
-      const r = String((it as {realm?: string}).realm || 'cn');
-      return r === realm;
-    });
+    const perRealm = upstream?.realm_totals?.[realm];
+    if (perRealm) {
+      return {
+        total: perRealm.total,
+        healthy: perRealm.healthy,
+        cooling: perRealm.cooling,
+        disabled: perRealm.disabled,
+        known: true,
+      };
+    }
+    // 上游未提供 realm_totals（老版本）时退回顶层汇总，并如实说明是全局口径
+    const hasTop = typeof upstream?.total === 'number';
     return {
-      total: mine.length,
-      healthy: mine.filter((it) => Boolean((it as {healthy?: boolean}).healthy)).length,
-      cooling: mine.filter((it) => Boolean((it as {cooling?: boolean}).cooling)).length,
-      disabled: mine.filter((it) => Boolean((it as {disabled?: boolean}).disabled)).length,
-      /** 上游是否返回了账号明细——没返回时上面几个数不可信，界面要说明 */
-      known: items.length > 0,
+      total: upstream?.total ?? 0,
+      healthy: upstream?.healthy ?? 0,
+      cooling: upstream?.cooling ?? 0,
+      disabled: upstream?.disabled ?? 0,
+      known: hasTop,
+      /** true = 只能用全局汇总（含两个版本），界面需标注 */
+      globalOnly: hasTop,
     };
   }, [upstream, realm]);
 
@@ -238,7 +251,8 @@ export default function DashboardPage() {
                 )}
               </div>
               {([
-                // 账号类计数按当前版本重算；粘性会话与 Redis 无版本之分，保持全局
+                // 账号类计数按当前版本（上游 realm_totals）；粘性会话与 Redis
+                // 无版本之分，保持全局
                 ['健康账号', pool.known ? pool.healthy : '—'],
                 ['冷却中', pool.known ? pool.cooling : '—'],
                 ['已禁用', pool.known ? pool.disabled : '—'],
@@ -250,6 +264,11 @@ export default function DashboardPage() {
                   <span className="font-medium tabular-nums">{String(v)}</span>
                 </div>
               ))}
+              {pool.globalOnly && !upstream.error && (
+                <p className="text-[11px] text-muted-foreground">
+                  上游未提供分版本计数，以上为两个版本合计
+                </p>
+              )}
               {upstream.error && <p className="text-[11px] text-red-500">{upstream.error}</p>}
             </div>
           ) : (
