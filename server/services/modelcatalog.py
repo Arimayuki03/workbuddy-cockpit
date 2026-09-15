@@ -176,6 +176,19 @@ def _decorate(items: list[dict], realm: str = 'cn') -> list[dict]:
             'default_effort': eff_default,
             # 多模态能力（官方 /v1/models 也透出 supports_images）
             'supports_images': bool(m.get('supports_images')),
+            # ── 上游 2026-09-15 补齐的目录字段 ──
+            # 模型描述（腾讯的 descriptionZh，中文）
+            'description': str(m.get('description') or ''),
+            # 积分倍率（如 "x0.05"）：同一 prompt 在不同模型上的扣费倍率，
+            # 用户据此挑更省的模型。仅展示，不参与选号（与上游口径一致）。
+            'credits': str(m.get('credits') or ''),
+            'vendor': str(m.get('vendor') or ''),
+            'tags': list(m.get('tags') or []),
+            'is_default': bool(m.get('is_default')),
+            'supports_reasoning': bool(m.get('supports_reasoning')),
+            'supports_tool_call': bool(m.get('supports_tool_call')),
+            'only_reasoning': bool(m.get('only_reasoning')),
+            'reasoning_summary': str(m.get('reasoning_summary') or ''),
         })
     return out
 
@@ -272,18 +285,34 @@ async def _build(realm: str, force: bool = False) -> dict:
     }
 
 
+# 上游 /v1/models 的字段名 → 我们内部统一的字段名。
+# 上游 2026-09-15 起大幅补齐了这些字段（PR 见其 commit 318182a/31e3b45/b67f061），
+# 此前 /v1/models 只有 id/context_length/max_output_tokens，所以我们才要直连腾讯。
+_UPSTREAM_FIELD_MAP = {
+    'reasoning_supported_efforts': 'efforts',
+    'reasoning_default_effort': 'default_effort',
+    'reasoning_summary': 'reasoning_summary',
+}
+
+
 def _map_upstream_model_fields(m: dict) -> dict:
     """把上游 `/v1/models` 的字段名映射成我们内部统一的形状。
 
-    上游 2026-09-15（PR #92）把推理档位透出为 `reasoning_supported_efforts` /
-    `reasoning_default_effort`（此前这些字段在 /v1/models 里**根本不存在**，
-    所以回退路径永远拿不到档位）。这里做一次映射，让 _decorate 只认一套名字。
+    两处来源不同、名字不同，必须在入口处收敛，否则 _decorate 要认两套命名：
+      * 推理档位：上游叫 `reasoning_supported_efforts`（它的命名），
+        腾讯接口叫 `reasoning.supportedEfforts`（我们直连时解析出来的）；
+      * 其余字段（name/description/credits/tags/vendor/能力标志）**两边同名**，
+        直接透传即可。
+
+    历史上这里只映射了档位字段——那时上游 /v1/models 里没有别的字段可映射。
     """
     out = dict(m)
-    if 'reasoning_supported_efforts' in m:
-        out['efforts'] = [str(x) for x in (m.get('reasoning_supported_efforts') or []) if x]
-    if 'reasoning_default_effort' in m:
-        out['default_effort'] = str(m.get('reasoning_default_effort') or '')
+    for src, dst in _UPSTREAM_FIELD_MAP.items():
+        if src in m:
+            if dst == 'efforts':
+                out[dst] = [str(x) for x in (m.get(src) or []) if x]
+            else:
+                out[dst] = str(m.get(src) or '')
     if 'supports_images' in m:
         out['supports_images'] = bool(m.get('supports_images'))
     return out

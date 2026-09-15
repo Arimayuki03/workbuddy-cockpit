@@ -114,10 +114,12 @@ ideas belong in [this repository](https://github.com/ithtelab/workbuddy-manager/
   through region registration and a one-time trial). Request logs and usage are global
   records; the UI says so explicitly
 - **Model catalogue** — a dedicated page for the models an account can actually use:
-  display name, context, max output, **reasoning effort levels**, grouped by series, with
-  search and capability filters. Data comes straight from Tencent's model endpoint (the
-  upstream `/v1/models` drops display names and effort levels). When unavailable it falls
-  back to the upstream list and **states the source honestly** rather than inventing data
+  display name, description, context, max output, **reasoning effort levels**,
+  **credit multiplier**, and capability badges (vision / reasoning-only), grouped by series,
+  with search, capability filters and **sorting by credit multiplier** (the practical way to
+  find the cheapest model). Data comes straight from Tencent's model endpoint, which carries
+  more fields than the upstream. When unavailable it falls back to the upstream list and
+  **states the source honestly** rather than inventing data
 - **Global realm limitations** (upstream behaviour, not something missing here): no
   check-in / cat travel / school season / night cat tasks, and credits come only from the
   one-time trial. **Keep-alive and activity reporting still run.** The task page explains
