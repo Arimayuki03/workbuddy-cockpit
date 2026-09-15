@@ -92,7 +92,7 @@ jobs:
           cp -r deploy "$STAGE/"
           # 文档一并打包（安全审查报告、设计说明等），便于离线查阅
           cp -r docs "$STAGE/" 2>/dev/null || true
-          cp .env.example README.md CHANGELOG.md LICENSE "$STAGE/"
+          cp .env.example README.md README.en.md CHANGELOG.md LICENSE "$STAGE/"
           # 容器部署资产一并打包：用户下载发布包后可直接 docker compose up，
           # 不必再回仓库取这两个文件（实测漏打包过，Docker 用户拿不到）
           cp Dockerfile docker-compose.yml "$STAGE/"
