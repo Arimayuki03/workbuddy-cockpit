@@ -265,3 +265,25 @@ class ContainerReloadHintTest(unittest.TestCase):
         self.assertIn('reload_hint', src,
                       '设置页没读 reload_hint —— 容器用户会以为配置已生效')
         self.assertIn('notify.warn', src, '应以醒目提示（warn）转达')
+
+
+class ReleasePackageIncludesDockerAssetsTest(unittest.TestCase):
+    """发布包必须包含容器部署资产。
+
+    实测漏过：打包步骤只复制了 server/ web/out deploy/ docs/ 与几个文档，
+    **Dockerfile 与 docker-compose.yml 没打进去** —— 用户下载发布包后用不了
+    容器部署（得回仓库另取这两个文件）。
+
+    这条测试直接断言打包步骤的 cp 列表，防止再次漏掉。
+    """
+
+    def test_workflow_packages_docker_assets(self) -> None:
+        wf = (_ROOT / '.github' / 'workflows' / 'release.yml').read_text(encoding='utf-8')
+        # 找到「组装发布目录」那一步的内容
+        start = wf.find('组装发布目录')
+        self.assertGreater(start, 0, '找不到打包步骤')
+        end = wf.find('- name:', start + 10)
+        block = wf[start:end if end > 0 else len(wf)]
+        for asset in ('Dockerfile', 'docker-compose.yml'):
+            self.assertIn(asset, block,
+                          f'发布包没打进去 {asset} —— 用户拿到包也用不了容器部署')
