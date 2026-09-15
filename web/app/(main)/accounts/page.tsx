@@ -237,13 +237,26 @@ export default function AccountsPage() {
       // 只能反复刷新碰运气。剩余时间是上游状态机给的权威值。
       const secs = a.cool_remaining_sec;
       const left = typeof secs === 'number' && secs > 0 ? fmtRemain(secs) : '';
-      const models = (a.rate_limited_models ?? []).map((m) => m.model);
+      // 按**原因**分组展示：上游两类条目的含义完全不同，混在一起会误导——
+      //   6004  → 这个模型被限流了（等一会儿就好）
+      //   11102 → 这个账号根本没有这个模型（等多久都不会好，该换模型）
+      // 上游的 reason 前缀就是判据（"6004 model rate limit" / "11102 model not available"）。
+      const limited: string[] = [];
+      const missing: string[] = [];
+      for (const m of a.rate_limited_models ?? []) {
+        const r = m.reason ?? '';
+        (r.startsWith('11102') ? missing : limited).push(m.model);
+      }
       const tip = [
         left ? `预计 ${left}后恢复` : '',
-        models.length ? `被限流的模型：${models.join('、')}` : '',
+        limited.length ? `被限流的模型：${limited.join('、')}（稍后会自动恢复）` : '',
+        missing.length
+          ? `该账号无这些模型：${missing.join('、')}（临时避让，无需处理）`
+          : '',
       ]
         .filter(Boolean)
         .join('\n');
+      const total = limited.length + missing.length;
       return (
         <Badge
           variant="secondary"
@@ -251,7 +264,7 @@ export default function AccountsPage() {
           title={tip || undefined}
         >
           ● 冷却中{left ? ` · ${left}` : ''}
-          {models.length > 1 && <span className="ml-1 opacity-70">（{models.length} 个模型）</span>}
+          {total > 0 && <span className="ml-1 opacity-70">（{total} 个模型）</span>}
         </Badge>
       );
     }
