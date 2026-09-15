@@ -341,13 +341,21 @@ docker compose logs workbuddy-manager | grep -A2 密码   # 首启随机密码
 docker pull ghcr.io/ithtelab/workbuddy-manager:latest
 ```
 
-**容器部署的三个边界**（不是缺陷，是刻意的取舍，界面会如实提示）：
+**容器版与宿主版的能力是一致的** —— compose 里默认挂载了三样东西让它们对齐：
 
-| 事项 | 说明 |
+| 挂载 | 作用 |
 |---|---|
-| **不支持在界面上更新上游** | 重建上游容器需要 docker CLI；挂载 `docker.sock` 能把宿主 root 权限交给容器内进程，风险远大于收益。请在宿主机 `docker compose up -d --build`。 |
-| **更新管理端会重启整个容器** | 容器无法自我重启。更新流程是「替换代码 → 结束容器 → 由 compose 的 `restart` 策略用新代码拉起」，所以 compose 里必须保留 `restart: unless-stopped`。 |
-| **端口默认只绑定 127.0.0.1** | 管理端持有全部账号凭据，应当藏在反向代理之后。确需直接访问请自行改 compose，并确保 HTTPS。 |
+| 上游仓库目录 | 读上游 compose 做端口收敛；`git pull` 更新上游；读写 `config.json` 与 `auths/`（**扫码添加账号会写 auths**，所以不能只读） |
+| `./data` | 数据库、日志、更新状态。必须持久化 |
+| `/var/run/docker.sock` | 让容器内的管理端能重启/重建上游容器 —— 即「更新上游」「保存设置后自动重载」「读上游日志」 |
+
+> **关于 docker.sock 的取舍**：挂它等于把宿主 root 权限交给本容器。但这**不是新增的风险等级**——宿主部署时本服务本来就是 root 运行（systemd 单元无 `User=`、安装脚本要求 root），而 root 进程本来就能 `docker run -v /:/host` 拿到宿主文件系统，两者权限等价。
+> 若你的要求是最小权限，把那一行注释掉即可：依赖 docker 的功能会**自动降级为「请到宿主机操作」**，界面如实提示，不会静默失败。
+
+还有两处与宿主部署的差异（界面都会提示）：
+
+- **更新管理端会重启整个容器**：容器无法自我重启。流程是「替换代码 → 结束容器 → 由 compose 的 `restart` 策略用新代码拉起」，所以 compose 里必须保留 `restart: unless-stopped`。
+- **端口默认只绑定 `127.0.0.1`**：管理端持有全部账号凭据，应当藏在反向代理之后。确需直接访问请自行改 compose，并确保 HTTPS。
 
 > 与宿主机安装一样，一键更新**强制验签**发布包。镜像本身不参与这套签名
 > （那是另一条信任链，依赖 GHCR 的 digest 与 GitHub 账号安全）。

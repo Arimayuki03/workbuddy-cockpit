@@ -470,12 +470,12 @@ export function UpdatePanel() {
         </div>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
           {TARGETS.map((t, i) => {
-            // 容器部署不支持更新上游（重建上游容器需要 docker CLI，挂 docker.sock
-            // 会把宿主 root 交给容器内进程，是本项目刻意不做的事）。
-            // 直接禁用并说明替代做法，而不是让用户点了才失败。
+            // 能否更新上游取决于**能否操作 docker**（后端按实际能力判定），
+            // 而不是"是否在容器里"：容器挂了 docker.sock 就能做这些事。
+            // 不可用时直接禁用并说明替代做法，而不是让用户点了才失败。
             const blocked = status?.can_update_upstream === false && t.id !== 'manager';
             const text = blocked
-              ? '容器部署不支持在界面更新上游——请到宿主机执行 docker compose up -d --build'
+              ? '当前环境无法操作 docker，不能更新上游——请在宿主机执行 docker compose up -d --build'
               : `${t.desc}。${t.hint}。更新过程中服务会短暂中断，已完成的任务不受影响。`;
             return (
             <ConfirmDialog
@@ -507,9 +507,13 @@ export function UpdatePanel() {
         </div>
         {status?.can_update_upstream === false && (
           <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
-            当前是容器部署：更新上游请在宿主机执行
+            当前环境无法操作 docker（宿主未安装 docker，或容器未挂载
+            <code className="mx-1 font-mono">/var/run/docker.sock</code>），
+            因此不能在界面重建上游容器。请在宿主机执行
             <code className="mx-1 font-mono">docker compose up -d --build</code>。
-            容器内不挂载 docker 套接字（那等于把宿主权限交出去），因此界面无法重建上游容器。
+            <br />
+            容器部署时挂上 docker 套接字即可恢复此功能（见仓库
+            <code className="mx-1 font-mono">docker-compose.yml</code>）。
           </p>
         )}
         {!isAdmin && (

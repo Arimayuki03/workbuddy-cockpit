@@ -36,13 +36,15 @@ async def save_upstream(body: dict, request: Request,
                    f'；来源 {client_ip(request)}')
     # 上游只在启动时读 config.json，保存后自动重载使其生效
     result['reload_scheduled'] = reload.request_restart()
-    # 容器部署下**无法自动重载上游**：需要 docker 命令，而本容器刻意不挂
-    # docker.sock（那等于把宿主 root 权限交给容器内进程）。此时要如实告诉
+    # 无法自动重载上游时（没装 docker / 容器没挂 docker.sock），要如实告诉
     # 用户去宿主机重启，而不是让他以为改完就生效了。
-    if updater.in_container():
+    #
+    # 判据是**实际能力**而非"是否容器"：容器挂了 docker.sock 就能自动重载
+    # （与宿主部署等价），宿主没装 docker 反而不能。
+    if not updater.can_control_docker():
         result['reload_scheduled'] = False
         result['reload_hint'] = (
-            '当前是容器部署：配置已写入，但容器内无法重启上游容器。'
+            '配置已写入，但当前环境无法操作 docker，不会自动重启上游容器。'
             '请在宿主机执行 docker compose restart wbapi（上游目录下）使其生效。'
         )
     return result

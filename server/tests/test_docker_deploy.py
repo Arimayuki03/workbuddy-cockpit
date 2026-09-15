@@ -128,49 +128,75 @@ class RestartBehaviorTest(unittest.TestCase):
 
 
 class UpstreamUpdateGuardTest(unittest.TestCase):
-    """容器形态必须**前置拒绝**更新上游，并给出替代做法。"""
+    """「能否更新上游」按**实际能力**判定，不按是否容器。
 
-    def _start(self, target: str, mode: str):
+    这是本项目的一处**判断修正**，值得写下来：
+      初版按「在容器里就不允许更新上游」实现，理由写成"挂 docker.sock 等于把
+      宿主 root 交给容器，比少一个功能危险得多"。这个理由**不成立**——宿主
+      部署时本服务本来就是 root 运行（systemd 单元无 User=、安装脚本要求 root），
+      而 root 进程本来就能 `docker run -v /:/host` 拿到宿主文件系统。也就是说
+      宿主部署的权限**已经等价于**挂 docker.sock。
+
+    结论：按能力判定才正确 —— 容器挂了 socket 就能（与宿主部署对齐），宿主没装
+    docker 反而不能。按「是否容器」判会把可用场景误判为不可用。
+    """
+
+    def _start(self, target: str, docker_ok: bool):
         from server.services import updater
-        with mock.patch.object(updater, 'in_container', return_value=(mode == 'docker')):
+        with mock.patch.object(updater, 'can_control_docker', return_value=docker_ok),                 mock.patch.object(updater, '_lock_active', return_value=True):
             return updater.start_update(target)
 
-    def test_container_rejects_upstream(self) -> None:
-        ok, msg = self._start('upstream', 'docker')
-        self.assertFalse(ok, '容器里不应允许更新上游')
-        self.assertIn('docker compose', msg, '应给出宿主机替代做法')
+    def test_no_docker_rejects_upstream(self) -> None:
+        ok, msg = self._start('upstream', False)
+        self.assertFalse(ok, '没有 docker 能力时不应允许更新上游')
+        self.assertIn('docker', msg, '应说明原因并给出替代做法')
+        self.assertIn('docker compose', msg)
 
-    def test_container_rejects_both(self) -> None:
-        ok, msg = self._start('both', 'docker')
+    def test_no_docker_rejects_both(self) -> None:
+        ok, msg = self._start('both', False)
         self.assertFalse(ok)
         self.assertIn('docker compose', msg)
 
-    def test_container_allows_manager(self) -> None:
-        """仅更新管理端在容器里是可行的（替换代码 + 容器重启）。"""
-        from server.services import updater
-        with mock.patch.object(updater, 'in_container', return_value=True), \
-                mock.patch.object(updater, '_lock_active', return_value=True):
-            ok, msg = updater.start_update('manager')
-        # 走到"已有任务在跑"这一步说明前置校验放行了（没有卡在容器拒绝上）
+    def test_docker_available_allows_upstream(self) -> None:
+        """有 docker 能力时（含挂了 socket 的容器）应放行到下一步。"""
+        ok, msg = self._start('upstream', True)
+        # 走到「已有更新任务」说明前置校验放行了
         self.assertFalse(ok)
-        self.assertIn('已有更新任务', msg, '被容器校验挡住了 —— 管理端应放行')
+        self.assertIn('已有更新任务', msg, '有 docker 能力却被前置校验挡住了')
+
+    def test_manager_always_allowed(self) -> None:
+        """仅更新管理端不需要 docker —— 任何形态都应放行。"""
+        ok, msg = self._start('manager', False)
+        self.assertFalse(ok)
+        self.assertIn('已有更新任务', msg)
 
     def test_status_reports_capability(self) -> None:
-        """能力标志要透出给界面，否则界面无法隐藏/禁用。"""
+        """能力标志要透出给界面（界面据此禁用/提示）。"""
         from server.services import updater
-        for mode, can in (('docker', False), ('systemd', True)):
-            with mock.patch.object(updater, 'in_container', return_value=(mode == 'docker')):
+        for docker_ok in (False, True):
+            with mock.patch.object(updater, 'can_control_docker', return_value=docker_ok):
                 st = updater.read_status()
-            self.assertEqual(st['in_container'], mode == 'docker')
-            self.assertEqual(st['can_update_upstream'], can)
+            self.assertEqual(st['can_update_upstream'], docker_ok)
 
-    def test_frontend_hides_upstream_in_container(self) -> None:
-        """界面必须读这两个字段来禁用选项（否则用户能点、然后失败）。"""
+    def test_capability_not_derived_from_container(self) -> None:
+        """关键断言：能力**不看**是否容器。
+
+        容器挂了 socket 就能更新上游；按容器判定会把这种（我们推荐的默认
+        配置）误判为不可用。
+        """
+        from server.services import updater
+        with mock.patch.object(updater, 'in_container', return_value=True),                 mock.patch.object(updater, 'can_control_docker', return_value=True):
+            self.assertTrue(updater.read_status()['can_update_upstream'],
+                            '容器 + 有 docker 能力时应可用 —— 不要按容器判定')
+        with mock.patch.object(updater, 'in_container', return_value=False),                 mock.patch.object(updater, 'can_control_docker', return_value=False):
+            self.assertFalse(updater.read_status()['can_update_upstream'],
+                             '宿主但没装 docker 时应不可用')
+
+    def test_frontend_uses_capability_flag(self) -> None:
         src = (_ROOT / 'web' / 'components' / 'common' / 'settings'
                / 'UpdatePanel.tsx').read_text(encoding='utf-8')
         self.assertIn('can_update_upstream', src,
-                      '更新面板没读容器能力标志 —— 用户会点到不支持的操作')
-        self.assertIn('docker compose', src, '应给出宿主机替代做法')
+                      '更新面板没读能力标志 —— 用户会点到不支持的操作')
 
 
 class DockerAssetsTest(unittest.TestCase):
@@ -205,18 +231,32 @@ class DockerAssetsTest(unittest.TestCase):
         self.assertTrue(any('/app/data' in str(v) for v in vols),
                         '未持久化 data 卷 —— 重建容器会丢失统计与审计记录')
 
-    def test_no_docker_socket_mount(self) -> None:
-        """绝不挂 docker.sock：那等于把宿主 root 权限交给容器内进程。
+    def test_upstream_dir_mounted(self) -> None:
+        """必须挂载上游仓库目录。
 
-        只检查 **volumes 段**，不搜全文——注释里正说明"为什么不挂"，
-        全文搜索会命中那段说明（第一版就这样误报过）。
+        没挂的话容器内既拿不到上游的 docker-compose.yml（端口收敛无从下手），
+        也无法在容器内 git pull —— 「更新上游」直接做不到。
+        （这正是初版的问题：只挂了 auths 与 config.json 两条子路径。）
         """
         import yaml
         dc = yaml.safe_load((_ROOT / 'docker-compose.yml').read_text(encoding='utf-8'))
-        vols = dc['services']['workbuddy-manager'].get('volumes') or []
-        offenders = [v for v in vols if 'docker.sock' in str(v)]
-        self.assertEqual(offenders, [],
-                         f'挂载了 docker 套接字 —— 容器内进程可获得宿主 root 权限：{offenders}')
+        vols = [str(v) for v in (dc['services']['workbuddy-manager'].get('volumes') or [])]
+        self.assertTrue(any('/opt/workbuddy2api' in v for v in vols),
+                        '未挂载上游目录 —— 容器版将无法更新上游')
+
+    def test_docker_socket_mounted_for_full_capability(self) -> None:
+        """默认挂载 docker.sock，使容器版与宿主部署能力对齐。
+
+        这是**判断修正**：初版刻意不挂，理由写成"挂了等于把宿主 root 交给容器"。
+        但宿主部署本来就是 root（systemd 无 User=），而 root 进程本来就能
+        `docker run -v /:/host` —— 两者权限等价，不挂只是让功能残缺。
+        若不想要，注释掉即可（功能会自动降级并如实提示）。
+        """
+        import yaml
+        dc = yaml.safe_load((_ROOT / 'docker-compose.yml').read_text(encoding='utf-8'))
+        vols = [str(v) for v in (dc['services']['workbuddy-manager'].get('volumes') or [])]
+        self.assertTrue(any('docker.sock' in v for v in vols),
+                        '未挂 docker.sock —— 容器版将无法重载/更新上游')
 
 
 if __name__ == '__main__':
@@ -224,46 +264,42 @@ if __name__ == '__main__':
 
 
 class ContainerReloadHintTest(unittest.TestCase):
-    """容器部署下保存上游配置：必须**如实告知需要手动重启上游**。
+    """无法自动重载上游时必须**如实告知**（而不是显示"正在自动应用"）。
 
-    为什么这是必要的：上游只在进程启动时读一次 config.json，保存后必须重启
-    上游容器才生效。宿主部署时管理端能直接 `docker restart`，但容器里**没有
-    docker 命令**（我们刻意不挂 docker.sock —— 那等于把宿主 root 交给容器内
-    进程）。若此时仍显示「正在自动应用到上游…」，用户会以为改完就生效了，
-    然后对着不生效的配置排查半天。
+    上游只在进程启动时读 config.json，改完必须重启上游容器才生效。宿主部署时
+    管理端能直接 `docker restart`；但若环境**没有 docker 能力**（宿主没装
+    docker，或容器没挂 docker.sock），这一步就做不了。此时若仍显示「正在自动
+    应用到上游…」，用户会以为生效了，然后对着不生效的配置排查半天。
 
-    修法：容器形态下把 reload_scheduled 置 False 并带回 reload_hint，
-    界面改用醒目提示转达。
+    判据同样是**实际能力**，不是"是否容器"。
     """
 
     @staticmethod
-    def _save(container: bool) -> dict:
-        """调用 save_upstream（异步），返回响应体。"""
+    def _save(docker_ok: bool) -> dict:
         import asyncio
         from server.routers import settings as st
-        with mock.patch.object(st.updater, 'in_container', return_value=container),                 mock.patch.object(st.wb2api, 'save_upstream_config',
+        with mock.patch.object(st.updater, 'can_control_docker', return_value=docker_ok),                 mock.patch.object(st.wb2api, 'save_upstream_config',
                                   return_value={'available': True}),                 mock.patch.object(st.security, 'audit'),                 mock.patch.object(st, 'client_ip', return_value='127.0.0.1'),                 mock.patch.object(st.reload, 'request_restart', return_value=True):
             return asyncio.run(st.save_upstream(
                 {'schedule': {'checkin_hours': [9]}}, None,
                 {'username': 't', 'role': 'admin'}))
 
-    def test_hint_present_in_container(self) -> None:
-        res = self._save(container=True)
-        self.assertFalse(res['reload_scheduled'], '容器里不应声称已调度重载')
-        self.assertIn('reload_hint', res, '容器里必须给出手动重启指引')
+    def test_hint_when_docker_unavailable(self) -> None:
+        res = self._save(docker_ok=False)
+        self.assertFalse(res['reload_scheduled'], '不应声称已调度重载')
+        self.assertIn('reload_hint', res, '必须给出手动重启指引')
         self.assertIn('docker compose', res['reload_hint'])
 
-    def test_no_hint_on_host(self) -> None:
-        res = self._save(container=False)
-        self.assertTrue(res['reload_scheduled'], '宿主部署应正常调度自动重载')
+    def test_no_hint_when_docker_available(self) -> None:
+        res = self._save(docker_ok=True)
+        self.assertTrue(res['reload_scheduled'], '有 docker 能力时应正常自动重载')
         self.assertNotIn('reload_hint', res)
 
     def test_frontend_surfaces_hint(self) -> None:
-        """界面必须把 reload_hint 显示出来（用醒目提示而不是"自动应用"）。"""
         src = (_ROOT / 'web' / 'app' / '(main)' / 'settings' / 'page.tsx'
                ).read_text(encoding='utf-8')
         self.assertIn('reload_hint', src,
-                      '设置页没读 reload_hint —— 容器用户会以为配置已生效')
+                      '设置页没读 reload_hint —— 用户会以为配置已生效')
         self.assertIn('notify.warn', src, '应以醒目提示（warn）转达')
 
 
