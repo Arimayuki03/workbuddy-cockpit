@@ -97,6 +97,10 @@ export interface CatalogModel {
   max_output_tokens: number;
   /** 支持的推理档位，如 ['low','high','max']；空数组 = 非推理模型或未提供 */
   efforts: string[];
+  /** 默认推理档位；空串 = 上游未声明（由上游自行回退到硬编码默认） */
+  default_effort: string;
+  /** 是否支持图片输入（多模态） */
+  supports_images: boolean;
   /** 系列归属（按 id 前缀推导，仅用于分组浏览） */
   series: string;
 }
