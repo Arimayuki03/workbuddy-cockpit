@@ -170,10 +170,13 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
     内容正常但报 terminated）。因此这里整体兜底。
     """
     try:
+        # realm 由**请求的模型名**判定（上游按 `cn:` / `global:` 前缀路由）：
+        # 它决定这次调用实际走了哪个账号池，也是界面按版本切换日志/统计的依据。
+        realm = db.realm_of_model(model)
         db.execute(
-            'INSERT INTO request_logs(ts, key_id, ip, model, mapped_model, status, prompt_tokens, completion_tokens, latency_ms, first_token_ms, ua, error, stream, credit) '
-            'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (int(time.time()), key['id'] if key else None, ip, model, mapped, status, pt, ct, latency, first_token, ua, error, 1 if stream else 0, credit),
+            'INSERT INTO request_logs(ts, key_id, ip, model, mapped_model, status, prompt_tokens, completion_tokens, latency_ms, first_token_ms, ua, error, stream, credit, realm) '
+            'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (int(time.time()), key['id'] if key else None, ip, model, mapped, status, pt, ct, latency, first_token, ua, error, 1 if stream else 0, credit, realm),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning('写入请求日志失败（不影响请求）: %s', exc)
@@ -184,7 +187,7 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
             total = pt + ct
             keysvc.touch(key, ip, total)
             if total or credit:
-                db.bump_usage(key['id'], model, pt, ct, credit)
+                db.bump_usage(key['id'], model, pt, ct, credit, realm=realm)
         except Exception as exc:  # noqa: BLE001
             logger.warning('累计用量失败（不影响请求）: %s', exc)
 

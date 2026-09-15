@@ -20,6 +20,7 @@ import {StatCard} from '@/components/common/layout/StatCard';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {useAuth} from '@/lib/auth-context';
+import {useRealm} from '@/lib/realm-context';
 import {Button} from '@/components/ui/button';
 import {
   Select,
@@ -48,6 +49,8 @@ const CHART_COLORS = [
 
 export default function StatsPage() {
   const {isAdmin} = useAuth();
+  // 统计随顶部版本切换：两个版本走的是不同账号池，混在一起看没有意义
+  const {realm, label: realmName} = useRealm();
   const [summary, setSummary] = useState<StatsSummary | null>(null);
   const [daily, setDaily] = useState<UsagePoint[]>([]);
   const [byModel, setByModel] = useState<UsageBreakdown[]>([]);
@@ -56,17 +59,17 @@ export default function StatsPage() {
   const load = useCallback(async () => {
     const d = Number(days) || 30;
     const results = await Promise.allSettled([
-      statsApi.summary(),
-      statsApi.daily(d),
-      statsApi.byModel(d),
-      statsApi.byKey(d),
+      statsApi.summary(realm),
+      statsApi.daily(d, realm),
+      statsApi.byModel(d, realm),
+      statsApi.byKey(d, realm),
     ]);
     if (results[0].status === 'fulfilled') setSummary(results[0].value);
     if (results[1].status === 'fulfilled') setDaily(results[1].value);
     if (results[2].status === 'fulfilled') setByModel(results[2].value);
     if (results[3].status === 'fulfilled') setByKey(results[3].value);
     if (results.some((r) => r.status === 'rejected')) notify.err(errText((results.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason));
-  }, [days]);
+  }, [days, realm]);
 
   useEffect(() => {
     load();
@@ -85,7 +88,7 @@ export default function StatsPage() {
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
         title="用量统计"
-        description="按时间、模型与密钥维度统计 Token 消耗与请求量（每 60 秒自动刷新；含两种版本，不按版本过滤）"
+        description={`按时间、模型与密钥维度统计 Token 消耗与请求量（每 60 秒自动刷新；当前只统计${realmName}）`}
         actions={
           <>
             <Select value={days} onValueChange={setDays}>
