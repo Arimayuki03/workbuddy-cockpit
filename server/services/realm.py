@@ -29,6 +29,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -206,6 +207,40 @@ def attribution_headers() -> dict:
     }
 
 
+def device_fingerprint_headers(uid: str | None) -> dict:
+    """按账号稳定派生的设备指纹头（X-Machine-ID / X-Session-ID）。
+
+    镜像上游 `deriveAccountStableID`（2026-09-15 新增）：
+
+        sha256("wb2a:" + purpose + ":" + uid) 前 18 字节的 hex = 36 字符
+
+    语义是「每个账号一台固定虚拟设备」——跨重启恒定、账号间互异、同 uid
+    同用途恒同值。上游对齐的是官方桌面端行为，目的是「防多号被按设备指纹
+    缺失/漂移关联风控」。
+
+    **为什么我们也要发**：管理端有一批请求绕过上游直连腾讯（扫码登录、
+    签到、查积分、地区注册、trial、探测）。上游这次给它的所有出站路径加了
+    这两个头，我们这条路若不加，就成了唯一「没有设备标识」的流量。
+
+    uid 为空时不返回任何头（匿名请求无设备可言，上游也是这个语义）。
+
+    实现细节刻意与上游逐字一致（固定盐 "wb2a:"、截 18 字节）：两边派生出的
+    值必须相同，否则同一个账号在「经上游」与「直连」两条路上会是两台设备，
+    反而制造出可被关联的异常。
+    """
+    u = str(uid or '').strip()
+    if not u:
+        return {}
+
+    def derive(purpose: str) -> str:
+        return hashlib.sha256(f'wb2a:{purpose}:{u}'.encode()).hexdigest()[:36]
+
+    return {
+        'X-Machine-ID': derive('machine'),
+        'X-Session-ID': derive('session'),
+    }
+
+
 def origin_of(realm: Realm) -> str:
     return GLOBAL_ORIGIN if realm == GLOBAL else CN_ORIGIN
 
@@ -252,11 +287,13 @@ def billing_paths(realm: Realm, kind: str) -> list[str]:
     return [f'/v2/billing/meter/{suffix}']
 
 
-def headers(realm: Realm, token: str | None = None) -> dict:
+def headers(realm: Realm, token: str | None = None,
+            uid: str | None = None) -> dict:
     """该 realm 的通用请求头（Origin/Referer/UA 随 realm 变）。
 
-    token 非空时附 Authorization。注意这里只给「通用头」；
-    各接口特有的头（X-User-Id 等）由调用方补，或走 billing_headers()。
+    token 非空时附 Authorization；uid 非空时附账号级设备指纹头
+    （X-Machine-ID / X-Session-ID，见 device_fingerprint_headers）。
+    其余接口特有的头（X-User-Id 等）由调用方补，或走 billing_headers()。
 
     风控头对齐上游 2026-09-14 的改动（D1/D5/D6）——管理端有一批请求**绕过
     上游直连腾讯**（扫码登录、签到、积分、trial、注册），上游给它的出站加了
@@ -288,6 +325,7 @@ def headers(realm: Realm, token: str | None = None) -> dict:
     }
     if token:
         h['Authorization'] = f'Bearer {token}'
+    h.update(device_fingerprint_headers(uid))
     return h
 
 
@@ -381,6 +419,14 @@ def billing_headers(realm: Realm, auth: dict | None = None) -> dict:
     uid = str(auth.get('uid') or '')
     if uid:
         h['X-User-Id'] = uid
+    # 账号级设备指纹头（X-Machine-ID / X-Session-ID）。
+    #
+    # 注意这里与上游现状**有意的差异**：上游 BillingHeaders 的注释写着「billing
+    # 域另行注入」，但代码里并没有真的调用 injectAccountStableHeaders —— 也就是
+    # 上游自己的 billing 域（签到/积分/trial）实际上没带这两个头（注释与实现不符）。
+    # 我们按**注释声称的意图**实现（全路径覆盖）：billing 正是我们直连的那批端点，
+    # 少发这两个头等于把「不像官方客户端」的形态留在最敏感的路上。
+    h.update(device_fingerprint_headers(uid))
     ent = str(auth.get('enterprise_id') or '')
     if ent:
         h['X-Enterprise-Id'] = ent
