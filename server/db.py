@@ -45,6 +45,10 @@ CREATE TABLE IF NOT EXISTS api_keys (
   max_ips       INTEGER NOT NULL DEFAULT 0,
   ip_allowlist  TEXT    NOT NULL DEFAULT '[]',
   models        TEXT    NOT NULL DEFAULT '[]',
+  -- 版本归属（cn / global / 空 = 不限制）：这把密钥只能调用该版本的模型。
+  -- 空值是**历史密钥**的存量形态（本列引入前创建的），保持其原有行为不变，
+  -- 界面上单独标注以便管理员补填。新建密钥一律要选一个版本。
+  realm         TEXT    NOT NULL DEFAULT '',
   quota         INTEGER NOT NULL DEFAULT 0,
   used_tokens   INTEGER NOT NULL DEFAULT 0,
   created_at    INTEGER NOT NULL,
@@ -228,6 +232,11 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # 这是有意的取舍：相比「重建表并可能丢历史」，接受旧库在这一维度上的
     # 精度损失，且界面会如实标注该口径。
     ('usage_daily', 'realm', "TEXT NOT NULL DEFAULT 'cn'"),
+    # API 密钥的版本归属（cn / global / 空 = 不限制）。
+    # 存量密钥一律为空——即保持它们原本「两版都能调」的行为，不因为升级就把
+    # 人家正在用的密钥悄悄限死（那会让线上调用突然 403）。管理员在界面上
+    # 看到「未限定」标记后可按需补填。
+    ('api_keys', 'realm', "TEXT NOT NULL DEFAULT ''"),
 )
 
 

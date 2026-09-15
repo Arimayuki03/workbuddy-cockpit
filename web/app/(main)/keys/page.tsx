@@ -11,6 +11,7 @@ import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {useAuth} from '@/lib/auth-context';
+import {useRealm, type Realm} from '@/lib/realm-context';
 import {Button} from '@/components/ui/button';
 import {CopyButton} from '@/components/ui/copy-button';
 import {Badge} from '@/components/ui/badge';
@@ -52,6 +53,8 @@ interface FormState {
   ipAllowlist: string;
   models: string;
   quota: string;
+  /** 版本归属：'cn' | 'global' | ''（不限制，仅存量密钥） */
+  realm: Realm | '';
 }
 
 const emptyForm: FormState = {
@@ -62,6 +65,7 @@ const emptyForm: FormState = {
   ipAllowlist: '',
   models: '',
   quota: '0',
+  realm: 'cn',
 };
 
 function toLines(v: string): string[] {
@@ -73,6 +77,7 @@ function toLines(v: string): string[] {
 
 export default function KeysPage() {
   const {isAdmin} = useAuth();
+  const {realm, label: realmName} = useRealm();
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [formOpen, setFormOpen] = useState(false);
@@ -101,7 +106,8 @@ export default function KeysPage() {
 
   function openCreate() {
     setEditing(null);
-    setForm(emptyForm);
+    // 新建时默认跟随当前所在版本：在哪个版本的界面里建，就是哪个版本的密钥
+    setForm({...emptyForm, realm});
     setFormOpen(true);
   }
 
@@ -116,6 +122,7 @@ export default function KeysPage() {
       ipAllowlist: (k.ip_allowlist || []).join('\n'),
       models: (k.models || []).join(', '),
       quota: String(k.quota ?? 0),
+      realm: k.realm || '',
     });
     setFormOpen(true);
   }
@@ -134,6 +141,9 @@ export default function KeysPage() {
         ip_allowlist: toLines(form.ipAllowlist),
         models: toLines(form.models),
         quota: Number(form.quota) || 0,
+        // '' 是有意义的取值（不限制版本），必须照传——后端以它区分
+        // 「存量密钥，两版都能调」与「限定了某一版」
+        realm: form.realm,
       };
 
       // 新建：填了天数才设过期（0 = 永不过期，不下发 expires_at）
@@ -186,7 +196,7 @@ export default function KeysPage() {
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
         title="API 密钥"
-        description="对外反代网关的分发密钥，支持有效期、IP 白名单、模型白名单与配额（每 60 秒自动刷新）"
+        description="对外反代网关的分发密钥，支持版本限定、有效期、IP 白名单、模型白名单与配额（每 60 秒自动刷新）"
         actions={
           <>
             {isAdmin && (
@@ -206,6 +216,7 @@ export default function KeysPage() {
               <TableHead className="pl-4 text-[11px] text-muted-foreground">名称</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">密钥前缀</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">状态</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">版本</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">有效期</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">IP / 模型</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">已用 Token</TableHead>
@@ -234,6 +245,22 @@ export default function KeysPage() {
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     {k.expires_at ? fmtDateTime(k.expires_at) : '永不过期'}
+                  </TableCell>
+                  <TableCell>
+                    {k.realm === 'global' ? (
+                      <Badge variant="secondary" className="rounded-full text-[10px]">国际版</Badge>
+                    ) : k.realm === 'cn' ? (
+                      <Badge variant="secondary" className="rounded-full text-[10px]">国内版</Badge>
+                    ) : (
+                      // 存量密钥：本字段引入前创建的，两版都能调。单独标出来
+                      // 而不是默认显示成国内版——那会让人以为它已被限定。
+                      <span
+                        className="text-[10px] text-amber-600 dark:text-amber-400"
+                        title="该密钥创建于「限定版本」功能之前，目前两版都能调用。编辑它即可选定一个版本。"
+                      >
+                        未限定
+                      </span>
+                    )}
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     {k.max_ips ? `≤${k.max_ips} IP` : '不限 IP'} /{' '}
@@ -341,7 +368,7 @@ export default function KeysPage() {
           <DialogHeader>
             <DialogTitle>{editing ? '编辑密钥' : '新建密钥'}</DialogTitle>
             <DialogDescription>
-              {editing ? '修改名称、IP 白名单、模型白名单与配额' : '密钥仅在创建时完整展示一次，请妥善保存'}
+              {editing ? '修改名称、限定版本、IP 白名单、模型白名单与配额' : '密钥仅在创建时完整展示一次，请妥善保存'}
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="max-h-[min(70vh,560px)]">
@@ -423,19 +450,44 @@ export default function KeysPage() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label className="text-[11px] text-muted-foreground">模型白名单（逗号分隔，留空 = 全部模型）</Label>
+                <Label className="text-[11px] text-muted-foreground">限定版本</Label>
+                <Select
+                  value={form.realm || '__all__'}
+                  onValueChange={(v) => setForm({...form, realm: (v === '__all__' ? '' : v) as FormState['realm']})}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="cn">仅国内版</SelectItem>
+                    <SelectItem value="global">仅国际版</SelectItem>
+                    {/* 只有存量密钥会停留在这个取值上；新建时不建议选，
+                        所以文案写明它意味着什么 */}
+                    <SelectItem value="__all__">不限制（两版都能调）</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-[10px] leading-4 text-muted-foreground">
+                  {form.realm === ''
+                    ? '不限制时两版都能调——这是本字段引入前的老密钥的形态，新建密钥建议选定一个版本。'
+                    : form.realm === 'global'
+                      ? '国际版密钥只能调 global: 开头的模型，调国内版模型会被拒绝；/v1/models 也只返回国际版模型。'
+                      : '国内版密钥只能调不带 global: 前缀的模型，调国际版模型会被拒绝；/v1/models 也只返回国内版模型。'}
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-[11px] text-muted-foreground">模型白名单（逗号分隔，留空 = 该版本全部模型）</Label>
                 <Input
                   value={form.models}
                   onChange={(e) => setForm({...form, models: e.target.value})}
                   placeholder="glm-5.2, global:gpt-5.4"
                 />
-                {/* 版本隔离就是靠这个白名单：模型名带 global: 前缀的走国际版账号池，
-                    不带前缀的走国内版。所以要「一把密钥只能用国际版」，就只列
-                    global: 开头的模型；想两版都能用，就分别列出各自要用的模型。
-                    这不是额外的功能开关，而是上游路由协议的直接体现。 */}
+                {/* 模型白名单与版本归属是**两道**检查，都要过：
+                    版本归属由上面的选项控制（粗粒度，拦跨版本调用），
+                    白名单在版本之内再收窄到具体几个模型（细粒度）。
+                    写模型名时注意与所选版本一致——带 global: 前缀的是国际版模型。 */}
                 <p className="text-[10px] leading-4 text-muted-foreground">
-                  需要限定版本时用前缀：<code className="font-mono">global:gpt-5.4</code> 走国际版，
-                  <code className="font-mono">glm-5.2</code> 走国内版。留空则两版都可用。
+                  在所选版本之内再限制到具体模型：<code className="font-mono">global:gpt-5.4</code> 是国际版模型，
+                  <code className="font-mono">glm-5.2</code> 是国内版模型。留空则不限制。
                 </p>
               </div>
             </div>
