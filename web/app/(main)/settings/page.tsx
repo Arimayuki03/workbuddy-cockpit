@@ -834,6 +834,7 @@ export default function SettingsPage() {
         },
       });
       notify.ok('Upstash 配置已保存', '正在自动应用到上游…');
+      // （Upstash 属于上游外部依赖，改完无需重启上游容器）
       setUpstashForm((f) => ({...f, token: ''}));
       await load();
     } catch (e) {
@@ -877,8 +878,14 @@ export default function SettingsPage() {
     setBusy(true);
     try {
       const def = GROUPS.find((g) => g.id === group);
-      await settingsApi.saveUpstream({[def?.section ?? group]: patch});
-      notify.ok('设置已保存', '正在自动应用到上游…');
+      const saved = await settingsApi.saveUpstream({[def?.section ?? group]: patch});
+      // 容器部署下无法自动重载上游（需 docker 命令，而容器刻意不挂 docker 套接字），
+      // 后端会带回 reload_hint —— 如实转达，不让人以为改完就生效了
+      if (saved?.reload_hint) {
+        notify.warn('设置已保存，但需要你手动一步', saved.reload_hint);
+      } else {
+        notify.ok('设置已保存', '正在自动应用到上游…');
+      }
       await load();
     } catch (e) {
       notify.err(errText(e));

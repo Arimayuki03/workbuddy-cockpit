@@ -221,3 +221,47 @@ class DockerAssetsTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ContainerReloadHintTest(unittest.TestCase):
+    """容器部署下保存上游配置：必须**如实告知需要手动重启上游**。
+
+    为什么这是必要的：上游只在进程启动时读一次 config.json，保存后必须重启
+    上游容器才生效。宿主部署时管理端能直接 `docker restart`，但容器里**没有
+    docker 命令**（我们刻意不挂 docker.sock —— 那等于把宿主 root 交给容器内
+    进程）。若此时仍显示「正在自动应用到上游…」，用户会以为改完就生效了，
+    然后对着不生效的配置排查半天。
+
+    修法：容器形态下把 reload_scheduled 置 False 并带回 reload_hint，
+    界面改用醒目提示转达。
+    """
+
+    @staticmethod
+    def _save(container: bool) -> dict:
+        """调用 save_upstream（异步），返回响应体。"""
+        import asyncio
+        from server.routers import settings as st
+        with mock.patch.object(st.updater, 'in_container', return_value=container),                 mock.patch.object(st.wb2api, 'save_upstream_config',
+                                  return_value={'available': True}),                 mock.patch.object(st.security, 'audit'),                 mock.patch.object(st, 'client_ip', return_value='127.0.0.1'),                 mock.patch.object(st.reload, 'request_restart', return_value=True):
+            return asyncio.run(st.save_upstream(
+                {'schedule': {'checkin_hours': [9]}}, None,
+                {'username': 't', 'role': 'admin'}))
+
+    def test_hint_present_in_container(self) -> None:
+        res = self._save(container=True)
+        self.assertFalse(res['reload_scheduled'], '容器里不应声称已调度重载')
+        self.assertIn('reload_hint', res, '容器里必须给出手动重启指引')
+        self.assertIn('docker compose', res['reload_hint'])
+
+    def test_no_hint_on_host(self) -> None:
+        res = self._save(container=False)
+        self.assertTrue(res['reload_scheduled'], '宿主部署应正常调度自动重载')
+        self.assertNotIn('reload_hint', res)
+
+    def test_frontend_surfaces_hint(self) -> None:
+        """界面必须把 reload_hint 显示出来（用醒目提示而不是"自动应用"）。"""
+        src = (_ROOT / 'web' / 'app' / '(main)' / 'settings' / 'page.tsx'
+               ).read_text(encoding='utf-8')
+        self.assertIn('reload_hint', src,
+                      '设置页没读 reload_hint —— 容器用户会以为配置已生效')
+        self.assertIn('notify.warn', src, '应以醒目提示（warn）转达')
