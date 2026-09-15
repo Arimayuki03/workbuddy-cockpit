@@ -49,6 +49,20 @@ This project fills that gap — a web console you can safely run on the public i
 > **Not a single line of workbuddy2api is modified.** Account rotation, concurrency and
 > circuit breaking stay its job; this project is a separate console and gateway.
 
+**Division of responsibility** (matching the upstream's own positioning): the upstream is
+an **upstream gateway only** (it talks to CodeBuddy and exposes the OpenAI Chat protocol),
+while this project is its **independent front-end panel**, deployed decoupled from it. So
+this project's boundaries are:
+
+- **Panel plus OpenAI-protocol forwarding only** — it does not convert `/v1` into Anthropic
+  Messages, Gemini or any other downstream protocol (that belongs to a downstream gateway)
+- **It does not replace the upstream** — account scheduling, token refresh and circuit
+  breaking are all still done by workbuddy2api; this project only reads its `/status` and
+  calls its APIs
+- The upstream lists this project among its "community front-end panels". We keep the
+  coupling loose: when the upstream adds capabilities we adapt, but **the upstream never
+  has to change code for the panel**
+
 ---
 
 ## Features
