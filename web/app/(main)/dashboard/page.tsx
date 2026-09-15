@@ -35,8 +35,8 @@ export default function DashboardPage() {
   const load = useCallback(async () => {
     const results = await Promise.allSettled([
       accountApi.list(),
-      statsApi.summary(),
-      statsApi.daily(14),
+      statsApi.summary(realm),
+      statsApi.daily(14, realm),
       upstreamApi.status(),
       // force=false：命中服务端 60 秒缓存，30 秒轮询不会反复打腾讯
       accountApi.refreshCredits(false),
@@ -180,7 +180,7 @@ export default function DashboardPage() {
         <StatCard
           label="今日 Token"
           value={fmtCompact(summary?.today_tokens)}
-          hint={`${fmtNumber(summary?.today_requests)} 次请求 · 含两种版本`}
+          hint={`${fmtNumber(summary?.today_requests)} 次请求 · ${realmName}`}
           icon={Activity}
           tone="info"
           delay={0.2}
@@ -191,8 +191,8 @@ export default function DashboardPage() {
         <div className="rounded-[20px] bg-muted p-4 lg:col-span-2">
           <div className="mb-3 flex items-center justify-between">
             <div className="text-sm font-medium">近 14 天调用趋势</div>
-            {/* 调用记录是全局的（不按版本拆分），如实标注而不是假装已过滤 */}
-            <div className="text-[11px] text-muted-foreground">请求数 · 含两种版本</div>
+            {/* 按当前版本过滤（与统计页同一口径），不再混两个版本 */}
+            <div className="text-[11px] text-muted-foreground">请求数 · {realmName}</div>
           </div>
           <div className="h-[220px] w-full">
             {chartData.length ? (
