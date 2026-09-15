@@ -185,3 +185,136 @@ class CatalogFieldPassthroughTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class EffortFallbackTest(unittest.TestCase):
+    """推理档位的三级解析（镜像上游 EffortListing）。
+
+    用户报的 issue #8：模型中心的推理栏对 deepseek-v4.1-flash 显示「不支持」，
+    而上游已支持三档强度。根因是**只依赖远端 supportedEfforts**，而腾讯接口
+    对部分模型不返回该字段。
+
+    上游 2026-09-15（PR #92）的解法是三级：远端权威 → 产品级静态兜底表 →
+    都没有则省略。我们镜像同一套（_EFFORT_FALLBACK 逐条照抄其 effort_catalog.go）。
+
+    另外上游把字段透出为 `reasoning_supported_efforts`（此前 /v1/models 里
+    根本没有档位字段）——回退路径必须按新字段名读，否则永远拿不到。
+    """
+
+    def test_issue8_model_gets_cn_efforts(self) -> None:
+        """issue #8 的那个模型：远端没给档位时，国内版应补上三档。"""
+        out = modelcatalog._decorate(
+            [{'id': 'deepseek-v4.1-flash', 'efforts': [], 'default_effort': ''}], 'cn')
+        self.assertEqual(out[0]['efforts'], ['low', 'high', 'max'])
+        self.assertEqual(out[0]['default_effort'], 'high')
+
+    def test_realm_tables_are_not_mixed(self) -> None:
+        """同一模型在两个版本的档位不同，不能混用（上游注释明确警告过）。"""
+        cn = modelcatalog._decorate([{'id': 'deepseek-v4.1-flash', 'efforts': []}], 'cn')[0]
+        gl = modelcatalog._decorate([{'id': 'deepseek-v4.1-flash', 'efforts': []}], 'global')[0]
+        self.assertEqual(cn['efforts'], ['low', 'high', 'max'])
+        self.assertEqual(gl['efforts'], ['high'], '国际版档位被国内版覆盖了')
+
+    def test_remote_wins_over_fallback(self) -> None:
+        """远端给了档位就是权威 —— 兜底表不覆盖。"""
+        out = modelcatalog._decorate(
+            [{'id': 'deepseek-v4.1-flash', 'efforts': ['low'], 'default_effort': 'low'}], 'cn')
+        self.assertEqual(out[0]['efforts'], ['low'])
+        self.assertEqual(out[0]['default_effort'], 'low')
+
+    def test_unknown_model_gets_nothing(self) -> None:
+        """两边都没有 → 空数组，不编造。"""
+        out = modelcatalog._decorate([{'id': 'totally-unknown', 'efforts': []}], 'cn')
+        self.assertEqual(out[0]['efforts'], [])
+        self.assertEqual(out[0]['default_effort'], '')
+
+    def test_default_must_be_in_efforts(self) -> None:
+        """默认档不在支持列表内 → 清空（镜像上游 containsEffort 校验）。"""
+        out = modelcatalog._decorate(
+            [{'id': 'x', 'efforts': ['low'], 'default_effort': 'max'}], 'cn')
+        self.assertEqual(out[0]['default_effort'], '')
+
+    def test_upstream_new_field_names_mapped(self) -> None:
+        """上游 /v1/models 的 reasoning_supported_efforts 要能被识别。"""
+        mapped = modelcatalog._map_upstream_model_fields({
+            'id': 'cn:deepseek-v4.1-flash',
+            'reasoning_supported_efforts': ['low', 'high', 'max'],
+            'reasoning_default_effort': 'high',
+            'supports_images': True,
+        })
+        self.assertEqual(mapped['efforts'], ['low', 'high', 'max'])
+        self.assertEqual(mapped['default_effort'], 'high')
+        d = modelcatalog._decorate([mapped], 'cn')[0]
+        self.assertEqual(d['efforts'], ['low', 'high', 'max'])
+        self.assertTrue(d['supports_images'])
+
+    def test_fallback_table_matches_upstream_shape(self) -> None:
+        """兜底表的基本形态：两个版本都在、档位非空、默认档合法。"""
+        for realm in ('cn', 'global'):
+            table = modelcatalog._EFFORT_FALLBACK.get(realm)
+            self.assertTrue(table, f'{realm} 兜底表缺失')
+            for mid, cap in table.items():
+                self.assertTrue(cap['efforts'], f'{realm}/{mid} 档位为空')
+                d = cap.get('default')
+                if d:
+                    self.assertIn(d, cap['efforts'],
+                                  f'{realm}/{mid} 的默认档 {d!r} 不在支持列表内')
+
+
+class UpstreamFallbackPathTest(unittest.TestCase):
+    """回退路径（读上游 /v1/models）必须走字段映射。
+
+    上游 2026-09-15 起才在 /v1/models 里透出档位，字段名是
+    `reasoning_supported_efforts` —— 我们的内部名字是 `efforts`。
+    若回退路径忘了映射，上游明明给了档位我们也读不到
+    （这一点是被反证试出来的：直接测 _map_upstream_model_fields 覆盖不到
+    「调用方是否真的用了它」）。
+    """
+
+    AUTH = {'file': 'a.json', 'uid': '1', 'nickname': '甲', 'realm': 'cn',
+            'is_expired': False, 'remain_seconds': 1000}
+
+    def setUp(self) -> None:
+        modelcatalog.invalidate()
+        for pat in (
+            mock.patch.object(modelcatalog.wb2api, 'list_auth_accounts',
+                              return_value=[self.AUTH]),
+            mock.patch.object(modelcatalog, '_load_token', return_value='tok'),
+        ):
+            p = pat.start()
+            self.addCleanup(p.stop)
+
+    def tearDown(self) -> None:
+        modelcatalog.invalidate()
+
+    def test_fallback_path_reads_new_field_names(self) -> None:
+        # 刻意用**兜底表里没有**的模型名：否则「映射生效」与「兜底表兜住了」
+        # 会产生相同结果，测不出映射是否真的在工作。
+        # （第一版用的是 deepseek-v4.1-flash——它在兜底表里，去掉映射后测试
+        #  仍然全绿；这是反证时发现的。）
+        mid = 'brand-new-model-not-in-fallback-table'
+        self.assertNotIn(mid, modelcatalog._EFFORT_FALLBACK['cn'],
+                         '这个模型不能出现在兜底表里，否则测不出字段映射')
+
+        async def tencent_fail(auth):
+            return False, 'token 过期'
+
+        async def upstream():
+            # 上游透出的形态：带 cn: 前缀 + reasoning_supported_efforts
+            return True, [{'id': f'cn:{mid}',
+                           'context_length': 131072, 'max_output_tokens': 8192,
+                           'reasoning_supported_efforts': ['low', 'high', 'max'],
+                           'reasoning_default_effort': 'high',
+                           'supports_images': True}]
+
+        with mock.patch.object(modelcatalog.tencent, 'fetch_models', tencent_fail), \
+                mock.patch.object(modelcatalog.wb2api, 'get_models', upstream):
+            out = asyncio.run(modelcatalog.catalog('cn', force=True))
+
+        self.assertEqual(out['source'], 'upstream')
+        m = out['models'][0]
+        self.assertEqual(m['id'], mid, '前缀应被剥掉')
+        self.assertEqual(m['efforts'], ['low', 'high', 'max'],
+                         '回退路径没映射新字段名 —— 上游给了档位也读不到')
+        self.assertEqual(m['default_effort'], 'high')
+        self.assertTrue(m['supports_images'])
