@@ -40,9 +40,24 @@ services:
       # 数据库、日志、更新状态、上游版本固定标记都在这里。
       # 必须持久化，否则重建容器会丢失统计与审计记录。
       - ./data:/app/data
-      # 上游的账号凭据（只读即可：管理端只读它来展示账号，写入由上游自己负责）
-      - ../workbuddy2api/auths:/opt/workbuddy2api/auths:ro
-      # 上游配置（读写：管理端的「设置」页会改它，改完由上游重载生效）
+      # 上游的账号凭据。**必须读写挂载**：管理端的「添加账号」扫码成功后会
+      # 直接落盘 workbuddy-<uid>.json 到这个目录（见 tencent.write_auth_file），
+      # 只读挂载会让扫码添加账号直接失败。
+      #
+      # **权限提示（与上游 issue #108 同款问题）**：bind mount 的目录属主由宿主机
+      # 决定，镜像内的 chown 不起作用。若管理端显示「0 个账号」而 auths 里明明有
+      # 文件，或添加账号时报权限错误，通常是跨 uid 读写不到——宿主机执行一次：
+      #   chown -R 10001:10001 ../workbuddy2api/auths
+      # （10001 是上游容器内进程的 uid，管理端也用同一 uid，见 Dockerfile）
+      - ../workbuddy2api/auths:/opt/workbuddy2api/auths
+      # 上游配置。**必须读写挂载**：管理端的「设置」页会改写它。
+      #
+      # **重要**：上游只在进程启动时读一次 config.json，之后改文件不会生效，必须
+      # 重启上游容器。宿主部署时管理端能直接 `docker restart`，但**本容器里没有
+      # docker 命令**（我们刻意不挂 docker.sock —— 那等于把宿主 root 交给容器内
+      # 进程）。因此容器部署下：**保存设置后请到宿主机重启上游**：
+      #   cd ../workbuddy2api && docker compose restart wb2api
+      # 界面在保存成功后会提示「已写入配置，请在宿主机重启上游以生效」。
       - ../workbuddy2api/config.json:/opt/workbuddy2api/config.json
     extra_hosts:
       # 让容器能通过 host.docker.internal 访问宿主机上的上游

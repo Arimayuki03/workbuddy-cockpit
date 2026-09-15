@@ -288,6 +288,11 @@ export interface UpstashConfig {
 export interface UpstreamConfig {
   /** 是否成功读取到上游配置文件；false 时前端应提示并禁止保存 */
   available?: boolean;
+  /**
+   * 保存后若需要用户手动做一步（容器部署下无法自动重启上游），后端带回此提示。
+   * 有值时界面用醒目提示转达，而不是显示「正在自动应用」。
+   */
+  reload_hint?: string;
   /** 上游配置文件路径 */
   config_path?: string;
   /** 读取失败原因 */
