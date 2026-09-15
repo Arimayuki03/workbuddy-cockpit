@@ -79,7 +79,11 @@ CREATE TABLE IF NOT EXISTS request_logs (
   error             TEXT,
   stream            INTEGER DEFAULT 0,
   -- 本次调用的真实扣费（来自上游 usage.credit）；NULL = 上游未返回，不等于 0
-  credit            REAL
+  credit            REAL,
+  -- 版本（cn / global）：由请求的模型名前缀判定（上游的路由协议）。
+  -- 为什么必须存：界面按版本切换时，日志与统计要跟着切；不存就无法回溯过滤。
+  -- NULL = 该字段上线前的历史记录（或模型名无前缀）——按 cn 归类，见 realm_of_model。
+  realm             TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_logs_ts ON request_logs(ts);
 
@@ -92,7 +96,9 @@ CREATE TABLE IF NOT EXISTS usage_daily (
   completion_tokens INTEGER NOT NULL DEFAULT 0,
   -- 当日实际扣费合计（来自上游 usage.credit；上游未返回时不计入）
   credit            REAL    NOT NULL DEFAULT 0,
-  PRIMARY KEY (day, key_id, model)
+  -- 版本（cn / global）；NULL 归 cn。主键含它，使两个版本的同名模型分开累计。
+  realm             TEXT    NOT NULL DEFAULT 'cn',
+  PRIMARY KEY (day, key_id, model, realm)
 );
 
 -- 管理端审计日志：登录、改密码、增删用户、改安全配置等敏感操作留痕。
@@ -212,6 +218,16 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ('usage_daily', 'credit', 'REAL NOT NULL DEFAULT 0'),
     # 首字延迟：可空（历史记录与非流式请求为 NULL）
     ('request_logs', 'first_token_ms', 'INTEGER'),
+    # 版本（cn / global）：界面按版本切换时日志与统计要跟着切。
+    # 历史记录为 NULL —— 读的时候按 cn 归类（见 realm_of_model 的注释）。
+    ('request_logs', 'realm', 'TEXT'),
+    # usage_daily 的 realm 需要能进主键才能把两个版本的同名模型分开累计。
+    # SQLite 不允许 ALTER 主键，因此**只加列**、不改主键：已有部署的
+    # usage_daily 主键仍是 (day, key_id, model)，此时两个版本的同名模型会
+    # 合并累计（历史既成事实，无法拆分）；新建库则从一开始就是四列主键。
+    # 这是有意的取舍：相比「重建表并可能丢历史」，接受旧库在这一维度上的
+    # 精度损失，且界面会如实标注该口径。
+    ('usage_daily', 'realm', "TEXT NOT NULL DEFAULT 'cn'"),
 )
 
 
@@ -281,19 +297,40 @@ def bump_usage(
     prompt_tokens: int,
     completion_tokens: int,
     credit: float | None = None,
+    realm: str | None = None,
 ) -> None:
-    """累计当日用量。credit 为本次真实扣费，缺省不计入（不按 0 记）。"""
+    """累计当日用量。credit 为本次真实扣费，缺省不计入（不按 0 记）。
+
+    realm（cn / global）由调用方按模型名前缀判定后传入；缺省归 cn
+    （与 realm_of_model 的口径一致：无前缀即国内版）。
+    """
     day = day_of()
+    r = realm if realm in ('cn', 'global') else realm_of_model(model)
     execute(
-        'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, completion_tokens, credit) '
-        'VALUES(?, ?, ?, 1, ?, ?, ?) '
-        'ON CONFLICT(day, key_id, model) DO UPDATE SET '
+        'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, completion_tokens, credit, realm) '
+        'VALUES(?, ?, ?, 1, ?, ?, ?, ?) '
+        'ON CONFLICT(day, key_id, model, realm) DO UPDATE SET '
         '  requests = requests + 1, '
         '  prompt_tokens = prompt_tokens + excluded.prompt_tokens, '
         '  completion_tokens = completion_tokens + excluded.completion_tokens, '
         '  credit = credit + excluded.credit',
-        (day, key_id, model, prompt_tokens, completion_tokens, float(credit or 0)),
+        (day, key_id, model, prompt_tokens, completion_tokens, float(credit or 0), r),
     )
+
+
+def realm_of_model(model: str | None) -> str:
+    """从模型名判定版本：上游的路由协议是 `cn:` / `global:` 前缀。
+
+    为什么以模型名为准：网关把模型名原样转发给上游，由上游按前缀选择账号池
+    ——所以「这次调用走的是哪个版本」完全由前缀决定，与调用方用哪个密钥无关。
+
+    无前缀 → cn：存量客户端与历史数据都是这个形态（升级前只有一个版本），
+    归到 cn 才能让它们落在原来的那一侧，不凭空改变历史归属。
+    """
+    m = str(model or '').strip().lower()
+    if m.startswith('global:'):
+        return 'global'
+    return 'cn'
 
 
 # ── 签到 / 保活记录 ──────────────────────────────────────
@@ -557,21 +594,23 @@ def backfill_usage_from_logs() -> dict:
     # 必须与 bump_usage 用同一时区口径（本地），否则凌晨的调用会被算成两天
     expected = query(
         f"SELECT {day_sql('ts')} AS day, key_id, COALESCE(model,'') AS model, "
+        "COALESCE(realm,'cn') AS realm, "
         "COUNT(*) AS requests, COALESCE(SUM(prompt_tokens),0) AS pt, "
         "COALESCE(SUM(completion_tokens),0) AS ct, COALESCE(SUM(credit),0) AS cr "
-        "FROM request_logs WHERE key_id IS NOT NULL GROUP BY day, key_id, model"
+        "FROM request_logs WHERE key_id IS NOT NULL GROUP BY day, key_id, model, realm"
     )
+    # 键含 realm：两个版本的同名模型是不同行，否则回填会把它们并成一条
     current = {
-        (r['day'], r['key_id'], r['model']): r
+        (r['day'], r['key_id'], r['model'], r['realm'] or 'cn'): r
         for r in query(
-            'SELECT day, key_id, model, requests, prompt_tokens, completion_tokens, credit FROM usage_daily'
+            'SELECT day, key_id, model, realm, requests, prompt_tokens, completion_tokens, credit FROM usage_daily'
         )
     }
 
     fixed = 0
     added_requests = added_tokens = 0
     for row in expected:
-        key = (row['day'], row['key_id'], row['model'])
+        key = (row['day'], row['key_id'], row['model'], row['realm'] or 'cn')
         cur = current.get(key)
         cur_req = int(cur['requests']) if cur else 0
         cur_pt = int(cur['prompt_tokens']) if cur else 0
@@ -583,15 +622,16 @@ def backfill_usage_from_logs() -> dict:
         if d_req <= 0 and d_pt <= 0 and d_ct <= 0:
             continue
         execute(
-            'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, completion_tokens, credit) '
-            'VALUES(?, ?, ?, ?, ?, ?, ?) '
-            'ON CONFLICT(day, key_id, model) DO UPDATE SET '
+            'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, completion_tokens, credit, realm) '
+            'VALUES(?, ?, ?, ?, ?, ?, ?, ?) '
+            'ON CONFLICT(day, key_id, model, realm) DO UPDATE SET '
             '  requests = MAX(requests, excluded.requests), '
             '  prompt_tokens = MAX(prompt_tokens, excluded.prompt_tokens), '
             '  completion_tokens = MAX(completion_tokens, excluded.completion_tokens), '
             '  credit = MAX(credit, excluded.credit)',
             (row['day'], row['key_id'], row['model'], int(row['requests']),
-             int(row['pt']), int(row['ct']), float(row['cr'] or 0)),
+             int(row['pt']), int(row['ct']), float(row['cr'] or 0),
+             str(row['realm'] or 'cn')),
         )
         fixed += 1
         added_requests += max(0, d_req)
@@ -614,21 +654,25 @@ def rebuild_usage_from_logs() -> dict:
     注意：本操作以 request_logs 为唯一依据。若请求日志曾被清空，
     那部分历史汇总会随之丢失（接口上已明确标注）。
     """
+    # realm 一并重建：日志里存了它，重建时若丢掉，界面按版本切换就查不到了。
+    # 历史日志该列为 NULL → 按 cn 归类（与 realm_of_model 口径一致）。
     expected = query(
         f"SELECT {day_sql('ts')} AS day, key_id, COALESCE(model,'') AS model, "
+        "COALESCE(realm,'cn') AS realm, "
         "COUNT(*) AS requests, COALESCE(SUM(prompt_tokens),0) AS pt, "
         "COALESCE(SUM(completion_tokens),0) AS ct, COALESCE(SUM(credit),0) AS cr "
-        "FROM request_logs WHERE key_id IS NOT NULL GROUP BY day, key_id, model"
+        "FROM request_logs WHERE key_id IS NOT NULL GROUP BY day, key_id, model, realm"
     )
     before = query_one('SELECT COUNT(*) AS c, COALESCE(SUM(requests),0) AS r, '
                        'COALESCE(SUM(prompt_tokens+completion_tokens),0) AS t FROM usage_daily')
     execute('DELETE FROM usage_daily')
     for row in expected:
         execute(
-            'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, completion_tokens, credit) '
-            'VALUES(?, ?, ?, ?, ?, ?, ?)',
+            'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, completion_tokens, credit, realm) '
+            'VALUES(?, ?, ?, ?, ?, ?, ?, ?)',
             (row['day'], row['key_id'], row['model'], int(row['requests']),
-             int(row['pt']), int(row['ct']), float(row['cr'] or 0)),
+             int(row['pt']), int(row['ct']), float(row['cr'] or 0),
+             str(row['realm'] or 'cn')),
         )
     after = query_one('SELECT COUNT(*) AS c, COALESCE(SUM(requests),0) AS r, '
                       'COALESCE(SUM(prompt_tokens+completion_tokens),0) AS t FROM usage_daily')

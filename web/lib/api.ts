@@ -171,10 +171,13 @@ export const logApi = {
 
 /* ── 用量统计 ───────────────────────────────────────── */
 export const statsApi = {
-  summary: () => get<StatsSummary>('/api/stats/summary'),
-  daily: (days = 30) => get<UsagePoint[]>('/api/stats/daily', {days}),
-  byModel: (days = 30) => get<UsageBreakdown[]>('/api/stats/by-model', {days}),
-  byKey: (days = 30) => get<UsageBreakdown[]>('/api/stats/by-key', {days}),
+  /** realm 非空时只统计该版本（界面按版本切换时传） */
+  summary: (realm?: Realm) => get<StatsSummary>('/api/stats/summary', {realm}),
+  daily: (days = 30, realm?: Realm) => get<UsagePoint[]>('/api/stats/daily', {days, realm}),
+  byModel: (days = 30, realm?: Realm) =>
+    get<UsageBreakdown[]>('/api/stats/by-model', {days, realm}),
+  byKey: (days = 30, realm?: Realm) =>
+    get<UsageBreakdown[]>('/api/stats/by-key', {days, realm}),
   /** 按请求日志回填用量缺口（幂等） */
   rebuildUsage: () =>
     post<{rows_before: number; rows_after: number; requests_delta: number; tokens_delta: number}>(

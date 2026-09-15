@@ -427,8 +427,16 @@ export default function KeysPage() {
                 <Input
                   value={form.models}
                   onChange={(e) => setForm({...form, models: e.target.value})}
-                  placeholder="glm-5.2, kimi-k2.7"
+                  placeholder="glm-5.2, global:gpt-5.4"
                 />
+                {/* 版本隔离就是靠这个白名单：模型名带 global: 前缀的走国际版账号池，
+                    不带前缀的走国内版。所以要「一把密钥只能用国际版」，就只列
+                    global: 开头的模型；想两版都能用，就分别列出各自要用的模型。
+                    这不是额外的功能开关，而是上游路由协议的直接体现。 */}
+                <p className="text-[10px] leading-4 text-muted-foreground">
+                  需要限定版本时用前缀：<code className="font-mono">global:gpt-5.4</code> 走国际版，
+                  <code className="font-mono">glm-5.2</code> 走国内版。留空则两版都可用。
+                </p>
               </div>
             </div>
           </DialogBody>

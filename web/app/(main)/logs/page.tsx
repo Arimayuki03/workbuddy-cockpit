@@ -11,6 +11,7 @@ import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {useAuth} from '@/lib/auth-context';
+import {useRealm} from '@/lib/realm-context';
 import {Button} from '@/components/ui/button';
 import {CopyButton} from '@/components/ui/copy-button';
 import {Badge} from '@/components/ui/badge';
@@ -43,6 +44,8 @@ const PAGE_SIZE = 20;
 
 export default function LogsPage() {
   const {isAdmin} = useAuth();
+  // 日志随顶部版本切换：两个版本走不同账号池，混看会把两个池子的调用搅在一起
+  const {realm, label: realmName} = useRealm();
   const [logs, setLogs] = useState<RequestLog[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -67,6 +70,7 @@ export default function LogsPage() {
         status: status === 'all' ? undefined : status,
         ip: ip || undefined,
         days: Number(days) || undefined,
+        realm,
       });
       setLogs(res.items);
       setTotal(res.total);
@@ -75,7 +79,7 @@ export default function LogsPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, keyId, model, status, ip, days]);
+  }, [page, keyId, model, status, ip, days, realm]);
 
   useEffect(() => {
     load();
