@@ -1,0 +1,55 @@
+# WorkBuddy Manager —— Docker Compose 部署
+#
+# 用法：
+#   1) 按需修改下面的环境变量（至少确认上游地址与路径）
+#   2) docker compose up -d --build
+#   3) 浏览器打开 http://<服务器IP>:7864
+#      首次启动若未设 WB_ADMIN_PASSWORD，会随机生成密码并打印到容器日志：
+#      docker compose logs workbuddy-manager | grep -A2 密码
+#
+# 与宿主机安装（deploy/install.sh + systemd）的区别，见 Dockerfile 顶部说明。
+# 简述：容器版**不支持在界面上更新上游**（那需要挂 docker.sock，等于把宿主 root
+# 交给容器）；上游请用它自己的 compose 单独升级。
+
+services:
+  workbuddy-manager:
+    build: .
+    image: workbuddy-manager:latest
+    container_name: workbuddy-manager
+    # 这个 restart 策略是容器版「一键更新」能生效的前提：
+    # 更新完成后容器内的进程会退出，靠它用新代码重新拉起。
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      # 首启管理员密码；不设则随机生成并打印到日志（推荐首启后立即改）
+      # WB_ADMIN_PASSWORD: "改成你的强密码"
+      # 上游地址：若上游与本品在同一 compose 网络，用服务名；否则填宿主机地址
+      #   - 同网络（推荐）：http://workbuddy2api:7863
+      #   - 用宿主机 Docker 网关：http://host.docker.internal:7863
+      WB2API_BASE: http://host.docker.internal:7863
+      # 反向代理在后面时，真实 IP 取自它覆盖写入的 X-Real-IP
+      WB_TRUST_PROXY: "1"
+      # 生产环境不暴露 /docs 与 /openapi.json
+      WB_ENABLE_DOCS: "0"
+    ports:
+      # **只监听本机**：管理端必须藏在反向代理之后。
+      # 若确需直接从别的机器访问，改成 "7864:7864"，但请先确保有 HTTPS 与访问控制——
+      # 管理端持有全部账号凭据，直接暴露到公网是被打穿的常见原因。
+      - "127.0.0.1:7864:7864"
+    volumes:
+      # 数据库、日志、更新状态、上游版本固定标记都在这里。
+      # 必须持久化，否则重建容器会丢失统计与审计记录。
+      - ./data:/app/data
+      # 上游的账号凭据（只读即可：管理端只读它来展示账号，写入由上游自己负责）
+      - ../workbuddy2api/auths:/opt/workbuddy2api/auths:ro
+      # 上游配置（读写：管理端的「设置」页会改它，改完由上游重载生效）
+      - ../workbuddy2api/config.json:/opt/workbuddy2api/config.json
+    extra_hosts:
+      # 让容器能通过 host.docker.internal 访问宿主机上的上游
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:7864/api/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

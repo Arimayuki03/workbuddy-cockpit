@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -42,6 +43,13 @@ UPSTREAM_REPO = os.environ.get('WB_UPSTREAM_REPO') or 'https://github.com/Sliver
 SERVICE_NAME = os.environ.get('WB_SERVICE_NAME') or 'workbuddy-web'
 DATA_DIR = Path(os.environ.get('WB_DATA_DIR') or INSTALL_DIR / 'data')
 STATUS_FILE = Path(os.environ.get('WB_UPDATE_STATUS') or DATA_DIR / 'update-status.json')
+# 运行形态：systemd（宿主机安装）或 docker（容器内运行）。
+#
+# 为什么必须区分「重启方式」：容器里没有 systemd，`systemctl restart` 只会失败。
+# 容器自身的重启必须由**外部**（compose 的 restart 策略）完成——容器里无法重启
+# 自己，这是 Docker 的模型决定的，不是缺功能。
+# 取 auto：能探测到容器就按容器处理，否则按 systemd。
+RUN_MODE = (os.environ.get('WB_RUN_MODE') or 'auto').strip().lower()
 # 上游版本固定：写入提交号/标签后，上游更新会检出该版本而不是跟随分支。
 # 用途：上游某个提交自身有问题（如 Dockerfile 引用了已删除的文件）时，
 # 可以固定回上一个可用提交，避免「一更就坏、且没有退路」。
@@ -731,12 +739,85 @@ def update_manager(rep: Reporter) -> None:
 
     # 先把终态落盘，再重启：systemd 默认 KillMode=control-group，restart 会连同
     # 本进程一起终止（start_new_session 只脱离终端会话，并未脱离 service 的 cgroup），
-    # 若等重启之后再写状态就永远写不到了。
+    # 若等重启之后再写状态就永远写不到了。容器形态同样会终止本进程（交给编排层拉起）。
     rep.finish(True)
+    if in_container():
+        # 容器：置退出标记后结束自己，由 compose 的 restart 策略用新代码拉起。
+        # 不能只 return——那时更新进程会正常退出，而**管理端主进程仍在跑旧代码**
+        # （它是另一个进程），结果是「更新完成」但界面还是旧版。
+        _exit_for_restart(rep)
+    restart_service(rep)
+
+
+def in_container() -> bool:
+    """是否运行在容器里（Docker/K8s 等）。
+
+    判据用标准做法：`/.dockerenv` 存在，或 cgroup 里出现容器运行时标识。
+    这是**探测**而不是配置项，减少用户配错的概率；`WB_RUN_MODE` 可显式覆盖。
+    """
+    if RUN_MODE in ('docker', 'container'):
+        return True
+    if RUN_MODE in ('systemd', 'host'):
+        return False
+    if Path('/.dockerenv').exists():
+        return True
+    try:
+        for line in Path('/proc/1/cgroup').read_text(encoding='utf-8').splitlines():
+            if any(k in line for k in ('docker', 'containerd', 'kubepods', 'podman')):
+                return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def restart_service(rep: Reporter) -> None:
+    """重启使新代码生效。
+
+    两种运行形态的重启方式**本质不同**，必须分开处理：
+
+      * systemd（宿主机安装）：`systemctl restart`。注意该操作会连同本更新进程
+        一起终止（systemd 默认 KillMode=control-group），所以**必须先写好终态**
+        （调用方已 rep.finish(True) 在前）。
+      * 容器：**无法自我重启**——容器里没有 systemd，也不能重启自己所在的容器
+        （除非挂载了 docker.sock，而那等于把宿主 root 权限交给容器，是更糟的
+        选择）。容器由 compose 的 `restart: unless-stopped` 策略在进程退出后
+        自动拉起，因此这里的做法是**主动结束进程**，让编排层把新代码加载起来。
+
+    所以容器形态下这里不是"失败"，而是"交给外部"——日志要写清楚，否则用户会
+    以为更新没生效。
+    """
+    if in_container():
+        rep.log('检测到容器环境：新代码已就位，正在退出进程以便容器重启策略拉起…')
+        rep.log('（容器无法自我重启；compose 的 restart 策略会在进程退出后')
+        rep.log('  用新代码重新启动。若长时间未恢复，请在宿主机执行：')
+        rep.log('  docker compose restart workbuddy-manager）')
+        return
     rc, _ = run(['systemctl', 'restart', SERVICE_NAME], rep=rep, check=False)
     if rc != 0:
         raise RuntimeError(f'重启服务失败（systemctl 返回 {rc}），请手动执行 systemctl status {SERVICE_NAME}')
     rep.log('服务已重启')
+
+
+def _exit_for_restart(rep: Reporter) -> None:
+    """容器形态下：结束**整个容器**使新代码生效。
+
+    为什么不是「结束更新进程自己就完事」：更新进程是管理端拉起的子进程，它退出
+    后管理端主进程仍在跑**旧代码**（新文件已落盘，但 Python 已把旧模块载入内存）。
+    容器里没有办法从内部重启 PID 1 之外的主进程，所以正确做法是结束整个容器，
+    由 compose 的 `restart: unless-stopped` 用新代码重新拉起。
+
+    实现：给 PID 1 发 SIGTERM（容器里 PID 1 就是主进程，uvicorn）。
+    compose 收到容器退出后会按 restart 策略重启它。
+    """
+    try:
+        os.kill(1, signal.SIGTERM)
+        rep.log('已向主进程发送终止信号，容器即将在新代码下重启')
+    except Exception as exc:  # noqa: BLE001
+        rep.log(f'发送终止信号失败（{exc}）—— 请手动重启容器：'
+                'docker compose restart workbuddy-manager', 'warn')
+        return
+    # 给接收方一点时间优雅退出；随后本进程也退出（容器本该随之结束）
+    time.sleep(2)
 
 
 def read_local_version() -> str:
