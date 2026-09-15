@@ -29,6 +29,9 @@ on:
 
 permissions:
   contents: write
+  # 推容器镜像到 GHCR 需要显式声明 packages: write —— 只给 contents 会被拒
+  # （实测报错：denied: installation not allowed to Create organization package）。
+  packages: write
 
 jobs:
   release:
@@ -209,6 +212,11 @@ jobs:
       # 镜像的完整性依赖 GHCR 的 digest 与 GitHub 的账号安全——这一层
       # 与发布包签名是两套信任链，README 里已如实说明。
       - name: 构建并推送容器镜像
+        # 镜像只是**附属产物**：发布包与 Release 才是主体。首次实测时此步因缺少
+        # packages: write 权限失败，整个 workflow 被标红——但 Release 其实已成功
+        # 创建，很容易被误读成「发版失败」。加 continue-on-error 后，镜像推不上去
+        # 只影响这一步，发布结果不受牵连。
+        continue-on-error: true
         if: github.event_name == 'push' || inputs.tag != ''
         env:
           REGISTRY: ghcr.io
