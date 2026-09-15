@@ -419,6 +419,23 @@ def update_upstream(rep: Reporter) -> None:
     else:
         rep.log('上游未在预期时间内就绪，请查看容器日志', 'warn')
 
+    # 7) 清版本检测缓存
+    #
+    # 缓存里存的是「更新前」查到的远端最新提交；不清的话，界面会把**已经装好的
+    # 这个版本**当成新版本继续提示「上游有更新」，一直到缓存 6 小时过期为止
+    # （用户报过这个问题：明明更新到最新了，面板还是一直说有更新）。
+    # 管理端更新那条路径早就清了，上游这条一直漏着。
+    _clear_version_cache(rep)
+
+
+def _clear_version_cache(rep: Reporter) -> None:
+    """清掉版本检测缓存，使界面立即重新判断「有没有更新」。"""
+    try:
+        (DATA_DIR / 'version-check.json').unlink(missing_ok=True)
+        rep.log('已清除版本检测缓存')
+    except Exception:  # noqa: BLE001
+        pass
+
 
 def _read_upstream_ref() -> str:
     """要固定的上游版本（提交号/标签）。环境变量优先，其次本地文件；空 = 跟随分支。"""
@@ -663,11 +680,7 @@ def update_manager(rep: Reporter) -> None:
     # 清掉版本检测缓存：缓存里存的是「更新前」查到的 latest，留着会让界面
     # 拿旧 latest 跟新版本比较，出现「v1.0.5 → v1.0.4」这类把降级当更新的提示，
     # 也会让刚发布的新版本最长 6 小时才被发现。
-    try:
-        (DATA_DIR / 'version-check.json').unlink(missing_ok=True)
-        rep.log('已清除版本检测缓存')
-    except Exception:  # noqa: BLE001
-        pass
+    _clear_version_cache(rep)
 
     # 先把终态落盘，再重启：systemd 默认 KillMode=control-group，restart 会连同
     # 本进程一起终止（start_new_session 只脱离终端会话，并未脱离 service 的 cgroup），
