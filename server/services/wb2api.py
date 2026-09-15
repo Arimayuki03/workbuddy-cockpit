@@ -168,6 +168,16 @@ def merge_pool_status(accounts: list[dict], status: dict) -> list[dict]:
         credits = p.get('credits')
         a['credits'] = int(credits) if isinstance(credits, (int, float)) else None
         a['cooling'] = bool(p.get('cooling'))
+        # 冷却剩余秒数：上游状态机给的是权威值（可能是它解析出的「上游重置时刻」，
+        # 也可能是无时间文案时的有界退避）。展示出来，用户就知道还要等多久，
+        # 而不是只看到一个「冷却中」干等。
+        _remain = p.get('cool_remaining_sec')
+        a['cool_remaining_sec'] = int(_remain) if isinstance(_remain, (int, float)) and _remain > 0 else None
+        # 被限流的模型清单（上游 issue #36 的限额台账）：多模型限流时，
+        # 账号级 until 不等于各模型各自的恢复时刻，需分别展示。
+        # 只透传列表形态（前端直接 .map()）；异常类型归空列表，避免整页崩掉。
+        _rl = p.get('rate_limited_models')
+        a['rate_limited_models'] = _rl if isinstance(_rl, list) else []
         a['disabled'] = bool(p.get('disabled'))
         # 禁用原因：上游对 11140（request illegal，需重新 OAuth 登录）会**硬禁用**
         # 账号（到期也不自愈），对 14017（试用未激活）只软冷却。展示原因才能
