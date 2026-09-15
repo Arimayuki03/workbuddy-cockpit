@@ -308,3 +308,110 @@ class BumpUsageRealmOverrideTest(unittest.TestCase):
         db.bump_usage(1, 'global:gpt-5.4', 10, 5, 0.1, realm='weird')
         rows = db.query('SELECT realm FROM usage_daily')
         self.assertEqual([r['realm'] for r in rows], ['global'])
+
+
+class UpstreamPoolCountsTest(unittest.TestCase):
+    """仪表盘「反代上游」面板的计数来源。
+
+    这里锁的是一个**曾经全显示 0** 的缺陷，根因值得记下来：
+      1. 最初读 `upstream.healthy` —— 那是**全局**汇总，切到国际版会显示
+         两个版本加起来的数，于是改成从账号明细自己数；
+      2. 但账号明细里**根本没有 healthy 字段**（它是汇总层才有的），
+         `Boolean(undefined)` 恒为 false → 健康账号永远显示 0（用户截图所示）；
+      3. 上游其实已经按版本分好组了：`/status` 的 `realm_totals.cn` / `.global`。
+
+    上游 /status 的响应形状（读其 internal/server/handler.go 确认）：
+        {"accounts":[...], "total":N, "healthy":N, "cooling":N, "disabled":N,
+         "realm_totals":{"cn":{...},"global":{...}}, ...}
+    其中 healthy/cooling/disabled 是**汇总键**，账号条目上没有。
+
+    前端是 TS，测试在 Python 侧——因此这里用与前端**同一套判定逻辑**做核对，
+    并在 test_frontend_uses_realm_totals 里断言前端确实读了 realm_totals
+    （防止有人改回去读明细）。
+    """
+
+    UPSTREAM = {
+        'connected': True,
+        'accounts': [
+            {'uid': 'g1', 'realm': 'global', 'cooling': False, 'disabled': False},
+            {'uid': 'c1', 'realm': 'cn', 'cooling': True, 'disabled': False},
+            {'uid': 'c2', 'realm': 'cn', 'cooling': False, 'disabled': False},
+        ],
+        'total': 3, 'healthy': 2, 'cooling': 1, 'disabled': 0,
+        'realm_totals': {
+            'cn': {'total': 2, 'healthy': 1, 'cooling': 1, 'disabled': 0,
+                   'in_flight_full': 0},
+            'global': {'total': 1, 'healthy': 1, 'cooling': 0, 'disabled': 0,
+                       'in_flight_full': 0},
+        },
+    }
+
+    @staticmethod
+    def _compute_pool(upstream: dict, realm: str) -> dict:
+        """与 dashboard/page.tsx 的 pool 计算保持一致。"""
+        per = (upstream.get('realm_totals') or {}).get(realm)
+        if per:
+            return {'total': per['total'], 'healthy': per['healthy'],
+                    'cooling': per['cooling'], 'disabled': per['disabled'],
+                    'known': True}
+        has_top = isinstance(upstream.get('total'), int)
+        return {'total': upstream.get('total', 0), 'healthy': upstream.get('healthy', 0),
+                'cooling': upstream.get('cooling', 0), 'disabled': upstream.get('disabled', 0),
+                'known': has_top, 'globalOnly': has_top}
+
+    def test_global_view_uses_global_counts(self) -> None:
+        p = self._compute_pool(self.UPSTREAM, 'global')
+        self.assertEqual((p['healthy'], p['cooling'], p['disabled']), (1, 0, 0))
+
+    def test_cn_view_uses_cn_counts(self) -> None:
+        p = self._compute_pool(self.UPSTREAM, 'cn')
+        self.assertEqual((p['healthy'], p['cooling'], p['disabled']), (1, 1, 0))
+
+    def test_counts_are_not_all_zero(self) -> None:
+        """回归断言：这个面板曾经恒显示 0（账号明细里没有 healthy 字段）。"""
+        for realm in ('cn', 'global'):
+            p = self._compute_pool(self.UPSTREAM, realm)
+            self.assertGreater(p['healthy'], 0,
+                               f'{realm} 视图健康账号为 0 —— 又能是读了明细里的 healthy？')
+
+    def test_falls_back_to_global_totals_with_flag(self) -> None:
+        """老上游没有 realm_totals 时退回全局汇总，并标记口径。"""
+        old = {k: v for k, v in self.UPSTREAM.items() if k != 'realm_totals'}
+        p = self._compute_pool(old, 'global')
+        self.assertTrue(p['globalOnly'], '应标记为全局口径')
+        self.assertEqual(p['healthy'], 2)
+
+    def test_frontend_uses_realm_totals(self) -> None:
+        """前端必须**从 realm_totals 取该版本的计数**，而不是从账号明细自己数。
+
+        为什么这是回归测试：这个面板曾**恒显示 0**。根因是从账号明细统计时读了
+        条目上的 healthy —— 而**账号明细里根本没有这个字段**（它是 /status 的
+        汇总层字段），布尔转换恒为 false。上游其实早已按版本分好组
+        （realm_totals.cn / .global），直接用就不会错。
+
+        断言写成「必须存在 perRealm.healthy 的读取」，而不是「必须没有 .healthy」——
+        后者会误伤两处**合法**用法：顶层汇总的 `upstream?.healthy`（老上游回退）
+        与展示用的 `pool.healthy`。正向断言既精确又不会被无关代码绊倒。
+        """
+        src = (Path(__file__).resolve().parents[2] / 'web' / 'app' / '(main)'
+               / 'dashboard' / 'page.tsx').read_text(encoding='utf-8')
+        # 1) 真的读了上游按版本分组的计数
+        self.assertIn('.realm_totals?.[realm]', src,
+                      '仪表盘没有实际读 realm_totals —— 上游已按版本分好组，别自己数')
+        # 2) 健康数取自该分组（而不是从明细条目上取）
+        self.assertIn('perRealm.healthy', src, '没有从 realm_totals 取 healthy')
+        self.assertIn('perRealm.cooling', src, '没有从 realm_totals 取 cooling')
+        self.assertIn('perRealm.disabled', src, '没有从 realm_totals 取 disabled')
+        # 3) 不得再出现「遍历账号明细、在条目上取 healthy」的写法
+        #    （这是产生「全 0」的那个 bug；用明细条目变量名定位，避免误伤汇总字段）
+        import re
+        for pat, why in (
+            (r'\(\s*it\s*\)\s*=>[^\n]*\bhealthy\b', '在账号明细条目 it 上取 healthy'),
+            (r'\bit\s*\.\s*healthy\b', '在账号明细条目 it 上取 healthy'),
+        ):
+            self.assertIsNone(re.search(pat, src), f'{why} —— 该字段不存在，会恒为 0')
+
+    def test_type_declares_realm_totals(self) -> None:
+        ts = (Path(__file__).resolve().parents[2] / 'web' / 'lib' / 'types.ts'
+              ).read_text(encoding='utf-8')
+        self.assertIn('realm_totals', ts, 'UpstreamStatus 类型缺 realm_totals')

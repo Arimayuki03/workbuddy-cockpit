@@ -64,6 +64,15 @@ export interface AccountsResponse {
   pool_available?: boolean;
 }
 
+/** 上游为一组账号给出的计数（`/status` 的顶层汇总与 realm_totals 同构） */
+export interface PoolCounts {
+  total: number;
+  healthy: number;
+  cooling: number;
+  disabled: number;
+  in_flight_full: number;
+}
+
 export interface UpstreamStatus {
   connected: boolean;
   accounts?: Record<string, unknown>[];
@@ -72,6 +81,13 @@ export interface UpstreamStatus {
   healthy?: number;
   total?: number;
   in_flight_full?: number;
+  /**
+   * 上游**按版本分好组**的计数（cn / global）。
+   * 界面切到某个版本时要的是这一份，而不是顶层那份全局汇总——
+   * 后者的 healthy/cooling 含两个版本，直接用会在国际版视图下显示国内版的数。
+   * 注意 healthy 是**汇总层**字段，账号明细里没有它（曾因此在界面上恒显示 0）。
+   */
+  realm_totals?: Record<string, PoolCounts>;
   redis_mode?: string;
   sticky_sessions?: number;
   error?: string;
