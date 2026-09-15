@@ -48,9 +48,15 @@ def _envelope(resp: httpx.Response) -> tuple[int, Any]:
     return resp.status_code, env
 
 
-def _hdr(realm: Realm, token: str | None = None) -> dict:
-    """该版本的通用请求头（Origin/Referer/UA 随版本变）。"""
-    return realm_headers(realm, token)
+def _hdr(realm: Realm, token: str | None = None,
+         uid: str | None = None) -> dict:
+    """该版本的通用请求头（Origin/Referer/UA 随版本变）。
+
+    uid 非空时附账号级设备指纹头（X-Machine-ID / X-Session-ID）。
+    能拿到账号 uid 的调用点都应传——那是官方客户端「每账号一台固定虚拟设备」
+    的形态，缺失会被按设备指纹异常关联风控。
+    """
+    return realm_headers(realm, token, uid)
 
 
 def _billing_hdr(realm: Realm, auth: dict | str | None = None) -> dict:
@@ -60,8 +66,8 @@ def _billing_hdr(realm: Realm, auth: dict | str | None = None) -> dict:
     我们此前只发通用头——Go 侧测试明确断言 trial 必须带 X-User-Id，签到与查
     积分同理。这里统一走 realm.billing_headers。
 
-    auth 允许传 token 字符串（兼容既有调用），此时只有 Authorization，
-    身份头缺失——新调用点应尽量传完整 dict。
+    auth 允许传 token 字符串（兼容既有调用），此时只有 Authorization 与
+    通用头，**身份头与设备指纹头都缺失**——新调用点应尽量传完整 dict。
     """
     if isinstance(auth, str):
         return realm_headers(realm, auth)
@@ -344,7 +350,8 @@ async def fetch_models(auth: dict) -> tuple[bool, list | str]:
         async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
             for path in paths:
                 resp = await client.get(
-                    f'{chat_base(realm)}{path}', headers=_hdr(realm, access_token)
+                    f'{chat_base(realm)}{path}',
+                    headers=_hdr(realm, access_token, str(auth.get('uid') or '')),
                 )
                 code, body = _envelope(resp)
                 last_code = code
@@ -496,7 +503,7 @@ async def probe_account(auth: dict, model: str = 'glm-5.2') -> tuple[bool, str]:
     # 账号自带的 domain 若已是完整 URL，说明部署方指定了 base，优先采用
     base = domain if domain.startswith('http') else chat_base(realm)
 
-    headers = _hdr(realm, access_token)
+    headers = _hdr(realm, access_token, uid)
     # chat 是流式路径：Accept 覆盖为流式形态（对齐上游 D6 —— 非流式默认收紧为
     # application/json，只有 chat 才声明 text/event-stream）
     headers['Accept'] = 'application/json, text/event-stream'
