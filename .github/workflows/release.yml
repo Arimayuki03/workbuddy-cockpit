@@ -199,6 +199,35 @@ jobs:
             -s "${STAGE}.tar.gz.sig" < "${STAGE}.tar.gz"
           echo "✓ 签名与仓库内公钥匹配"
 
+      # ── 构建并发布容器镜像（Docker 部署方案，issue #7）──────────────
+      #
+      # 推送到 GHCR（GitHub 容器仓库），用户可直接：
+      #   docker pull ghcr.io/<owner>/workbuddy-manager:latest
+      # 而不是自己 clone + build（后者要装 Node 构建前端，门槛高）。
+      #
+      # 注意：镜像**不由本项目签名**（签名机制只覆盖 tar.gz 发布包）。
+      # 镜像的完整性依赖 GHCR 的 digest 与 GitHub 的账号安全——这一层
+      # 与发布包签名是两套信任链，README 里已如实说明。
+      - name: 构建并推送容器镜像
+        if: github.event_name == 'push' || inputs.tag != ''
+        env:
+          REGISTRY: ghcr.io
+        run: |
+          TAG="${{ steps.vars.outputs.tag }}"
+          IMAGE="${REGISTRY}/${{ github.repository_owner }}/workbuddy-manager"
+          # 镜像标签用小写（GHCR 要求），去掉 v 前缀
+          VER="${TAG#v}"
+          IMAGE="${IMAGE,,}"
+          echo "构建 $IMAGE:$VER"
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+          docker build -t "$IMAGE:$VER" -t "$IMAGE:latest" .
+          docker push "$IMAGE:$VER"
+          docker push "$IMAGE:latest"
+          # 把镜像 digest 记进 step summary：digest 是内容寻址的，
+          # 用户可用它核对拉到的镜像与本次构建完全一致
+          DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE:$VER")"
+          echo "镜像：$DIGEST" >> $GITHUB_STEP_SUMMARY
+
       - name: 部署说明
         run: |
           cat <<'EOF' >> $GITHUB_STEP_SUMMARY
@@ -232,5 +261,10 @@ jobs:
           tar xzf ${{ steps.pack.outputs.stage }}.tar.gz
           cd ${{ steps.pack.outputs.stage }}
           sudo bash deploy/install.sh
+          ```
+
+          或者用容器部署（另见仓库内 docker-compose.yml）：
+          ```bash
+          docker pull ghcr.io/${{ github.repository_owner }}/workbuddy-manager:${{ steps.vars.outputs.version }}
           ```
           EOF

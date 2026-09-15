@@ -41,8 +41,34 @@ def _updater_script() -> Path:
     return Path(__file__).resolve().parent.parent.parent / 'deploy' / 'update.py'
 
 
+def in_container() -> bool:
+    """是否运行在容器里（与 deploy/update.py 的判定一致）。
+
+    用途：容器形态有**能力边界**，界面要如实呈现而不是让用户点了才失败：
+      * 可以更新管理端（下载→验签→替换代码→容器重启），
+      * **不能更新上游**——重建上游容器需要 docker CLI（挂 docker.sock），
+        而挂上它等于把宿主 root 权限交给容器内进程，是更糟的取舍。
+        （详见仓库 Dockerfile 顶部的设计取舍说明。）
+    """
+    mode = (os.environ.get('WB_RUN_MODE') or 'auto').strip().lower()
+    if mode in ('docker', 'container'):
+        return True
+    if mode in ('systemd', 'host'):
+        return False
+    if Path('/.dockerenv').exists():
+        return True
+    try:
+        cg = Path('/proc/1/cgroup').read_text(encoding='utf-8')
+        if any(k in cg for k in ('docker', 'containerd', 'kubepods', 'podman')):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
 def read_status() -> dict:
     """读取进度；附上当前版本与是否正在运行。"""
+    container = in_container()
     status: dict = {
         'available': True,
         'running': False,
@@ -54,6 +80,10 @@ def read_status() -> dict:
         'upstream_dir': str(_upstream_dir()),
         # 当前固定的上游版本（空 = 跟随分支）
         'upstream_ref': upstream_ref(),
+        # 运行形态与能力边界：容器里不能更新上游（需 docker CLI），界面据此隐藏
+        # 该选项并说明原因，而不是让用户点了再失败
+        'in_container': container,
+        'can_update_upstream': not container,
     }
 
     if STATUS_FILE.is_file():
@@ -231,6 +261,15 @@ def start_update(target: str) -> tuple[bool, str]:
     """启动更新（后台脱离运行）。返回 (是否已启动, 说明)。"""
     if target not in ('manager', 'upstream', 'both'):
         return False, '参数不合法'
+    if in_container() and target in ('upstream', 'both'):
+        # 容器里重建上游需要 docker CLI；挂 docker.sock 等于把宿主 root 交给
+        # 容器内进程（可挂载宿主根目录），比"少一个功能"危险得多，故不做。
+        # 这里**前置拒绝并给出替代做法**，而不是让它跑到一半才失败。
+        return False, (
+            '容器部署不支持更新上游（需要 docker 命令，而挂载 docker.sock 会带来'
+            '更大的安全风险）。请在宿主机升级上游：cd <上游目录> && docker compose '
+            'up -d --build；或使用「仅更新管理端」。'
+        )
     if _lock_active():
         return False, '已有更新任务正在执行'
 

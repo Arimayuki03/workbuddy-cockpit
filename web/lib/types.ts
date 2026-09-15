@@ -384,6 +384,13 @@ export interface UpdateLogLine {
 
 export interface UpdateStatus {
   available: boolean;
+  /** 是否运行在容器里（决定能力边界，见 can_update_upstream） */
+  in_container?: boolean;
+  /**
+   * 是否支持「更新上游」。容器部署为 false —— 重建上游容器需要 docker CLI，
+   * 而挂载 docker.sock 会把宿主 root 权限交给容器内进程，是本项目刻意不做的事。
+   */
+  can_update_upstream?: boolean;
   /** 是否正在更新 */
   running: boolean;
   /** 上次更新是否成功（null = 未运行过） */

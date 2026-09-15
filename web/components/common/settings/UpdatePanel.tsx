@@ -469,17 +469,26 @@ export function UpdatePanel() {
           账号授权文件、上游配置、密钥与日志数据都会保留。
         </div>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-          {TARGETS.map((t, i) => (
+          {TARGETS.map((t, i) => {
+            // 容器部署不支持更新上游（重建上游容器需要 docker CLI，挂 docker.sock
+            // 会把宿主 root 交给容器内进程，是本项目刻意不做的事）。
+            // 直接禁用并说明替代做法，而不是让用户点了才失败。
+            const blocked = status?.can_update_upstream === false && t.id !== 'manager';
+            const text = blocked
+              ? '容器部署不支持在界面更新上游——请到宿主机执行 docker compose up -d --build'
+              : `${t.desc}。${t.hint}。更新过程中服务会短暂中断，已完成的任务不受影响。`;
+            return (
             <ConfirmDialog
               key={t.id}
               title={`确认${t.label}？`}
-              description={`${t.desc}。${t.hint}。更新过程中服务会短暂中断，已完成的任务不受影响。`}
+              description={text}
               confirmText="开始更新"
               onConfirm={() => start(t.id)}
               trigger={
                 <button
                   type="button"
-                  disabled={!isAdmin || busy || running}
+                  disabled={!isAdmin || busy || running || blocked}
+                  title={blocked ? '容器部署不支持此项' : undefined}
                   className={
                     'flex flex-col items-start gap-1 rounded-2xl px-3.5 py-3 text-left transition-colors ' +
                     'bg-background/60 hover:bg-background disabled:cursor-not-allowed disabled:opacity-50'
@@ -493,8 +502,16 @@ export function UpdatePanel() {
                 </button>
               }
             />
-          ))}
+            );
+          })}
         </div>
+        {status?.can_update_upstream === false && (
+          <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
+            当前是容器部署：更新上游请在宿主机执行
+            <code className="mx-1 font-mono">docker compose up -d --build</code>。
+            容器内不挂载 docker 套接字（那等于把宿主权限交出去），因此界面无法重建上游容器。
+          </p>
+        )}
         {!isAdmin && (
           <p className="mt-2 text-[11px] text-muted-foreground">只读角色无法执行更新。</p>
         )}

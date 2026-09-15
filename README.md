@@ -312,7 +312,7 @@ npm run dev                          # http://localhost:3000
 > 本项目对内部请求默认 `trust_env=False`（不读取系统代理）；确需走代理时设置 `WB_HTTP_PROXY`。
 > TUN 模式下请在代理软件中把 `127.0.0.1` 加入直连 / 绕过列表。
 
-### 二、运行测试
+#### 运行测试
 
 ```bash
 # 配置读写的回归测试：时刻数组 / 时长字符串 / 部分提交不覆盖同段其他键
@@ -323,7 +323,36 @@ python -m unittest discover -s server/tests -t . -v
 > 这一组测试专门守住两个曾经写坏配置的坑：把整点数组当成数字间隔、
 > 把时长字符串当成秒数。
 
-### 二、部署到服务器（一键脚本）
+### 二、Docker 部署
+
+仓库自带 `Dockerfile` 与 `docker-compose.yml`，适合已经用 Docker 跑上游的用户：
+
+```bash
+git clone https://github.com/ithtelab/workbuddy-manager.git
+cd workbuddy-manager
+# 按需改 compose 里的 WB2API_BASE 与卷路径（默认假设上游在 ../workbuddy2api）
+docker compose up -d --build
+docker compose logs workbuddy-manager | grep -A2 密码   # 首启随机密码
+```
+
+也可以直接用构建好的镜像（每次发版会推到 GHCR）：
+
+```bash
+docker pull ghcr.io/ithtelab/workbuddy-manager:latest
+```
+
+**容器部署的三个边界**（不是缺陷，是刻意的取舍，界面会如实提示）：
+
+| 事项 | 说明 |
+|---|---|
+| **不支持在界面上更新上游** | 重建上游容器需要 docker CLI；挂载 `docker.sock` 能把宿主 root 权限交给容器内进程，风险远大于收益。请在宿主机 `docker compose up -d --build`。 |
+| **更新管理端会重启整个容器** | 容器无法自我重启。更新流程是「替换代码 → 结束容器 → 由 compose 的 `restart` 策略用新代码拉起」，所以 compose 里必须保留 `restart: unless-stopped`。 |
+| **端口默认只绑定 127.0.0.1** | 管理端持有全部账号凭据，应当藏在反向代理之后。确需直接访问请自行改 compose，并确保 HTTPS。 |
+
+> 与宿主机安装一样，一键更新**强制验签**发布包。镜像本身不参与这套签名
+> （那是另一条信任链，依赖 GHCR 的 digest 与 GitHub 账号安全）。
+
+### 三、部署到服务器（一键脚本）
 
 本项目依赖上游 [`workbuddy2api`](https://github.com/Sliverkiss/workbuddy2api)
 （账号池与 OpenAI 兼容接口），**单独 clone 本仓库无法运行**。
