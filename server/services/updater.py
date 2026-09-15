@@ -22,6 +22,9 @@ from pathlib import Path
 from .. import config
 
 STATUS_FILE = config.DATA_DIR / 'update-status.json'
+# docker 可用性缓存（(时间, 布尔)）。每次探测要跑 docker info（~50ms），
+# 而状态接口会被前端轮询，加 30 秒缓存避免频繁探测。
+_docker_ok_cache: tuple[float, bool] | None = None
 LOCK_FILE = config.DATA_DIR / 'update.lock'
 LOG_FILE = config.DATA_DIR / 'update.log'
 # 上游版本固定：写入提交号/标签后，更新上游时检出该版本而不跟随分支。
@@ -44,11 +47,7 @@ def _updater_script() -> Path:
 def in_container() -> bool:
     """是否运行在容器里（与 deploy/update.py 的判定一致）。
 
-    用途：容器形态有**能力边界**，界面要如实呈现而不是让用户点了才失败：
-      * 可以更新管理端（下载→验签→替换代码→容器重启），
-      * **不能更新上游**——重建上游容器需要 docker CLI（挂 docker.sock），
-        而挂上它等于把宿主 root 权限交给容器内进程，是更糟的取舍。
-        （详见仓库 Dockerfile 顶部的设计取舍说明。）
+    只是一个事实判断；**能力**由 can_control_docker() 决定。
     """
     mode = (os.environ.get('WB_RUN_MODE') or 'auto').strip().lower()
     if mode in ('docker', 'container'):
@@ -66,6 +65,33 @@ def in_container() -> bool:
     return False
 
 
+def can_control_docker() -> bool:
+    """能否操作宿主上的 docker（重启上游容器 / 读上游日志 / 更新上游）。
+
+    判据是**实际能不能跑通 `docker info`**，而不是"在不在容器里"：
+
+      * 宿主部署：装了 docker 且在 docker 组 / root → True
+      * 容器挂了 docker.sock：socket 可用 → True（与宿主部署能力对齐）
+      * 容器没挂 socket：docker 命令找不到或连不上 daemon → False
+
+    为什么不用「是否容器」来判断（初版就是这么写的，是错的）：容器挂了 socket
+    后**完全能**做到这些事，而宿主没装 docker 时反而做不到。按能力判定才不会
+    把可用场景误判为不可用（也会在真的不可用时给出准确提示）。
+    """
+    global _docker_ok_cache
+    now = time.time()
+    if _docker_ok_cache is not None and now - _docker_ok_cache[0] < 30:
+        return _docker_ok_cache[1]
+    ok = False
+    try:
+        proc = subprocess.run(['docker', 'info'], capture_output=True, timeout=8)
+        ok = proc.returncode == 0
+    except Exception:  # noqa: BLE001
+        ok = False
+    _docker_ok_cache = (now, ok)
+    return ok
+
+
 def read_status() -> dict:
     """读取进度；附上当前版本与是否正在运行。"""
     container = in_container()
@@ -80,10 +106,11 @@ def read_status() -> dict:
         'upstream_dir': str(_upstream_dir()),
         # 当前固定的上游版本（空 = 跟随分支）
         'upstream_ref': upstream_ref(),
-        # 运行形态与能力边界：容器里不能更新上游（需 docker CLI），界面据此隐藏
-        # 该选项并说明原因，而不是让用户点了再失败
+        # 运行形态与能力边界
         'in_container': container,
-        'can_update_upstream': not container,
+        # 「能否更新上游」按**实际能力**判定（能否操作 docker），不按是否容器：
+        # 容器挂了 docker.sock 就能（与宿主部署等价），宿主没装 docker 就不能。
+        'can_update_upstream': can_control_docker(),
     }
 
     if STATUS_FILE.is_file():
@@ -261,14 +288,16 @@ def start_update(target: str) -> tuple[bool, str]:
     """启动更新（后台脱离运行）。返回 (是否已启动, 说明)。"""
     if target not in ('manager', 'upstream', 'both'):
         return False, '参数不合法'
-    if in_container() and target in ('upstream', 'both'):
-        # 容器里重建上游需要 docker CLI；挂 docker.sock 等于把宿主 root 交给
-        # 容器内进程（可挂载宿主根目录），比"少一个功能"危险得多，故不做。
-        # 这里**前置拒绝并给出替代做法**，而不是让它跑到一半才失败。
+    if target in ('upstream', 'both') and not can_control_docker():
+        # 重建上游容器需要操作宿主 docker。判定按**实际能力**（能否跑通
+        # docker info），而不是"是否在容器里"：容器挂了 docker.sock 就完全
+        # 能做这些事（与宿主部署等价）。
+        # 不可用时**前置拒绝并给出替代做法**，而不是让它跑到一半才失败。
         return False, (
-            '容器部署不支持更新上游（需要 docker 命令，而挂载 docker.sock 会带来'
-            '更大的安全风险）。请在宿主机升级上游：cd <上游目录> && docker compose '
-            'up -d --build；或使用「仅更新管理端」。'
+            '当前环境无法操作 docker（未安装 docker，或容器没有挂载 '
+            '/var/run/docker.sock），因此不能更新上游。'
+            '请在宿主机升级上游：cd <上游目录> && docker compose up -d --build；'
+            '或使用「仅更新管理端」。'
         )
     if _lock_active():
         return False, '已有更新任务正在执行'
