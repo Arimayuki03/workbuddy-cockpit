@@ -318,3 +318,111 @@ class UpstreamFallbackPathTest(unittest.TestCase):
                          '回退路径没映射新字段名 —— 上游给了档位也读不到')
         self.assertEqual(m['default_effort'], 'high')
         self.assertTrue(m['supports_images'])
+
+
+class ModelCatalogFullFieldsTest(unittest.TestCase):
+    """模型目录的完整字段解析（上游 2026-09-15 补齐）。
+
+    背景：上游这次把 /v1/models 的字段大幅补齐（name / description / credits
+    / tags / vendor / 能力标志），并顺手给出了它从腾讯接口解析这些字段时用的
+    JSON 名（descriptionZh / credits / tags / vendor …）。我们直连腾讯，本就
+    能取到这些字段——只是此前没解析。
+
+    其中最有价值的是 **credits（积分倍率）**：同一 prompt 在不同模型上的扣费
+    倍率不同，用户挑「省积分」的模型时靠它。此前界面上完全看不到。
+
+    字段名照上游的实测解析结果，不是猜的（详见 tencent.fetch_models 的注释）。
+    """
+
+    def test_tencent_fields_parsed(self) -> None:
+        payload = {
+            'code': 0,
+            'data': {
+                'models': [{
+                    'id': 'glm-5.2',
+                    'name': 'GLM-5.2',
+                    'descriptionZh': '通用对话模型',
+                    'credits': 'x0.05',
+                    'tags': ['badge:限时免费'],
+                    'vendor': 'zhipu',
+                    'isDefault': True,
+                    'maxInputTokens': 131072,
+                    'maxOutputTokens': 32768,
+                    'supportsImages': True,
+                    'supportsReasoning': True,
+                    'supportsToolCall': True,
+                    'onlyReasoning': False,
+                    'reasoning': {'supportedEfforts': ['high'], 'defaultEffort': 'high',
+                                  'summary': 'auto'},
+                }],
+                'agents': [{'name': 'cli', 'models': ['glm-5.2']}],
+            },
+        }
+
+        class _Client:
+            def __init__(self, *a, **k): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *exc): return False
+            async def get(self, url, **kw):
+                class R:
+                    status_code = 200
+                    def json(self): return payload
+                return R()
+
+        with mock.patch.object(config, 'http_client', _Client):
+            ok, out = asyncio.run(tencent.fetch_models(
+                {'access_token': 'T', 'realm': 'cn', 'uid': 'u'}))
+        self.assertTrue(ok, out)
+        m = out[0]
+        self.assertEqual(m['description'], '通用对话模型')
+        self.assertEqual(m['credits'], 'x0.05', '积分倍率没解析出来 —— 用户挑不了省积分的模型')
+        self.assertEqual(m['vendor'], 'zhipu')
+        self.assertEqual(m['tags'], ['badge:限时免费'])
+        self.assertTrue(m['is_default'])
+        self.assertTrue(m['supports_reasoning'])
+        self.assertTrue(m['supports_tool_call'])
+        self.assertFalse(m['only_reasoning'])
+        self.assertEqual(m['reasoning_summary'], 'auto')
+
+    def test_catalog_decorate_passes_fields_through(self) -> None:
+        out = modelcatalog._decorate([{
+            'id': 'glm-5.2', 'efforts': ['high'], 'credits': 'x0.05',
+            'description': '通用对话模型', 'vendor': 'zhipu', 'tags': ['t'],
+            'is_default': True, 'supports_reasoning': True,
+            'supports_tool_call': True, 'only_reasoning': False,
+            'reasoning_summary': 'auto',
+        }], 'cn')[0]
+        for key, want in (('credits', 'x0.05'), ('description', '通用对话模型'),
+                          ('vendor', 'zhipu'), ('tags', ['t']),
+                          ('is_default', True), ('supports_reasoning', True),
+                          ('supports_tool_call', True), ('reasoning_summary', 'auto')):
+            self.assertEqual(out[key], want, f'{key} 没透传到目录')
+        self.assertIn('only_reasoning', out)
+
+    def test_missing_fields_get_safe_defaults(self) -> None:
+        """上游没给这些字段时要有安全默认（不能 KeyError、不能编造）。"""
+        out = modelcatalog._decorate([{'id': 'x', 'efforts': []}], 'cn')[0]
+        self.assertEqual(out['credits'], '')
+        self.assertEqual(out['description'], '')
+        self.assertEqual(out['tags'], [])
+        self.assertFalse(out['is_default'])
+        self.assertFalse(out['supports_images'])
+
+    def test_upstream_fallback_maps_same_named_fields(self) -> None:
+        """回退路径（读上游 /v1/models）的同名字段要能直接透传。
+
+        上游这次透出的 name/description/credits/tags/vendor 与我们内部**同名**，
+        不需要映射；只有推理档位名不同（reasoning_supported_efforts）。
+        """
+        mapped = modelcatalog._map_upstream_model_fields({
+            'id': 'cn:glm-5.2', 'name': 'GLM-5.2', 'credits': 'x0.05',
+            'description': '[x0.05 credit] 通用对话模型', 'vendor': 'zhipu',
+            'tags': ['t'], 'is_default': True, 'supports_tool_call': True,
+            'reasoning_supported_efforts': ['high'], 'reasoning_default_effort': 'high',
+        })
+        d = modelcatalog._decorate([mapped], 'cn')[0]
+        self.assertEqual(d['credits'], 'x0.05')
+        self.assertEqual(d['vendor'], 'zhipu')
+        self.assertTrue(d['is_default'])
+        self.assertTrue(d['supports_tool_call'])
+        self.assertEqual(d['efforts'], ['high'], '档位字段名映射失效')

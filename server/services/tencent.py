@@ -394,6 +394,21 @@ async def fetch_models(auth: dict) -> tuple[bool, list | str]:
             'default_effort': str(reasoning.get('defaultEffort') or '').strip(),
             # 多模态能力：官方 /v1/models 也透出该字段（supports_images）
             'supports_images': bool(m.get('supportsImages')),
+            # ── 以下为上游 2026-09-15 补齐的模型目录字段（我们直连腾讯，本就能取到）──
+            # 说明：字段名照上游 dynModelEntry 的 JSON 标签（descriptionZh / credits /
+            # tags / vendor …），那是它从同一接口解析出来的实测结果，不是猜的。
+            'description': str(m.get('descriptionZh') or '').strip(),
+            # 积分倍率原文（如 "x0.05"）：同一个 prompt 在不同模型上的扣费倍率，
+            # 用户据此挑更省的模型。仅展示，不参与选号（与上游口径一致）。
+            'credits': str(m.get('credits') or '').strip(),
+            'vendor': str(m.get('vendor') or '').strip(),
+            'tags': [str(t) for t in tags if t],
+            'is_default': bool(m.get('isDefault')),
+            'supports_reasoning': bool(m.get('supportsReasoning')),
+            'supports_tool_call': bool(m.get('supportsToolCall')),
+            'only_reasoning': bool(m.get('onlyReasoning')),
+            # 推理摘要模式（如 "auto"）；与 supportedEfforts 不同源
+            'reasoning_summary': str(reasoning.get('summary') or '').strip(),
             '_non_chat': _non_chat_model(mid, _as_int(m.get('maxOutputTokens')), tags),
         }
 

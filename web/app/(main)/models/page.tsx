@@ -100,6 +100,11 @@ export default function ModelsPage() {
   const [series, setSeries] = useState('all');
   /** 能力筛选：全部 / 支持推理 / 大上下文 / 多模态 */
   const [cap, setCap] = useState<'all' | 'reasoning' | 'large' | 'vision'>('all');
+  /**
+   * 排序：默认按原顺序；「积分倍率从低到高」用于挑省积分的模型。
+   * 这是积分倍率最有用的用法——单看一行的倍率没概念，排一下才知道哪个最省。
+   */
+  const [sort, setSort] = useState<'default' | 'credits'>('default');
 
   // realm 变化时重新拉取：两个版本的模型清单不同，且后端已按版本分开缓存
   const load = useCallback(async (force = false) => {
@@ -129,7 +134,7 @@ export default function ModelsPage() {
 
   const filtered = useMemo(() => {
     const kw = q.trim().toLowerCase();
-    return models.filter((m) => {
+    const list = models.filter((m) => {
       if (series !== 'all' && m.series !== series) return false;
       if (cap === 'reasoning' && m.efforts.length === 0) return false;
       if (cap === 'large' && (m.context_length || 0) < 131072) return false;
@@ -141,7 +146,24 @@ export default function ModelsPage() {
         m.series.toLowerCase().includes(kw)
       );
     });
-  }, [models, q, series, cap]);
+    if (sort === 'credits') {
+      // 倍率从低到高（越省越靠前）。**没有倍率的排在最后**——不是 0，
+      // 不能当成「免费」混进最前面。
+      const num = (v?: string) => {
+        const m = /x?\s*([0-9]+(?:\.[0-9]+)?)/i.exec(v || '');
+        return m ? Number(m[1]) : null;
+      };
+      return [...list].sort((a, b) => {
+        const na = num(a.credits);
+        const nb = num(b.credits);
+        if (na === null && nb === null) return 0;
+        if (na === null) return 1;
+        if (nb === null) return -1;
+        return na - nb;
+      });
+    }
+    return list;
+  }, [models, q, series, cap, sort]);
 
   const summary = data?.summary;
   const seriesOptions = summary?.series ?? [];
@@ -272,6 +294,17 @@ export default function ModelsPage() {
                 {label}
               </Button>
             ))}
+            {/* 排序：挑省积分模型时最实用的一项 —— 单看倍率没概念，排一下才清楚 */}
+            <span className="ml-1 h-4 w-px shrink-0 bg-border" />
+            <Button
+              variant={sort === 'credits' ? 'default' : 'outline'}
+              size="sm"
+              className="h-7 shrink-0 rounded-full px-2.5 text-[11px]"
+              title="按积分倍率从低到高排序，挑最省积分的模型"
+              onClick={() => setSort((v) => (v === 'credits' ? 'default' : 'credits'))}
+            >
+              积分倍率 ↑
+            </Button>
           </div>
         </div>
       </section>
@@ -310,7 +343,9 @@ export default function ModelsPage() {
                   {filtered.map((m: CatalogModel) => (
                     <TableRow key={m.id} className="border-b border-border/40">
                       <TableCell className="pl-4">
-                        <div className="flex flex-col gap-0.5 py-0.5">
+                        {/* 模型描述（腾讯的 descriptionZh）挂在名称上做悬浮提示：
+                            它通常是一两句话，铺在表格里会把行高撑开 */}
+                        <div className="flex flex-col gap-0.5 py-0.5" title={m.description || undefined}>
                           {m.name ? (
                             <>
                               <span className="text-xs font-medium">{m.name}</span>
@@ -351,10 +386,36 @@ export default function ModelsPage() {
                         )}
                       </TableCell>
                       <TableCell className="pr-4">
-                        <div className="flex items-center justify-end gap-1.5">
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
+                          {/* 积分倍率：同一 prompt 在不同模型上的扣费倍率，
+                              挑「省积分」的模型时最有用的一项。上游把它拼进
+                              description 前缀，我们单独展示（更清楚） */}
+                          {m.credits && (
+                            <Badge
+                              variant="secondary"
+                              className="rounded-md font-mono text-[10px]"
+                              title="积分倍率：同一请求按此倍率扣费，数值越小越省"
+                            >
+                              {m.credits}
+                            </Badge>
+                          )}
                           {m.supports_images && (
                             <Badge variant="secondary" className="rounded-md text-[10px]" title="支持图片输入">
                               多模态
+                            </Badge>
+                          )}
+                          {m.only_reasoning && (
+                            <Badge
+                              variant="secondary"
+                              className="rounded-md text-[10px]"
+                              title="纯推理模型：只输出思维链，不产出正文"
+                            >
+                              仅推理
+                            </Badge>
+                          )}
+                          {m.is_default && (
+                            <Badge variant="secondary" className="rounded-md text-[10px]" title="上游标记的默认模型">
+                              默认
                             </Badge>
                           )}
                           <SeriesBadge series={m.series} />

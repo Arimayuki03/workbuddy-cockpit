@@ -128,6 +128,25 @@ export interface CatalogModel {
   max_output_tokens: number;
   /** 支持的推理档位，如 ['low','high','max']；空数组 = 非推理模型或未提供 */
   efforts: string[];
+  /** 模型描述（腾讯的 descriptionZh，中文）；空串 = 未提供 */
+  description?: string;
+  /**
+   * 积分倍率原文（如 "x0.05"）：同一 prompt 在不同模型上的扣费倍率。
+   * **仅展示**，不参与选号（与上游口径一致）。空串 = 未提供。
+   */
+  credits?: string;
+  /** 厂商标识（如 volc / deepseek）；空串 = 未提供 */
+  vendor?: string;
+  /** 模型标签（含 badge:限时免费 等） */
+  tags?: string[];
+  /** 是否默认模型 */
+  is_default?: boolean;
+  supports_reasoning?: boolean;
+  supports_tool_call?: boolean;
+  /** 纯推理模型（不产出正文，只出思维链） */
+  only_reasoning?: boolean;
+  /** 推理摘要模式（如 "auto"） */
+  reasoning_summary?: string;
   /** 默认推理档位；空串 = 上游未声明（由上游自行回退到硬编码默认） */
   default_effort: string;
   /** 是否支持图片输入（多模态） */
