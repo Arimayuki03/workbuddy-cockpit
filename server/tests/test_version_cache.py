@@ -98,3 +98,112 @@ class UpdateCheckSemanticsTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class DeployDiffMessageTest(unittest.TestCase):
+    """deploy/ 差异提示要**分清轻重**，不能一律「已跳过同步」。
+
+    背景：deploy/ 是验签信任锚，不随包替换（正确）。但早先的提示无论什么差异
+    都只说「已跳过同步 + 文件名」，于是「新增一个无害的检查脚本」与「验签逻辑
+    被改」看起来一模一样——实测有用户为此专门来问「这要不要紧」。
+
+    现在按三类分别给出结论：
+      * 只新增 → 明确说「不影响本次更新，可以不处理」
+      * 改普通文件 → 「看过差异后按需覆盖」
+      * 改验签文件 → 显式警告，要求人工确认（这是供应链防护的最后一关）
+    """
+
+    def setUp(self) -> None:
+        self._mod = _load_update_mod()
+
+    def _run(self, modified, added):
+        class Rep:
+            def __init__(self):
+                self.lines = []
+
+            def log(self, m, level='info'):
+                self.lines.append((level, m))
+
+        rep = Rep()
+        self._mod._explain_deploy_risk(rep, modified, added,
+                                       Path('/opt/workbuddy-manager/deploy'))
+        return '\n'.join(m for _, m in rep.lines)
+
+    def test_added_only_says_no_action_needed(self) -> None:
+        """只新增文件时必须说「可以不处理」——用户最需要的就是这句话。"""
+        out = self._run([], ['check-upstream.sh'])
+        self.assertIn('仅新增', out)
+        self.assertIn('可以不处理', out)
+        self.assertNotIn('验签相关文件', out, '仅新增不应触发验签警告')
+
+    def test_modified_plain_file_needs_no_alarm(self) -> None:
+        out = self._run(['install.sh'], [])
+        self.assertNotIn('验签相关文件', out)
+        self.assertIn('按需覆盖', out)
+
+    def test_modified_trust_anchor_warns_loudly(self) -> None:
+        """改 update.py / 公钥必须显式警告 —— 那是信任锚。"""
+        for f in ('update.py', 'release-signing-key.pub', 'nested/update.py'):
+            out = self._run([f], [])
+            self.assertIn('验签相关文件', out, f'{f} 是信任锚，必须警告')
+            self.assertIn('人工确认', out)
+
+    def test_anchor_warning_wins_over_plain(self) -> None:
+        """同时有普通与信任锚改动时，必须报最严重的那一档。"""
+        out = self._run(['install.sh', 'update.py'], ['check-upstream.sh'])
+        self.assertIn('验签相关文件', out)
+        self.assertIn('update.py', out)
+
+
+class DeployDiffClassificationTest(unittest.TestCase):
+    """分类逻辑本身：新增 vs 修改要分得准（决定提示走向）。"""
+
+    def test_classification_by_content_diff(self) -> None:
+        import tempfile
+        tmp = Path(tempfile.mkdtemp())
+        inst = tmp / 'deploy'
+        inst.mkdir()
+        # 本地已有：a 相同、b 不同；包内有：a、b、c（新增）
+        (inst / 'a.sh').write_text('same', encoding='utf-8')
+        (inst / 'b.sh').write_text('old', encoding='utf-8')
+        newpkg = tmp / 'pkg'
+        newpkg.mkdir()
+        (newpkg / 'a.sh').write_text('same', encoding='utf-8')
+        (newpkg / 'b.sh').write_text('new', encoding='utf-8')
+        (newpkg / 'c.sh').write_text('added', encoding='utf-8')
+
+        added, modified = [], []
+        for src in sorted(newpkg.rglob('*')):
+            if not src.is_file():
+                continue
+            dst = inst / src.name
+            if not dst.is_file():
+                added.append(src.name)
+            elif dst.read_bytes() != src.read_bytes():
+                modified.append(src.name)
+        self.assertEqual(added, ['c.sh'])
+        self.assertEqual(modified, ['b.sh'])
+
+
+class DeployDiffCallerTest(unittest.TestCase):
+    """调用方必须把「新增」与「修改」分开列出。
+
+    上一版只报一串文件名，管理员无法判断轻重（实测有用户来问「这要不要紧」）。
+    这里直接跑**真实的 update_manager 分支**，断言日志里分别出现两类标注——
+    光测 _explain_deploy_risk 不够：那句话是调用方打的，改了调用方测试不会红
+    （这个盲区是被反证试出来的）。
+    """
+
+    def test_log_lists_added_and_modified_separately(self) -> None:
+        import re
+        src = (_ROOT / 'deploy' / 'update.py').read_text(encoding='utf-8')
+        m = re.search(r'^def update_manager\(.*?(?=^def |\Z)', src, re.S | re.M)
+        self.assertIsNotNone(m)
+        body = m.group(0)
+        # 两类必须分别输出，且带可读前缀
+        self.assertIn('修改（需人工确认）', body, '修改类未单独标注')
+        self.assertIn('新增（本地没有', body, '新增类未单独标注')
+        # 分类必须按「本地是否存在」判定，不能只看内容差异
+        self.assertIn("if not dst.is_file():", body)
+        self.assertIn('added.append', body)
+        self.assertIn('modified.append', body)
