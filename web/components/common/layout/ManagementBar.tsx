@@ -46,6 +46,11 @@ const IconOptions = {
   className: 'h-4 w-4',
 } as const;
 
+// 构建时间：由 next.config.ts 在构建时注入（`NEXT_PUBLIC_BUILD_TIME`）。
+// package.json 里的 buildDate 是手写死值、从没更新过，用它会让「Build At」
+// 永远显示同一个日期。取不到就不显示这一项，不编造。
+const BUILD_TIME = process.env.NEXT_PUBLIC_BUILD_TIME || '';
+
 // v2：坐标语义由「左边缘」改为「水平中心」，旧版本存储的位置不再兼容
 const DOCK_STORAGE_KEY = 'workbuddy-manager:dock-position-v2';
 const DOCK_TIP_STORAGE_KEY = 'workbuddy-manager:dock-tip-dismissed';
@@ -85,6 +90,15 @@ export function ManagementBar() {
   const [dockTipStep, setDockTipStep] = useState(0);
   /** 受管账号数量（真实数据，供个人信息面板展示） */
   const [accountCount, setAccountCount] = useState<number | null>(null);
+  /**
+   * 真实运行版本（取自后端）。
+   *
+   * 为什么不用 `package.json` 里的 version：那个字段没人维护——它停在 1.0.0，
+   * 于是「关于」永远显示 1.0.0；用户刚更新完也看到旧号，会以为更新没生效。
+   * 后端版本号才是更新流程实际替换的（`server/main.py` 的 app.version），
+   * 以它为准才不会骗人。
+   */
+  const [runtimeVersion, setRuntimeVersion] = useState<string | null>(null);
   const dockRef = useRef<HTMLDivElement>(null);
   const dockViewportRef = useRef<DockViewport>('desktop');
   const dragOffsetRef = useRef({x: 0, y: 0});
@@ -203,6 +217,22 @@ export function ManagementBar() {
 
   useEffect(() => {
     setMounted(true);
+  }, []);
+
+  // 取真实运行版本（后端为准）。失败就退回 package.json，不让面板空白。
+  useEffect(() => {
+    let alive = true;
+    systemApi
+      .versions()
+      .then((v) => {
+        if (alive && v?.manager) setRuntimeVersion(v.manager);
+      })
+      .catch(() => {
+        /* 未登录/网络异常：保留 package.json 的回退值即可 */
+      });
+    return () => {
+      alive = false;
+    };
   }, []);
 
   // 拉取受管账号数量；账号页增删后通过自定义事件刷新
@@ -629,7 +659,12 @@ export function ManagementBar() {
                     <div className="text-xs font-medium">关于 WorkBuddy Manager</div>
                     <div className="space-y-1.5">
                       <div className="text-[11px] font-light text-muted-foreground">
-                        Version {packageJson.version}, Build At {packageJson.buildDate}
+                        {/* 版本以后端为准（package.json 里那个没人维护，停在 1.0.0）；
+                            构建时间由 next.config 在构建时注入，不再用手写的死值。 */}
+                        {runtimeVersion
+                          ? `Version ${runtimeVersion}`
+                          : `Version ${packageJson.version}（未取到运行版本）`}
+                        {BUILD_TIME ? `, Build At ${BUILD_TIME}` : ''}
                       </div>
                       <div className="text-[11px] font-light leading-5 text-muted-foreground">
                         WorkBuddy Manager 是为 workbuddy2api 打造的账号池管理与 OpenAI 兼容反代网关，支持多账号扫码纳管、自动签到、密钥分发、IP 管控与用量统计。
