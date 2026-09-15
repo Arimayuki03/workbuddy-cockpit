@@ -790,10 +790,12 @@ export default function SettingsPage() {
   /**
    * 上游模型列表。
    *
-   * 上游自己会缓存 1 小时（动态拉取成功时），失败则回退到编译进二进制的
-   * 静态表、并有 5 分钟负缓存——所以「刷新页面」不一定能拿到新列表。
-   * 这也是为什么提供手动重新拉取：上游刷新令牌/新增模型后，用户需要能
-   * 立刻主动取一次，而不是干等缓存过期。
+   * 上游自己会缓存 1 小时（动态拉取成功时），失败则进入 5 分钟负缓存——
+   * 所以「刷新页面」不一定能拿到新列表。这也是为什么提供手动重新拉取：
+   * 上游刷新令牌/新增模型后，用户需要能立刻主动取一次，而不是干等缓存过期。
+   *
+   * 注：上游 2026-09-15（commit 1b7ce4a）起删除了静态兜底表，改为纯动态——
+   * 取不到就是空列表。下面的 static 分支只为仍在跑旧版上游的部署保留。
    */
   const loadModels = useCallback(async (silent = true) => {
     if (!silent) setModelsLoading(true);
@@ -1033,7 +1035,7 @@ export default function SettingsPage() {
                   {modelSource === 'static' && (
                     <span
                       className="shrink-0 text-[11px] text-amber-600 dark:text-amber-400"
-                      title="上游动态拉取失败时，会回退到其内置的静态模型表——那是编译进二进制的固定列表，数量比实际可用模型少。可直接点击右侧「重新拉取」再试一次。"
+                      title="上游动态拉取失败时，会回退到其内置的静态模型表——那是编译进二进制的固定列表，数量比实际可用模型少。可直接点击右侧「重新拉取」再试一次。该提示只可能出现在旧版上游（新版已改为纯动态，取不到即为空列表）。"
                     >
                       上游内置回退表（非实时） · {models.length} 个
                     </span>
@@ -1054,7 +1056,7 @@ export default function SettingsPage() {
                   size="sm"
                   className="h-7 shrink-0 gap-1.5 text-[11px]"
                   disabled={modelsLoading}
-                  title="重新向上游拉取模型列表（上游自身有 1 小时缓存，失败时回退静态表）"
+                  title="重新向上游拉取模型列表（上游自身有 1 小时缓存）"
                   onClick={() => loadModels(false)}
                 >
                   {modelsLoading ? (
@@ -1088,6 +1090,7 @@ export default function SettingsPage() {
                     <>
                       上游动态拉取失败，已回退到它<b>编译进二进制的静态表</b>——数量比实际可用模型少。
                       可点击「重新拉取」再试，或重启上游容器后重试。
+                      （新版上游已取消该回退表，此处出现即说明上游版本较旧。）
                     </>
                   ) : (
                     <>

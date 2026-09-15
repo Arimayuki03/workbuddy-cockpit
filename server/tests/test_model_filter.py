@@ -163,6 +163,74 @@ class NonChatFilterTest(unittest.TestCase):
         self.assertFalse(by_id['plain']['supports_images'])
 
 
+class GlobalModelScopeTest(unittest.TestCase):
+    """国际版取全量模型，不套国内版的 `cli` 白名单。
+
+    上游两个域各走各的解析：国内版 FetchModels 按 agents 的 `cli` 列表过滤，
+    国际版 parseGlobalModelNames 直接取 `data.models` 全量、完全不看 agents。
+    我们曾把国内版口径套到国际版上，导致国际版实际可用的模型（如
+    deepseek-v4.1-flash，上游 issue #84 专为它在国际版的档位做过处理）
+    若不在 `cli` 列表里就从模型中心消失。
+    """
+
+    def setUp(self) -> None:
+        p = mock.patch.object(config, 'http_client', _Client)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _fetch(self, realm, models, cli_ids):
+        _Client.payload = _models_payload(models, cli_ids)
+        return asyncio.run(tencent.fetch_models(
+            {'access_token': 'T', 'realm': realm, 'uid': 'u'}))
+
+    MODELS = [
+        {'id': 'gpt-5.6-sol', 'maxInputTokens': 200000, 'maxOutputTokens': 32000},
+        {'id': 'deepseek-v4.1-flash', 'maxInputTokens': 131072, 'maxOutputTokens': 32000,
+         'reasoning': {'supportedEfforts': ['high']}},
+    ]
+
+    def test_global_ignores_cli_whitelist(self) -> None:
+        ok, out = self._fetch('global', self.MODELS, ['gpt-5.6-sol'])
+        self.assertTrue(ok, out)
+        ids = [m['id'] for m in out]
+        self.assertIn('deepseek-v4.1-flash', ids,
+                      f'国际版不该被国内版的 cli 白名单截断，实际 {ids}')
+
+    def test_cn_still_uses_cli_whitelist(self) -> None:
+        ok, out = self._fetch('cn', self.MODELS, ['gpt-5.6-sol'])
+        self.assertTrue(ok, out)
+        self.assertEqual([m['id'] for m in out], ['gpt-5.6-sol'],
+                         '国内版必须保持 cli 白名单口径')
+
+    def test_global_narrow_list_form(self) -> None:
+        """国际版探测端点可能返回字符串数组（上游 parseGlobalModelNames 兼容该形态）。"""
+        _Client.payload = {'code': 0, 'data': ['gpt-5.6-sol', 'deepseek-v4.1-flash']}
+        ok, out = asyncio.run(tencent.fetch_models(
+            {'access_token': 'T', 'realm': 'global', 'uid': 'u'}))
+        self.assertTrue(ok, out)
+        self.assertEqual([m['id'] for m in out], ['gpt-5.6-sol', 'deepseek-v4.1-flash'])
+
+    def test_global_keeps_models_matching_cn_non_chat_rules(self) -> None:
+        """国内版的非对话判定不作用于国际版（那套规则来自国内的 harness）。
+
+        同一个 id 在国内版被滤掉、在国际版保留——只按 id 判断而不管 realm，
+        就等于用国内版的口径裁剪国际版的模型清单。
+        """
+        models = [
+            {'id': 'glm-5.2', 'maxInputTokens': 131072, 'maxOutputTokens': 32768},
+            {'id': 'nes-something', 'maxInputTokens': 131072, 'maxOutputTokens': 4096},
+        ]
+        ok_cn, out_cn = self._fetch('cn', models, None)
+        self.assertTrue(ok_cn, out_cn)
+        self.assertEqual([m['id'] for m in out_cn], ['glm-5.2'],
+                         '国内版应滤掉 nes- 前缀模型')
+
+        ok_gl, out_gl = self._fetch('global', models, None)
+        self.assertTrue(ok_gl, out_gl)
+        self.assertEqual([m['id'] for m in out_gl], ['glm-5.2', 'nes-something'],
+                         '国际版不该套用国内版的非对话规则')
+
+
 class CatalogFieldPassthroughTest(unittest.TestCase):
     """模型目录要把新字段带到前端（否则 UI 拿不到）。"""
 
