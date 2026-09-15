@@ -717,7 +717,7 @@ def update_manager(rep: Reporter) -> None:
             rep.log(f'更新版本标记：{new_marker.read_text(encoding="utf-8").strip()}')
 
         # 文档同步：界面「更新日志」直接读 CHANGELOG.md，若不同步会一直停在旧版内容
-        for name in ('CHANGELOG.md', 'README.md'):
+        for name in ('CHANGELOG.md', 'README.md', 'README.en.md'):
             src = new_root / name
             if src.is_file():
                 shutil.copyfile(src, INSTALL_DIR / name)
