@@ -177,5 +177,50 @@ class WebPhraseTest(unittest.TestCase):
         self.assertEqual(offenders, [], f'en.phrases 里有 {len(offenders)} 条未翻译：{offenders[:5]}')
 
 
+class AlwaysFailingBadgeTest(unittest.TestCase):
+    """账号页「一直失败」徽章的判据（issue #14 第二点）。
+
+    上游对**未命中它那几条规则**的 4xx（例如被 WAF 拦下的 403）只「换号不罚」
+    ——不冷却、不熔断、不禁用（其 applyErrorPolicy 的 default 分支，为防雪崩
+    刻意如此）。这种账号在面板上一直显示「正常」，实际每次请求都失败、
+    可持续几小时，用户完全无从下手。我们能做的是把它标出来。
+
+    判据必须用 `success_count`：上游 `last_success` 是 Go 的 `time.Time` 配
+    `omitempty`，而 **`omitempty` 对结构体类型不生效** —— 从未成功过的账号会
+    序列化成 `"0001-01-01T00:00:00Z"`，在 JS 里是**真值**，拿它判空永远
+    命中不了（已在 Go 侧实测确认零值 time.Time 照样被序列化）。
+    """
+
+    ZERO_TIME = '0001-01-01T00:00:00Z'
+
+    @staticmethod
+    def _always_failing(acct: dict) -> bool:
+        """与 accounts/page.tsx 的 renderStatus 保持同一判据。"""
+        errs = acct.get('err_total') if isinstance(acct.get('err_total'), int) else 0
+        oks = acct.get('success_count') if isinstance(acct.get('success_count'), int) else 0
+        return errs > 0 and oks == 0
+
+    def test_never_succeeded_is_flagged(self) -> None:
+        self.assertTrue(self._always_failing(
+            {'err_total': 5, 'last_success': self.ZERO_TIME,
+             'last_err': '2026-09-16T11:00:00+08:00'}))
+        self.assertTrue(self._always_failing({'err_total': 1, 'last_success': self.ZERO_TIME}))
+
+    def test_healthy_account_not_flagged(self) -> None:
+        """成功过的账号不该被误标 —— 正常账号也会有偶发错误。"""
+        self.assertFalse(self._always_failing(
+            {'err_total': 9, 'success_count': 40,
+             'last_success': '2026-09-16T10:00:00+08:00'}))
+        self.assertFalse(self._always_failing({'success_count': 12}))
+        self.assertFalse(self._always_failing({}), '从没跑过的账号不该标')
+
+    def test_last_success_alone_would_miss_it(self) -> None:
+        """把「为什么不能用 last_success 判空」固化成测试，免得后人改回去。"""
+        acct = {'err_total': 5, 'last_success': self.ZERO_TIME}
+        self.assertTrue(self._always_failing(acct), '正确判据应标出')
+        naive = (acct.get('err_total') or 0) > 0 and not acct.get('last_success')
+        self.assertFalse(naive, '用 last_success 判空的写法会漏标 —— 正是要避免的')
+
+
 if __name__ == '__main__':
     unittest.main()

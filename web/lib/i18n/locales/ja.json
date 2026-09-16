@@ -241,6 +241,8 @@
     "badgeExpired": "● 期限切れ",
     "badgeCooling": "● クールダウン中",
     "badgeOnline": "● オンライン",
+    "badgeNeverSucceeded": "● 常に失敗",
+    "badgeNeverSucceededTitle": "このアカウントは {errs} 回試行され、一度も成功していません。上流はこの種の失敗（WAF による 403 など）ではアカウントを切り替えるだけで冷却しないため、ここでは正常に見えますが実際は毎回失敗します。再ログインするか削除を検討してください。",
     "modelsCount": "（{n} モデル）",
     "etaRecovery": "約 {left}で復旧",
     "limitedModels": "レート制限中のモデル: {models}（自動的に復旧します）",

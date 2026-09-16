@@ -256,6 +256,8 @@
     "badgeExpired": "● Expired",
     "badgeCooling": "● Cooling down",
     "badgeOnline": "● Online",
+    "badgeNeverSucceeded": "● Always failing",
+    "badgeNeverSucceededTitle": "This account has been tried {errs} time(s) and never succeeded. The upstream only rotates away from such failures (e.g. a WAF-blocked 403) without cooling the account down, so it looks healthy here while every request actually fails. Consider signing in again or deleting it.",
     "modelsCount": " ({n} models)",
     "etaRecovery": "Recovers in about {left}",
     "limitedModels": "Rate-limited models: {models} (recovers automatically)",
