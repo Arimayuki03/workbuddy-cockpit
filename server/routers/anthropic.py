@@ -53,16 +53,21 @@ _STOP_REASON = {
 }
 
 
-def _err(message: str, status: int = 400, err_type: str = 'invalid_request_error') -> JSONResponse:
+def _err(message: str, status: int = 400, err_type: str = 'invalid_request_error',
+         hint: str | None = None) -> JSONResponse:
     """Anthropic 风格的错误体。
 
     与 OpenAI 的区别不只是字段名：Anthropic 把错误包在 `{"type":"error","error":{...}}`
     里，客户端会按这个结构解析。共用 `_oai_error` 会让 SDK 读不到错误信息。
+
+    `hint` 透传上游的 `error.gateway_hint`（与 message 并列的可执行建议）。放在
+    Anthropic 的错误对象里——与上游在 OpenAI 形状下把它置于 `error` 内一致；
+    为空时不写该字段（不编造）。
     """
-    return JSONResponse(
-        {'type': 'error', 'error': {'type': err_type, 'message': message}},
-        status_code=status,
-    )
+    err: dict = {'type': err_type, 'message': message}
+    if hint:
+        err['gateway_hint'] = hint
+    return JSONResponse({'type': 'error', 'error': err}, status_code=status)
 
 
 def _as_int(value: object) -> int:
@@ -647,7 +652,8 @@ async def messages(request: Request):
                     msg = str(err_obj.get('message') if isinstance(err_obj, dict) else err_obj) or str(data)[:300]
                 else:
                     msg = resp.text[:300]
-                return _err(msg, resp.status_code, 'api_error')
+                return _err(msg, resp.status_code, 'api_error',
+                            hint=gateway._error_hint(data))
             return JSONResponse(to_anthropic_response(data if isinstance(data, dict) else {}, model))
         except Exception as exc:  # noqa: BLE001
             latency = int((time.time() - started) * 1000)
@@ -722,6 +728,13 @@ async def messages(request: Request):
                     if isinstance(err_obj, dict) and not obj.get('choices'):
                         msg = err_obj.get('message')
                         error_text = str(msg if msg else err_obj)[:500]
+                        # 上游在 error 帧里可能带 gateway_hint（并列的可执行建议，
+                        # 上游 StreamHint 变体的产物）。拼在 message 后面一起发给
+                        # 客户端——SSE 的 error 事件只有 message 一个字段位，
+                        # 丢掉它等于让「该怎么办」这句建议消失。
+                        mid_hint = gateway._error_hint(obj)
+                        if mid_hint:
+                            error_text = f'{error_text}（{mid_hint}）'[:500]
                         abort = True
                         break
 
