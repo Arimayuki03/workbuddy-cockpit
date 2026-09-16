@@ -98,10 +98,13 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 									}
 								}
 							}
-							// 有的上游把完整消息放在 message 里（非 delta）
+							// 有的上游把完整消息放在 message 里（非 delta）。守卫 once 语义：
+							// 采过一次即 latch gotAnyContent，否则「每帧都带完整 message」
+							// 的上游会让正文被逐帧重复追加（N 帧 → N 遍）。
 							if msg, ok := c["message"].(map[string]any); ok && !gotAnyContent {
 								if txt, ok := msg["content"].(string); ok {
 									content.WriteString(txt)
+									gotAnyContent = true
 								}
 							}
 						}
