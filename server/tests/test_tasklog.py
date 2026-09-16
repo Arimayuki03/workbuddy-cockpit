@@ -304,6 +304,96 @@ class ParseTaskLines(unittest.TestCase):
 if __name__ == '__main__':
     unittest.main()
 
+class GrowthRewardLogTest(unittest.TestCase):
+    """连登奖励与抽奖的日志解析（上游 2026-09-16 commit 91418c5 新增）。
+
+    这两类日志挂在 `activity` 这个 kind 下（与活跃上报同一个），因此解析器
+    **不会**因为不认识的 kind 而整个漏掉——但结果文案是新形态：
+
+      `activity <uid>: redeem tier=7d ok (+100 credit, +5 energy, +1 chances)`
+      `activity <uid>: lottery drawn prize=50 credits (credit)`
+
+    其中两处必须特判，否则界面上显示错误：
+      * 领奖的积分收益若不解析 → 显示 0（把「赚到了 100」显示成「没赚」）；
+      * 抽奖成功若不加判定 → **落到末尾的 error**（它没有 ` ok ` 字样），
+        中奖反而显示成红色失败——比不显示更糟。
+    """
+
+    def test_redeem_credits_extracted(self) -> None:
+        ev = tasklog.parse_line(
+            f'{DOCKER}activity 89374120: redeem tier=7d ok (+100 credit, +5 energy, +1 chances)'
+        )
+        assert ev is not None
+        self.assertEqual(ev['kind'], 'activity')
+        self.assertEqual(ev['credits'], 100, '领奖积分没解析出来')
+        self.assertEqual(ev['level'], 'credit')
+
+    def test_redeem_other_tiers(self) -> None:
+        for tier, credit in (('14d', 200), ('28d', 500)):
+            ev = tasklog.parse_line(
+                f'{DOCKER}activity 89374120: redeem tier={tier} ok (+{credit} credit, +9 energy, +3 chances)'
+            )
+            assert ev is not None
+            self.assertEqual(ev['credits'], credit, tier)
+
+    def test_redeem_energy_and_chances_are_not_credits(self) -> None:
+        """只有 credit 段算积分：energy / chances 不是积分，不能混进收益。"""
+        ev = tasklog.parse_line(
+            f'{DOCKER}activity 89374120: redeem tier=7d ok (+0 credit, +50 energy, +99 chances)'
+        )
+        assert ev is not None
+        self.assertEqual(ev['credits'], 0)
+
+    def test_redeem_skip_is_not_error(self) -> None:
+        """天数不足 / 已领过是正常态（上游 409/403），不该显示成失败。
+
+        判成 `ok` 而不是 `info`：文案里的 `already claimed` 命中既有的
+        「幂等成功」标记（与签到「今天已签到」同一处理）——已领过就是没事发生，
+        不是「跳过了什么」。两者都不是失败，但 `ok` 与签到口径一致。
+        """
+        for line in (
+            'redeem tier=7d skip (already claimed or days not enough)',
+            'redeem tier=7d skip (days not enough)',
+        ):
+            ev = tasklog.parse_line(f'{DOCKER}activity 89374120: {line}')
+            assert ev is not None
+            self.assertNotEqual(ev['level'], 'error', line)
+            self.assertEqual(ev['credits'], 0, line)
+
+    def test_redeem_real_failure_is_error(self) -> None:
+        ev = tasklog.parse_line(f'{DOCKER}activity 89374120: redeem tier=7d: boom')
+        assert ev is not None
+        self.assertEqual(ev['level'], 'error')
+
+    def test_lottery_credit_prize_extracted(self) -> None:
+        ev = tasklog.parse_line(f'{DOCKER}activity 89374120: lottery drawn prize=50 credits (credit)')
+        assert ev is not None
+        self.assertEqual(ev['credits'], 50, '抽奖中的积分奖品没解析出来')
+        self.assertEqual(ev['level'], 'credit')
+
+    def test_lottery_non_credit_prize_is_success(self) -> None:
+        """非积分奖品（道具 / 谢谢参与）也是**成功**，不能判成失败。"""
+        for prize in ('谢谢参与', '体验券', 'none'):
+            ev = tasklog.parse_line(
+                f'{DOCKER}activity 89374120: lottery drawn prize={prize} (none)'
+            )
+            assert ev is not None
+            self.assertEqual(ev['level'], 'ok', prize)
+            self.assertEqual(ev['credits'], 0, prize)
+
+    def test_lottery_skip_is_info(self) -> None:
+        for line in ('lottery skip (no chances)', 'lottery skip (no chances or disabled)'):
+            ev = tasklog.parse_line(f'{DOCKER}activity 89374120: {line}')
+            assert ev is not None
+            self.assertEqual(ev['level'], 'info', line)
+
+    def test_streak_line_is_ok(self) -> None:
+        ev = tasklog.parse_line(f'{DOCKER}activity 89374120: streak days=8')
+        assert ev is not None
+        self.assertEqual(ev['level'], 'ok')
+        self.assertEqual(ev['credits'], 0)
+
+
 class ScriptTaskKindsTest(unittest.TestCase):
     """第五、六类任务（开学季 / 夜猫）的日志解析。
 
