@@ -62,6 +62,8 @@
     "systemSettings": "系統設定",
     "quickLinks": "快速連結",
     "uiReference": "UI 參考",
+    "community": "LINUX DO 社群",
+    "communityTitle": "本專案在 LINUX DO 社群發布與交流",
     "help": "說明",
     "about": "關於 WorkBuddy Manager",
     "aboutDesc": "WorkBuddy Manager 是為 workbuddy2api 打造的帳號池管理與 OpenAI 相容反向代理閘道，支援多帳號掃碼納管、自動簽到、金鑰派發、IP 管控與用量統計。",
