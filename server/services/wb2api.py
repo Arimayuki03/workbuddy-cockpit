@@ -453,6 +453,10 @@ _UPSTREAM_TEXT_MAX = 512
 _INT_RANGES: dict[str, tuple[int, int, str]] = {
     'activity_report_count': (1, 50, '条'),
     'max_in_flight': (0, 64, '个'),
+    # 国际版在途上限分档（上游 2680f4c）：与 max_in_flight 同区间，0 = 不限制 /
+    # 回落 max_in_flight。单独登记是为了享受同样的区间校验 —— 不登记的话它会被
+    # 归到「未知键」原样透传，用户填个负数或超大值也能写进上游配置。
+    'max_in_flight_global': (0, 64, '个'),
     'breaker_threshold': (1, 100, '次'),
     'idle_weight_max': (0, 1000, ''),
     'max_body_mb': (1, 256, 'MB'),

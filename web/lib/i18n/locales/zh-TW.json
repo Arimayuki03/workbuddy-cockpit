@@ -21,8 +21,8 @@
     "success": "成功",
     "failure": "失敗",
     "clear": "清空",
-    "optional": "選填"
-    ,"refresh": "重新整理"
+    "optional": "選填",
+    "refresh": "重新整理"
   },
   "nav": {
     "dashboard": "儀表板",
@@ -198,9 +198,9 @@
     "byKey": "依金鑰",
     "emptyTitle": "暫無資料",
     "emptyDesc": "該維度在所選時間範圍內沒有呼叫",
-    "tokenHint": "{v} Token"
-    ,"usageHealthTitle": "用量統計可能沒有正常累計"
-    ,"usageHealthDetail": "今天已有 {n} 次呼叫記錄，但用量統計為 0——統計可能沒有正常寫入。可嘗試「修復統計」；若仍為 0，請查看伺服器日誌。"
+    "tokenHint": "{v} Token",
+    "usageHealthTitle": "用量統計可能沒有正常累計",
+    "usageHealthDetail": "今天已有 {n} 次呼叫記錄，但用量統計為 0——統計可能沒有正常寫入。可嘗試「修復統計」；若仍為 0，請查看伺服器日誌。"
   },
   "accounts": {
     "title": "帳號管理",
@@ -478,9 +478,9 @@
     "seriesHunyuan": "騰訊混元",
     "seriesAuto": "自動選擇",
     "seriesOther": "其他",
-    "sourceTencent": "騰訊模型介面（含顯示名稱與推理檔位）"
-    ,"sourceUpstream": "上游 /v1/models（無顯示名稱；推理檔位取上游透出值）"
-    ,"sourceNone": "暫無可用的模型資料來源"
+    "sourceTencent": "騰訊模型介面（含顯示名稱與推理檔位）",
+    "sourceUpstream": "上游 /v1/models（無顯示名稱；推理檔位取上游透出值）",
+    "sourceNone": "暫無可用的模型資料來源"
   },
   "playground": {
     "title": "聊天測試台",
@@ -589,8 +589,8 @@
     "kindUserResource": "餘額查詢",
     "kindCredit": "積分變動",
     "kindSchool": "開學季任務",
-    "kindCat": "夜貓任務"
-    ,"creditLedger": "餘額 +{delta}（{prev} → {next}）"
+    "kindCat": "夜貓任務",
+    "creditLedger": "餘額 +{delta}（{prev} → {next}）"
   },
   "addAccount": {
     "title": "新增騰訊帳號 · {realm}",
@@ -961,6 +961,8 @@
     "出站标识": "出站標識",
     "网关向腾讯发起请求时的客户端标识": "閘道向騰訊發起請求時的客戶端標識",
     "国际版": "國際版",
-    "国际版（workbuddy.ai）路由开关与基址。关闭即锁死纯 CN": "國際版（workbuddy.ai）路由開關與基址。關閉即鎖死純 CN"
+    "国际版（workbuddy.ai）路由开关与基址。关闭即锁死纯 CN": "國際版（workbuddy.ai）路由開關與基址。關閉即鎖死純 CN",
+    "国际版单账号最大并发": "國際版單帳號最大並行",
+    "国际版单独用这个上限（不填则跟随上面的「单账号最大并发」）。国际版的风控更严，官方默认压到 2——并发越高越容易被判为异常流量": "國際版單獨用這個上限（不填則跟隨上面的「單帳號最大並行」）。國際版的風控更嚴，官方預設壓到 2——並行越高越容易被判定為異常流量。"
   }
 }

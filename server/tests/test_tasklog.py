@@ -527,5 +527,57 @@ class ScheduleHoursValidationTest(unittest.TestCase):
                 _sanitize_section('schedule', bad)
 
 
+class ScriptStdoutNotInContainerLogTest(unittest.TestCase):
+    """**记录一个容易误判的点**：脚本内部的 stdout 不会进容器日志。
+
+    上游 `runScript`（internal/scheduler/school.go）执行子进程后**只记一行**
+    成败摘要，不转发子进程的 stdout：
+
+        log.Printf("%s: ok (%s)", name, cmdArgs[1])          # 成功
+        log.Printf("WARN: %s (%s): %v", name, ...)           # 失败
+
+    所以 `scripts/task_runner.py` 里那些 `print(f"[task_runner] ...")`（上游
+    2026-09-16 一口气加了 40 多条，用于 first_buddy / 开学季 / 小程序任务链）
+    **根本不会出现在容器日志里**，我们的任务记录页看不到它们 —— 这是**正常**的，
+    不是解析缺口。
+
+    为什么值得写成测试：只看脚本源码会以为「新增了大量日志形态，解析器要跟」，
+    于是白做一遍适配（我在核对其 2026-09-16 的 9 个提交时就差点这么判）。
+    真正进日志的仍是 `<kind>: ok (<script>)` 那两行，由 ScriptTaskKindsTest 覆盖。
+
+    这里把两类形态都钉住：(a) 脚本级摘要解析正常；(b) `[task_runner]` 前缀行
+    确实不被解析（如实反映「它不在日志流里」，而不是让解析器去兼容一个
+    永远不会出现的形态）。
+    """
+
+    def test_script_summary_lines_still_parse(self) -> None:
+        """真正会进日志的两行 —— 必须能解析（这是我们要保证的）。"""
+        ok = tasklog.parse_line(f'{DOCKER}cat: ok (scripts/task_runner.py)')
+        assert ok is not None
+        self.assertEqual(ok['kind'], 'cat')
+        self.assertEqual(ok['level'], 'ok')
+
+        warn = tasklog.parse_line(f'{DOCKER}WARN: cat (scripts/task_runner.py): exit status 1')
+        assert warn is not None
+        self.assertEqual(warn['kind'], 'cat')
+        self.assertEqual(warn['level'], 'warn')
+
+    def test_task_runner_stdout_is_not_parsed(self) -> None:
+        """脚本内部输出不在日志流里 —— 解析器**不该**为它做兼容。
+
+        若将来上游改成转发子进程 stdout（那会是一次明确的行为变更），
+        这个测试会失败，提醒我们那时才需要适配。
+        """
+        for line in (
+            '[task_runner] ab12cd34 Sequential_Tasks_1: only_claim 跳过（未 completed）',
+            '[task_runner] ab12cd34 first_buddy: buddy/first -> ok credit=+100 energy=+5',
+            '[task_runner] ab12cd34 school: claim ok 已入账',
+        ):
+            self.assertIsNone(
+                tasklog.parse_line(f'{DOCKER}{line}'),
+                f'该形态不应出现在日志流里，却解析出了内容：{line}',
+            )
+
+
 if __name__ == '__main__':
     unittest.main()
