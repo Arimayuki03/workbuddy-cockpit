@@ -9,7 +9,8 @@
 2. 没有空译文；
 3. 占位符集合一致（`{n}` 这类，译文漏掉或写错名字都会导致界面渲染出花括号）；
 4. 英文版不含中日韩汉字（复制粘贴中文原文最常见的症状）；
-5. 复数形式写成了对象时，必须带 other（渲染兜底依赖它）。
+5. 复数形式写成了对象时，必须带 other（渲染兜底依赖它）；
+6. 源码里**写死的** t('...') 键在字典里真的存在。
 """
 from __future__ import annotations
 
@@ -33,6 +34,10 @@ _PLURAL_KEYS = {'zero', 'one', 'two', 'few', 'many', 'other'}
 
 _PLACEHOLDER = re.compile(r'\{(\w+)\}')
 _HAN = re.compile(r'[\u3400-\u4dbf\u4e00-\u9fff]')
+
+# t('a.b.c') / t("a.b.c")：只认写死的字符串键，变量与模板串无法静态校验。
+# 前面不允许是字母、数字、`.`、`$`——否则 foo.t('x') 这类别的对象的方法会被算进来。
+_T_CALL_KEY = re.compile(r"""(?<![\w.$])t\(\s*['\"]([A-Za-z0-9_.]+)['\"]""")
 
 
 def _load(locale: str) -> dict:
@@ -136,6 +141,41 @@ class WebLocaleTest(unittest.TestCase):
             if any(_HAN.search(text) for text in _texts(value))
         ]
         self.assertEqual(offenders, [], f'en 里有 {len(offenders)} 处未翻译的中文：{offenders[:10]}')
+
+
+class WebKeyUsageTest(unittest.TestCase):
+    """源码里写死的 t('...') 键必须真的存在于字典。
+
+    字典自洽（键集对齐、无空译文）并不能保证**界面用对了键**：键名写错一个字母，
+    字典校验照样全绿，用户却在界面上直愣愣看到 `accounts.expiryColumn`。
+    本测试补上这一环——扫描前端源码里的字面量键，逐个回字典里查。
+
+    （动态拼出来的键、短语表 tp('中文') 不在此列；前者静态不可知，后者另有守卫。）
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.flat = _flatten(_load(_SOURCE))
+        cls.used: dict[str, list[str]] = {}
+        for path in sorted((_ROOT / 'web').rglob('*')):
+            if path.suffix not in ('.ts', '.tsx') or 'node_modules' in path.parts:
+                continue
+            for key in _T_CALL_KEY.findall(path.read_text(encoding='utf-8')):
+                cls.used.setdefault(key, []).append(str(path.relative_to(_ROOT)))
+
+    def test_scan_is_not_vacuous(self) -> None:
+        """先确认扫描真的抓到了东西，免得正则失效后测试空转照样绿。"""
+        self.assertGreater(len(self.used), 100, '没扫到几个键，正则可能失配了')
+        self.assertIn('security.auditLog', self.used)
+
+    def test_all_literal_keys_exist(self) -> None:
+        missing = {
+            key: sorted(set(files))
+            for key, files in self.used.items()
+            if key not in self.flat
+        }
+        detail = '; '.join(f'{k} ← {v[0]}' for k, v in sorted(missing.items())[:10])
+        self.assertEqual(missing, {}, f'有 {len(missing)} 个键在字典里不存在：{detail}')
 
 
 class WebPhraseTest(unittest.TestCase):

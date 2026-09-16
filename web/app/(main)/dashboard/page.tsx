@@ -388,7 +388,7 @@ export default function DashboardPage() {
                     />
                   </div>
                   <div className="mt-1.5 flex items-center justify-between gap-2">
-                    <span className={'text-[11px] tabular-nums ' + vis.textClass} title={t('accounts.expiryColumn')}>
+                    <span className={'text-[11px] tabular-nums ' + vis.textClass} title={t('accounts.colExpiry')}>
                       {fmtRemain(a.remain_seconds)}
                     </span>
                     <span
