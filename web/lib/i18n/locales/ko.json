@@ -198,9 +198,9 @@
     "byKey": "키별",
     "emptyTitle": "데이터 없음",
     "emptyDesc": "선택한 기간에 이 항목의 호출이 없습니다",
-    "tokenHint": "{v} Token"
-    ,"usageHealthTitle": "사용량 통계가 정상적으로 누적되지 않았을 수 있습니다"
-    ,"usageHealthDetail": "오늘 이미 {n}건의 호출 기록이 있지만 사용량 통계는 0입니다. 통계가 정상적으로 기록되지 않았을 수 있습니다. '통계 복구'를 시도하고, 계속 0이면 서버 로그를 확인하세요."
+    "tokenHint": "{v} Token",
+    "usageHealthTitle": "사용량 통계가 정상적으로 누적되지 않았을 수 있습니다",
+    "usageHealthDetail": "오늘 이미 {n}건의 호출 기록이 있지만 사용량 통계는 0입니다. 통계가 정상적으로 기록되지 않았을 수 있습니다. '통계 복구'를 시도하고, 계속 0이면 서버 로그를 확인하세요."
   },
   "accounts": {
     "title": "계정 관리",
@@ -478,9 +478,9 @@
     "seriesHunyuan": "Tencent Hunyuan",
     "seriesAuto": "자동 선택",
     "seriesOther": "기타",
-    "sourceTencent": "Tencent 모델 API(표시 이름과 추론 단계 포함)"
-    ,"sourceUpstream": "업스트림 /v1/models(표시 이름 없음, 추론 단계는 업스트림 값)"
-    ,"sourceNone": "사용 가능한 모델 데이터 출처가 없습니다"
+    "sourceTencent": "Tencent 모델 API(표시 이름과 추론 단계 포함)",
+    "sourceUpstream": "업스트림 /v1/models(표시 이름 없음, 추론 단계는 업스트림 값)",
+    "sourceNone": "사용 가능한 모델 데이터 출처가 없습니다"
   },
   "playground": {
     "title": "채팅 테스트 환경",
@@ -589,8 +589,8 @@
     "kindUserResource": "잔액 조회",
     "kindCredit": "크레딧 변동",
     "kindSchool": "개학 시즌 작업",
-    "kindCat": "야간 고양이 작업"
-    ,"creditLedger": "잔액 +{delta} ({prev} → {next})"
+    "kindCat": "야간 고양이 작업",
+    "creditLedger": "잔액 +{delta} ({prev} → {next})"
   },
   "addAccount": {
     "title": "Tencent 계정 추가 · {realm}",
@@ -961,6 +961,8 @@
     "出站标识": "아웃바운드 식별자",
     "网关向腾讯发起请求时的客户端标识": "게이트웨이가 Tencent로 요청할 때의 클라이언트 식별자",
     "国际版": "글로벌 버전",
-    "国际版（workbuddy.ai）路由开关与基址。关闭即锁死纯 CN": "글로벌 버전(workbuddy.ai) 라우팅 스위치와 베이스 URL입니다. 끄면 중국 버전 전용으로 고정됩니다"
+    "国际版（workbuddy.ai）路由开关与基址。关闭即锁死纯 CN": "글로벌 버전(workbuddy.ai) 라우팅 스위치와 베이스 URL입니다. 끄면 중국 버전 전용으로 고정됩니다",
+    "国际版单账号最大并发": "글로벌 버전 계정당 최대 동시 요청",
+    "国际版单独用这个上限（不填则跟随上面的「单账号最大并发」）。国际版的风控更严，官方默认压到 2——并发越高越容易被判为异常流量": "글로벌 버전은 이 상한을 따로 사용합니다(비워 두면 위의 \"계정당 최대 동시 요청\"을 따릅니다). 글로벌 버전은 이상 트래픽 검사가 더 엄격하며 공식 기본값은 2입니다. 동시 요청이 많을수록 비정상 트래픽으로 판정되기 쉽습니다."
   }
 }

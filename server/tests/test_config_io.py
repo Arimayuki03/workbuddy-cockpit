@@ -416,5 +416,61 @@ class ExpiryFallback(unittest.TestCase):
         self.assertIsNone(a['issued_at'])
 
 
+class GlobalInFlightTierTest(unittest.TestCase):
+    """国际版在途上限分档（上游 2680f4c 新增 `pool.max_in_flight_global`）。
+
+    上游给 global 域单独的并发上限（官方默认 2），因为国际版风控更严。
+    面板要能设置它 —— 两个容易忽略的点：
+
+      1. **保存别的 pool 字段时不能把它弄丢**。`save_upstream_config` 是逐字段
+         update（`cfg[field].update(clean)`），看着安全，但那是实现的偶然性质
+         而非契约；钉住它，免得将来改成整体替换时静默丢字段。
+      2. **要享受区间校验**。不登记进 `_INT_RANGES` 的话未知键被原样透传，
+         用户填个 -1 也能写进上游配置。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.cfg_path = Path(self._tmp.name) / 'config.json'
+        self._orig = config.UPSTREAM_CONFIG
+        config.UPSTREAM_CONFIG = self.cfg_path
+
+    def tearDown(self) -> None:
+        config.UPSTREAM_CONFIG = self._orig
+        try:
+            self._tmp.cleanup()
+        except PermissionError:
+            pass
+
+    def _write(self, data: dict) -> None:
+        self.cfg_path.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+
+    def _read(self) -> dict:
+        return json.loads(self.cfg_path.read_text(encoding='utf-8'))
+
+    def test_field_is_writable(self) -> None:
+        self._write({'pool': {'max_in_flight': 3, 'max_in_flight_global': 2}})
+        wb2api.save_upstream_config({'pool': {'max_in_flight_global': 4}})
+        self.assertEqual(self._read()['pool']['max_in_flight_global'], 4)
+
+    def test_not_lost_when_saving_sibling_field(self) -> None:
+        """改 max_in_flight 时不能把分档字段弄丢。"""
+        self._write({'pool': {'max_in_flight': 3, 'max_in_flight_global': 2}})
+        wb2api.save_upstream_config({'pool': {'max_in_flight': 5}})
+        pool = self._read()['pool']
+        self.assertEqual(pool['max_in_flight'], 5)
+        self.assertEqual(pool['max_in_flight_global'], 2, '分档字段被弄丢了')
+
+    def test_range_is_validated(self) -> None:
+        """与 max_in_flight 同区间；非法值必须拒绝而不是透传。"""
+        self._write({'pool': {'max_in_flight_global': 2}})
+        for good in (0, 2, 64):
+            wb2api.save_upstream_config({'pool': {'max_in_flight_global': good}})
+            self.assertEqual(self._read()['pool']['max_in_flight_global'], good)
+        for bad in (-1, 65, 'x', True, None):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                wb2api.save_upstream_config({'pool': {'max_in_flight_global': bad}})
+
+
 if __name__ == '__main__':
     unittest.main()

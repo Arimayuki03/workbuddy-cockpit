@@ -286,6 +286,17 @@ const POOL_FIELDS: Field[] = [
     def: 3,
   },
   {
+    key: 'max_in_flight_global',
+    kind: 'num',
+    label: '国际版单账号最大并发',
+    desc: '国际版单独用这个上限（不填则跟随上面的「单账号最大并发」）。国际版的风控更严，'
+      + '官方默认压到 2——并发越高越容易被判为异常流量',
+    unit: '个',
+    min: 0,
+    max: 32,
+    def: 2,
+  },
+  {
     key: 'breaker_threshold',
     kind: 'num',
     label: '连续失败熔断阈值',
