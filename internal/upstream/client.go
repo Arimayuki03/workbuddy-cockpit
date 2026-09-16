@@ -860,6 +860,11 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 // 单账号 hang 对该账号相关操作的阻塞越短（issue:持锁 120s I/O → 池级停滞）。
 const refreshIOTimeout = 30 * time.Second
 
+// refreshTokenExpiresInMax refresh 响应 expiresIn 的量级上限（10 年，纯防御值：
+// 实测 R-D 响应恒 5184000=60d）。超限视为上游脏数据，不写 ExpiresAt（保留旧值），
+// 防止 NeedsRefresh 永假导致 token 永不刷新反而真过期失效。
+const refreshTokenExpiresInMax = 10 * 365 * 24 * time.Hour
+
 // RefreshToken 刷新 access token；成功时更新 a 的字段（缺省值保留旧值），
 // 调用方负责 SaveAtomic。
 //
@@ -920,10 +925,15 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	// 第 2 段（锁内）：校验快照一致后写回。
 	a.Lock()
 	defer a.Unlock()
+	// 写回守卫是 AND 语义：锁外期间另一刷新已完成 → 两 token 必同时变化（实测 R-D：
+	// refresh 响应 accessToken/refreshToken 总是一起 rotate，写回也同时写两个），AND
+	// 即「并发刷新已完成」判据；AND 与 OR 在真实形态下等价。唯 OR 会额外放弃的
+	// 「只有单 token 变化」（如手工只改 auth 文件一个字段）不构成放弃条件——本次
+	// 结果覆盖手工编辑。
 	if a.AccessToken != atBefore && a.RefreshToken != rtSnapshot {
 		// 锁外期间另一 goroutine 已完成刷新：新 token 已生效，本次结果不必再写
-		// （两个并发刷新拿到的新 token 都有效，后写会覆盖先写，但二者等价可用；
-		// 提前返回避免无意义覆盖与 ExpiresAt 抖动）。
+		// （实测 R-E：服务端无 rotation 撤销，并发双刷新拿到的两个新 token 都有效，
+		// 后写覆盖先写二者等价可用；提前返回避免无意义覆盖与 ExpiresAt 抖动）。
 		return nil
 	}
 	a.AccessToken = tok.AccessToken
@@ -934,7 +944,12 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 		a.Domain = tok.Domain
 	}
 	// preserveExpiry：响应缺 expiresIn 时保留旧过期时间，避免刷新风暴。
-	if tok.ExpiresIn > 0 {
+	// 实测 R-D 响应恒带 expiresIn=5184000（60d）——缺省分支仅为防御，保留旧值
+	// 避免过期判定漂移。同理，超过 10 年的 expiresIn 按脏值处理保留旧值：
+	// 实测 JWT exp-iat 与 expiresIn 严格自洽（R-F），超量级值只会是上游脏数据，
+	// 照写会把 ExpiresAt 推到荒谬未来 → NeedsRefresh 永假 → token 永不刷新
+	// 反而真过期失效。
+	if tok.ExpiresIn > 0 && time.Duration(tok.ExpiresIn)*time.Second < refreshTokenExpiresInMax {
 		a.ExpiresAt = time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second).Unix()
 	}
 	return nil
