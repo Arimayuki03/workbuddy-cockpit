@@ -493,6 +493,11 @@ _INT_RANGES: dict[str, tuple[int, int, str]] = {
     # 原样透传，用户填个负数或超大值也能写进上游配置。
     'max_in_flight_global': (0, 64, '个'),
     'breaker_threshold': (1, 100, '次'),
+    # 连败降权阈值（上游 cf1e7e5 新增 pool.degrade_threshold，默认 5）：ErrClient 与
+    # 传输层失败连续达此次数即临时出池。登记以享受同样的区间校验。
+    # 另外两个同批新增的键（degrade_cooldown / degrade_cooldown_max）是时长字符串，
+    # 已被下面「按 _cooldown 后缀走时长格式校验」那条规则覆盖，无需单独登记。
+    'degrade_threshold': (1, 100, '次'),
     'idle_weight_max': (0, 1000, ''),
     'max_body_mb': (1, 256, 'MB'),
 }
