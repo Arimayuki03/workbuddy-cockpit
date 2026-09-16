@@ -1,7 +1,7 @@
 'use client';
 
 import {useCallback, useEffect, useState} from 'react';
-import {Activity, TrendingUp, KeyRound, Cpu, Wrench, RotateCcw, Coins} from 'lucide-react';
+import {Activity, TrendingUp, KeyRound, Cpu, Wrench, RotateCcw, Coins, AlertTriangle} from 'lucide-react';
 import {
   Bar,
   BarChart,
@@ -156,6 +156,22 @@ export default function StatsPage() {
           </>
         }
       />
+
+      {/* 统计没在累计时明确提示。
+          统计是旁路写入（失败不影响转发），所以坏了以后界面看不出异常——
+          数字只是停着不动、页面照常刷新。这里把「今天有请求但统计为 0」
+          这种组合直接摆出来，并指向右侧的「修复统计」按钮。 */}
+      {summary?.usage_health && !summary.usage_health.ok && (
+        <div className="flex items-start gap-2 rounded-[16px] border border-amber-500/30 bg-amber-500/[0.07] px-3.5 py-3">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+          <div className="text-[11px] leading-5">
+            <span className="font-medium text-amber-700 dark:text-amber-300">
+              用量统计可能没有正常累计
+            </span>
+            <div className="text-muted-foreground">{summary.usage_health.detail}</div>
+          </div>
+        </div>
+      )}
 
       <section className="grid grid-cols-2 gap-3 lg:grid-cols-4 md:gap-4">
         <StatCard

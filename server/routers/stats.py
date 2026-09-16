@@ -36,10 +36,11 @@ def summary(realm: str | None = None,
     """总览。
 
     realm（cn / global）非空时只统计该版本——界面按版本切换时用。
-    注意 usage_daily 的 realm 列在**旧库**上是迁移加的，旧库主键仍是
-    (day, key_id, model)：那种库上两个版本的同名模型会合并累计，此时按版本
-    过滤只能过滤到「该模型归属哪个版本」，而非真正分离的行。新库主键含 realm，
-    分得干净（见 db._MIGRATIONS 的说明）。
+
+    附带的 `usage_health` 用于暴露「统计根本没在累计」这种情况：曾经有个缺陷
+    （issue #9）让存量库上一行都写不进 usage_daily，而表现是完全静默的
+    （页面照常轮询、数字只是不动），拖了几个版本才被发现。判据是**今天的
+    请求日志有内容但今天的统计为 0**——正常部署不该出现这种组合。
     """
     today = time.strftime('%Y-%m-%d')
     week = _since(7)
@@ -88,7 +89,36 @@ def summary(realm: str | None = None,
         'total_tokens': a_tok,
         'active_keys': int(active_keys),
         'top_model': top['model'] if top else None,
+        'usage_health': _usage_health(today, t_req),
     }
+
+
+def _usage_health(today: str, today_requests: int) -> dict:
+    """检测「用量统计没有在累计」——今天有请求日志但统计为 0。
+
+    为什么值得单独做：统计写入是旁路（失败只记 warning，不影响转发），
+    所以一旦写入路径坏了，**用户侧完全看不出异常**：页面照常刷新、数字只是
+    停着不动。issue #9 就是这个形态，拖了几个版本才有人发现。
+
+    正常部署不可能出现「今天有请求但今天零统计」——两者写在同一段代码里，
+    前者成功后者必成功（bump_usage 紧随日志落库之后）。
+    只在**两边都非零**时才下结论，避免刚部署/刚清库的误报。
+    """
+    try:
+        logs_today = db.query_one(
+            f'SELECT COUNT(*) AS c FROM request_logs WHERE {db.day_sql("ts")} = ?',
+            (today,),
+        )
+        n = int(logs_today['c']) if logs_today else 0
+    except Exception:  # noqa: BLE001
+        return {'ok': True, 'detail': ''}
+    if n > 0 and today_requests == 0:
+        return {
+            'ok': False,
+            'detail': (f'今天已有 {n} 次调用记录，但用量统计为 0——统计可能没有 '
+                       f'正常写入。可尝试「修复统计」；若仍为 0，请查看服务端日志。'),
+        }
+    return {'ok': True, 'detail': ''}
 
 
 @router.post('/repair-usage')
