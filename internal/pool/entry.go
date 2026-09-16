@@ -419,7 +419,10 @@ type modelCostEntry struct {
 	Samples   int
 }
 
-// modelCooldown 单个 (账号, 模型) 的模型级独立冷却记录（运行态，不持久化）。
+// modelCooldown 单个 (账号, 模型) 的模型级独立冷却记录。**已持久化**（stateAccount.ModelCooldowns
+// → stateModelCooldown，见 2f4c77b）：Until/ResetAt/Reason 三字段落盘往返无损，Hits 不落盘
+// （见字段注释）。本注释此前写「运行态，不持久化」，是 908abbd 引入本结构体时的旧状态描述，
+// 在 2f4c77b 加上持久化后未同步更新，与上方 stateModelCooldown 的「落盘/恢复往返无损」自相矛盾。
 // 承载两种「该模型在此账号上不可用」语义：
 //   - 6004 模型级限流：Until 对齐上游重置墙钟；ResetAt 记录权威恢复时刻。
 //   - 11102 该后端无此模型：Until 为指数退避 TTL（6h 起、封顶 24h）；Hits 记录
