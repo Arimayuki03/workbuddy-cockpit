@@ -29,9 +29,9 @@ from server.services import modelcatalog, tencent  # noqa: E402
 
 
 class _Resp:
-    def __init__(self, payload) -> None:
+    def __init__(self, payload, status: int = 200) -> None:
         self._p = payload
-        self.status_code = 200
+        self.status_code = status
 
     def json(self):
         return self._p
@@ -229,6 +229,164 @@ class GlobalModelScopeTest(unittest.TestCase):
         self.assertTrue(ok_gl, out_gl)
         self.assertEqual([m['id'] for m in out_gl], ['glm-5.2', 'nes-something'],
                          '国际版不该套用国内版的非对话规则')
+
+
+class TwoTierCatalogTest(unittest.TestCase):
+    """模型目录是**两级取数**：企业端点 + `/v3/config`。
+
+    官方客户端取模型目录走两级；我们此前只探测企业端点，于是 `/v3/config`
+    独有的模型全丢——实测国际版少了 deepseek-v4.1-flash、gpt-6-astra、
+    hy4-preview-f、kimi-k2.8-preview（用户报的「国际版没有 DeepSeek」即此，
+    上游 commit 0adc345 修的是同一件事）。
+
+    这一组测试按**路径**分派响应，因为两路的内容本就不同——用同一个 body
+    应答两个端点的话，即使实现只探测一路也照样通过（那种测试挡不住回归）。
+    """
+
+    ENT = [
+        {'id': 'gpt-5.6-sol', 'maxInputTokens': 977000, 'maxOutputTokens': 125000, 'credits': 'x3.47'},
+        {'id': 'gpt-5.3-codex', 'maxInputTokens': 200000, 'maxOutputTokens': 32000, 'credits': 'x0.20'},
+    ]
+    V3 = [
+        {'id': 'gpt-5.6-sol', 'maxInputTokens': 977000, 'maxOutputTokens': 125000, 'credits': 'x3.47'},
+        {'id': 'deepseek-v4.1-flash', 'maxInputTokens': 172000, 'maxOutputTokens': 23000,
+         'credits': 'x0.00', 'reasoning': {'supportedEfforts': ['high']}},
+        {'id': 'hy4-preview-f', 'maxInputTokens': 977000, 'maxOutputTokens': 63000, 'credits': 'x0.00'},
+    ]
+
+    def setUp(self) -> None:
+        self.seen: list[str] = []
+
+    def _patch(self, ent, v3):
+        """两路各自预置响应；ent/v3 可以是 payload 或 (status, payload) 或异常。"""
+        seen = self.seen
+
+        def make(spec):
+            if isinstance(spec, Exception):
+                def raiser(_url):
+                    raise spec
+                return raiser
+
+            def fixed(_url):
+                status, payload = spec if isinstance(spec, tuple) else (200, spec)
+                return _Resp(payload, status)
+            return fixed
+
+        ent_f, v3_f = make(ent), make(v3)
+
+        class _PathClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, url, **kw):
+                seen.append(url)
+                return v3_f(url) if url.endswith('/v3/config') else ent_f(url)
+
+        return mock.patch.object(config, 'http_client', lambda *a, **k: _PathClient())
+
+    def _fetch(self, realm, ent, v3):
+        self.seen = []
+        with self._patch(ent, v3):
+            return asyncio.run(tencent.fetch_models(
+                {'access_token': 'T', 'realm': realm, 'uid': 'u', 'domain': ''}))
+
+    def test_v3_only_models_are_included(self) -> None:
+        """核心回归：只在 /v3/config 下发的模型必须出现在清单里。"""
+        ok, out = self._fetch('global', _models_payload(self.ENT), {'code': 0, 'data': {'models': self.V3}})
+        self.assertTrue(ok, out)
+        ids = [m['id'] for m in out]
+        self.assertIn('deepseek-v4.1-flash', ids, f'国际版丢了 v3 独有模型：{ids}')
+        self.assertIn('hy4-preview-f', ids, f'国际版丢了 v3 独有模型：{ids}')
+        self.assertIn('gpt-5.3-codex', ids, '企业端点独有模型也应保留（补缺）')
+
+    def test_both_paths_are_requested(self) -> None:
+        """两路都要探测——少探一路就是本 bug 的成因。"""
+        self._fetch('global', _models_payload(self.ENT), {'code': 0, 'data': {'models': self.V3}})
+        paths = {u.split('workbuddy.ai')[-1] for u in self.seen}
+        self.assertIn('/v3/config', paths, '没探测 /v3/config——v3 独有模型会全部丢失')
+        self.assertIn('/v2/enterprises/personal/models', paths, '没探测企业端点')
+
+    def test_dedup_and_v3_priority(self) -> None:
+        """同 id 只出现一次，且字段以 v3 为准（上游合并口径）。"""
+        ent = _models_payload([{'id': 'gpt-5.6-sol', 'maxInputTokens': 1, 'maxOutputTokens': 2,
+                                'credits': 'x9.99'}])
+        v3 = {'code': 0, 'data': {'models': [
+            {'id': 'gpt-5.6-sol', 'maxInputTokens': 977000, 'maxOutputTokens': 125000,
+             'credits': 'x3.47'}]}}
+        ok, out = self._fetch('global', ent, v3)
+        self.assertTrue(ok, out)
+        self.assertEqual(len(out), 1, f'重复条目未去重：{[m["id"] for m in out]}')
+        self.assertEqual(out[0]['credits'], 'x3.47', 'v3 条目应为权威（credits 以它为准）')
+
+    def test_v3_failure_degrades_to_enterprise(self) -> None:
+        """v3 失败不拖累企业端点（降级为单路，而不是整体报错）。"""
+        ok, out = self._fetch('global', _models_payload(self.ENT), (400, {'code': 12403}))
+        self.assertTrue(ok, f'v3 失败不该让整次取数失败：{out}')
+        self.assertEqual([m['id'] for m in out], ['gpt-5.6-sol', 'gpt-5.3-codex'])
+
+    def test_enterprise_failure_degrades_to_v3(self) -> None:
+        ok, out = self._fetch('global', (500, {'code': 500}), {'code': 0, 'data': {'models': self.V3}})
+        self.assertTrue(ok, f'企业端点失败不该让整次取数失败：{out}')
+        self.assertIn('deepseek-v4.1-flash', [m['id'] for m in out])
+
+    def test_v3_network_error_degrades(self) -> None:
+        """网络异常（而非业务错误码）同样只降级、不整体失败。"""
+        ok, out = self._fetch('global', _models_payload(self.ENT),
+                              RuntimeError('connection reset'))
+        self.assertTrue(ok, f'v3 网络异常不该让整次取数失败：{out}')
+
+    def test_both_fail_reports_failure(self) -> None:
+        ok, out = self._fetch('global', (500, {'code': 500}), (500, {'code': 500}))
+        self.assertFalse(ok, '两路全失败时应报失败，而不是返回空清单')
+        self.assertIsInstance(out, str, '失败时应给出原因字符串')
+
+    def test_cn_keeps_cli_filter_with_v3_supplement(self) -> None:
+        """国内版：console 的 cli 过滤与 v3 补缺同时生效。"""
+        ent = _models_payload(
+            [{'id': 'glm-5.2', 'maxInputTokens': 131072, 'maxOutputTokens': 32768},
+             {'id': 'nes-embed', 'maxInputTokens': 8192, 'maxOutputTokens': 4096}],
+            cli_ids=['glm-5.2'],
+        )
+        v3 = {'code': 0, 'data': {'models': [
+            {'id': 'glm-5.2', 'maxInputTokens': 131072, 'maxOutputTokens': 32768},
+            {'id': 'hy4-preview-f', 'maxInputTokens': 256000, 'maxOutputTokens': 32000}]}}
+        ok, out = self._fetch('cn', ent, v3)
+        self.assertTrue(ok, out)
+        ids = [m['id'] for m in out]
+        self.assertIn('glm-5.2', ids)
+        self.assertIn('hy4-preview-f', ids, '国内版也该拿到 v3 补缺')
+        self.assertNotIn('nes-embed', ids, '非对话过滤仍生效')
+
+    def test_v3_null_models_shape_degrades(self) -> None:
+        """`/v3/config` 返回 `code:0` 但 `models:null` 时按「这路没数据」处理。
+
+        这是**真实观测到的形状**（用无凭据请求打 /v3/config：data 里有 agent/mcp/
+        codebase 等键，但 models 是 null）。token 失效等情况下也会走到这里。
+        必须降级而不是当成「成功但空」把整页清空——企业端点的结果要留住。
+        """
+        v3 = {'code': 0, 'msg': 'ok', 'data': {'agent': {'agents': None}, 'models': None}}
+        ok, out = self._fetch('global', _models_payload(self.ENT), v3)
+        self.assertTrue(ok, f'该形态应降级为企业端点结果：{out}')
+        self.assertEqual([m['id'] for m in out], ['gpt-5.6-sol', 'gpt-5.3-codex'])
+
+    def test_both_null_models_reports_failure(self) -> None:
+        """两路都是空 models 时如实报失败，不返回空清单冒充成功。"""
+        empty = {'code': 0, 'data': {'models': None}}
+        ok, out = self._fetch('global', empty, empty)
+        self.assertFalse(ok, '两路都没数据时应报失败')
+        self.assertIsInstance(out, str)
+
+    def test_v3_only_models_are_kept_for_global(self) -> None:
+        """国际版与国内版对 v3 条目的口径一致（都取全量、都不做 CN 的非对话过滤）。"""
+        v3 = {'code': 0, 'data': {'models': [
+            {'id': 'nes-thing', 'maxInputTokens': 131072, 'maxOutputTokens': 4096}]}}
+        ok_gl, out_gl = self._fetch('global', _models_payload([]), v3)
+        self.assertTrue(ok_gl, out_gl)
+        self.assertIn('nes-thing', [m['id'] for m in out_gl],
+                      '国际版不该套用国内版的非对话规则')
 
 
 class CatalogFieldPassthroughTest(unittest.TestCase):
