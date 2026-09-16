@@ -84,5 +84,67 @@ class RateLimitedModelsPassthroughTest(unittest.TestCase):
             self.assertEqual(a['rate_limited_models'], [], f'{v!r} 应归一为 []')
 
 
+class NotInPoolTest(unittest.TestCase):
+    """账号没进上游池时必须能识别出来（用户报的「面板全绿却报没有健康账号」）。
+
+    我们读的是 auths/ 目录下的**文件**，上游读的才是**池**。两者不总一致：
+    上游 `LoadDir` 对解析失败的 auth 文件静默跳过（`Parse` 在 accessToken 为
+    空时报错），那个文件永远进不了池、永远选不中。
+
+    此前这种账号在面板上走兜底分支显示「● 在线」——于是出现「面板全绿、调用
+    却报没有健康账号」的矛盾（用户实测反馈）。
+    """
+
+    def _merge_pool(self, pool_items: list[dict]) -> dict:
+        accounts = [{'uid': 'u1'}]
+        wb2api.merge_pool_status(accounts, {'accounts': pool_items})
+        return accounts[0]
+
+    def test_account_absent_from_pool_is_marked(self) -> None:
+        """上游没返回它 → in_pool 为 False，供界面标出「未加载」。"""
+        self.assertIs(self._merge_pool([])['in_pool'], False)
+
+    def test_account_present_in_pool_is_marked(self) -> None:
+        self.assertIs(self._merge_pool([{'uid': 'u1', 'credits': 5}])['in_pool'], True)
+
+    def _read_auths(self, payload: dict) -> list[dict]:
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from server import config
+
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / 'auths').mkdir()
+        orig = config.AUTH_DIR
+        config.AUTH_DIR = tmp / 'auths'
+        try:
+            (config.AUTH_DIR / 'workbuddy-t.json').write_text(
+                json.dumps(payload), encoding='utf-8')
+            return wb2api.list_auth_accounts()
+        finally:
+            config.AUTH_DIR = orig
+
+    def test_missing_token_flagged_as_invalid(self) -> None:
+        """accessToken 为空 → 上游 Parse 必拒；本地如实给出原因。"""
+        got = self._read_auths({
+            'auth': {'accessToken': '', 'expiresAt': 4102444800,
+                     'domain': 'www.codebuddy.cn'},
+            'account': {'uid': 'uid-x', 'nickname': 'x'},
+        })
+        self.assertEqual(len(got), 1)
+        self.assertTrue(got[0]['invalid_reason'], '空 accessToken 应给出原因')
+        self.assertIn('accessToken', got[0]['invalid_reason'])
+
+    def test_valid_token_has_no_invalid_reason(self) -> None:
+        """正常账号不该被误标 —— 否则所有账号都会显示成「未加载」。"""
+        got = self._read_auths({
+            'auth': {'accessToken': 'at-ok', 'expiresAt': 4102444800,
+                     'domain': 'www.codebuddy.cn'},
+            'account': {'uid': 'uid-y', 'nickname': 'y'},
+        })
+        self.assertEqual(got[0]['invalid_reason'], '')
+
+
 if __name__ == '__main__':
     unittest.main()
