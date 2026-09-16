@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 
@@ -37,6 +38,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .. import config, db, iputil, keysvc
 from ..routers.security import get_config as get_security_config
 from . import gateway
+
+logger = logging.getLogger('workbuddy.anthropic')
 
 router = APIRouter(tags=['anthropic'])
 
@@ -62,18 +65,138 @@ def _err(message: str, status: int = 400, err_type: str = 'invalid_request_error
     )
 
 
-def _token(request: Request) -> str:
-    """取调用方令牌，兼容两种客户端的传法。
+def _as_int(value: object) -> int:
+    """把上游给的数字字段安全地转成 int。
 
-    Anthropic 官方 SDK 用 `x-api-key`，而 Claude Code 走的是
-    `ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer`。两者都要认，
-    否则会出现「同一个密钥，某客户端能用某客户端不能用」。
-    （注意：管理端的登录态**不认** `x-api-key`，那是另一回事。）
+    上游是**外部进程**，`usage` 可能畸形（字符串、null、嵌套对象）。直接
+    `int(...)` 会抛 ValueError，而它在**流式生成器内部**抛出会直接掐断流——
+    客户端看到 terminated、连 `message_stop` 都收不到（gateway.py 里记录过
+    这类事故）。转不动就按 0 计，不影响主流程。
     """
-    key = request.headers.get('x-api-key', '').strip()
-    if key:
-        return key
-    return gateway._bearer(request)
+    if isinstance(value, bool):
+        return 0
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+def _token_candidates(request: Request) -> list[str]:
+    """列出请求里**所有**可能的令牌值（去重、保持优先级）。
+
+    为什么不是「取一个」：客户端可能同时带**多份凭据**——实测遇到过
+    Claude Code 既发 `x-api-key`（值属于另一个服务、67 字符的 `sk-…`）
+    又发 `Authorization: Bearer`（值才是本网关的 `wbk_…`）。
+    只取第一个就会拿到不相干的那份，表现为「明明配对了却 401」，
+    而且从客户端侧完全看不出问题。所以这里返回候选列表，由调用方逐个验。
+
+    取值来源：
+      · `x-api-key` / `x-anthropic-api-key` —— Anthropic 官方 SDK 等
+      · `Authorization` —— Claude Code 配 ANTHROPIC_AUTH_TOKEN 时发；
+        带 `Bearer ` 前缀的剥掉，**不带前缀的也照收**（部分转发工具直接放裸 token）
+
+    （注意：管理端的登录态**不认**这些头，那是另一回事。）
+    """
+    out: list[str] = []
+    for header in ('x-api-key', 'x-anthropic-api-key'):
+        value = request.headers.get(header, '').strip()
+        if value and value not in out:
+            out.append(value)
+    auth = request.headers.get('authorization', '').strip()
+    if auth:
+        value = auth[7:].strip() if auth.lower().startswith('bearer ') else auth
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
+def _resolve_key(request: Request):
+    """从候选令牌里找出**能解析出密钥**的那一个。
+
+    返回 `(key, token)`；都不行时 key 为 None、token 为最长候选（仅供日志判断）。
+    """
+    candidates = _token_candidates(request)
+    for token in candidates:
+        key = keysvc.resolve(token)
+        if key is not None:
+            return key, token
+    return None, (max(candidates, key=len) if candidates else '')
+
+
+def _authorize(request: Request, model: str | None) -> tuple[dict | None, str, JSONResponse | None]:
+    """完整鉴权：密钥 → 全局 IP 管控 → 密钥约束 → 限流。返回 `(key, ip, error)`。
+
+    ⚠️ 这套检查与 `gateway._authorize` **必须保持同序同项**——同一把密钥在两个
+    协议下得出不同结论是最难查的一类问题。之所以没直接复用：本层要遍历**多个
+    候选令牌**（客户端可能同时带着别的服务的凭据），而 `_authorize` 只接单个 token。
+    改任一侧时请同步另一侧。
+
+    之所以抽成函数：`count_tokens` 早先只挑了个能解析的密钥就放行，
+    把停用/过期/配额/限流**全漏了**——重复实现的两份逻辑一旦漂移，漏的就是安全项。
+    """
+    ip = iputil.client_ip(request)
+    ua = request.headers.get('user-agent')
+    path = request.url.path
+
+    key, token = _resolve_key(request)
+    if not token:
+        logger.warning('未取到令牌，收到的请求头: %s', _header_names(request))
+        return None, ip, _err('缺少 API Key：请在 x-api-key 或 Authorization: Bearer 中提供', 401, 'authentication_error')
+    if key is None:
+        # 「配了却 401」几乎只能靠这行定位：候选个数/长度说明客户端发了什么，
+        # 前缀是密钥的**公开部分**（面板列表里就显示它），便于比对是哪一把；
+        # 再往后不记，避免把凭据写进日志。
+        # 只在本网关前缀（wbk_）上打前缀——客户端可能同时带了别的服务的凭据
+        # （实测遇到过 sk- 开头的），那种串的前缀不该被抄进本项目的日志。
+        hint = token[:12] if token.startswith(keysvc.TOKEN_PREFIX) else '(非本网关前缀)'
+        logger.warning(
+            '令牌无法解析：候选=%d 个，最长 %d 位、前缀=%r；x-api-key 长度=%d，authorization 长度=%d；请求头: %s',
+            len(_token_candidates(request)), len(token), hint,
+            len(request.headers.get('x-api-key', '')),
+            len(request.headers.get('authorization', '')),
+            _header_names(request),
+        )
+        return None, ip, _err('API Key 无效', 401, 'authentication_error')
+
+    sec = get_security_config()
+    if sec.get('enabled'):
+        rules = [
+            {'kind': r['kind'], 'cidr': r['cidr']}
+            for r in db.query('SELECT kind, cidr FROM ip_rules')
+        ]
+        if not iputil.evaluate(ip, rules, sec.get('mode', 'blacklist')):
+            gateway._log_ip(ip, path, True, ua)
+            gateway._record(key, ip, model or '', '', 403, 0, 0, 0, ua, 'IP 被拦截', False)
+            return None, ip, _err(f'来源 IP {ip} 被安全策略拦截', 403, 'permission_error')
+
+    gateway._log_ip(ip, path, False, ua)
+
+    # model 为 None 时按「模型发现类请求」处理：跳过版本与模型白名单
+    # （没有 model 就无从判定版本），但停用/过期/配额/IP 这些照常校验。
+    reason = keysvc.validate(key, ip, model, is_model_list=(model is None))
+    if reason:
+        gateway._record(key, ip, model or '', '', 403, 0, 0, 0, ua, reason, False)
+        return None, ip, _err(reason, 403, 'permission_error')
+
+    limited, _count = gateway._rate_limited(key)
+    if limited:
+        msg = f'请求过于频繁（{gateway.RATE_WINDOW}s 内超过 {gateway.RATE_MAX_PER_MIN} 次）'
+        gateway._record(key, ip, model or '', '', 429, 0, 0, 0, ua, msg, False)
+        return None, ip, _err(msg, 429, 'rate_limit_error')
+
+    return key, ip, None
+
+
+def _header_names(request: Request) -> list[str]:
+    """收到的请求头**名字**（不含值）。
+
+    鉴权失败时写进日志：客户端到底把令牌放在哪个头里，是这类「配了却 401」
+    问题唯一可靠的线索——且只记名字，不会把凭据写进日志。
+    """
+    try:
+        return sorted({k.lower() for k in request.headers.keys()})
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _text_of(content: object) -> str:
@@ -259,8 +382,8 @@ def to_anthropic_response(data: dict, model: str) -> dict:
         'stop_reason': _STOP_REASON.get(str(choice.get('finish_reason')), 'end_turn'),
         'stop_sequence': None,
         'usage': {
-            'input_tokens': int(usage.get('prompt_tokens') or 0),
-            'output_tokens': int(usage.get('completion_tokens') or 0),
+            'input_tokens': _as_int(usage.get('prompt_tokens')),
+            'output_tokens': _as_int(usage.get('completion_tokens')),
         },
     }
 
@@ -325,14 +448,19 @@ class _StreamTranslator:
     def feed(self, obj: dict) -> list[bytes]:
         """喂一个 OpenAI SSE 的 data 对象，返回要下发的事件。"""
         out: list[bytes] = []
+        # 已经收尾过就不再吐事件：上游若在带 finish_reason 的帧之后**继续发内容帧**
+        # （它自己有 bug，或被打穿），客户端会收到 message_stop 之后的事件，
+        # 而那些块永远等不到 content_block_stop —— 协议被污染。
+        if self.finished:
+            return out
         if not self.started:
             out += self._start_message()
 
         # 非流式写法的 usage 也可能出现在末尾帧
         usage = obj.get('usage')
         if isinstance(usage, dict):
-            self.input_tokens = int(usage.get('prompt_tokens') or self.input_tokens or 0)
-            self.output_tokens = int(usage.get('completion_tokens') or self.output_tokens or 0)
+            self.input_tokens = _as_int(usage.get('prompt_tokens')) or self.input_tokens
+            self.output_tokens = _as_int(usage.get('completion_tokens')) or self.output_tokens
 
         choices = obj.get('choices')
         if not isinstance(choices, list) or not choices:
@@ -430,12 +558,24 @@ class _StreamTranslator:
         return out
 
 
+# SSE 解析缓冲的上限。正常 SSE 是「一行一条 data:」，缓冲里始终只留半行；
+# 如果上游持续吐出不含换行的数据（实现有 bug、或上游被换成了别的东西），
+# 缓冲会一直长下去直至吃光内存——所以到上限就中止转发并落一条日志。
+# 1 MiB 远大于任何正常的单行 SSE（含大段 tool_use 参数也只几十 KB）。
+MAX_SSE_BUFFER = 1 << 20
+
+
 @router.post('/v1/messages')
 async def messages(request: Request):
     """Anthropic Messages API。"""
     body, err = await gateway._read_json_body(request)
     if err:
-        # 上游格式错误：这里换成 Anthropic 风格，客户端才读得懂
+        # 保留网关注入的状态码语义：413（体太大）与 400（JSON 非法）是两回事。
+        # 一律写死 400 会让客户端在「体太大」时误判为格式问题——它只会原样重试，
+        # 而不会去压缩上下文或调大上限（gateway 那条路给的就是 413 + 调参建议）。
+        if getattr(err, 'status_code', 0) == 413:
+            return _err('请求体超过上限：请压缩上下文或附件，'
+                        '或在管理端「设置 → 上游配置 → 请求上限」调大 server.max_body_mb 后重试', 413)
         return _err('请求体不是合法 JSON 对象')
 
     model = body.get('model')
@@ -445,41 +585,12 @@ async def messages(request: Request):
     if body.get('max_tokens') is None:
         return _err('缺少必填字段 max_tokens')
 
-    # 鉴权沿用网关那套（密钥 / IP 管控 / 配额 / 限流），令牌来源两种都认
-    token = _token(request)
-    if not token:
-        return _err('缺少 API Key：请在 x-api-key 或 Authorization: Bearer 中提供', 401, 'authentication_error')
-    key = keysvc.resolve(token)
-    if key is None:
-        return _err('API Key 无效', 401, 'authentication_error')
+    # 鉴权：与 gateway._authorize 同一套检查、同一顺序（见该函数说明）
+    key, ip, auth_err = _authorize(request, model)
+    if auth_err:
+        return auth_err
 
-    ip = iputil.client_ip(request)
     ua = request.headers.get('user-agent')
-    path = request.url.path
-
-    sec = get_security_config()
-    if sec.get('enabled'):
-        rules = [
-            {'kind': r['kind'], 'cidr': r['cidr']}
-            for r in db.query('SELECT kind, cidr FROM ip_rules')
-        ]
-        if not iputil.evaluate(ip, rules, sec.get('mode', 'blacklist')):
-            gateway._log_ip(ip, path, True, ua)
-            gateway._record(key, ip, model, '', 403, 0, 0, 0, ua, 'IP 被拦截', False)
-            return _err(f'来源 IP {ip} 被安全策略拦截', 403, 'permission_error')
-
-    gateway._log_ip(ip, path, False, ua)
-    reason = keysvc.validate(key, ip, model)
-    if reason:
-        gateway._record(key, ip, model, '', 403, 0, 0, 0, ua, reason, False)
-        return _err(reason, 403, 'permission_error')
-
-    limited, _count = gateway._rate_limited(key)
-    if limited:
-        msg = f'请求过于频繁（{gateway.RATE_WINDOW}s 内超过 {gateway.RATE_MAX_PER_MIN} 次）'
-        gateway._record(key, ip, model, '', 429, 0, 0, 0, ua, msg, False)
-        return _err(msg, 429, 'rate_limit_error')
-
     stream = bool(body.get('stream'))
 
     try:
@@ -512,7 +623,7 @@ async def messages(request: Request):
                 data = None
             gateway._record(
                 key, ip, model, mapped or '', resp.status_code,
-                int(usage.get('prompt_tokens') or 0), int(usage.get('completion_tokens') or 0),
+                _as_int(usage.get('prompt_tokens')), _as_int(usage.get('completion_tokens')),
                 latency, ua, None if resp.status_code < 400 else str(data)[:500], False,
                 credit=gateway._usage_credit(usage),
             )
@@ -549,27 +660,29 @@ async def messages(request: Request):
         translator = _StreamTranslator(model)
         error_text: str | None = None
         first_token_ms: int | None = None
+        abort = False   # 中途出错需中止转发（缓冲超限 / 上游回 error 帧）
 
         try:
             async for chunk in resp.aiter_bytes():
                 pending += chunk.decode('utf-8', errors='ignore')
 
                 if status_code >= 400:
-                    # 上游报错：把响应体收下来，稍后翻成 error 事件。
-                    #
-                    # 原实现是 `if len(pending) > 4000`，**方向反了**：真实的错误体
-                    # 只有一二百字节（OpenAI 风格 error JSON），永远进不去那个分支，
-                    # 于是 error_text 恒为 None —— 客户端只收到
-                    # message_start → message_delta(end_turn) → message_stop，
-                    # 即「成功但内容为空」，且拿不到任何错误信息。
-                    # 对 Claude Code 这类客户端，表现为模型静默返回空回复。
-                    #
-                    # 这里**累积到上限为止**，且只在还没收到内容时赋值：
-                    # 错误体可能分多个 chunk 到达（首块过短会截断错误信息），
-                    # 也可能一次就来一大块（只看首块长度会整个漏掉）。
-                    if not error_text:
-                        error_text = pending[:2000]
+                    # 有数据就留一份：早先要等到 4000 字节才取，而常见的上游错误体
+                    # 只有几百字节 → error_text 恒为 None，错误被**静默丢弃**，
+                    # 客户端收到「正常但内容为空」的回答，连重试都不会触发。
+                    if error_text is None and pending.strip():
+                        error_text = pending[:500]
+                    # 上游报错时也可能持续吐数据，缓冲同样要设上限
+                    if len(pending) > MAX_SSE_BUFFER:
+                        break
                     continue
+
+                if len(pending) > MAX_SSE_BUFFER:
+                    logger.warning('SSE 缓冲超过 %d 字节仍未见换行，中止转发（上游响应形态异常）',
+                                   MAX_SSE_BUFFER)
+                    error_text = '上游响应异常：数据流缺少分隔'
+                    abort = True
+                    break
 
                 # 逐行解析并翻译。**不能**先把 pending 交给 gateway._scan_sse：
                 # 那个函数会消费掉所有完整行、只返回残缺缓冲，这里就拿不到数据了。
@@ -589,6 +702,16 @@ async def messages(request: Request):
                     if not isinstance(obj, dict):
                         continue
 
+                    # 上游可能**中途**回一个 error 帧（形如 {"error":{...}}，没有
+                    # choices）。整帧丢弃会让客户端只收到 message_start 加一个空
+                    # 回答——必须显式转成 Anthropic 的 error 事件并中止。
+                    err_obj = obj.get('error')
+                    if isinstance(err_obj, dict) and not obj.get('choices'):
+                        msg = err_obj.get('message')
+                        error_text = str(msg if msg else err_obj)[:500]
+                        abort = True
+                        break
+
                     frame_usage = obj.get('usage')
                     if isinstance(frame_usage, dict):
                         usage.update(frame_usage)
@@ -599,32 +722,38 @@ async def messages(request: Request):
                     if translator.saw_content and first_token_ms is None:
                         first_token_ms = int((time.time() - started) * 1000)
 
-            if status_code >= 400:
-                # 上游直接报错：把错误翻成 Anthropic 事件。
-                #
-                # **顺序要紧**：error 必须发在 message_stop **之前**。多数 SDK
-                # （含 Anthropic 官方库）把 message_stop 当作流的终止信号，读到它
-                # 就结束迭代、不再读后续事件 —— 先发 stop 后发 error 等于那个
-                # 错误永远不会被客户端看到，仍是「成功但空」。
-                if error_text:
-                    yield _event('error', {
-                        'type': 'error',
-                        'error': {'type': 'api_error', 'message': error_text},
-                    })
-                # 仍补一套收尾事件：部分客户端期待流以 message_stop 结束，
-                # 缺了会一直等（挂住）。error 已经先发出去，不会再被吞掉。
-                for event in translator.finish(None, force=True):
-                    yield event
-            else:
-                for event in translator.finish(None, force=True):
-                    yield event
+                if abort:
+                    break
+
+            # 收尾。**顺序要紧**：error 必须发在 message_stop **之前**。
+            # 多数 SDK（含 Anthropic 官方库）把 message_stop 当作流的终止信号，
+            # 读到它就结束迭代、不再读后续事件——先发 stop 后发 error 等于那个
+            # 错误永远不会被客户端看到，客户端仍表现为「成功但空回复」，比报错
+            # 更难排查。
+            #
+            # 两种情况都会走到这里，所以只写一遍：
+            #   · 上游直接报错（status >= 400）—— error_text 是响应体；
+            #   · 状态码 200 但**过程中**出错（缓冲超限 / 上游中途回 error 帧）——
+            #     此时客户端拿到的 stop_reason 是 end_turn，即一个「完整但空/
+            #     残缺」的回答：不重试、不报错，排障时毫无线索；截断点若落在
+            #     input_json_delta 中间，还会拿半截 JSON 去执行工具调用。
+            if error_text:
+                yield _event('error', {
+                    'type': 'error',
+                    'error': {'type': 'api_error', 'message': error_text},
+                })
+            # 仍补一套收尾事件（含 message_start，若流尚未开始）：部分客户端期
+            # 待流以 message_stop 结束，缺了会一直等（挂住）。error 已先发出，
+            # 不会再被吞掉。
+            for event in translator.finish(None, force=True):
+                yield event
         finally:
             await resp.aclose()
             await client.aclose()
             latency = int((time.time() - started) * 1000)
             gateway._record(
                 key, ip, model, mapped or '', status_code,
-                int(usage.get('prompt_tokens') or 0), int(usage.get('completion_tokens') or 0),
+                _as_int(usage.get('prompt_tokens')), _as_int(usage.get('completion_tokens')),
                 latency, ua, error_text, True,
                 credit=gateway._usage_credit(usage), first_token=first_token_ms,
             )
@@ -645,19 +774,23 @@ async def count_tokens(request: Request):
     接口——裸着会让任何人都能借它判断网关是否存活、探测部署规模，也与其余端点
     的「一律先验密钥」不一致。
     """
-    token = _token(request)
-    if not token:
-        return _err('缺少 API Key：请在 x-api-key 或 Authorization: Bearer 中提供', 401, 'authentication_error')
-    if keysvc.resolve(token) is None:
-        return _err('API Key 无效', 401, 'authentication_error')
+    # 体积上限：这个端点同样对外开放，不能成为绕过网关请求体上限的后门
+    # （gateway._read_json_body 逐块累加、不信任 Content-Length，正是为此）。
+    body, err = await gateway._read_json_body(request)
+    if err:
+        if getattr(err, 'status_code', 0) == 413:
+            return _err('请求体超过上限：请精简后再试', 413)
+        return _err('请求体不是 JSON 对象')
 
-    body = None
-    try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001
-        body = None
-    if not isinstance(body, dict):
-        return _err('请求体必须是 JSON 对象')
+    # 完整鉴权：早先这里只挑了个「能解析的密钥」就放行，把停用 / 过期 / 配额 /
+    # IP 白名单 / 限流**全漏了**——被吊销的密钥照样能调这个端点。现在与
+    # /v1/messages 走同一条路径（`_authorize`）。
+    # count_tokens 允许不带 model（那是常态），故 model 为 None 时按「模型发现
+    # 类请求」处理：跳过版本与模型白名单，其余约束照常生效。
+    model = body.get('model') if isinstance(body.get('model'), str) else None
+    _key, _ip, auth_err = _authorize(request, model)
+    if auth_err:
+        return auth_err
 
     total = 0
     system = body.get('system')
