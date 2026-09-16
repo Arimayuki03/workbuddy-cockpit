@@ -255,8 +255,13 @@ func (f *modelsDevFetcher) fetchDoc(client *http.Client, baseOverride string) {
 }
 
 // parseModelsDevDoc 解析 models.dev api.json：{provider:{models:{id:{limit:{context,
-// output}}}}} → 裸 id 索引。同名多 provider 采值：官方 vendor 源（modelsDevVendorSources）
-// 优先；无官方源（或多官方源分歧——理论罕见，取先到的）取众数（出现次数最多的值对）。
+// output}}}}} → 裸 id 索引。同名多 provider 采值优先级四级：官方 vendor 源
+//（modelsDevVendorSources）> 票数众数 > provider 字典序 > 先出现。
+// 第 3 级 provider 字典序是确定性 tie-break：聚合时维护候选的最小 provider 名
+//（minProvider，同 doc 稳定的选择器身份），消灭 map 迭代序随机化导致的
+//「同票先到先得」值抖动（同 binary 两次拉取同一文档可能落不同的值进 model.json，
+// /v1/models 的 context_length 不可复现）。不引入「值字典序」——那会把
+//「选谁」变成「选什么值」的启发式，语义不如 provider 名干净。
 func parseModelsDevDoc(raw []byte) (map[string]modelsDevEntry, error) {
 	var doc map[string]struct {
 		Models map[string]struct {
@@ -269,12 +274,14 @@ func parseModelsDevDoc(raw []byte) (map[string]modelsDevEntry, error) {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, fmt.Errorf("models.dev doc: %w", err)
 	}
-	// 同名 id 的候选值收集：vendorOfficial 标记官方源，votes 计众数。
+	// 同名 id 的候选值收集：vendorOfficial 标记官方源，votes 计众数，
+	// minProvider 维护该候选已见的最小 provider 名（tie-break 用）。
 	type candidate struct {
-		entry  modelsDevEntry
-		vendor bool
-		votes  int
-		aggKey string // 去重聚合 key（同值多 provider 只计票不重复存）
+		entry       modelsDevEntry
+		vendor      bool
+		votes       int
+		aggKey      string // 去重聚合 key（同值多 provider 只计票不重复存）
+		minProvider string
 	}
 	byModel := map[string][]candidate{}
 	for provider, pv := range doc {
@@ -306,16 +313,20 @@ func parseModelsDevDoc(raw []byte) (map[string]modelsDevEntry, error) {
 					if modelsDevVendorSources[provider] {
 						cs[i].vendor = true
 					}
+					if provider < cs[i].minProvider {
+						cs[i].minProvider = provider
+					}
 					dup = true
 					break
 				}
 			}
 			if !dup {
 				byModel[id] = append(cs, candidate{
-					entry:  modelsDevEntry{Context: ctx, Output: out},
-					vendor: modelsDevVendorSources[provider],
-					votes:  1,
-					aggKey: key,
+					entry:       modelsDevEntry{Context: ctx, Output: out},
+					vendor:      modelsDevVendorSources[provider],
+					votes:       1,
+					aggKey:      key,
+					minProvider: provider,
 				})
 			}
 		}
@@ -324,12 +335,14 @@ func parseModelsDevDoc(raw []byte) (map[string]modelsDevEntry, error) {
 	for id, cs := range byModel {
 		best := 0
 		for i, c := range cs {
-			// 优先级：官方 vendor 源 > 票数众数 > 先出现。
+			// 优先级：官方 vendor 源 > 票数众数 > provider 字典序（tie-break 确定性）。
 			cur := cs[best]
 			better := false
 			if c.vendor && !cur.vendor {
 				better = true
 			} else if c.vendor == cur.vendor && c.votes > cur.votes {
+				better = true
+			} else if c.vendor == cur.vendor && c.votes == cur.votes && c.minProvider < cur.minProvider {
 				better = true
 			}
 			if better {
