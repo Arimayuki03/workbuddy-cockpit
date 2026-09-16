@@ -298,6 +298,7 @@
     "colPrefix": "Key prefix",
     "realm": "Edition",
     "realmLimit": "Pinned edition",
+    "realmFollowsPage": "New keys follow the realm you are viewing — the realm whose pages you are on is the realm the key gets.",
     "realmCnOnly": "China edition only",
     "realmGlobalOnly": "Global edition only",
     "realmAll": "Unrestricted (both editions)",

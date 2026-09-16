@@ -283,6 +283,7 @@
     "colPrefix": "キー接頭辞",
     "realm": "エディション",
     "realmLimit": "エディション限定",
+    "realmFollowsPage": "新規キーは現在表示中のバージョンに従います（表示中のバージョンのキーとして作成されます）。",
     "realmCnOnly": "中国版のみ",
     "realmGlobalOnly": "グローバル版のみ",
     "realmAll": "制限なし（両エディション可）",

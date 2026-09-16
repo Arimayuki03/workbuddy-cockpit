@@ -38,6 +38,14 @@ async def upstream_status(user: dict = Depends(security.current_user)) -> dict:
     return await wb2api.get_status()
 
 
+def _strip_cn_prefix(m: dict) -> dict:
+    """去掉模型 id 的 `cn:` 前缀，**保留 `global:`**（见调用处注释）。"""
+    mid = str(m.get('id') or '')
+    if mid.lower().startswith('cn:'):
+        return {**m, 'id': mid[3:]}
+    return m
+
+
 @router.get('/models')
 async def models(
     realm: str | None = None,
@@ -65,6 +73,17 @@ async def models(
     if realm:
         r = 'global' if str(realm).strip().lower() == 'global' else 'cn'
         items = [m for m in items if modelcatalog._belongs(m, r)]
+    # 去掉 `cn:` 前缀：那是**上游的路由约定**，不是模型本身的名字。
+    # 界面要显示的是「腾讯自带的模型名」（glm-5.2 / deepseek-v4.1-flash），
+    # 前面挂个 cn: 既难看又让人以为得照着写。
+    #
+    # ⚠️ 只去 `cn:`，**绝不能动 `global:`**：上游 resolveModel 只认 `[realm:]model`
+    # 协议——取第一个 `:` 前段恰为 cn/global 才剥离，**其余一律当裸名（= 国内版）**。
+    # 所以裸名走国内版本来就成立（存量客户端一直如此），但**国际版一旦失去
+    # `global:` 前缀就会被路由到国内账号池**（模型名对不上，必然报错）。
+    # 曾用过 modelcatalog._strip_realm_prefix()，它把两种前缀都去掉了——那会让
+    # 界面上的国际版模型名变成「不可用」，实测发现后改为只去 cn:。
+    items = [_strip_cn_prefix(m) for m in items]
     return {
         'models': items,
         'source': wb2api.models_source(source_items),

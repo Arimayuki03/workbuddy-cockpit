@@ -172,7 +172,11 @@ export default function KeysPage() {
         quota: Number(form.quota) || 0,
         // '' 是有意义的取值（不限制版本），必须照传——后端以它区分
         // 「存量密钥，两版都能调」与「限定了某一版」
-        realm: form.realm,
+        //
+        // 新建时**以当前所在版本为准**（而不是 openCreate 时的快照）：
+        // 弹窗开着的时候用户可能切了版本，若沿用快照，创建出来的密钥版本
+        // 会与界面上显示的不一致——那种错是静默的，只有调用时才暴露。
+        realm: editing ? form.realm : realm,
       };
 
       // 新建：填了天数才设过期（0 = 永不过期，不下发 expires_at）
@@ -492,28 +496,53 @@ export default function KeysPage() {
               </div>
               <div className="space-y-1.5">
                 <Label className="text-[11px] text-muted-foreground">{t('keys.realmLimit')}</Label>
-                <Select
-                  value={form.realm || '__all__'}
-                  onValueChange={(v) => setForm({...form, realm: (v === '__all__' ? '' : v) as FormState['realm']})}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="cn">{t('keys.realmCnOnly')}</SelectItem>
-                    <SelectItem value="global">{t('keys.realmGlobalOnly')}</SelectItem>
-                    {/* 只有存量密钥会停留在这个取值上；新建时不建议选，
-                        所以文案写明它意味着什么 */}
-                    <SelectItem value="__all__">{t('keys.realmAll')}</SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="text-[10px] leading-4 text-muted-foreground">
-                  {form.realm === ''
-                    ? t('keys.realmHintUnlimited')
-                    : form.realm === 'global'
-                      ? t('keys.realmHintGlobal')
-                      : t('keys.realmHintCn')}
-                </p>
+                {/* 版本归属：**新建时不显示选择器**，直接跟随当前所在版本——
+                    在哪个版本的界面里建，就是哪个版本的密钥。
+                    用户明确要求过不要让他在这里选：选错了是**静默的**（只有真正
+                    调用时才报「仅限某版本」），不如跟随页面、并把结果写清楚。
+                    编辑时保留选择器：存量密钥（尤其"不限制"的老密钥）需要能改。 */}
+                {editing ? (
+                  <>
+                    <Select
+                      value={form.realm || '__all__'}
+                      onValueChange={(v) => setForm({...form, realm: (v === '__all__' ? '' : v) as FormState['realm']})}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="cn">{t('keys.realmCnOnly')}</SelectItem>
+                        <SelectItem value="global">{t('keys.realmGlobalOnly')}</SelectItem>
+                        {/* 只有存量密钥会停留在这个取值上 */}
+                        <SelectItem value="__all__">{t('keys.realmAll')}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-[10px] leading-4 text-muted-foreground">
+                      {form.realm === ''
+                        ? t('keys.realmHintUnlimited')
+                        : form.realm === 'global'
+                          ? t('keys.realmHintGlobal')
+                          : t('keys.realmHintCn')}
+                    </p>
+                  </>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-1.5 rounded-lg bg-muted px-3 py-2">
+                    <Badge
+                      variant="secondary"
+                      className={
+                        'rounded-full text-[10px] ' +
+                        (realm === 'global'
+                          ? 'text-blue-600 dark:text-blue-400'
+                          : 'text-emerald-600 dark:text-emerald-400')
+                      }
+                    >
+                      {realm === 'global' ? t('realm.global') : t('realm.cn')}
+                    </Badge>
+                    <span className="text-[10px] leading-4 text-muted-foreground">
+                      {t('keys.realmFollowsPage')}
+                    </span>
+                  </div>
+                )}
               </div>
               <div className="space-y-1.5">
                 <Label className="text-[11px] text-muted-foreground">{t('keys.modelWhitelist')}</Label>
