@@ -211,33 +211,76 @@ jobs:
       #   docker pull ghcr.io/<owner>/workbuddy-manager:latest
       # 而不是自己 clone + build（后者要装 Node 构建前端，门槛高）。
       #
+      # **同时构建 amd64 与 arm64**：原先用 `docker build` 只产出 runner 自己的
+      # 架构（amd64），arm64 机器（Apple Silicon、Oracle/华为等 ARM 云主机）拉下来
+      # 只能靠 QEMU 模拟跑，或者干脆报 `no matching manifest for linux/arm64`。
+      # 两个架构合并成一个 manifest list，用户 `docker pull` 时按自身架构自动选。
+      #
       # 注意：镜像**不由本项目签名**（签名机制只覆盖 tar.gz 发布包）。
       # 镜像的完整性依赖 GHCR 的 digest 与 GitHub 的账号安全——这一层
       # 与发布包签名是两套信任链，README 里已如实说明。
-      - name: 构建并推送容器镜像
+      - name: 解析镜像名
+        # GHCR 要求仓库名全小写，而 repository_owner 可能含大写。
+        # build-push-action 的 tags 里没法做大小写转换，先在这里算好。
+        if: github.event_name == 'push' || inputs.tag != ''
+        id: image
+        run: |
+          IMAGE="ghcr.io/${{ github.repository_owner }}/workbuddy-manager"
+          echo "name=${IMAGE,,}" >> $GITHUB_OUTPUT
+
+      # 下面这几步与镜像构建同属「附属产物」链路，一并加 continue-on-error：
+      # 它们任一失败都会让 build-push-action 无法运行，若不加，job 会标红——
+      # 而 Release 其实已经创建成功，与上面的注释所声明的意图相矛盾。
+      - name: 设置 QEMU
+        # 跨架构构建 arm64 层需要它：runner 是 amd64，模拟出 arm64 执行环境
+        continue-on-error: true
+        if: github.event_name == 'push' || inputs.tag != ''
+        uses: docker/setup-qemu-action@v3
+
+      - name: 设置 Buildx
+        continue-on-error: true
+        if: github.event_name == 'push' || inputs.tag != ''
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        continue-on-error: true
+        if: github.event_name == 'push' || inputs.tag != ''
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送容器镜像（amd64 + arm64）
         # 镜像只是**附属产物**：发布包与 Release 才是主体。首次实测时此步因缺少
         # packages: write 权限失败，整个 workflow 被标红——但 Release 其实已成功
         # 创建，很容易被误读成「发版失败」。加 continue-on-error 后，镜像推不上去
         # 只影响这一步，发布结果不受牵连。
         continue-on-error: true
         if: github.event_name == 'push' || inputs.tag != ''
-        env:
-          REGISTRY: ghcr.io
-        run: |
-          TAG="${{ steps.vars.outputs.tag }}"
-          IMAGE="${REGISTRY}/${{ github.repository_owner }}/workbuddy-manager"
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # 多平台必须走 buildx 并直接 push：本地镜像库放不下多架构的 manifest list
+          platforms: linux/amd64,linux/arm64
+          push: true
           # 镜像标签用小写（GHCR 要求），去掉 v 前缀
-          VER="${TAG#v}"
-          IMAGE="${IMAGE,,}"
-          echo "构建 $IMAGE:$VER"
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
-          docker build -t "$IMAGE:$VER" -t "$IMAGE:latest" .
-          docker push "$IMAGE:$VER"
-          docker push "$IMAGE:latest"
-          # 把镜像 digest 记进 step summary：digest 是内容寻址的，
-          # 用户可用它核对拉到的镜像与本次构建完全一致
-          DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE:$VER")"
-          echo "镜像：$DIGEST" >> $GITHUB_STEP_SUMMARY
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ steps.vars.outputs.version }}
+            ${{ steps.image.outputs.name }}:latest
+          # 关掉 provenance 证明：它会在 manifest list 里塞入 attestation 条目，
+          # 某些旧版 Docker（< 25）拉取时会报 unknown/unknown platform。
+          # 本项目不依赖该证明，关掉换来更干净的索引。
+          provenance: false
+
+      - name: 记录镜像 digest
+        if: steps.build.outcome == 'success'
+        run: |
+          # digest 是内容寻址的，用户可用它核对拉到的镜像与本次构建完全一致。
+          # 多架构构建下镜像不在本地库里，digest 只能取自 build-push-action 的输出。
+          echo "镜像：${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
+          echo "平台：linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
 
       - name: 部署说明
         run: |

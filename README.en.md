@@ -420,6 +420,10 @@ Or pull the prebuilt image (pushed to GHCR on every release):
 docker pull ghcr.io/ithtelab/workbuddy-manager:latest
 ```
 
+> The image ships for **both `linux/amd64` and `linux/arm64`** (Apple Silicon and ARM
+> cloud hosts can pull it directly, with no QEMU emulation). `docker pull` picks the
+> right one for your machine automatically.
+
 **The container build has the same capabilities as a host install** — the compose file
 mounts three things to make that true:
 

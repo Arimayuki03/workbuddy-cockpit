@@ -51,15 +51,29 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git curl ca-certificates openssh-client \
     && rm -rf /var/lib/apt/lists/*
-# docker-cli 走官方静态包（Debian 仓库里的 docker.io 会拖进 dockerd，太重）
+# docker-cli 走官方静态包（Debian 仓库里的 docker.io 会拖进 dockerd，太重）。
+# 静态包的目录名与 Docker 的架构名**并不一致**（amd64→x86_64、arm64→aarch64）：
+# 原先这里写死 x86_64，arm64 机器上会装进一个跑不起来的二进制，直到运行时
+# 调用 docker 才报「格式错误」。改为按目标架构选包。
+# TARGETARCH 由 buildx 按目标平台注入（多架构构建必需）；普通 `docker build`
+# 下它为空，退回 uname -m —— 这样在 arm64 机器上直接 `docker compose up --build`
+# 也是对的，不强制用户先装 buildx。
 ARG DOCKER_CLI_VERSION=27.3.1
-RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
-        -o /tmp/docker.tgz \
-    && tar -xzf /tmp/docker.tgz -C /tmp \
-    && mv /tmp/docker/docker /usr/local/bin/docker \
-    && chmod +x /usr/local/bin/docker \
-    && rm -rf /tmp/docker /tmp/docker.tgz \
-    && docker --version
+ARG TARGETARCH
+RUN set -eux; \
+    case "${TARGETARCH:-$(uname -m)}" in \
+        amd64 | x86_64)  DOCKER_ARCH=x86_64 ;; \
+        arm64 | aarch64) DOCKER_ARCH=aarch64 ;; \
+        arm | armv7l)    DOCKER_ARCH=armhf ;; \
+        *) echo "docker-cli 静态包不支持的架构：${TARGETARCH:-$(uname -m)}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://download.docker.com/linux/static/stable/${DOCKER_ARCH}/docker-${DOCKER_CLI_VERSION}.tgz" \
+        -o /tmp/docker.tgz; \
+    tar -xzf /tmp/docker.tgz -C /tmp; \
+    mv /tmp/docker/docker /usr/local/bin/docker; \
+    chmod +x /usr/local/bin/docker; \
+    rm -rf /tmp/docker /tmp/docker.tgz; \
+    docker --version
 
 WORKDIR /app
 
