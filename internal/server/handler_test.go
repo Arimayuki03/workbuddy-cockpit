@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2414,5 +2415,58 @@ func TestContentBlockedCustomIgnoresActiveDegrade(t *testing.T) {
 	}
 	if strings.Contains(out, prompt.Degraded) {
 		t.Errorf("custom request must NOT use Degraded prompt even in degrade period: %s", out)
+	}
+}
+
+// TestStaleSnapshotBoundedByPickGate 粘性快照陈旧被 Pick 闸兜底的契约锚
+//（pr134-watchlist-analysis.md #10）：
+// session.ResolveForModel 在取任何锁之前拿 pool 可用性快照——若快照后、Pick 前
+// 粘性号 A 被冷却（快照陈旧判 available），Session 层仍会返回 A 作为建议 uid；
+// 但真正的可用性权威闸是 handler 的 Pool.PickByUIDForModel（锁内新鲜判定
+// healthyForModel）——A 冷却后返回 nil → unbindSticky 回落普通轮换。
+// 本测试锁死该兜底契约：Available 闭包返回含 A 的固定快照（永远陈旧），
+// A 预冷却，断言请求 200 落到 good、绑定收敛 good、A 从未被出站选中。
+// 若未来有人把 Pick 闸挪走（粘性 uid 不再经锁内校验直取），本测试立刻红。
+func TestStaleSnapshotBoundedByPickGate(t *testing.T) {
+	st := newBindStore()
+	sess := session.New(session.Config{
+		TTL:   time.Minute,
+		Store: st,
+		// 固定快照：永远包含 stale——模拟 ResolveForModel 取快照后 A 才被冷却的
+		// 陈旧窗口（此后无论如何查都返回同一份「A 可用」的旧快照）。
+		Available: func() []string { return []string{"stale", "good"} },
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "stale", AccessToken: "at-stale", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	// Pick 前冷却 A：pool 锁内新鲜状态 A 不可用，但 session 快照仍说可用。
+	p.Cooldown("stale", pool.CoolHard, time.Hour, "余额不足")
+
+	var sawStale atomic.Bool
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		if authz == "Bearer at-stale" {
+			sawStale.Store(true)
+		}
+		return 200, sseOK, true
+	})
+	h := NewHandler(Config{
+		Pool:         p,
+		Upstream:     up,
+		Session:      sess,
+		SoftCooldown: time.Minute,
+	})
+	sess.Bind("conv-1", "stale")
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-1"}}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s（陈旧快照必须被 Pick 闸兜底，请求成功落到 good）", rec.Code, rec.Body)
+	}
+	if sawStale.Load() {
+		t.Fatal("stale 号已冷却，不得被出站选中（PickByUIDForModel 闸失效）")
+	}
+	if uid, ok := st.lastUID("conv-1"); !ok || uid != "good" {
+		t.Fatalf("绑定应收敛到 good（stale 被 Pick 闸拒绝后解绑回落），got %s ok=%v", uid, ok)
 	}
 }
