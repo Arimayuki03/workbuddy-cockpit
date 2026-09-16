@@ -83,8 +83,13 @@ export default function LogsPage() {
 
   useEffect(() => {
     load();
+    // 依赖是「会改变查询范围」的项，而不是 load 本身：其余筛选条件（密钥/模型/
+    // 状态/IP）由「查询」按钮显式触发，不该边打字边重查。
+    //
+    // **realm 必须在这里**：切版本若只等 60 秒心跳，用户点一下会觉得没反应、
+    // 以为功能坏了（实测反馈）。分页与天数本来就在，切版本理应同属「立即重查」。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, days]);
+  }, [page, days, realm]);
 
   // 新请求会不断写入日志；心跳刷新只更新当前筛选下的列表，不会重置筛选条件
   useHeartbeat(load, 60000);

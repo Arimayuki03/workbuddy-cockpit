@@ -89,11 +89,11 @@ def summary(realm: str | None = None,
         'total_tokens': a_tok,
         'active_keys': int(active_keys),
         'top_model': top['model'] if top else None,
-        'usage_health': _usage_health(today, t_req),
+        'usage_health': _usage_health(today, t_req, realm),
     }
 
 
-def _usage_health(today: str, today_requests: int) -> dict:
+def _usage_health(today: str, today_requests: int, realm: str | None = None) -> dict:
     """检测「用量统计没有在累计」——今天有请求日志但统计为 0。
 
     为什么值得单独做：统计写入是旁路（失败只记 warning，不影响转发），
@@ -102,20 +102,31 @@ def _usage_health(today: str, today_requests: int) -> dict:
 
     正常部署不可能出现「今天有请求但今天零统计」——两者写在同一段代码里，
     前者成功后者必成功（bump_usage 紧随日志落库之后）。
-    只在**两边都非零**时才下结论，避免刚部署/刚清库的误报。
+
+    **realm 必须传，且两边口径必须一致** —— 这是被真实误报教会的：日志条数若
+    按全版本统计、而用量按当前版本过滤，那么「有国内版流量、没有国际版流量」
+    时切到国际版必然满足 `n > 0 and today_requests == 0`，页面就会报
+    「今天已有 605 次调用记录，但用量统计为 0」，而点「修复统计」又说
+    「统计与请求日志一致」。两条结论互相矛盾，用户卡在中间无法自证，
+    比不提示更糟。
     """
     try:
+        # 与用量同一口径：看某版本时只看该版本的日志
+        # （COALESCE 把历史 NULL 归 cn，与 realm_of_model 一致）
+        rgt = ' AND COALESCE(realm, ?) = ?' if realm in ('cn', 'global') else ''
         logs_today = db.query_one(
-            f'SELECT COUNT(*) AS c FROM request_logs WHERE {db.day_sql("ts")} = ?',
-            (today,),
+            f'SELECT COUNT(*) AS c FROM request_logs '
+            f'WHERE {db.day_sql("ts")} = ?{rgt}',
+            (today,) + (('cn', realm) if rgt else ()),
         )
         n = int(logs_today['c']) if logs_today else 0
     except Exception:  # noqa: BLE001
         return {'ok': True, 'detail': ''}
     if n > 0 and today_requests == 0:
+        scope = {'cn': '国内版', 'global': '国际版'}.get(str(realm or ''), '')
         return {
             'ok': False,
-            'detail': (f'今天已有 {n} 次调用记录，但用量统计为 0——统计可能没有 '
+            'detail': (f'今天{scope}已有 {n} 次调用记录，但用量统计为 0——统计可能没有 '
                        f'正常写入。可尝试「修复统计」；若仍为 0，请查看服务端日志。'),
         }
     return {'ok': True, 'detail': ''}
