@@ -726,3 +726,63 @@ func TestModelsDevNegativesReStampBlocksEviction(t *testing.T) {
 			after, max, perRound*rounds)
 	}
 }
+
+// TestParseModelsDevDocTieBreakDeterministic T2 真平票（无官方源、3 家 vs 3 家
+// 同票不同值）的确定性：map 迭代序随机化必须被 provider 字典序 tie-break 压平。
+// 双断言锁死：多次解析结果两两相等，且等于 provider 字典序最小候选（"a-vendor"）。
+// 依据 pr134-watchlist-analysis.md #2：旧实现「先出现胜」依赖 map 迭代序——
+// 同 binary 两次拉取同一文档可能落不同值（/v1/models 可观测抖动 +
+// model.json 不可复现覆盖）。
+func TestParseModelsDevDocTieBreakDeterministic(t *testing.T) {
+	raw := fakeModelsDevDoc(map[string]map[string][2]int64{
+		"agg-a": {"kimi-k3": {1000000, 131072}},
+		"agg-b": {"kimi-k3": {1000000, 131072}},
+		"agg-c": {"kimi-k3": {1000000, 131072}},
+		"z-vendor": {"kimi-k3": {200000, 131072}},
+		"y-vendor": {"kimi-k3": {200000, 131072}},
+		"a-vendor": {"kimi-k3": {200000, 131072}},
+	})
+	run := func() int64 {
+		doc, err := parseModelsDevDoc([]byte(raw))
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		return doc["kimi-k3"].Context
+	}
+	first := run()
+	if first != 200000 {
+		t.Errorf("tie-break context=%d want 200000 (provider 字典序最小 a-vendor 一方)", first)
+	}
+	// map 迭代序随机化（-count 多次 + Go 每轮随机起点）下结果必须稳定。
+	for i := 0; i < 20; i++ {
+		if got := run(); got != first {
+			t.Fatalf("tie-break 不确定: run %d got %d want %d", i, got, first)
+		}
+	}
+}
+
+// TestParseModelsDevDocVendorTieBreakByProviderName T1 多官方源同票分歧
+//（zai 与 moonshotai 都报 kimi-k3 且值不同）：两候选都 vendor=true 同票，
+// 旧实现「先到先得」不确定，必须由 provider 字典序（moonshotai < zai）收敛。
+func TestParseModelsDevDocVendorTieBreakByProviderName(t *testing.T) {
+	raw := fakeModelsDevDoc(map[string]map[string][2]int64{
+		"zai":        {"kimi-k3": {1000000, 131072}},
+		"moonshotai": {"kimi-k3": {200000, 131072}},
+	})
+	run := func() int64 {
+		doc, err := parseModelsDevDoc([]byte(raw))
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		return doc["kimi-k3"].Context
+	}
+	first := run()
+	if first != 200000 {
+		t.Errorf("vendor tie-break context=%d want 200000 (provider 字典序 moonshotai < zai)", first)
+	}
+	for i := 0; i < 20; i++ {
+		if got := run(); got != first {
+			t.Fatalf("vendor tie-break 不确定: run %d got %d want %d", i, got, first)
+		}
+	}
+}
