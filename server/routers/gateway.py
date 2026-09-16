@@ -248,8 +248,16 @@ def _authorize(request: Request, model: str | None,
 
     reason = keysvc.validate(key, ip, model, is_model_list=is_model_list)
     if reason:
-        _record(key, ip, model or '', '', 403, 0, 0, 0, ua, reason, False)
-        return None, ip, _oai_error(reason, 403, 'permission_error', 'forbidden')
+        # 状态码由 keysvc 决定，不再一律 403：一批客户端（DeepSeek Harness 等）
+        # 把 401/403 统一显示成「API 密钥无效」，一律 403 会把「密钥版本不匹配」
+        # 这种配置问题说成密钥坏了，用户便反复重建密钥（issue #18）。
+        _record(key, ip, model or '', '', getattr(reason, 'status', 403), 0, 0, 0, ua, reason, False)
+        return None, ip, _oai_error(
+            reason,
+            getattr(reason, 'status', 403),
+            getattr(reason, 'err_type', 'permission_error'),
+            getattr(reason, 'code', 'forbidden'),
+        )
 
     limited, count = _rate_limited(key)
     if limited:

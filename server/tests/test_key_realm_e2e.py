@@ -72,31 +72,40 @@ class GatewayRealmIsolationE2ETest(unittest.TestCase):
             )
 
     def test_global_key_cannot_call_cn_model(self) -> None:
+        """版本不匹配用 **400**：一批客户端（DeepSeek Harness 等）把 401/403
+        一律显示成「API 密钥无效」，用 403 会让「密钥版本配错了」看起来像
+        「密钥坏了」——issue #18 里用户因此反复重建密钥。断言点有两个：
+        仍被拦住（不放行到上游）**且**状态码不会被客户端折叠成认证错误。
+        """
         r = self._chat(self._token(realm='global'), 'glm-5.2')
-        self.assertEqual(r.status_code, 403, r.text)
+        self.assertEqual(r.status_code, 400, r.text)
         self.assertIn('国际版', r.json()['error']['message'])
 
     def test_cn_key_cannot_call_global_model(self) -> None:
         r = self._chat(self._token(realm='cn'), 'global:gpt-5.6-sol')
-        self.assertEqual(r.status_code, 403, r.text)
+        self.assertEqual(r.status_code, 400, r.text)
         self.assertIn('国内版', r.json()['error']['message'])
 
     def test_scoped_key_passes_auth_for_own_realm(self) -> None:
-        """放行与否看状态码：502 = 过了鉴权但上游连不上（正是我们想确认的）。"""
+        """放行与否看状态码：502 = 过了鉴权但上游连不上（正是我们想确认的）。
+
+        必须断言**确切**的 502，不能只断言「不是 403」——版本不匹配改 400 之后，
+        「不是 403」把 400 也放过了，测试就白写了。
+        """
         r = self._chat(self._token(realm='global'), 'global:gpt-5.6-sol')
-        self.assertNotEqual(r.status_code, 403, f'同版本模型不该被拦：{r.text}')
+        self.assertEqual(r.status_code, 502, f'同版本模型该过鉴权（502=上游不可达）：{r.text}')
 
     def test_unscoped_key_passes_both_realms(self) -> None:
         token = self._token()
         for model in ('glm-5.2', 'global:gpt-5.6-sol'):
             r = self._chat(token, model)
-            self.assertNotEqual(r.status_code, 403, f'{model} 不该被拦：{r.text}')
+            self.assertEqual(r.status_code, 502, f'{model} 该过鉴权：{r.text}')
 
     def test_missing_model_rejected_for_scoped_key(self) -> None:
         """不带 model 走的就是上游默认模型（国内版）——隔离密钥不能借此绕过。"""
         r = self._chat(self._token(realm='global'), '')
         # 空 model 先被网关拦成 400；这里确认没被放行到上游
-        self.assertIn(r.status_code, (400, 403), r.text)
+        self.assertEqual(r.status_code, 400, r.text)
 
     def test_models_endpoint_scoped_by_key(self) -> None:
         """/v1/models 按密钥版本裁剪（用假上游响应，不依赖真实上游）。"""

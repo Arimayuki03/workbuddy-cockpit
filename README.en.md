@@ -576,6 +576,57 @@ for chunk in resp:
 > is accounted for precisely.
 
 <details>
+<summary><b>OpenAI Responses API (Codex / DeepSeek Harness, etc.)</b></summary>
+
+This service also speaks the Responses protocol (`/v1/responses`; `/responses` works too
+when the SDK's `baseURL` omits `/v1`). The request body uses `input` instead of `messages`,
+and `instructions` carries the system text:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="https://wb.example.com/v1", api_key="wbk_xxxxxxxx")
+
+resp = client.responses.create(
+    model="glm-5.2",
+    instructions="You are a terse assistant",
+    input="Hello",
+    stream=True,
+)
+for event in resp:
+    if event.type == "response.output_text.delta":
+        print(event.delta, end="")
+```
+
+Tool calls are supported as well: send flat-shaped `tools`
+(`{type:"function", name, parameters}`) and you get back `function_call` output items
+plus `response.function_call_arguments.delta` events.
+
+> A client that speaks only `openai-responses` (such as a DeepSeek Harness custom
+> provider) should set its API protocol to `openai-responses`. It is not the same
+> protocol as `openai-completions`, so it needs its own provider entry.
+
+</details>
+
+<details>
+<summary><b>Anthropic Messages API (Claude Code / Cursor / Cline, etc.)</b></summary>
+
+Clients that only speak the Anthropic protocol can point their base URL straight at this
+service — set `ANTHROPIC_BASE_URL` to the root (the wire format of `/v1/messages` matches
+the official one):
+
+```bash
+export ANTHROPIC_BASE_URL=https://wb.example.com
+export ANTHROPIC_AUTH_TOKEN=wbk_xxxxxxxx   # x-api-key header also accepted
+export ANTHROPIC_MODEL=glm-5.2
+```
+
+Model names are the **same set** as on the OpenAI side (including the `global:` prefix
+version rule and per-key realm isolation), and `/v1/messages/count_tokens` is available.
+
+</details>
+
+<details>
 <summary><b>Available models</b></summary>
 
 Check Settings → Available models for the live list. Commonly (all with a 131072 context):
@@ -592,6 +643,9 @@ Check Settings → Available models for the live list. Commonly (all with a 1310
 |---|---|---|---|
 | `POST` | `/v1/chat/completions` | gateway key | OpenAI-compatible chat (streaming / non-streaming) |
 | `POST` | `/v2/chat/completions` | gateway key | Same as above (v2 path) |
+| `POST` | `/v1/responses` `/responses` | gateway key | OpenAI Responses API compatible (streaming / non-streaming) |
+| `POST` | `/v1/messages` | gateway key | Anthropic Messages API compatible (Claude Code, etc.) |
+| `POST` | `/v1/messages/count_tokens` | gateway key | Rough input-token estimate (by character count) |
 | `GET` | `/v1/models` | gateway key | Model list |
 | `GET` | `/healthz` | none | Liveness probe (includes upstream connectivity) |
 | `GET` | `/api/me` | session | Current user |

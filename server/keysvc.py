@@ -12,6 +12,38 @@ from .iputil import ip_matches
 TOKEN_PREFIX = 'wbk_'
 
 
+class Rejection(str):
+    """拒绝原因 + 该用哪个 HTTP 状态码回。
+
+    为什么不是纯字符串：一批客户端（实测 DeepSeek Harness——它的 chat-completions
+    适配层写的是 `status === 401 || 403 → code 'AUTH'`，界面再 `code === 'AUTH' ?
+    'API 密钥无效' : message`）会把 **401/403 的真实报文整段丢掉**，只显示本地化的
+    「API 密钥无效」。于是「密钥限定了国内版、却去调国际版模型」这种**配置问题**
+    被显示成密钥坏了，用户就反复新建密钥——而在国内版界面里新建的每一把都还是
+    国内版专用，永远好不了（issue #18 的现场）。
+
+    所以按「该怪谁」分流，而不是一律 403：
+
+      · 请求与密钥不匹配（版本归属 / 模型白名单 / 缺 model）→ ``400
+        invalid_request_error``：这是「这次请求的参数不对」，客户端会把原因原样
+        显示出来，用户一眼看到该改什么。
+      · 凭据本身不可用（已停用 / 已过期）→ ``403``：显示成「密钥无效」是贴切的。
+      · 用量类（配额用尽）→ ``429``：避免被当成认证失败（OpenAI 同语义用 429
+        ``insufficient_quota``）。
+
+    继承 str 是为了兼容既有调用方——它们只做 `if reason:` 真假判断或把原因当
+    文本用，`str` 子类在这两种用法下行为不变。
+    """
+
+    def __new__(cls, message: str, status: int = 403,
+                err_type: str = 'permission_error', code: str = 'forbidden'):
+        self = super().__new__(cls, message)
+        self.status = status
+        self.err_type = err_type
+        self.code = code
+        return self
+
+
 def _hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
@@ -202,28 +234,35 @@ def resolve(token: str) -> dict | None:
 
 def validate(key: dict, ip: str, model: str | None,
              *, is_model_list: bool = False) -> str | None:
-    """返回 None 表示放行，否则返回拒绝原因。
+    """返回 None 表示放行，否则返回拒绝原因（`Rejection`，自带状态码）。
 
     is_model_list：请求是 `/v1/models`（模型发现，不带 model）。版本归属在这种
     请求上不拦——它没有版本可言，拦了会让限定版本的密钥连「我有哪些模型」都
     问不到；真正的隔离由调用时的模型名把关（见下）。
     """
     if not key['enabled']:
-        return '密钥已停用'
+        return Rejection('密钥已停用', 403, 'permission_error', 'key_disabled')
     if key['expires_at'] and key['expires_at'] < time.time():
-        return '密钥已过期'
+        return Rejection('密钥已过期', 403, 'permission_error', 'key_expired')
     if key['quota'] and key['used_tokens'] >= key['quota']:
-        return '密钥配额已用尽'
+        # 配额用尽与认证无关，用 429 才对（403 会被客户端读成「密钥无效」：
+        # 用户于是去查密钥、而不是去调额度，方向就被带偏了）。
+        return Rejection('密钥配额已用尽', 429, 'insufficient_quota', 'quota_exhausted')
 
     allow = key['ip_allowlist']
     if allow and not any(ip_matches(ip, c) for c in allow):
-        return f'来源 IP {ip} 不在密钥白名单内'
+        # 观感上像认证失败，但它不是「密钥错」而是「来源不对」，客户端原样显示
+        # 才能让用户知道要加白名单，故用 400 让报文得以透出。
+        return Rejection(f'来源 IP {ip} 不在密钥白名单内', 400,
+                         'invalid_request_error', 'ip_not_allowed')
 
     if key['max_ips']:
         known = db.query('SELECT ip FROM api_key_ips WHERE key_id = ?', (key['id'],))
         ips = {r['ip'] for r in known}
         if ip not in ips and len(ips) >= key['max_ips']:
-            return f'密钥已绑定 {len(ips)} 个 IP，超出上限 {key["max_ips"]}'
+            return Rejection(
+                f'密钥已绑定 {len(ips)} 个 IP，超出上限 {key["max_ips"]}', 400,
+                'invalid_request_error', 'too_many_ips')
 
     # 版本归属：密钥限定版本后，只能调用该版本的模型。
     #
@@ -237,13 +276,17 @@ def validate(key: dict, ip: str, model: str | None,
     want = _norm_realm(key.get('realm'))
     if want and not is_model_list:
         if not isinstance(model, str) or not model.strip():
-            return f'该密钥限定了{"国际版" if want == "global" else "国内版"}模型，请求必须指定 model'
+            return Rejection(
+                f'该密钥限定了{"国际版" if want == "global" else "国内版"}模型，请求必须指定 model',
+                400, 'invalid_request_error', 'realm_mismatch')
         got = 'global' if model.strip().lower().startswith('global:') else 'cn'
         if got != want:
             label = {'cn': '国内版', 'global': '国际版'}[want]
             other = '国际版' if want == 'cn' else '国内版'
             hint = '模型名需带 global: 前缀' if want == 'global' else '请去掉 global: 前缀'
-            return f'该密钥仅限{label}模型，当前请求是{other}模型（{hint}）'
+            return Rejection(
+                f'该密钥仅限{label}模型，当前请求是{other}模型（{hint}）',
+                400, 'invalid_request_error', 'realm_mismatch')
 
     # 模型白名单：**不能因为 model 缺失就跳过检查**。
     # 原写法 `if key['models'] and model and model not in ...` 在 body 不带 model
@@ -252,9 +295,11 @@ def validate(key: dict, ip: str, model: str | None,
     # 拦成 400；这里再兜一层，任何非字符串或空值一律拒绝。
     if key['models'] and not is_model_list:
         if not isinstance(model, str) or not model.strip():
-            return '请求未指定 model，而该密钥启用了模型白名单'
+            return Rejection('请求未指定 model，而该密钥启用了模型白名单', 400,
+                             'invalid_request_error', 'model_not_allowed')
         if model not in key['models']:
-            return f'模型 {model} 不在密钥白名单内'
+            return Rejection(f'模型 {model} 不在密钥白名单内', 400,
+                             'invalid_request_error', 'model_not_allowed')
     return None
 
 
