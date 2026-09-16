@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any
@@ -35,6 +36,13 @@ from .realm import (
 # 不校验就会把国际版的 token 写进国内版的会话流程（上游 validateRealmMatch 同此意图）。
 _state_cache: dict[str, tuple[float, Realm]] = {}
 STATE_TTL = 300
+
+# 模型目录的 v3 端点（国内版与国际版同路径，按账号切 base）。
+# 它是官方客户端模型目录的第二级取数：企业端点拿不到的那几个模型只在
+# /v3/config 下发——实测国际版独有的 deepseek-v4.1-flash / gpt-6-astra /
+# hy4-preview-f / kimi-k2.8-preview 都从这里来（见 fetch_models 的说明）。
+# 该端点有 UA 门禁：只有三段式 CLI UA（我们 _ua 的形态）能过，web UA 被 400 拒。
+V3_CONFIG_PATH = '/v3/config'
 
 
 def _envelope(resp: httpx.Response) -> tuple[int, Any]:
@@ -325,54 +333,118 @@ async def fetch_models(auth: dict) -> tuple[bool, list | str]:
     只暴露 id / context_length / max_output_tokens。要做「模型中心」这类
     带显示名与能力的展示，只能照上游约定直连腾讯接口（同一路径、同一信封）。
 
-    口径与上游 FetchModels 保持一致：
-      - 只取 agents 里名为 `cli` 的模型 id 列表（那才是对 CLI 暴露的）
-      - `disabled` 的条目不收录
-      - **过滤非对话模型**（上游 2026-09-14 新增）：见 `_non_chat_model`。
-        不过滤的话，模型中心会列出嵌入/补全/图片生成这类模型，用户选中后
-        聊天直接报 `code=11102`（上游明确说「选了报错」）。
-    路径按版本分派：国际版 `/v2/enterprises/personal/models` 优先、
-    `/console/...` 回落；国内版直接 `/console/...`。
+    **模型目录是两级取数**（照官方客户端，上游 2026-09-15 commit 0adc345 修的同
+    一件事）：企业端点（国内 `/console/...`、国际 `/v2/...` → `/console/...`）**加上**
+    `/v3/config`。只探测企业端点会丢掉 `/v3/config` 独有的模型——实测国际版少了
+    `deepseek-v4.1-flash`、`gpt-6-astra`、`hy4-preview-f`、`kimi-k2.8-preview`
+    四个（用户报的「国际版没有 DeepSeek」即此）。两路**并发**，任一路失败降级用
+    另一路（都失败才算失败）。
+
+    两域口径各自保留（上游两域各走各的解析）：
+      - 国内版（上游 FetchModels）：企业端点按 agents 的 `cli` 列表过滤；
+      - 国际版（上游 parseGlobalModelNames）：企业端点取 `data.models` **全量**，
+        不看 agents——国际版模型目录不由国内版的 `cli` 白名单定义；
+      - `/v3/config` 两域都是**全量**（它没有 agents），但要过非对话过滤。
+      - `disabled` 的条目不收录，跳过无 id 的条目。
+
+    合并口径与上游一致：`/v3/config` 条目为主（同 id 时字段以它为准），企业端点
+    只补它没有的模型；输出顺序稳定（v3 在前、企业端点补充项在后）。
+
     返回 (ok, models 或错误信息)。不含任何凭据。
     """
     access_token = str(auth.get('access_token') or '')
     if not access_token:
         return False, '该账号无有效 accessToken'
     realm = realm_of(auth)
-    paths = (
+    uid = str(auth.get('uid') or '')
+    enterprise_paths = (
         ['/v2/enterprises/personal/models', '/console/enterprises/personal/models']
         if realm == GLOBAL
         else ['/console/enterprises/personal/models']
     )
-    try:
-        data = None
+
+    async def _probe(paths: list[str]) -> tuple[object | None, str]:
+        """按候选路径顺序取第一个成功响应，返回 (data, 错误说明)。"""
         last_code = -1
-        async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
-            for path in paths:
-                resp = await client.get(
-                    f'{chat_base(realm)}{path}',
-                    headers=_hdr(realm, access_token, str(auth.get('uid') or '')),
-                )
-                code, body = _envelope(resp)
-                last_code = code
-                if code == 0 and isinstance(body, dict):
-                    data = body
-                    break
-        if not isinstance(data, dict):
-            return False, f'模型接口返回 code={last_code}'
-    except Exception as exc:  # noqa: BLE001
-        return False, f'模型接口异常: {exc}'
+        try:
+            async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
+                for path in paths:
+                    resp = await client.get(
+                        f'{chat_base(realm)}{path}',
+                        headers=_hdr(realm, access_token, uid),
+                    )
+                    code, body = _envelope(resp)
+                    last_code = code
+                    if code == 0 and isinstance(body, (dict, list)):
+                        return body, ''
+            return None, f'code={last_code}'
+        except Exception as exc:  # noqa: BLE001
+            return None, f'异常: {exc}'
+
+    # 两路并发：串行会把模型中心的等待时间翻倍，而两路互不依赖。
+    ent_res, v3_res = await asyncio.gather(
+        _probe(enterprise_paths),
+        _probe([V3_CONFIG_PATH]),
+    )
+    ent_data, ent_err = ent_res
+    v3_data, v3_err = v3_res
+    if ent_data is None and v3_data is None:
+        return False, f'模型接口返回 {ent_err}（/v3/config 亦失败：{v3_err}）'
+
+    # 各自解析成「id → 条目」再合并。解析函数与 order 分离，是为了让合并
+    # 能按「主路原序在前、补缺项在后」输出，而不是依赖字典的插入序。
+    ent_items, ent_order = _parse_model_payload(ent_data, realm)
+    v3_items, v3_order = _parse_model_payload(v3_data, realm)
+    if not ent_items and not v3_items:
+        return False, '模型接口未返回任何可用模型'
+
+    merged: dict[str, dict] = {}
+    order: list[str] = []
+    for items, ids in ((v3_items, v3_order), (ent_items, ent_order)):
+        for mid in ids:
+            if mid in merged:
+                continue
+            merged[mid] = items[mid]
+            order.append(mid)
+    out = [merged[i] for i in order]
+    if not out:
+        return False, '模型接口未返回任何可用模型'
+    return True, out
+
+
+def _parse_model_payload(data: object, realm: Realm) -> tuple[dict[str, dict], list[str]]:
+    """把一路响应解析成「id → 条目」与输出顺序。
+
+    容忍两种形态：对象列表（常规）与字符串数组（窄表，只有模型名）。
+    国内版的企业端点按 agents 的 `cli` 列表过滤；国际版与 /v3 全量。
+    """
+    # 窄表形态：data 直接是模型名字符串数组（上游 parseGlobalModelNames 兼容）。
+    if isinstance(data, list):
+        items: dict[str, dict] = {}
+        order: list[str] = []
+        for raw in data:
+            mid = str(raw).strip()
+            if mid and mid not in items:
+                items[mid] = {'id': mid}
+                order.append(mid)
+        return items, order
+
+    if not isinstance(data, dict):
+        return {}, []
 
     raw_models = data.get('models') if isinstance(data.get('models'), list) else []
     agents = data.get('agents') if isinstance(data.get('agents'), list) else []
 
+    # 国内版才用 agents 的 `cli` 白名单；国际版取全量。窄表的 v3 响应没有 agents，
+    # 自然走全量。
     cli_ids: list[str] = []
-    for ag in agents:
-        if isinstance(ag, dict) and ag.get('name') == 'cli':
-            ids = ag.get('models')
-            if isinstance(ids, list):
-                cli_ids = [str(x) for x in ids if x]
-            break
+    if realm != GLOBAL:
+        for ag in agents:
+            if isinstance(ag, dict) and ag.get('name') == 'cli':
+                ids = ag.get('models')
+                if isinstance(ids, list):
+                    cli_ids = [str(x) for x in ids if x]
+                break
 
     info: dict[str, dict] = {}
     for m in raw_models:
@@ -409,13 +481,19 @@ async def fetch_models(auth: dict) -> tuple[bool, list | str]:
             'only_reasoning': bool(m.get('onlyReasoning')),
             # 推理摘要模式（如 "auto"）；与 supportedEfforts 不同源
             'reasoning_summary': str(reasoning.get('summary') or '').strip(),
-            '_non_chat': _non_chat_model(mid, _as_int(m.get('maxOutputTokens')), tags),
+            # 非对话过滤（nes- / 输出≤256 / text-to-image）：**国内版全域**适用
+            # （上游在 CN 的 console 与 v3 两路都做）。国际版不做——那套规则源自
+            # 国内版 harness，套到国际版会重犯「用国内版口径裁剪国际版」的错误。
+            '_non_chat': realm != GLOBAL and _non_chat_model(
+                mid, _as_int(m.get('maxOutputTokens')), tags),
         }
 
-    # cli 列表为空时退回全部未禁用模型：上游此时直接报错，但管理端只是展示，
-    # 给个可用列表比整页空白更有用（来源会在 UI 上如实标注）。
+    # 国内版：cli 列表为空时退回全部未禁用模型（上游此时直接报错，但管理端只是
+    # 展示，给个可用列表比整页空白更有用，来源会在 UI 上如实标注）。
+    # 国际版与 /v3：未取 cli_ids（空）→ 天然走全量。
     ids = cli_ids or list(info.keys())
-    out: list[dict] = []
+    items = {}
+    order = []
     for i in ids:
         item = info.get(i)
         if not item or item['disabled']:
@@ -423,10 +501,9 @@ async def fetch_models(auth: dict) -> tuple[bool, list | str]:
         # 内部标记一律去掉（无论是否命中过滤）——否则它会随 API 响应漏到前端
         if item.pop('_non_chat', False):
             continue
-        out.append(item)
-    if not out:
-        return False, '模型接口未返回任何可用模型'
-    return True, out
+        items[i] = item
+        order.append(i)
+    return items, order
 
 
 def _non_chat_model(mid: str, max_output_tokens: int, tags: list) -> bool:

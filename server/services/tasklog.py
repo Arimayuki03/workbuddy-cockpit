@@ -153,6 +153,20 @@ def _classify(rest: str, sev: str | None) -> tuple[int, str]:
     if m_adopt:
         return int(m_adopt.group(1)), 'credit'
 
+    # 连登奖励（上游 91418c5 新增）：`redeem tier=7d ok (+100 credit, +5 energy, +1 chances)`。
+    # 不解析的话界面上收益显示为 0——而这是真实到账的积分，等于把「赚到了」显示成「没赚」。
+    # 只取 credit 段（energy / chances 不是积分，不并入收益）。
+    m_redeem = re.search(r'redeem\s+tier=\S+\s+ok\s*\(\+?(\d+)\s*credits?', rest, re.IGNORECASE)
+    if m_redeem:
+        return int(m_redeem.group(1)), 'credit'
+
+    # 连登抽奖（同提交）：`lottery drawn prize=50 credits (credit)`。
+    # 奖品种类不止积分（也有谢谢参与/道具），只有 prize 文本里带 credits 才计入收益，
+    # 否则是无积分奖励的抽奖，仍算成功。
+    m_draw = re.search(r'lottery\s+drawn\s+prize=(\d+)\s*credits?', rest, re.IGNORECASE)
+    if m_draw:
+        return int(m_draw.group(1)), 'credit'
+
     # 账号被禁用属于严重结果，即使上游只标了 WARN 也按失败展示
     if '禁用' in rest or 'session dead' in lower:
         return 0, 'error'
@@ -165,6 +179,11 @@ def _classify(rest: str, sev: str | None) -> tuple[int, str]:
     # 「今天已签到」是幂等成功：腾讯以业务错误返回，但语义上没问题。
     # 不特判就会在界面上显示成红色的签到失败。
     if any(m in rest or m in lower for m in _ALREADY_MARKERS):
+        return 0, 'ok'
+
+    # 抽奖成功（无积分奖或未命中上面的 credit 形态）：不能落到末尾的 error——
+    # 它没有 ` ok ` 字样，全靠这一条兜住，否则中奖反而显示成红色失败。
+    if re.match(r'lottery\s+drawn\b', rest, re.IGNORECASE):
         return 0, 'ok'
 
     if re.match(r'report \d+/\d+:', lower):

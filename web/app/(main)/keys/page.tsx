@@ -11,6 +11,7 @@ import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {useAuth} from '@/lib/auth-context';
+import {useRealm, type Realm} from '@/lib/realm-context';
 import {Button} from '@/components/ui/button';
 import {CopyButton} from '@/components/ui/copy-button';
 import {RichText} from '@/lib/i18n/rich-text';
@@ -54,6 +55,8 @@ interface FormState {
   ipAllowlist: string;
   models: string;
   quota: string;
+  /** 版本归属：'cn' | 'global' | ''（不限制，仅存量密钥） */
+  realm: Realm | '';
 }
 
 const emptyForm: FormState = {
@@ -64,6 +67,7 @@ const emptyForm: FormState = {
   ipAllowlist: '',
   models: '',
   quota: '0',
+  realm: 'cn',
 };
 
 function toLines(v: string): string[] {
@@ -76,6 +80,7 @@ function toLines(v: string): string[] {
 export default function KeysPage() {
   const t = useT();
   const {isAdmin} = useAuth();
+  const {realm, label: realmName} = useRealm();
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [formOpen, setFormOpen] = useState(false);
@@ -104,7 +109,8 @@ export default function KeysPage() {
 
   function openCreate() {
     setEditing(null);
-    setForm(emptyForm);
+    // 新建时默认跟随当前所在版本：在哪个版本的界面里建，就是哪个版本的密钥
+    setForm({...emptyForm, realm});
     setFormOpen(true);
   }
 
@@ -119,6 +125,7 @@ export default function KeysPage() {
       ipAllowlist: (k.ip_allowlist || []).join('\n'),
       models: (k.models || []).join(', '),
       quota: String(k.quota ?? 0),
+      realm: k.realm || '',
     });
     setFormOpen(true);
   }
@@ -137,6 +144,9 @@ export default function KeysPage() {
         ip_allowlist: toLines(form.ipAllowlist),
         models: toLines(form.models),
         quota: Number(form.quota) || 0,
+        // '' 是有意义的取值（不限制版本），必须照传——后端以它区分
+        // 「存量密钥，两版都能调」与「限定了某一版」
+        realm: form.realm,
       };
 
       // 新建：填了天数才设过期（0 = 永不过期，不下发 expires_at）
@@ -214,6 +224,12 @@ export default function KeysPage() {
               <TableHead className="text-[11px] text-muted-foreground">{t('keys.colUsedTokens')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">{t('keys.colLastUsed')}</TableHead>
               {isAdmin && <TableHead className="pr-4 text-right text-[11px] text-muted-foreground">{t('accounts.colActions')}</TableHead>}
+              <TableHead className="text-[11px] text-muted-foreground">{t('keys.realm')}</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('keys.expiry')}</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('keys.colIpModels')}</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('keys.colUsedTokens')}</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('keys.colLastUsed')}</TableHead>
+              {isAdmin && <TableHead className="pr-4 text-right text-[11px] text-muted-foreground">{t('accounts.colActions')}</TableHead>}
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -237,6 +253,22 @@ export default function KeysPage() {
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     {k.expires_at ? fmtDateTime(k.expires_at) : t('keys.neverExpires')}
+                  </TableCell>
+                  <TableCell>
+                    {k.realm === 'global' ? (
+                      <Badge variant="secondary" className="rounded-full text-[10px]">{t('realm.global')}</Badge>
+                    ) : k.realm === 'cn' ? (
+                      <Badge variant="secondary" className="rounded-full text-[10px]">{t('realm.cn')}</Badge>
+                    ) : (
+                      // 存量密钥：本字段引入前创建的，两版都能调。单独标出来
+                      // 而不是默认显示成国内版——那会让人以为它已被限定。
+                      <span
+                        className="text-[10px] text-amber-600 dark:text-amber-400"
+                        title={t('keys.realmUnsetTitle')}
+                      >
+                        {t('keys.realmUnset')}
+                      </span>
+                    )}
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     {k.max_ips ? t('keys.ipLimit', {n: k.max_ips}) : t('keys.ipUnlimited')} /{' '}
@@ -430,16 +462,41 @@ export default function KeysPage() {
                 />
               </div>
               <div className="space-y-1.5">
+                <Label className="text-[11px] text-muted-foreground">{t('keys.realmLimit')}</Label>
+                <Select
+                  value={form.realm || '__all__'}
+                  onValueChange={(v) => setForm({...form, realm: (v === '__all__' ? '' : v) as FormState['realm']})}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="cn">{t('keys.realmCnOnly')}</SelectItem>
+                    <SelectItem value="global">{t('keys.realmGlobalOnly')}</SelectItem>
+                    {/* 只有存量密钥会停留在这个取值上；新建时不建议选，
+                        所以文案写明它意味着什么 */}
+                    <SelectItem value="__all__">{t('keys.realmAll')}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-[10px] leading-4 text-muted-foreground">
+                  {form.realm === ''
+                    ? t('keys.realmHintUnlimited')
+                    : form.realm === 'global'
+                      ? t('keys.realmHintGlobal')
+                      : t('keys.realmHintCn')}
+                </p>
+              </div>
+              <div className="space-y-1.5">
                 <Label className="text-[11px] text-muted-foreground">{t('keys.modelWhitelist')}</Label>
                 <Input
                   value={form.models}
                   onChange={(e) => setForm({...form, models: e.target.value})}
                   placeholder="glm-5.2, global:gpt-5.4"
                 />
-                {/* 版本隔离就是靠这个白名单：模型名带 global: 前缀的走国际版账号池，
-                    不带前缀的走国内版。所以要「一把密钥只能用国际版」，就只列
-                    global: 开头的模型；想两版都能用，就分别列出各自要用的模型。
-                    这不是额外的功能开关，而是上游路由协议的直接体现。 */}
+                {/* 模型白名单与版本归属是**两道**检查，都要过：
+                    版本归属由上面的选项控制（粗粒度，拦跨版本调用），
+                    白名单在版本之内再收窄到具体几个模型（细粒度）。
+                    写模型名时注意与所选版本一致——带 global: 前缀的是国际版模型。 */}
                 <p className="text-[10px] leading-4 text-muted-foreground">
                   {/* 反引号包住的模型名由 RichText 渲染成等宽字体 */}
                   <RichText text={t('keys.modelPrefixNote')} />
