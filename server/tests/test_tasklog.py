@@ -393,6 +393,69 @@ class GrowthRewardLogTest(unittest.TestCase):
         self.assertEqual(ev['level'], 'ok')
         self.assertEqual(ev['credits'], 0)
 
+    def test_generic_gain_form(self) -> None:
+        """通用收益形态 `<动作> ok (+N credit)` —— 上游一直在加新动作。
+
+        写成通用规则（而不是逐个动作列举）的理由：这类日志上游**持续在加**
+        （adopt / gift / compensation / …），每加一个漏一条的后果是**收益显示为 0**
+        ——数字是错的但没有任何报错，最难发现。已经踩过三次。
+        """
+        for action in ('gift', 'compensation', 'adopt', 'claim', 'bonus', 'unknown-new-action'):
+            ev = tasklog.parse_line(f'{DOCKER}activity 89374120: {action} ok (+80 credit)')
+            assert ev is not None
+            self.assertEqual(ev['credits'], 80, f'{action} 的收益没提取到')
+            self.assertEqual(ev['level'], 'credit', action)
+
+    def test_generic_rule_does_not_swallow_multi_item_parens(self) -> None:
+        """**反证**：通用规则不能吞掉括号里有多项的形态。
+
+        连登奖励是 `(+100 credit, +5 energy, +1 chances)` —— 通用规则要求
+        括号里只有 credit 且紧跟右括号，所以它不会命中这条，仍由 redeem 规则
+        处理。若通用规则写松了（例如匹配 `credit` 但不要求右括号），
+        它会先命中并返回，把一条本应计入的事件变成只算 credit —— 虽然这里
+        结果数值相同，但语义会漂移（例如未来 redeem 改成 credit 不在首位时
+        会取错数字）。所以这里钉住「谁处理谁」。
+        """
+        ev = tasklog.parse_line(
+            f'{DOCKER}activity 89374120: redeem tier=7d ok (+100 credit, +5 energy, +1 chances)')
+        assert ev is not None
+        self.assertEqual(ev['credits'], 100)
+        self.assertEqual(ev['level'], 'credit')
+        # 多档位也要对
+        ev2 = tasklog.parse_line(
+            f'{DOCKER}activity 89374120: redeem tier=28d ok (+500 credit, +9 energy, +3 chances)')
+        assert ev2 is not None
+        self.assertEqual(ev2['credits'], 500)
+
+    def test_makeup_line(self) -> None:
+        """补签卡保连登（上游 243c7f2）：成功无积分收益，失败仍算 error。"""
+        ok = tasklog.parse_line(f'{DOCKER}activity 89374120: makeup ok 2026-09-15 (+streak kept)')
+        assert ok is not None
+        self.assertEqual(ok['level'], 'ok')
+        self.assertEqual(ok['credits'], 0, '补签本身不产生积分收益')
+
+        bad = tasklog.parse_line(f'{DOCKER}activity 89374120: makeup 2026-09-15: boom')
+        assert bad is not None
+        self.assertEqual(bad['level'], 'error')
+
+    def test_zero_credit_still_counts_as_credit_level(self) -> None:
+        """`(+0 credit)` 是「明确告知没有收益」，与「没提收益」不同。
+
+        返回 level='credit' 让界面能区分「这次活动给了 0」与「这条日志与积分无关」。
+        """
+        ev = tasklog.parse_line(f'{DOCKER}checkin 89374120: ok (+0 credit)')
+        assert ev is not None
+        self.assertEqual(ev['credits'], 0)
+        self.assertEqual(ev['level'], 'credit')
+
+    def test_depart_without_credit_is_plain_ok(self) -> None:
+        """没有收益括号的行不该被通用规则误判成 credit。"""
+        ev = tasklog.parse_line(f'{DOCKER}travel 89374120: depart ok location=7')
+        assert ev is not None
+        self.assertEqual(ev['credits'], 0)
+        self.assertEqual(ev['level'], 'ok')
+        self.assertEqual(ev['credits'], 0)
+
 
 class ScriptTaskKindsTest(unittest.TestCase):
     """第五、六类任务（开学季 / 夜猫）的日志解析。
