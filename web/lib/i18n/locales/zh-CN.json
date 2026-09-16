@@ -328,6 +328,8 @@
     "modelPrefixNote": "在所选版本之内再限制到具体模型：`global:gpt-5.4` 是国际版模型，`glm-5.2` 是国内版模型。留空则不限制。",
     "create": "创建",
     "createdTitle": "密钥创建成功",
+    "createdButRefreshFailed": "密钥已创建，但列表刷新失败",
+    "createdButRefreshFailedHint": "手动刷新页面即可看到",
     "createdDesc": "请立即复制保存，关闭后将无法再次查看完整密钥",
     "copyKey": "复制密钥",
     "copyBaseUrl": "复制 Base URL",
