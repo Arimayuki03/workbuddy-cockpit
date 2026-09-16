@@ -358,6 +358,9 @@ docker compose logs workbuddy-manager | grep -A2 密码   # 首启随机密码
 docker pull ghcr.io/ithtelab/workbuddy-manager:latest
 ```
 
+> 镜像**同时提供 `linux/amd64` 与 `linux/arm64`**（Apple Silicon、ARM 云主机可直接拉取，
+> 无需 QEMU 模拟）。`docker pull` 会按你的机器架构自动选择对应的那一份。
+
 **容器版与宿主版的能力是一致的** —— compose 里默认挂载了三样东西让它们对齐：
 
 | 挂载 | 作用 |
