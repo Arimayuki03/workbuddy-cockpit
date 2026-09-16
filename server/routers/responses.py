@@ -71,13 +71,15 @@ def _event(name: str, payload: dict) -> bytes:
 
 
 def _failed(message: str, status: int, err_type: str = 'api_error',
-            code: str | None = None) -> JSONResponse:
+            code: str | None = None, hint: str | None = None) -> JSONResponse:
     """错误回非流式 JSON（带状态码），而不是 SSE 错误帧。
 
     流一旦以 200 开始，状态码就固定了——错误只能裹在事件里，客户端会把它当作
     「流正常结束」。所以错误一律在**开流之前**用真实状态码回掉。
+
+    `hint` 透传上游的 `error.gateway_hint`（并列的可执行建议；为空时不写字段）。
     """
-    return gateway._oai_error(message, status, err_type, code)
+    return gateway._oai_error(message, status, err_type, code, hint)
 
 
 def _upstream_error_text(data: object, resp: object = None,
@@ -776,7 +778,8 @@ async def _handle(request: Request) -> JSONResponse | StreamingResponse:
                 credit=gateway._usage_credit(usage),
             )
             if resp.status_code >= 400:
-                return _failed(_upstream_error_text(data, resp), resp.status_code)
+                return _failed(_upstream_error_text(data, resp), resp.status_code,
+                               hint=gateway._error_hint(data))
             if not isinstance(data, dict):
                 # 200 但响应体不是 JSON：不能当作「成功但空回答」返回——那正是
                 # 最难排查的一种表现（客户端不重试、不报错）。原样把上游的响应
@@ -821,7 +824,8 @@ async def _handle(request: Request) -> JSONResponse | StreamingResponse:
         latency = int((time.time() - started) * 1000)
         gateway._record(key, ip, model, mapped or '', resp.status_code, 0, 0, latency,
                         ua, text, True)
-        return _failed(_upstream_error_text(parsed, None, fallback=text), resp.status_code)
+        return _failed(_upstream_error_text(parsed, None, fallback=text),
+                       resp.status_code, hint=gateway._error_hint(parsed))
 
     async def gen():
         pending = ''
@@ -858,6 +862,12 @@ async def _handle(request: Request) -> JSONResponse | StreamingResponse:
                     if isinstance(err_obj, dict) and not obj.get('choices'):
                         msg = err_obj.get('message')
                         error_text = str(msg if msg else err_obj)[:500]
+                        # 带上上游的 gateway_hint（可执行建议）。收尾时以
+                        # response.failed 的 error.message 发给客户端，那里只有
+                        # 一个 message 字段位，丢掉它就等于建议消失。
+                        mid_hint = gateway._error_hint(obj)
+                        if mid_hint:
+                            error_text = f'{error_text}（{mid_hint}）'[:500]
                         break
 
                     for event in translator.feed(obj):

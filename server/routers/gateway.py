@@ -18,11 +18,22 @@ logger = logging.getLogger('workbuddy.gateway')
 router = APIRouter(tags=['gateway'])
 
 
-def _oai_error(message: str, status: int = 400, err_type: str = 'invalid_request_error', code: str | None = None) -> JSONResponse:
-    return JSONResponse(
-        {'error': {'message': message, 'type': err_type, 'code': code}},
-        status_code=status,
-    )
+def _oai_error(message: str, status: int = 400, err_type: str = 'invalid_request_error',
+               code: str | None = None, hint: str | None = None) -> JSONResponse:
+    """OpenAI 形状的错误体。
+
+    `hint` 对应上游 2026-09-16 新增的 `error.gateway_hint`：与 message **并列**的
+    网关视角补充说明（措辞为英文，面向客户端工具链）。上游只给**可执行的**建议
+    （如「no healthy account available in pool; check /status or retry later」），
+    未覆盖的错误形态不带该字段。
+
+    为空时**不写这个字段**：与上游「不编造 hint」的口径一致，也避免客户端拿到
+    一个空值还要自己判断。
+    """
+    err: dict = {'message': message, 'type': err_type, 'code': code}
+    if hint:
+        err['gateway_hint'] = hint
+    return JSONResponse({'error': err}, status_code=status)
 
 
 def _bearer(request: Request) -> str:
@@ -146,6 +157,29 @@ def _log_ip(ip: str, path: str, blocked: bool, ua: str | None) -> None:
         避免表无限增长直到磁盘写满。
     """
     db.add_ip_access_log(ip, path, blocked, ua)
+
+
+def _error_hint(data: object) -> str | None:
+    """从上游错误体里取 `error.gateway_hint`（取不到返回 None）。
+
+    上游 2026-09-16 起在错误响应里附这个字段：与 message **并列**的网关视角补充
+    说明，只给**可执行的**建议（例如「no healthy account available in pool;
+    check /status or retry later」），未覆盖的错误形态不带。
+
+    两个**协议翻译层**（Anthropic / Responses）此前只取 `message` 重建错误体，
+    这个字段会被丢掉——于是同一份上游错误，走 `/v1/chat/completions` 的客户端
+    能看到建议、走 `/v1/messages` 的看不到。与 issue #18 同一条原则：**真实原因
+    与可执行建议都要能到达客户端**。故抽成共用实现，三处口径一致。
+    """
+    if not isinstance(data, dict):
+        return None
+    err = data.get('error')
+    if not isinstance(err, dict):
+        return None
+    hint = err.get('gateway_hint')
+    if isinstance(hint, str) and hint.strip():
+        return hint.strip()[:300]
+    return None
 
 
 def _usage_credit(usage: dict | None) -> float | None:
