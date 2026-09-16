@@ -472,5 +472,78 @@ class GlobalInFlightTierTest(unittest.TestCase):
                 wb2api.save_upstream_config({'pool': {'max_in_flight_global': bad}})
 
 
+class DegradeConfigTest(unittest.TestCase):
+    """连败降权参数（上游 cf1e7e5 新增，issue #114）。
+
+    上游对 ErrClient / 传输层这类「只换号不罚」的失败累计计数，连续达阈就把账号
+    **临时出池**（默认 5 次 / 10m，封顶 2h）。三个新键：`degrade_threshold`（整数）、
+    `degrade_cooldown` 与 `degrade_cooldown_max`（时长字符串）。
+
+    面板暂未提供输入框，但**手写在 config.json 里的值必须原样留住** ——
+    保存设置页其它字段时把它弄丢，用户的调参会静默失效（这类「看着保存成功、
+    实际丢字段」最难查）。另外 `degrade_threshold` 要享区间校验（同 breaker_threshold），
+    时长键则靠既有的 `_cooldown` 后缀规则覆盖。
+
+    注意上游把降权账号的 `/status.cooling` 置为 **true**（其 Cooling 口径含
+    degradeUntil），所以界面无需改动就会显示「冷却中」——这里只钉配置读写。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.cfg_path = Path(self._tmp.name) / 'config.json'
+        self._orig = config.UPSTREAM_CONFIG
+        config.UPSTREAM_CONFIG = self.cfg_path
+
+    def tearDown(self) -> None:
+        config.UPSTREAM_CONFIG = self._orig
+        try:
+            self._tmp.cleanup()
+        except PermissionError:
+            pass
+
+    def _write(self, data: dict) -> None:
+        self.cfg_path.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+
+    def _read(self) -> dict:
+        return json.loads(self.cfg_path.read_text(encoding='utf-8'))
+
+    def _seed(self) -> None:
+        self._write({'pool': {
+            'max_in_flight': 3, 'degrade_threshold': 5,
+            'degrade_cooldown': '10m', 'degrade_cooldown_max': '2h',
+        }})
+
+    def test_all_three_keys_survive_sibling_save(self) -> None:
+        """改 max_in_flight 时三个降权键都不能丢。"""
+        self._seed()
+        wb2api.save_upstream_config({'pool': {'max_in_flight': 5}})
+        pool = self._read()['pool']
+        self.assertEqual(pool['max_in_flight'], 5)
+        self.assertEqual(pool['degrade_threshold'], 5)
+        self.assertEqual(pool['degrade_cooldown'], '10m')
+        self.assertEqual(pool['degrade_cooldown_max'], '2h')
+
+    def test_threshold_writable_and_range_validated(self) -> None:
+        self._seed()
+        wb2api.save_upstream_config({'pool': {'degrade_threshold': 8}})
+        self.assertEqual(self._read()['pool']['degrade_threshold'], 8)
+        for bad in (-1, 0, 101, 'x', True, None):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                wb2api.save_upstream_config({'pool': {'degrade_threshold': bad}})
+
+    def test_duration_keys_reject_bad_format(self) -> None:
+        """时长键由既有的 `_cooldown` 后缀规则兜底 —— 确认它真的管到这两个新键。
+
+        写错格式（例如中文「10分钟」）会让上游按 0 处理，表现为「降权不生效」，
+        而界面上看不出任何异常。
+        """
+        self._seed()
+        wb2api.save_upstream_config({'pool': {'degrade_cooldown': '30s'}})
+        self.assertEqual(self._read()['pool']['degrade_cooldown'], '30s')
+        for bad in ('十分钟', '10', '', 'abc'):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                wb2api.save_upstream_config({'pool': {'degrade_cooldown': bad}})
+
+
 if __name__ == '__main__':
     unittest.main()
