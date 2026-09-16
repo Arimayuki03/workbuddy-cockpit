@@ -13,6 +13,8 @@ import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {useAuth} from '@/lib/auth-context';
 import {Button} from '@/components/ui/button';
 import {CopyButton} from '@/components/ui/copy-button';
+import {RichText} from '@/lib/i18n/rich-text';
+import {useT} from '@/lib/i18n/provider';
 import {Badge} from '@/components/ui/badge';
 import {Input} from '@/components/ui/input';
 import {
@@ -72,6 +74,7 @@ function toLines(v: string): string[] {
 }
 
 export default function KeysPage() {
+  const t = useT();
   const {isAdmin} = useAuth();
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);
@@ -122,7 +125,7 @@ export default function KeysPage() {
 
   async function submit() {
     if (!form.name.trim()) {
-      notify.err('请填写密钥名称');
+      notify.err(t('keys.nameRequired'));
       return;
     }
     setBusy(true);
@@ -142,7 +145,7 @@ export default function KeysPage() {
         if (days > 0) payload.expires_at = Math.floor(Date.now() / 1000) + days * 86400;
       } else if (form.expiryMode === 'days') {
         if (days <= 0) {
-          notify.err('请填写大于 0 的天数');
+          notify.err(t('keys.daysRequired'));
           setBusy(false);
           return;
         }
@@ -154,10 +157,10 @@ export default function KeysPage() {
 
       if (editing) {
         await keyApi.update(editing.id, payload as Partial<ApiKey>);
-        notify.ok('密钥已更新');
+        notify.ok(t('keys.keyUpdated'));
       } else {
         const created = await keyApi.create(payload as Partial<ApiKey>);
-        notify.ok('密钥已创建');
+        notify.ok(t('keys.keyCreated'));
         if (created.key) setIssued(created.key);
       }
       setFormOpen(false);
@@ -172,7 +175,7 @@ export default function KeysPage() {
   async function toggle(k: ApiKey) {
     try {
       await keyApi.update(k.id, {enabled: !k.enabled});
-      notify.ok(k.enabled ? '已停用' : '已启用');
+      notify.ok(k.enabled ? t('keys.disabled') : t('keys.enabled'));
       load();
     } catch (e) {
       notify.err(errText(e));
@@ -185,14 +188,14 @@ export default function KeysPage() {
   return (
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
-        title="API 密钥"
-        description="对外反代网关的分发密钥，支持有效期、IP 白名单、模型白名单与配额（每 60 秒自动刷新）"
+        title={t('keys.title')}
+        description={t('keys.description')}
         actions={
           <>
             {isAdmin && (
               <Button size="sm" className="rounded-full" onClick={openCreate}>
                 <Plus />
-                新建密钥
+                {t('keys.newKey')}
               </Button>
             )}
           </>
@@ -203,14 +206,14 @@ export default function KeysPage() {
         <Table>
           <TableHeader>
             <TableRow className="border-b border-border/60 hover:bg-transparent">
-              <TableHead className="pl-4 text-[11px] text-muted-foreground">名称</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">密钥前缀</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">状态</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">有效期</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">IP / 模型</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">已用 Token</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">最近使用</TableHead>
-              {isAdmin && <TableHead className="pr-4 text-right text-[11px] text-muted-foreground">操作</TableHead>}
+              <TableHead className="pl-4 text-[11px] text-muted-foreground">{t('metric.name')}</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('keys.colPrefix')}</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colStatus')}</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('keys.expiry')}</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('keys.colIpModels')}</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('keys.colUsedTokens')}</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('keys.colLastUsed')}</TableHead>
+              {isAdmin && <TableHead className="pr-4 text-right text-[11px] text-muted-foreground">{t('accounts.colActions')}</TableHead>}
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -223,21 +226,23 @@ export default function KeysPage() {
                   <TableCell className="font-mono text-xs text-muted-foreground">{k.prefix}…</TableCell>
                   <TableCell>
                     {!k.enabled ? (
-                      <Badge variant="secondary" className="rounded-full text-muted-foreground">已停用</Badge>
+                      <Badge variant="secondary" className="rounded-full text-muted-foreground">{t('keys.badgeDisabled')}</Badge>
                     ) : expired ? (
-                      <Badge variant="destructive" className="rounded-full">已过期</Badge>
+                      <Badge variant="destructive" className="rounded-full">{t('keys.badgeExpired')}</Badge>
                     ) : overQuota ? (
-                      <Badge variant="destructive" className="rounded-full">超配额</Badge>
+                      <Badge variant="destructive" className="rounded-full">{t('keys.badgeOverQuota')}</Badge>
                     ) : (
-                      <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">正常</Badge>
+                      <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">{t('keys.badgeOk')}</Badge>
                     )}
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
-                    {k.expires_at ? fmtDateTime(k.expires_at) : '永不过期'}
+                    {k.expires_at ? fmtDateTime(k.expires_at) : t('keys.neverExpires')}
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
-                    {k.max_ips ? `≤${k.max_ips} IP` : '不限 IP'} /{' '}
-                    {k.models?.length ? `${k.models.length} 模型` : '全部模型'}
+                    {k.max_ips ? t('keys.ipLimit', {n: k.max_ips}) : t('keys.ipUnlimited')} /{' '}
+                    {k.models?.length
+                      ? t('keys.modelsCount', {count: k.models.length, n: k.models.length})
+                      : t('keys.modelsAll')}
                   </TableCell>
                   <TableCell className="text-xs tabular-nums">
                     {(() => {
@@ -261,50 +266,50 @@ export default function KeysPage() {
                     {k.last_used_at ? (
                       fmtDateTime(k.last_used_at)
                     ) : (
-                      <span className="text-muted-foreground/70">从未使用</span>
+                      <span className="text-muted-foreground/70">{t('keys.neverUsed')}</span>
                     )}
                   </TableCell>
                   {isAdmin && (
                     <TableCell className="pr-4">
                       <div className="flex justify-end gap-1">
-                        <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title="编辑" onClick={() => openEdit(k)}>
+                        <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('keys.edit')} onClick={() => openEdit(k)}>
                           <Pencil className="h-3.5 w-3.5" />
                         </Button>
                         <Button
                           variant="ghost"
                           size="icon"
                           className="h-7 w-7 rounded-md"
-                          title={k.enabled ? '停用' : '启用'}
+                          title={k.enabled ? t('keys.disable') : t('keys.enable')}
                           onClick={() => toggle(k)}
                         >
                           {k.enabled ? <Ban className="h-3.5 w-3.5" /> : <CircleCheck className="h-3.5 w-3.5" />}
                         </Button>
                         <ConfirmDialog
-                          title="重置用量？"
-                          description={`将把密钥「${k.name}」的已用 Token 归零。`}
+                          title={t('keys.resetUsageTitle')}
+                          description={t('keys.resetUsageDesc', {name: k.name})}
                           onConfirm={async () => {
                             await keyApi.resetUsage(k.id);
-                            notify.ok('已重置');
+                            notify.ok(t('keys.resetDone'));
                             load();
                           }}
                           trigger={
-                            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title="重置用量">
+                            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('keys.resetUsage')}>
                               <RotateCcw className="h-3.5 w-3.5" />
                             </Button>
                           }
                         />
                         <ConfirmDialog
-                          title={`删除密钥「${k.name}」？`}
-                          description="删除后使用该密钥的调用将立即失效，此操作不可撤销。"
-                          confirmText="删除"
+                          title={t('keys.deleteTitle', {name: k.name})}
+                          description={t('keys.deleteDesc')}
+                          confirmText={t('keys.delete')}
                           destructive
                           onConfirm={async () => {
                             await keyApi.remove(k.id);
-                            notify.ok('已删除');
+                            notify.ok(t('keys.deleted'));
                             load();
                           }}
                           trigger={
-                            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md text-red-500 hover:text-red-600" title="删除">
+                            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md text-red-500 hover:text-red-600" title={t('keys.delete')}>
                               <Trash2 className="h-3.5 w-3.5" />
                             </Button>
                           }
@@ -321,14 +326,14 @@ export default function KeysPage() {
         {!keys.length && !loading && (
           <EmptyState
             icon={KeyRound}
-            title="暂无 API 密钥"
-            description="创建一个密钥，即可用 OpenAI SDK 调用本网关"
+            title={t('keys.emptyTitle')}
+            description={t('keys.emptyDesc')}
             className="flex flex-col items-center justify-center py-16 text-center"
           >
             {isAdmin && (
               <Button className="mt-4 rounded-full" onClick={openCreate}>
                 <Plus />
-                新建密钥
+                {t('keys.newKey')}
               </Button>
             )}
           </EmptyState>
@@ -339,20 +344,20 @@ export default function KeysPage() {
       <Dialog open={formOpen} onOpenChange={setFormOpen}>
         <DialogContent className="max-w-[520px]">
           <DialogHeader>
-            <DialogTitle>{editing ? '编辑密钥' : '新建密钥'}</DialogTitle>
+            <DialogTitle>{editing ? t('keys.editTitle') : t('keys.createTitle')}</DialogTitle>
             <DialogDescription>
-              {editing ? '修改名称、IP 白名单、模型白名单与配额' : '密钥仅在创建时完整展示一次，请妥善保存'}
+              {editing ? t('keys.editDesc') : t('keys.createDesc')}
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="max-h-[min(70vh,560px)]">
             <div className="space-y-4 px-6 pb-2">
               <div className="space-y-1.5">
-                <Label className="text-[11px] text-muted-foreground">名称</Label>
-                <Input value={form.name} onChange={(e) => setForm({...form, name: e.target.value})} placeholder="例如：客服组" />
+                <Label className="text-[11px] text-muted-foreground">{t('keys.name')}</Label>
+                <Input value={form.name} onChange={(e) => setForm({...form, name: e.target.value})} placeholder={t('keys.namePlaceholder')} />
               </div>
               {!editing ? (
                 <div className="space-y-1.5">
-                  <Label className="text-[11px] text-muted-foreground">有效期（天，自创建时起算，0 = 永不过期）</Label>
+                  <Label className="text-[11px] text-muted-foreground">{t('keys.expiresInDays')}</Label>
                   <Input
                     type="number"
                     min={0}
@@ -363,8 +368,10 @@ export default function KeysPage() {
               ) : (
                 <div className="space-y-1.5">
                   <Label className="text-[11px] text-muted-foreground">
-                    有效期
-                    {editing.expires_at ? `（当前：${fmtDateTime(editing.expires_at)} 到期）` : '（当前：永不过期）'}
+                    {t('keys.expiry')}
+                    {editing.expires_at
+                      ? t('keys.expiryCurrent', {at: fmtDateTime(editing.expires_at)})
+                      : t('keys.expiryNever')}
                   </Label>
                   <div className="flex items-center gap-2">
                     <Select
@@ -375,9 +382,9 @@ export default function KeysPage() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="keep">保持不变</SelectItem>
-                        <SelectItem value="days">从现在起 N 天后过期</SelectItem>
-                        <SelectItem value="never">永不过期</SelectItem>
+                        <SelectItem value="keep">{t('keys.expiryKeep')}</SelectItem>
+                        <SelectItem value="days">{t('keys.expiryFromNow')}</SelectItem>
+                        <SelectItem value="never">{t('keys.expiryNeverOption')}</SelectItem>
                       </SelectContent>
                     </Select>
                     {form.expiryMode === 'days' && (
@@ -385,7 +392,7 @@ export default function KeysPage() {
                         type="number"
                         min={1}
                         className="w-24"
-                        placeholder="天数"
+                        placeholder={t('keys.daysPlaceholder')}
                         value={form.expiresDays}
                         onChange={(e) => setForm({...form, expiresDays: e.target.value})}
                       />
@@ -395,7 +402,7 @@ export default function KeysPage() {
               )}
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
-                  <Label className="text-[11px] text-muted-foreground">最大 IP 数（0 = 不限）</Label>
+                  <Label className="text-[11px] text-muted-foreground">{t('keys.maxIps')}</Label>
                   <Input
                     type="number"
                     min={0}
@@ -404,7 +411,7 @@ export default function KeysPage() {
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label className="text-[11px] text-muted-foreground">配额 Token（0 = 不限）</Label>
+                  <Label className="text-[11px] text-muted-foreground">{t('keys.quotaTokens')}</Label>
                   <Input
                     type="number"
                     min={0}
@@ -414,7 +421,7 @@ export default function KeysPage() {
                 </div>
               </div>
               <div className="space-y-1.5">
-                <Label className="text-[11px] text-muted-foreground">IP 白名单（每行一个，支持 CIDR，留空 = 不限制）</Label>
+                <Label className="text-[11px] text-muted-foreground">{t('keys.ipWhitelist')}</Label>
                 <Textarea
                   rows={3}
                   value={form.ipAllowlist}
@@ -423,7 +430,7 @@ export default function KeysPage() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label className="text-[11px] text-muted-foreground">模型白名单（逗号分隔，留空 = 全部模型）</Label>
+                <Label className="text-[11px] text-muted-foreground">{t('keys.modelWhitelist')}</Label>
                 <Input
                   value={form.models}
                   onChange={(e) => setForm({...form, models: e.target.value})}
@@ -434,18 +441,18 @@ export default function KeysPage() {
                     global: 开头的模型；想两版都能用，就分别列出各自要用的模型。
                     这不是额外的功能开关，而是上游路由协议的直接体现。 */}
                 <p className="text-[10px] leading-4 text-muted-foreground">
-                  需要限定版本时用前缀：<code className="font-mono">global:gpt-5.4</code> 走国际版，
-                  <code className="font-mono">glm-5.2</code> 走国内版。留空则两版都可用。
+                  {/* 反引号包住的模型名由 RichText 渲染成等宽字体 */}
+                  <RichText text={t('keys.modelPrefixNote')} />
                 </p>
               </div>
             </div>
           </DialogBody>
           <DialogFooter>
             <Button variant="outline" className="rounded-full" onClick={() => setFormOpen(false)}>
-              取消
+              {t('common.cancel')}
             </Button>
             <Button className="rounded-full" onClick={submit} disabled={busy}>
-              {editing ? '保存' : '创建'}
+              {editing ? t('common.save') : t('keys.create')}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -455,25 +462,25 @@ export default function KeysPage() {
       <Dialog open={!!issued} onOpenChange={(v) => !v && setIssued(null)}>
         <DialogContent className="max-w-[520px]">
           <DialogHeader>
-            <DialogTitle>密钥创建成功</DialogTitle>
-            <DialogDescription>请立即复制保存，关闭后将无法再次查看完整密钥</DialogDescription>
+            <DialogTitle>{t('keys.createdTitle')}</DialogTitle>
+            <DialogDescription>{t('keys.createdDesc')}</DialogDescription>
           </DialogHeader>
           <div className="space-y-3 px-6 pb-2">
             {/* min-w-0 必不可少：flex 项默认 min-width:auto，长密钥会把
                 复制按钮挤出去（移动端就点不到了） */}
             <div className="flex items-center gap-2 rounded-2xl bg-muted p-3">
               <code className="min-w-0 flex-1 break-all font-mono text-xs">{issued}</code>
-              <CopyButton value={issued || ''} size="sm" showLabel label="复制密钥" />
+              <CopyButton value={issued || ''} size="sm" showLabel label={t('keys.copyKey')} />
             </div>
             <div className="flex items-center gap-2">
               <span className="text-[11px] text-muted-foreground">Base URL</span>
               <code className="min-w-0 flex-1 break-all font-mono text-[11px]">{baseUrl}/v1</code>
-              <CopyButton value={`${baseUrl}/v1`} title="复制 Base URL" />
+              <CopyButton value={`${baseUrl}/v1`} title={t('keys.copyBaseUrl')} />
             </div>
           </div>
           <DialogFooter>
             <Button className="rounded-full" onClick={() => setIssued(null)}>
-              我已保存
+              {t('keys.savedIt')}
             </Button>
           </DialogFooter>
         </DialogContent>

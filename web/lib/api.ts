@@ -1,4 +1,5 @@
 import axios, {AxiosError} from 'axios';
+import {tp} from './i18n';
 import type {Realm} from './realm-context';
 import type {
   Account,
@@ -36,11 +37,18 @@ export const http = axios.create({
   timeout: 60000,
 });
 
-/** 统一抽取后端错误信息 */
+/**
+ * 统一抽取后端错误信息。
+ *
+ * 后端的报错是中文（服务端不做多语言，见 README 的多语言说明），这里过一遍
+ * 短语表：命中已收录的后端文案就换成当前语言，没收录的原样展示——既不需要
+ * 后端改造，也不会因为漏收录而显示成键名或空白。
+ */
 export function errText(e: unknown): string {
   const ax = e as AxiosError<{detail?: string; error?: string}>;
   const d = ax?.response?.data;
-  return (typeof d === 'string' ? d : d?.detail || d?.error) || ax?.message || '请求失败';
+  const raw = (typeof d === 'string' ? d : d?.detail || d?.error) || ax?.message || '';
+  return raw ? tp(raw) : tp('请求失败');
 }
 
 http.interceptors.response.use(
