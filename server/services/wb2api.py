@@ -6,6 +6,7 @@ import base64
 import ipaddress
 import json
 import re
+import socket
 import time
 from pathlib import Path
 
@@ -17,15 +18,23 @@ from .realm import realm_of, supports_checkin
 def _safe_file(filename: str) -> Path:
     """把请求里的文件名解析为 auths 目录下的真实路径，非法即抛错。
 
-    穿越防线（`/`、反斜杠、`..`）是根本；此外只接受 `workbuddy-*.json`
+    穿越防线（`/`、反斜杠、`..`、NUL）是根本；此外只接受 `workbuddy*.json`
     这一种形态，避免越权读到目录里的其他文件（例如隐藏文件或临时文件）。
+
+    **通配宽度必须与上游一致**（上游 `auth.AuthFileGlob = "workbuddy*.json"`，
+    其注释写明这是它自己踩过的坑：曾用窄模式 `workbuddy-*.json`，导致
+    `workbuddy_new.json` 被网关加载却被工具跳过、两边口径对不上）。
+    我们此前正是窄模式，于是那种账号**在上游池里能被选中、面板却看不到**——
+    与「面板读文件、上游读池」那个不一致是同一个问题的反方向。
+    这里的宽化不放松安全：前缀 `workbuddy`、后缀 `.json`、禁止路径分隔符
+    与 `..` 三条约束都还在。
     """
     if '/' in filename or '\\' in filename or '..' in filename:
         raise ValueError('非法的文件名')
     if '\x00' in filename:
         raise ValueError('非法的文件名')
-    # 白名单形态：账号文件一律是 workbuddy-<uid>.json
-    if not re.fullmatch(r'workbuddy-[0-9A-Za-z_-]{1,80}\.json', filename):
+    # 白名单形态：账号文件是 workbuddy<后缀>.json（后缀可为空，同上游 glob）
+    if not re.fullmatch(r'workbuddy[0-9A-Za-z_-]{0,80}\.json', filename):
         raise ValueError('非法的文件名')
     target = config.AUTH_DIR / filename
     if target.suffix != '.json':
@@ -94,7 +103,7 @@ def list_auth_accounts() -> list[dict]:
     if not config.AUTH_DIR.is_dir():
         return out
     now = time.time()
-    for path in sorted(config.AUTH_DIR.glob('workbuddy-*.json')):
+    for path in sorted(config.AUTH_DIR.glob('workbuddy*.json')):
         try:
             raw = json.loads(path.read_text(encoding='utf-8'))
         except Exception:
@@ -345,6 +354,14 @@ def read_container_logs(limit: int = 200, timestamps: bool = True) -> list[str]:
         return []
 
 
+# 管理端**允许读写**的上游配置段。既是 `save_upstream_config` 的写入白名单，
+# 也是 `load_upstream_config` 的**下发白名单**——两处必须是同一份，否则会出现
+# 「能保存但读不回来」或「读得到却存不回去」的不一致。顶层其余键（api_key、
+# auth_dir、state_file 等）一律不下发：它们是凭据或部署路径，界面不使用。
+_EDITABLE_SECTIONS = ('schedule', 'pool', 'cooldown', 'features',
+                      'session_sticky', 'prompt', 'server', 'upstream', 'global')
+
+
 def _mask(v: str) -> str:
     if not v:
         return ''
@@ -384,9 +401,24 @@ def load_upstream_config() -> dict:
             'error': error or '无法读取上游配置',
         }
 
-    view = dict(cfg)
-    if 'api_key' in view:
-        view['api_key_masked'] = _mask(str(view.pop('api_key') or ''))
+    # **白名单**式往外发，而不是 `dict(cfg)` 之后逐个 pop 敏感键。
+    #
+    # 为什么必须反过来写：denylist 的失效模式是「上游加了一个新的密钥字段 →
+    # 原样下发给任何登录用户（含只读的 viewer）」，而且**不会有任何报错**。
+    # 白名单的失效模式则相反：新字段不显示，用户去上游改 —— 安全得多。
+    # （实测确认过 denylist 的后果：往配置里塞一个未知的 *_secret 键，
+    # 它会出现在接口响应里。）
+    view: dict = {
+        # 界面确实要用的非敏感顶层项
+        k: cfg[k] for k in ('listen',) if k in cfg
+    }
+    # 只放界面能编辑的那些配置段（与 save_upstream_config 的允许集合一致）
+    for section in _EDITABLE_SECTIONS:
+        if section in cfg and isinstance(cfg[section], dict):
+            view[section] = cfg[section]
+
+    if 'api_key' in cfg:
+        view['api_key_masked'] = _mask(str(cfg.get('api_key') or ''))
     # 账号列表实际读取的是管理端自己的 AUTH_DIR，以此为准；上游若声明了不同目录则一并暴露
     upstream_auth_dir = cfg.get('auth_dir')
     view['auth_dir'] = str(config.AUTH_DIR)
@@ -601,8 +633,7 @@ def save_upstream_config(patch: dict) -> dict:
     if not isinstance(cfg, dict):
         raise ValueError('上游配置文件不是合法的 JSON 对象，已取消保存')
 
-    for field in ('schedule', 'pool', 'cooldown', 'features',
-                  'session_sticky', 'prompt', 'server', 'upstream', 'global'):
+    for field in _EDITABLE_SECTIONS:
         if field in patch and isinstance(patch[field], dict):
             cfg.setdefault(field, {})
             clean = _sanitize_section(field, patch[field])
@@ -676,6 +707,12 @@ _BLOCKED_HOSTNAMES = (
 )
 
 
+def _is_internal_addr(addr: ipaddress._BaseAddress) -> bool:
+    """回环 / 私有 / 链路本地（含云元数据 169.254.169.254）/ 保留 / 组播 / 未指定。"""
+    return bool(addr.is_loopback or addr.is_private or addr.is_link_local
+                or addr.is_reserved or addr.is_multicast or addr.is_unspecified)
+
+
 def _reject_internal_host(host: str) -> str | None:
     """判断主机是否指向内网/本机/元数据服务；是则返回拒绝原因，否则 None。
 
@@ -689,23 +726,77 @@ def _reject_internal_host(host: str) -> str | None:
 
     注意允许自定义 Redis 服务商（如自建 Upstash 兼容服务）：所以不是白名单
     域名，而是**排除内网与元数据**——公网主机名/IP 一律放行。
+
+    实现要点（逐条都对应一个实测可绕过的写法，别简化回去）：
+
+      1. **先剥 userinfo**：`https://evil@127.0.0.1` 里真正被连接的是 `127.0.0.1`
+         （httpx 会把 `evil@` 当认证信息），而按字符串看它不是 IP 字面量 ——
+         不剥就会放行。
+      2. **`localhost` 与 `*.localhost` 必须显式拦**：它不是 IP 字面量，
+         但解析到回环（RFC 6761 规定 localhost 恒为回环）。
+      3. **域名要真的解析再判断**：`127.0.0.1.nip.io` 这类通配 DNS 指向内网，
+         纯字符串判断看不出来。
+      4. **解析失败按拒绝处理**（fail-closed）：拿不准就不要发请求。
+         `test_upstash` 本来就是要探测连通性，拒掉一个解析不出的域名不损失功能。
+
+    已知取舍：
+
+      * 解析与请求之间理论上有 TOCTOU 窗口（DNS 可返回不同结果）。这里不做
+        「解析后固定 IP 再连接」——那需要自己管连接池，复杂度远高于收益；
+        攻击者要利用它得先控制被解析域名的 DNS，而那已超出本接口的威胁边界。
+      * **自建在私网里的 Upstash 兼容服务会被拒**。这是有意的：本接口的职责
+        是探测公网 Redis 服务，放行私网地址就等于给出一个内网探针。原实现
+        本来就拦私网 IP 字面量（只是漏了「域名解析到私网」这条），所以这不算
+        能力回退，只是把同一个口径补齐。确有私网需求时应改用部署侧的网络策略，
+        而不是放开这里。
+      * DNS 查询失败时**放行**（fail-open），而不是拒绝。这一点与直觉相反，
+        但在这里是对的：解析不出来的域名，紧接着的 httpx 请求会**用同一个解析器**
+        再解析一次、同样失败 —— 也就是说根本连不上，放行不产生 SSRF 风险。
+        若改成 fail-closed，代价是「DNS 一时抽风 → 连通性测试报无法解析」，
+        以及**测试环境/离线环境里任何域名都测不了**（我们的假主机名就因此挂掉），
+        换来的是一个不存在攻击面。已知取舍里 DNS rebinding 的窗口本就不在本
+        接口的威胁边界内（需要攻击者控制域名解析）。
     """
-    h = (host or '').strip().strip('[]').lower()
+    # 剥 userinfo（取最后一个 @ 之后的部分）与端口；去掉 IPv6 字面量的方括号
+    h = (host or '').strip().rsplit('@', 1)[-1].strip()
+    h = h.strip('[]').lower()
+    if not h:
+        return '地址为空'
+    # 端口：IPv6 已去括号，剩下的冒号只可能是「host:port」
+    if h.count(':') == 1:
+        h = h.split(':', 1)[0]
     if not h:
         return '地址为空'
     if h in _BLOCKED_HOSTNAMES or h.endswith('.internal') or h.endswith('.local'):
         return f'{host} 是不允许探测的内部地址'
-    # 明文 IP：拦掉回环 / 私有 / 链路本地（含云元数据 169.254.169.254）/ 保留段
+    if h == 'localhost' or h.endswith('.localhost'):
+        return f'{host} 是不允许探测的内部地址'
+
+    # 明文 IP：直接判段
     try:
         addr = ipaddress.ip_address(h)
     except ValueError:
-        # 不是 IP 字面量（域名）→ 放行。域名解析到内网的情况由部署方的网络策略兜底，
-        # 这里不做 DNS 解析：解析后校验会引入 TOCTOU（解析与请求之间结果可能变），
-        # 而且会让每次测试多一次 DNS 查询。
+        addr = None
+    if addr is not None:
+        if _is_internal_addr(addr):
+            return f'{host} 是不允许探测的内部地址'
         return None
-    if (addr.is_loopback or addr.is_private or addr.is_link_local
-            or addr.is_reserved or addr.is_multicast or addr.is_unspecified):
-        return f'{host} 是不允许探测的内部地址'
+
+    # 域名：解析后逐个地址判断（任一落在内网即拒）。
+    #
+    # 解析失败 → 放行（见 docstring 的说明：解析不出的域名，接下来那次请求也会
+    # 解析失败，连不上就不存在 SSRF）。这里只关心「解析出来的地址是否内网」。
+    try:
+        infos = socket.getaddrinfo(h, None)
+    except Exception:  # noqa: BLE001
+        return None
+    for info in infos:
+        try:
+            resolved = ipaddress.ip_address(info[4][0])
+        except (ValueError, IndexError):
+            continue
+        if _is_internal_addr(resolved):
+            return f'{host} 解析到内部地址 {resolved}，不允许探测'
     return None
 
 

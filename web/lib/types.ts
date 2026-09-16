@@ -56,6 +56,13 @@ export interface Account {
    * 出现「面板全绿但调用报没有健康账号」的矛盾。
    */
   in_pool?: boolean;
+  /**
+   * 本次没取到上游状态（`/status` 里 `connected: false`）——运行时字段全部未知。
+   *
+   * 与 `in_pool: false` 是**两回事**：前者是「看不到上游」，后者是「上游明确没
+   * 加载它」。混为一谈会把正常账号误报成文件损坏（实测确认过这个误报）。
+   */
+  poolUnknown?: boolean;
   /** 已知上游不会加载该文件时的原因（空 = 未发现明显问题） */
   invalid_reason?: string;
   /** 账号所属版本（cn / global）；存量账号按域名回退，无该字段时视为 cn */
@@ -291,7 +298,12 @@ export interface StatsSummary {
    * 数字只是停着不动，页面照常轮询。所以要把「今天有请求但统计为 0」这种
    * 组合显式报出来，而不是等用户自己发现。
    */
-  usage_health?: {ok: boolean; detail: string};
+  /**
+   * `logs_today` 是**本该累计用量**的今日调用数（服务端按与 `bump_usage`
+   * 相同的条件统计）。界面用它拼译文，不要去正则解析 `detail` 那句中文——
+   * 那样改文案会让译文静默失效（曾经如此）。
+   */
+  usage_health?: {ok: boolean; detail: string; logs_today?: number};
 }
 
 export interface IpRule {

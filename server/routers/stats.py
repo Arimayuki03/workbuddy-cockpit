@@ -94,42 +94,55 @@ def summary(realm: str | None = None,
 
 
 def _usage_health(today: str, today_requests: int, realm: str | None = None) -> dict:
-    """检测「用量统计没有在累计」——今天有请求日志但统计为 0。
+    """检测「用量统计没有在累计」——本该累计的请求有日志、但统计为 0。
 
     为什么值得单独做：统计写入是旁路（失败只记 warning，不影响转发），
     所以一旦写入路径坏了，**用户侧完全看不出异常**：页面照常刷新、数字只是
     停着不动。issue #9 就是这个形态，拖了几个版本才有人发现。
 
-    正常部署不可能出现「今天有请求但今天零统计」——两者写在同一段代码里，
-    前者成功后者必成功（bump_usage 紧随日志落库之后）。
+    **判据必须与「什么请求才会累计用量」完全对齐**，否则会误报。这是被两次
+    真实误报教会的：
 
-    **realm 必须传，且两边口径必须一致** —— 这是被真实误报教会的：日志条数若
-    按全版本统计、而用量按当前版本过滤，那么「有国内版流量、没有国际版流量」
-    时切到国际版必然满足 `n > 0 and today_requests == 0`，页面就会报
-    「今天已有 605 次调用记录，但用量统计为 0」，而点「修复统计」又说
-    「统计与请求日志一致」。两条结论互相矛盾，用户卡在中间无法自证，
-    比不提示更糟。
+      1. **版本口径**：日志按全版本数、用量按当前版本过滤 → 只有国内版流量时
+         切到国际版必然触发（实测报告过 605 次那个数字）；
+      2. **请求类型**：`_record` 里 `request_logs` 是**无条件**写的，而
+         `bump_usage` 只在 `key 且 (tokens 或 credit)` 时调用。于是「今天只有
+         被拒绝的调用」（403 / 429 / 无 key）或「只调了 /v1/models」（0 token）
+         会留下日志却没有用量行 —— 那种部署**完全健康**，却被报「统计可能没有
+         正常写入」（实测复现过）。
+
+    所以这里只数**本该产生用量行**的那部分日志：有 key、且 token 或扣费非 0。
+    这与 gateway._record 的判断条件是同一份口径；那边改了这里也要跟着改。
+
+    返回里带上结构化数字，**不要让前端去正则解析这句中文**（曾经这么做，
+    改文案时前端静默失效、译文形同虚设）。
     """
     try:
-        # 与用量同一口径：看某版本时只看该版本的日志
-        # （COALESCE 把历史 NULL 归 cn，与 realm_of_model 一致）
+        # 与用量同一口径：看某版本时只看该版本（COALESCE 把历史 NULL 归 cn）
         rgt = ' AND COALESCE(realm, ?) = ?' if realm in ('cn', 'global') else ''
+        # 只数「本该累计」的：与 _record 的 `if key:` 且 `if total or credit:` 对齐
+        should = (
+            'key_id IS NOT NULL'
+            " AND (COALESCE(prompt_tokens,0) + COALESCE(completion_tokens,0) > 0"
+            '      OR COALESCE(credit,0) > 0)'
+        )
         logs_today = db.query_one(
             f'SELECT COUNT(*) AS c FROM request_logs '
-            f'WHERE {db.day_sql("ts")} = ?{rgt}',
+            f'WHERE {db.day_sql("ts")} = ? AND {should}{rgt}',
             (today,) + (('cn', realm) if rgt else ()),
         )
         n = int(logs_today['c']) if logs_today else 0
     except Exception:  # noqa: BLE001
-        return {'ok': True, 'detail': ''}
+        return {'ok': True, 'detail': '', 'logs_today': 0}
     if n > 0 and today_requests == 0:
         scope = {'cn': '国内版', 'global': '国际版'}.get(str(realm or ''), '')
         return {
             'ok': False,
+            'logs_today': n,
             'detail': (f'今天{scope}已有 {n} 次调用记录，但用量统计为 0——统计可能没有 '
                        f'正常写入。可尝试「修复统计」；若仍为 0，请查看服务端日志。'),
         }
-    return {'ok': True, 'detail': ''}
+    return {'ok': True, 'detail': '', 'logs_today': 0}
 
 
 @router.post('/repair-usage')

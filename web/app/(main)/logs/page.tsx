@@ -1,6 +1,6 @@
 'use client';
 
-import {useCallback, useEffect, useState} from 'react';
+import {useCallback, useEffect, useRef, useState} from 'react';
 import {ScrollText, Search, Trash2, ChevronLeft, ChevronRight} from 'lucide-react';
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
@@ -60,6 +60,24 @@ export default function LogsPage() {
   const [status, setStatus] = useState('all');
   const [ip, setIp] = useState('');
   const [days, setDays] = useState('7');
+
+  /**
+   * 切版本时回到第 1 页。
+   *
+   * 为什么必须重置：两个版本的日志条数不同，停在「第 5 页」再切版本会去查另一个
+   * 版本的第 5 页——那边可能只有 1 页，于是看到空白表格和「第 5 页 / 共 1 页」
+   * 这种自相矛盾的页码。其余筛选项（天数 / 密钥 / 状态）都是这么做的，版本不该例外。
+   *
+   * 写法说明：用「渲染期纠正 state」而不是 `useEffect` + `setPage`。
+   * 后者会先用旧页码发一次请求、再重置页码发第二次（白白多查一次，且第一份
+   * 结果可能短暂显示出来）。在渲染期直接 setState，React 会在本次渲染结束前
+   * 立刻用新 state 重渲染，下面的加载 effect 只跑一次、拿到的就是第 1 页。
+   */
+  const lastRealm = useRef(realm);
+  if (lastRealm.current !== realm) {
+    lastRealm.current = realm;
+    if (page !== 1) setPage(1);
+  }
 
   const load = useCallback(async () => {
     setLoading(true);

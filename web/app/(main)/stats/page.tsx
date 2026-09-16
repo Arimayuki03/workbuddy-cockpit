@@ -51,16 +51,25 @@ const CHART_COLORS = [
 /**
  * 统计健康提示的详情本地化。
  *
- * 服务端（`server/routers/stats.py` 的 `_usage_health`）返回的是**带数字的中文模板句**，
- * 且其测试断言了详情里必须出现调用次数，所以这里不改服务端，改为按同一模板反解、
- * 交给译文重排；解不出就原样显示服务端文案——宁可退化成中文，也不要显示空白或丢掉数字。
+ * 服务端（`server/routers/stats.py` 的 `_usage_health`）同时返回**结构化数字**
+ * `logs_today` 和一句中文 `detail`。这里用数字拼译文，**不再正则反解那句中文**。
+ *
+ * 为什么改掉正则：原先按 `^今天已有 (\d+) 次…` 反解，后来服务端为了标明版本
+ * 把文案改成 `今天国内版已有 N 次…`，正则立刻全都不匹配 —— 结果是五种语言的
+ * 译文全部失效，非中文用户看到原始中文句子，而且**不会有任何报错**。
+ * 用结构化字段就没有这种「改文案即静默失效」的耦合。
+ *
+ * 退路：拿不到数字（服务端旧版本）时原样显示 `detail`，不显示空白。
  */
-const USAGE_HEALTH_DETAIL = /^今天已有 (\d+) 次调用记录，但用量统计为 0/;
-
-function usageHealthDetail(detail: string, t: (key: string, params?: Record<string, string>) => string): string {
-  const m = USAGE_HEALTH_DETAIL.exec(detail.trim());
-  if (!m) return detail;
-  return t('stats.usageHealthDetail', {n: fmtNumber(Number(m[1]))});
+function usageHealthDetail(
+  health: {detail?: string; logs_today?: number},
+  t: (key: string, params?: Record<string, string>) => string,
+): string {
+  const n = health.logs_today;
+  if (typeof n === 'number' && n > 0) {
+    return t('stats.usageHealthDetail', {n: fmtNumber(n)});
+  }
+  return health.detail || '';
 }
 
 export default function StatsPage() {
@@ -199,7 +208,7 @@ export default function StatsPage() {
               {t('stats.usageHealthTitle')}
             </span>
             <div className="text-muted-foreground">
-              {usageHealthDetail(summary.usage_health.detail, t)}
+              {usageHealthDetail(summary.usage_health, t)}
             </div>
           </div>
         </div>
