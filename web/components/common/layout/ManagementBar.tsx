@@ -23,6 +23,7 @@ import {
 import {useThemeUtils} from '@/hooks/use-theme-utils';
 import {useAuth} from '@/lib/auth-context';
 import {accountApi, systemApi} from '@/lib/api';
+import {useT} from '@/lib/i18n/provider';
 import {notify} from '@/lib/toast';
 import {CountingNumber} from '@/components/animate-ui/text/counting-number';
 import {Button} from '@/components/ui/button';
@@ -81,6 +82,7 @@ const SystemTheme = {
 export function ManagementBar() {
   const themeUtils = useThemeUtils();
   const {me, isAdmin, logout} = useAuth();
+  const t = useT();
   const [mounted, setMounted] = useState(false);
   const [dockViewport, setDockViewport] = useState<DockViewport>('desktop');
   const [profileOpen, setProfileOpen] = useState(false);
@@ -266,14 +268,14 @@ export function ManagementBar() {
         const c = await systemApi.checkUpdate();
         if (!c.has_any) return;
         const parts: string[] = [];
-        if (c.manager.has_update) parts.push(`管理端 ${c.manager.latest}`);
-        if (c.upstream.has_update) parts.push(`上游 ${c.upstream.latest}`);
-        notify.warn('发现新版本可更新', `${parts.join(' · ')}　到「设置 → 系统更新」一键升级`);
+        if (c.manager.has_update) parts.push(t('update.managerVersion', {v: c.manager.latest}));
+        if (c.upstream.has_update) parts.push(t('update.upstreamVersion', {v: c.upstream.latest}));
+        notify.warn(t('update.newVersion'), t('update.notice', {targets: parts.join(' · ')}));
       } catch {
         /* 检测失败静默：不打扰用户（如服务器访问 GitHub 受限） */
       }
     })();
-  }, [mounted]);
+  }, [mounted, t]);
 
   useEffect(() => {
     if (!mounted || typeof window === 'undefined') return;
@@ -335,15 +337,15 @@ export function ManagementBar() {
 
   const dockTipSteps = dockViewport === 'mobile' ?
     [
-      '菜单栏已调整至此处，点击即可展开。',
-      '长按菜单栏空白区域可自定义拖动位置。',
-      '展开后，倒数第二个按钮用于快速添加腾讯账号。',
-      '展开后，倒数第一个按钮用于访问个人设置与账户信息。',
+      t('dock.mobile1'),
+      t('dock.mobile2'),
+      t('dock.mobile3'),
+      t('dock.mobile4'),
     ] :
     [
-      '菜单栏已调整至此处，长按空白区域可自定义拖动位置。',
-      '右侧第二个按钮用于快速扫码添加腾讯账号。',
-      '右侧第一个按钮用于访问个人设置与账户信息。',
+      t('dock.desktop1'),
+      t('dock.desktop2'),
+      t('dock.desktop3'),
     ];
 
   const handleNextDockTip = useCallback(() => {
@@ -431,32 +433,32 @@ export function ManagementBar() {
 
   const dockItems = [
     {
-      title: '仪表盘',
+      title: t('nav.dashboard'),
       icon: <BarChart3 {...IconOptions} />,
       href: '/dashboard',
     },
     {
-      title: '账号',
+      title: t('nav.accounts'),
       icon: <Users {...IconOptions} />,
       href: '/accounts',
     },
     {
-      title: '任务',
+      title: t('nav.tasks'),
       icon: <ClipboardList {...IconOptions} />,
       href: '/tasks',
     },
     {
-      title: '密钥',
+      title: t('nav.keys'),
       icon: <KeyRound {...IconOptions} />,
       href: '/keys',
     },
     {
-      title: '模型',
+      title: t('nav.models'),
       icon: <Boxes {...IconOptions} />,
       href: '/models',
     },
     {
-      title: '测试台',
+      title: t('nav.playground'),
       icon: <MessageSquare {...IconOptions} />,
       href: '/playground',
     },
@@ -465,27 +467,27 @@ export function ManagementBar() {
       icon: <div />,
     },
     {
-      title: '用量',
+      title: t('nav.stats'),
       icon: <TrendingUp {...IconOptions} />,
       href: '/stats',
     },
     {
-      title: '日志',
+      title: t('nav.logs'),
       icon: <ScrollText {...IconOptions} />,
       href: '/logs',
     },
     {
-      title: '安全',
+      title: t('nav.security'),
       icon: <ShieldCheck {...IconOptions} />,
       href: '/security',
     },
     {
-      title: '设置',
+      title: t('nav.settings'),
       icon: <Settings {...IconOptions} />,
       href: '/settings',
     },
     {
-      title: '快速添加',
+      title: t('nav.quickAdd'),
       icon: <PlusCircle {...IconOptions} />,
       customComponent: (
         <div
@@ -499,7 +501,7 @@ export function ManagementBar() {
       ),
     },
     {
-      title: '个人信息',
+      title: t('nav.profile'),
       icon: <User {...IconOptions} />,
       customComponent: (
         <>
@@ -518,9 +520,9 @@ export function ManagementBar() {
               }}
             >
               <DialogHeader>
-                <DialogTitle>个人信息</DialogTitle>
+                <DialogTitle>{t('profile.title')}</DialogTitle>
                 <DialogDescription>
-                  管理账户信息、主题偏好与登录会话 · 点击空白处或按 Esc 关闭
+                  {t('profile.desc')}
                 </DialogDescription>
               </DialogHeader>
               <DialogBody className="max-h-[min(72vh,560px)]">
@@ -544,15 +546,15 @@ export function ManagementBar() {
                               </div>
                               <div className="mt-2 flex flex-wrap items-center gap-1.5">
                                 <Badge variant="secondary" className="h-5 rounded-full px-2 text-[10px]">
-                                  {me.role === 'admin' ? '管理员' : '只读用户'}
+                                  {me.role === 'admin' ? t('profile.roleAdmin') : t('profile.roleViewer')}
                                 </Badge>
                               </div>
                             </div>
                           </div>
                           <ConfirmDialog
-                            title="确认退出登录？"
-                            description="退出后需要重新输入用户名与密码才能进入管理端。"
-                            confirmText="退出登录"
+                            title={t('profile.logoutTitle')}
+                            description={t('profile.logoutDesc')}
+                            confirmText={t('profile.logout')}
                             destructive
                             onConfirm={handleLogout}
                             trigger={
@@ -562,7 +564,7 @@ export function ManagementBar() {
                                 className="h-8 shrink-0 rounded-full text-muted-foreground hover:text-red-600"
                               >
                                 <LogOutIcon className="size-3.5" />
-                                退出登录
+                                {t('profile.logout')}
                               </Button>
                             }
                           />
@@ -571,11 +573,11 @@ export function ManagementBar() {
                         <Separator />
 
                         <div className="space-y-2">
-                          <div className="text-[11px] font-medium text-muted-foreground">账号池概览</div>
+                          <div className="text-[11px] font-medium text-muted-foreground">{t('profile.poolOverview')}</div>
                           <div className="flex flex-wrap items-center gap-2">
                             <div className="inline-flex items-center gap-2 rounded-full bg-muted px-3 py-2">
                               <Users className="size-3.5 text-foreground/60" />
-                              <span className="text-xs font-medium text-foreground">受管账号</span>
+                              <span className="text-xs font-medium text-foreground">{t('profile.managedAccounts')}</span>
                               <span className="text-xs font-semibold tabular-nums text-foreground">
                                 {accountCount === null ? (
                                   '—'
@@ -595,7 +597,7 @@ export function ManagementBar() {
 
                         {mounted && (
                           <div className="space-y-2">
-                            <div className="text-[11px] font-medium text-muted-foreground">系统设置</div>
+                            <div className="text-[11px] font-medium text-muted-foreground">{t('profile.systemSettings')}</div>
                             <div className="flex flex-wrap items-center gap-2">
                               <button
                                 type="button"
@@ -605,7 +607,7 @@ export function ManagementBar() {
                                 <div className="flex items-center gap-2">
                                   {themeUtils.getIcon('size-3.5 text-foreground/60')}
                                   <span className="text-xs font-medium text-foreground">
-                                    {themeUtils.getSystemTheme() === SystemTheme.LIGHT ? '浅色模式' : '深色模式'}
+                                    {themeUtils.getSystemTheme() === SystemTheme.LIGHT ? t('theme.light') : t('theme.dark')}
                                   </span>
                                 </div>
                               </button>
@@ -617,7 +619,7 @@ export function ManagementBar() {
                   )}
 
                   <div className="space-y-2">
-                    <div className="text-[11px] font-medium text-muted-foreground">快速链接</div>
+                    <div className="text-[11px] font-medium text-muted-foreground">{t('profile.quickLinks')}</div>
                     <div className="flex flex-wrap items-center gap-2">
                       <Link
                         href="https://github.com/Sliverkiss/workbuddy2api"
@@ -638,7 +640,7 @@ export function ManagementBar() {
                       >
                         <div className="flex items-center gap-2">
                           <Link2 className="size-3.5 text-foreground/60" />
-                          <span className="text-xs font-medium text-foreground">UI 参考</span>
+                          <span className="text-xs font-medium text-foreground">{t('profile.uiReference')}</span>
                         </div>
                       </Link>
                       <Link
@@ -647,7 +649,7 @@ export function ManagementBar() {
                       >
                         <div className="flex items-center gap-2">
                           <MessageCircleIcon className="size-3.5 text-foreground/60" />
-                          <span className="text-xs font-medium text-foreground">帮助</span>
+                          <span className="text-xs font-medium text-foreground">{t('profile.help')}</span>
                         </div>
                       </Link>
                     </div>
@@ -656,18 +658,18 @@ export function ManagementBar() {
                   <Separator />
 
                   <div className="space-y-2">
-                    <div className="text-xs font-medium">关于 WorkBuddy Manager</div>
+                    <div className="text-xs font-medium">{t('profile.about')}</div>
                     <div className="space-y-1.5">
                       <div className="text-[11px] font-light text-muted-foreground">
                         {/* 版本以后端为准（package.json 里那个没人维护，停在 1.0.0）；
                             构建时间由 next.config 在构建时注入，不再用手写的死值。 */}
                         {runtimeVersion
                           ? `Version ${runtimeVersion}`
-                          : `Version ${packageJson.version}（未取到运行版本）`}
+                          : `Version ${packageJson.version}${t('profile.versionFallback')}`}
                         {BUILD_TIME ? `, Build At ${BUILD_TIME}` : ''}
                       </div>
                       <div className="text-[11px] font-light leading-5 text-muted-foreground">
-                        WorkBuddy Manager 是为 workbuddy2api 打造的账号池管理与 OpenAI 兼容反代网关，支持多账号扫码纳管、自动签到、密钥分发、IP 管控与用量统计。
+                        {t('profile.aboutDesc')}
                       </div>
                     </div>
                   </div>
@@ -705,7 +707,7 @@ export function ManagementBar() {
           >
             <div className="space-y-1.5">
               <div className="text-[10px] font-medium leading-4 text-foreground md:text-[11px]">
-                菜单栏引导
+                {t('dock.tipTitle')}
               </div>
               <p className="text-[10px] leading-4 text-muted-foreground md:text-[11px]">
                 {dockTipSteps[dockTipStep]}

@@ -20,10 +20,12 @@ import {PageHeader} from '@/components/common/layout/PageHeader';
 import {StatCard} from '@/components/common/layout/StatCard';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {Badge} from '@/components/ui/badge';
+import {useT} from '@/lib/i18n/provider';
 import {notify} from '@/lib/toast';
 
 export default function DashboardPage() {
   const {realm, label: realmName} = useRealm();
+  const t = useT();
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [summary, setSummary] = useState<StatsSummary | null>(null);
   const [daily, setDaily] = useState<UsagePoint[]>([]);
@@ -53,8 +55,8 @@ export default function DashboardPage() {
         ),
       );
     }
-    if (results.slice(0, 4).some((r) => r.status === 'rejected')) notify.err('部分数据加载失败');
-  }, [realm]);
+    if (results.slice(0, 4).some((r) => r.status === 'rejected')) notify.err(t('dashboard.partialLoadFailed'));
+  }, [realm, t]);
 
   useEffect(() => {
     load();
@@ -131,46 +133,50 @@ export default function DashboardPage() {
       {/* 本页 30 秒自动刷新，且没有任何会改变数据的操作，
           因此不再放手动刷新按钮（移动端还省下一行） */}
       <PageHeader
-        title="仪表盘"
-        description={`${realmName}账号池健康度、反代网关与今日用量总览（每 30 秒自动刷新）`}
+        title={t('dashboard.title')}
+        description={t('dashboard.description', {realm: realmName})}
       />
 
       <section className="grid grid-cols-2 gap-3 lg:grid-cols-5 md:gap-4">
         <StatCard
-          label="账号总数"
+          label={t('dashboard.totalAccounts')}
           value={fmtNumber(scoped.length)}
-          hint={`${realmName}已纳管`}
+          hint={t('dashboard.totalAccountsHint', {realm: realmName})}
           icon={Users}
           tone="neutral"
           delay={0}
         />
         <StatCard
-          label="有效期内"
+          label={t('dashboard.valid')}
           value={fmtNumber(valid)}
-          hint={valid === scoped.length ? '全部正常' : `${scoped.length - valid} 个异常`}
+          hint={
+            valid === scoped.length
+              ? t('dashboard.allOk')
+              : t('dashboard.abnormal', {count: scoped.length - valid, n: scoped.length - valid})
+          }
           icon={CircleCheck}
           tone="success"
           hintTone={valid === scoped.length ? 'success' : 'warning'}
           delay={0.05}
         />
         <StatCard
-          label="即将过期"
+          label={t('expiry.urgent')}
           value={fmtNumber(expiring)}
-          hint={expiring > 0 ? '<1h 需刷新' : '暂无风险'}
+          hint={expiring > 0 ? t('dashboard.needRefresh') : t('dashboard.noRisk')}
           icon={TriangleAlert}
           tone={expiring > 0 ? 'warning' : 'success'}
           hintTone={expiring > 0 ? 'warning' : 'neutral'}
           delay={0.1}
         />
         <StatCard
-          label="积分余额"
+          label={t('metric.credits')}
           value={creditsKnown.length ? fmtNumber(totalCredits) : '—'}
           hint={
             !creditsKnown.length
-              ? '等待上游同步'
+              ? t('dashboard.waitingUpstream')
               : creditsLow > 0
-                ? `${creditsLow} 个账号低于 200`
-                : `覆盖 ${creditsKnown.length} 个账号`
+                ? t('dashboard.creditsLow', {count: creditsLow, n: creditsLow})
+                : t('dashboard.creditsCovered', {count: creditsKnown.length, n: creditsKnown.length})
           }
           icon={Coins}
           tone={!creditsKnown.length ? 'neutral' : creditsLow > 0 ? 'warning' : 'accent'}
@@ -178,9 +184,9 @@ export default function DashboardPage() {
           delay={0.15}
         />
         <StatCard
-          label="今日 Token"
+          label={t('dashboard.todayTokens')}
           value={fmtCompact(summary?.today_tokens)}
-          hint={`${fmtNumber(summary?.today_requests)} 次请求 · 含两种版本`}
+          hint={t('dashboard.todayRequests', {n: fmtNumber(summary?.today_requests)})}
           icon={Activity}
           tone="info"
           delay={0.2}
@@ -190,9 +196,9 @@ export default function DashboardPage() {
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="rounded-[20px] bg-muted p-4 lg:col-span-2">
           <div className="mb-3 flex items-center justify-between">
-            <div className="text-sm font-medium">近 14 天调用趋势</div>
+            <div className="text-sm font-medium">{t('dashboard.trend14')}</div>
             {/* 调用记录是全局的（不按版本拆分），如实标注而不是假装已过滤 */}
-            <div className="text-[11px] text-muted-foreground">请求数 · 含两种版本</div>
+            <div className="text-[11px] text-muted-foreground">{t('dashboard.requestsBothRealms')}</div>
           </div>
           <div className="h-[220px] w-full">
             {chartData.length ? (
@@ -218,7 +224,7 @@ export default function DashboardPage() {
                   <Area
                     type="monotone"
                     dataKey="requests"
-                    name="请求数"
+                    name={t('metric.requests')}
                     stroke="var(--chart-1)"
                     fill="url(#gReq)"
                     strokeWidth={2}
@@ -226,7 +232,7 @@ export default function DashboardPage() {
                 </AreaChart>
               </ResponsiveContainer>
             ) : (
-              <div className="grid h-full place-items-center text-xs text-muted-foreground">暂无调用数据</div>
+              <div className="grid h-full place-items-center text-xs text-muted-foreground">{t('dashboard.noCallData')}</div>
             )}
           </div>
         </div>
@@ -234,30 +240,30 @@ export default function DashboardPage() {
         <div className="rounded-[20px] bg-muted p-4">
           <div className="mb-3 flex items-center gap-2 text-sm font-medium">
             <Server className="h-4 w-4" />
-            反代上游
+            {t('dashboard.upstreamPanel')}
           </div>
           {upstream ? (
             <div className="space-y-3">
               <div className="flex items-center justify-between text-xs">
-                <span className="text-muted-foreground">连接状态</span>
+                <span className="text-muted-foreground">{t('dashboard.connStatus')}</span>
                 {upstream.connected ? (
                   <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">
-                    ● 正常
+                    {t('dashboard.connected')}
                   </Badge>
                 ) : (
                   <Badge variant="destructive" className="rounded-full">
-                    ● 不可用
+                    {t('dashboard.unavailable')}
                   </Badge>
                 )}
               </div>
               {([
                 // 账号类计数按当前版本（上游 realm_totals）；粘性会话与 Redis
                 // 无版本之分，保持全局
-                ['健康账号', pool.known ? pool.healthy : '—'],
-                ['冷却中', pool.known ? pool.cooling : '—'],
-                ['已禁用', pool.known ? pool.disabled : '—'],
-                ['粘性会话', upstream.sticky_sessions ?? 0],
-                ['Redis 模式', upstream.redis_mode ?? '—'],
+                [t('dashboard.healthyAccounts'), pool.known ? pool.healthy : '—'],
+                [t('dashboard.cooling'), pool.known ? pool.cooling : '—'],
+                [t('dashboard.disabled'), pool.known ? pool.disabled : '—'],
+                [t('dashboard.stickySessions'), upstream.sticky_sessions ?? 0],
+                [t('dashboard.redisMode'), upstream.redis_mode ?? '—'],
               ] as [string, string | number][]).map(([k, v]) => (
                 <div key={k} className="flex items-center justify-between text-xs">
                   <span className="text-muted-foreground">{k}</span>
@@ -266,19 +272,19 @@ export default function DashboardPage() {
               ))}
               {pool.globalOnly && !upstream.error && (
                 <p className="text-[11px] text-muted-foreground">
-                  上游未提供分版本计数，以上为两个版本合计
+                  {t('dashboard.globalTotalsNote')}
                 </p>
               )}
               {upstream.error && <p className="text-[11px] text-red-500">{upstream.error}</p>}
             </div>
           ) : (
-            <div className="grid h-[160px] place-items-center text-xs text-muted-foreground">未获取到上游状态</div>
+            <div className="grid h-[160px] place-items-center text-xs text-muted-foreground">{t('dashboard.noUpstreamStatus')}</div>
           )}
         </div>
       </section>
 
       <section className="rounded-[20px] bg-muted p-4">
-        <div className="mb-3 text-sm font-medium">账号健康快照</div>
+        <div className="mb-3 text-sm font-medium">{t('dashboard.healthSnapshot')}</div>
         {scoped.length ? (
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {scoped.slice(0, 9).map((a) => {
@@ -320,9 +326,11 @@ export default function DashboardPage() {
                               ? 'text-amber-600 dark:text-amber-400'
                               : 'text-foreground')
                       }
-                      title="积分余额"
+                      title={t('metric.credits')}
                     >
-                      {typeof credOf(a) === 'number' ? `${fmtNumber(credOf(a))} 积分` : ''}
+                      {typeof credOf(a) === 'number'
+                        ? t('metric.creditAmount', {n: fmtNumber(credOf(a))})
+                        : ''}
                     </span>
                   </div>
                 </div>
@@ -332,8 +340,8 @@ export default function DashboardPage() {
         ) : (
           <EmptyState
             icon={Users}
-            title="暂无账号"
-            description="点击底栏「快速添加」扫码授权腾讯账号"
+            title={t('dashboard.noAccounts')}
+            description={t('dashboard.noAccountsHint')}
             className="flex flex-col items-center justify-center py-12 text-center"
           />
         )}
