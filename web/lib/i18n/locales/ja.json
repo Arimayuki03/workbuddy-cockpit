@@ -116,7 +116,7 @@
     "expired": "期限切れ",
     "urgent": "まもなく期限切れ",
     "soon": "残りわずか",
-    "healthy": "オンライン"
+    "valid": "有効"
   },
   "metric": {
     "credits": "クレジット残高",
@@ -159,7 +159,8 @@
     "healthSnapshot": "アカウント健全性スナップショット",
     "noAccounts": "アカウントがありません",
     "noAccountsHint": "画面下部の「クイック追加」から QR コードで Tencent アカウントを認証してください",
-    "partialLoadFailed": "一部のデータを読み込めませんでした"
+    "partialLoadFailed": "一部のデータを読み込めませんでした",
+    "unusable": "{n} 件が使用不可"
   },
   "stats": {
     "title": "使用量",

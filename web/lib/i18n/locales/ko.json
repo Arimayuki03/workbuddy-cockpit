@@ -116,7 +116,7 @@
     "expired": "만료됨",
     "urgent": "곧 만료",
     "soon": "촉박",
-    "healthy": "온라인"
+    "valid": "유효"
   },
   "metric": {
     "credits": "크레딧 잔액",
@@ -159,7 +159,8 @@
     "healthSnapshot": "계정 상태 스냅샷",
     "noAccounts": "계정이 없습니다",
     "noAccountsHint": "하단 바의 '빠른 추가'로 Tencent 계정을 QR 인증하세요",
-    "partialLoadFailed": "일부 데이터를 불러오지 못했습니다"
+    "partialLoadFailed": "일부 데이터를 불러오지 못했습니다",
+    "unusable": "{n}개 사용 불가"
   },
   "stats": {
     "title": "사용량",
