@@ -241,11 +241,7 @@ export default function KeysPage() {
               <TableHead className="pl-4 text-[11px] text-muted-foreground">{t('metric.name')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">{t('keys.colPrefix')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colStatus')}</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">{t('keys.expiry')}</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">{t('keys.colIpModels')}</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">{t('keys.colUsedTokens')}</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">{t('keys.colLastUsed')}</TableHead>
-              {isAdmin && <TableHead className="pr-4 text-right text-[11px] text-muted-foreground">{t('accounts.colActions')}</TableHead>}
+              {/* 版本列紧跟状态：它和状态一样是「这把密钥的属性」，位置与账号页的列序一致 */}
               <TableHead className="text-[11px] text-muted-foreground">{t('keys.realm')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">{t('keys.expiry')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">{t('keys.colIpModels')}</TableHead>
