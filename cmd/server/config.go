@@ -131,6 +131,12 @@ type Config struct {
 		// ExpiringSoon 快过期积分窗口（如 "168h"=7天）：签到查余额时，到期时间在此窗口内
 		// 的积分被标记为"快过期"，选号优先消耗（issue:积分过期）。空/0 = 禁用分桶。
 		ExpiringSoon string `json:"expiring_soon"`
+		// CostExploreInterval costTier 条件探索窗口（issue #136 方案 a′）：tier 0
+		// 垄断层存在且 tier 1 有成员时，距上次探索 ≥ 窗口则本次 pick 生效层切
+		// tier 1-only（探索=搭车改道，零新增上游请求；成功即毕业，失败走既有
+		// 错误策略）。默认 "30m"（≤48 次/天/模型）；"0" 关停（完全回到现状行为）；
+		// 空值回落默认。
+		CostExploreInterval string `json:"cost_explore_interval"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -149,6 +155,8 @@ type Config struct {
 	SessionTTL          time.Duration `json:"-"`
 	SessionGCInterval   time.Duration `json:"-"`
 	ExpiringSoonDur     time.Duration `json:"-"`
+	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
+	CostExploreIntervalDur time.Duration `json:"-"`
 }
 
 // Default 默认配置。
@@ -193,6 +201,8 @@ func Default() *Config {
 	c.Pool.IdleWeightPerHour = 0.5
 	c.Pool.IdleWeightMax = 5.0
 	c.Pool.ExpiringSoon = "168h" // 快过期窗口默认 7 天：官方活动奖励积分多在两周内过期
+	// costTier 探索默认 30m（issue #136：垄断破除 + 搭车改道零新增请求）；"0" 关停。
+	c.Pool.CostExploreInterval = "30m"
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
@@ -363,6 +373,18 @@ func (c *Config) normalize() error {
 	}
 	if c.ExpiringSoonDur < 0 {
 		c.ExpiringSoonDur = 0 // 负值视为禁用，避免 upstream 判定窗口反转
+	}
+	// costTier 探索窗口（issue #136）：空值回落默认 30m（Default 已置；此兜底覆盖
+	// 显式 ""）；"0" 是合法值（关停，完全回到现状行为），不回落；负值钳 0 同关停
+	// （"−5m" 无合理语义）。
+	if c.Pool.CostExploreInterval == "" {
+		c.Pool.CostExploreInterval = "30m"
+	}
+	if c.CostExploreIntervalDur, err = time.ParseDuration(c.Pool.CostExploreInterval); err != nil {
+		return fmt.Errorf("pool.cost_explore_interval: %w", err)
+	}
+	if c.CostExploreIntervalDur < 0 {
+		c.CostExploreIntervalDur = 0
 	}
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120
