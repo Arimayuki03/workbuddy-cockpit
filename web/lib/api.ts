@@ -21,6 +21,7 @@ import type {
   SecurityConfig,
   StatsSummary,
   TaskLogResponse,
+  TaskRunStatus,
   UpstreamConfig,
   UpstreamStatus,
   UsageBreakdown,
@@ -71,6 +72,8 @@ const post = async <T>(url: string, body?: unknown): Promise<T> =>
   (await http.post<T>(url, body)).data;
 const patch = async <T>(url: string, body?: unknown): Promise<T> =>
   (await http.patch<T>(url, body)).data;
+const put = async <T>(url: string, body?: unknown): Promise<T> =>
+  (await http.put<T>(url, body)).data;
 const del = async <T>(url: string): Promise<T> => (await http.delete<T>(url)).data;
 
 /* ── 鉴权 ───────────────────────────────────────────── */
@@ -139,6 +142,17 @@ export const accountApi = {
   refresh: (file: string) =>
     post<{ok: boolean; message: string}>(`/api/accounts/${encodeURIComponent(file)}/refresh`),
   restart: () => post<{ok: boolean; message: string}>('/api/restart'),
+
+  /* ── 成长任务一键执行（issue #19）─────────────────────
+   * 调用上游自带的 scripts/task_runner.py。full（点亮）会伪造活跃上报，
+   * 因此单独要求 confirm，与幂等的 claim 区分开。 */
+  taskRunStatus: () => get<TaskRunStatus>('/api/task-run'),
+  taskRunStart: (mode: 'preview' | 'claim' | 'full', target = 'ALL', confirm = false) =>
+    post<{ok: boolean; message: string}>('/api/task-run', {mode, target, confirm}),
+  taskRunStop: () => post<{ok: boolean; message: string}>('/api/task-run/stop'),
+  taskClaimSchedule: () => get<{enabled: boolean; hours: number[]}>('/api/task-claim-schedule'),
+  saveTaskClaimSchedule: (enabled: boolean, hours: number[]) =>
+    put<{enabled: boolean; hours: number[]}>('/api/task-claim-schedule', {enabled, hours}),
 };
 
 /* ── 上游状态 ───────────────────────────────────────── */

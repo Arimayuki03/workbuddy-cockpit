@@ -23,6 +23,7 @@ import type {CheckinLog, TaskLog, TaskLogResponse} from '@/lib/types';
 import {fmtDateTime, fmtNumber} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
+import {TaskRunnerPanel} from '@/components/common/tasks/TaskRunnerPanel';
 import {useAuth} from '@/lib/auth-context';
 import {useRealm} from '@/lib/realm-context';
 import {Button} from '@/components/ui/button';
@@ -291,6 +292,10 @@ export default function TasksPage() {
         title={t('tasks.title')}
         description={t('tasks.description', {realm: realmName})}
       />
+
+      {/* 成长任务一键执行（issue #19）。仅管理员：这些操作会对账号发起真实写请求，
+          后端也以 require_admin 兜底。国际版无成长中心体系，故不显示。 */}
+      {isAdmin && (realm ?? 'cn') === 'cn' && <TaskRunnerPanel />}
 
       {/* 移动端：三块整合成一张卡片，用分段切换，避免又长又碎 */}
       <div className="flex gap-1 rounded-full bg-muted p-1 md:hidden">

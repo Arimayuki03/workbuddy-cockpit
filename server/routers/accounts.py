@@ -7,7 +7,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from .. import config, db, security
 from ..services import (
-    credits as creditsvc, modelcatalog, reload, tasklog, tencent, wb2api,
+    credits as creditsvc, modelcatalog, reload, tasklog, taskrun, tencent, wb2api,
 )
 from ..services.realm import realm_of, supports_checkin
 
@@ -601,6 +601,70 @@ async def collect_task_logs(user: dict = Depends(security.require_admin)) -> dic
 def clear_task_logs(user: dict = Depends(security.require_admin)) -> dict:
     db.clear_task_logs()
     return {'ok': True}
+
+
+# ── 成长任务一键执行（issue #19）─────────────────────────────
+# 调用上游自带的 scripts/task_runner.py。三种模式按风险分级，见 taskrun 模块注释：
+# preview 只读 / claim 幂等领奖 / full 点亮+领奖（会伪造上报）。
+# 全部仅管理员可用 —— 这些操作会对账号发起真实写请求。
+
+
+@router.get('/task-run')
+def task_run_status(user: dict = Depends(security.require_admin)) -> dict:
+    """当前/上次执行状态与输出尾部（界面轮询）。"""
+    return taskrun.status()
+
+
+@router.post('/task-run')
+async def task_run_start(
+    body: dict = Body(...),
+    user: dict = Depends(security.require_admin),
+) -> dict:
+    """启动一次执行。body: {mode, target}。
+
+    `full`（点亮 + 领奖）会伪造活跃上报，因此要求显式传 `confirm: true` ——
+    与「领奖」区分开，避免手滑点到风险最高的那个。
+    """
+    mode = str(body.get('mode') or '').strip()
+    target = str(body.get('target') or 'ALL').strip() or 'ALL'
+    if mode not in ('preview', 'claim', 'full'):
+        raise HTTPException(status_code=400, detail='模式只能是 preview / claim / full')
+    if mode == 'full' and body.get('confirm') is not True:
+        raise HTTPException(
+            status_code=400,
+            detail='「点亮任务」会向腾讯发送活跃上报（造画布、连发对话等），'
+                   '请先确认：该操作有风控风险，建议先用「预览」看清将要做的事。',
+        )
+    ok, msg = taskrun.start(mode, target)
+    if not ok:
+        # 前置拒绝（脚本缺失/已有任务在跑/参数不合法）用 409 表达「状态冲突」，
+        # 与「请求本身有错」（400）区分开。
+        raise HTTPException(status_code=409, detail=msg)
+    return {'ok': True, 'message': msg}
+
+
+@router.post('/task-run/stop')
+async def task_run_stop(user: dict = Depends(security.require_admin)) -> dict:
+    stopped = await taskrun.stop()
+    return {'ok': stopped, 'message': '已停止' if stopped else '当前没有正在执行的任务'}
+
+
+@router.get('/task-claim-schedule')
+def task_claim_schedule_get(user: dict = Depends(security.require_admin)) -> dict:
+    """定时领奖配置（仅幂等领奖，不含点亮）。"""
+    return taskrun.get_schedule()
+
+
+@router.put('/task-claim-schedule')
+def task_claim_schedule_put(
+    body: dict = Body(...),
+    user: dict = Depends(security.require_admin),
+) -> dict:
+    """保存定时领奖配置。"""
+    try:
+        return taskrun.set_schedule(body.get('enabled'), body.get('hours'))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get('/upstream/logs')
