@@ -57,9 +57,21 @@ _MODE_ARGS: dict[str, list[str]] = {
     'full': ['--yes'],                   # 点亮 + 领奖（会伪造上报）
 }
 
-# 单次运行上限：全量跑 54 个账号时每账号要发很多上报（动作间隔 ≥1s），
-# 留足时间；超时后终止并如实报告，不无限挂着。
-RUN_TIMEOUT_SECONDS = 1800
+# 单次运行的**空闲**上限（秒）：多久没有新输出就判定卡死并终止。
+#
+# 为什么按「空闲」而不是「总时长」：脚本的耗时**随账号数线性增长**——它每做一个
+# 写动作至少间隔 1s（脚本自身约束），全量任务一轮约 40 个动作，于是
+#   6 个账号 ≈ 4 分钟、54 个账号 ≈ 36 分钟（还只是下限）。
+# 用固定总时长（初版写的是 30 分钟）会把「大池子的正常全量」**中途杀掉**，
+# 比不设还糟：账号做了一半、状态半途而废，用户还得重跑。
+# 改按空闲判定：只要脚本还在产出（每个动作都会打一行），就说明它活着；
+# 真正卡死时它会静默，这时才终止。取值要明显大于「单步最长耗时」——
+# 单个动作含网络往返与 1s 间隔，实测远低于 2 分钟，取 5 分钟留足余量。
+IDLE_TIMEOUT_SECONDS = 300
+
+# 兜底总上限（秒）：防止「每 4 分钟吐一行」的诡异形态无限跑下去。
+# 30 个账号以内都够用；更大的池子建议分批跑（界面按账号逐个触发）。
+MAX_TOTAL_SECONDS = 4 * 3600
 
 # 输出缓冲上限：脚本会为每个动作打一行，全量批量可能几千行。只保留尾部，
 # 避免长时间运行把内存吃满（界面也只需要看最近的）。
@@ -132,7 +144,11 @@ def build_command(mode: str, target: str) -> list[str]:
         raise ValueError(f'不支持的模式：{mode}')
     if not _ACCOUNT_RE.match(target or ''):
         raise ValueError('账号标识不合法（只允许 uid 前缀或 ALL）')
-    return [_python(), str(_script_path()), target, *_MODE_ARGS[mode]]
+    # `-u` 必须加：非交互（管道）时 Python 的 stdout 是**块缓冲**，攒满 8KB 才刷。
+    # 脚本每行约 80 字节，于是一次全量要跑满约 100 行才会吐出第一批输出——
+    # 用户看到的就是「点了做任务，卡半天没有任何输出，然后突然冒出一大段」
+    # （线上实测）。加 -u 后每行实时可见，面板才真的能当进度看。
+    return [_python(), '-u', str(_script_path()), target, *_MODE_ARGS[mode]]
 
 
 def start(mode: str, target: str = 'ALL') -> tuple[bool, str]:
@@ -169,6 +185,9 @@ async def _run(argv: list[str], mode: str, target: str) -> None:
     # 显式指定账号目录：脚本自身的回落顺序（WB2A_AUTHS > 仓库内 auths/ >
     # /root/...）不一定指向本面板管的那批文件，传错会「跑了个寂寞」还看不出来。
     env['WB2A_AUTHS'] = str(config.AUTH_DIR)
+    # 与 argv 里的 `-u` 双保险：两者都是「不缓冲」的表达，任一被忽略时另一个兜住
+    # （脚本将来若自己拉起子进程，环境变量也能继承下去）。
+    env['PYTHONUNBUFFERED'] = '1'
     # 上游目录作为 cwd：脚本以 __file__ 自定位，但仍按上游惯例从仓库根运行。
     cwd = str(_script_path().parent.parent)
 
@@ -180,11 +199,38 @@ async def _run(argv: list[str], mode: str, target: str) -> None:
             stderr=asyncio.subprocess.STDOUT,
             stdin=asyncio.subprocess.DEVNULL,
         )
+        # 按**空闲**判定卡死，而不是总时长（理由见 IDLE_TIMEOUT_SECONDS 注释）：
+        # 每读到一行就把「最后一次活动」往后推，静默超过阈值才判定卡死。
+        last_seen = time.time()
+        started = time.time()
+
+        async def pump_with_deadline() -> None:
+            nonlocal last_seen
+            while True:
+                try:
+                    raw = await asyncio.wait_for(proc.stdout.readline(), timeout=5)
+                except asyncio.TimeoutError:
+                    idle = time.time() - last_seen
+                    if idle > IDLE_TIMEOUT_SECONDS:
+                        raise _Stalled(idle)
+                    if time.time() - started > MAX_TOTAL_SECONDS:
+                        raise _Stalled(time.time() - started, total=True)
+                    continue
+                if not raw:
+                    return
+                line = raw.decode('utf-8', errors='replace').rstrip('\r\n')
+                if line:
+                    _append(line)
+                    last_seen = time.time()
+
         try:
-            await asyncio.wait_for(_pump(proc), timeout=RUN_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
+            await pump_with_deadline()
+        except _Stalled as exc:
             _state['timed_out'] = True
-            _append(f'!! 超过 {RUN_TIMEOUT_SECONDS}s 未结束，已终止')
+            if getattr(exc, 'total', False):
+                _append(f'!! 运行超过 {MAX_TOTAL_SECONDS // 3600} 小时上限，已终止')
+            else:
+                _append(f'!! 已 {int(exc.args[0])}s 无输出，判定卡死并终止')
             try:
                 proc.kill()
             except ProcessLookupError:
@@ -208,16 +254,8 @@ async def _run(argv: list[str], mode: str, target: str) -> None:
         _record_history(mode, target)
 
 
-async def _pump(proc: asyncio.subprocess.Process) -> None:
-    """逐行读输出（脚本按行打印进度）。"""
-    assert proc.stdout is not None
-    while True:
-        raw = await proc.stdout.readline()
-        if not raw:
-            break
-        line = raw.decode('utf-8', errors='replace').rstrip('\r\n')
-        if line:
-            _append(line)
+class _Stalled(Exception):
+    """内部信号：判定子进程卡死（空闲超阈值 / 超过兜底总上限）。"""
 
 
 def _append(line: str) -> None:

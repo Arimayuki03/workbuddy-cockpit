@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -88,7 +89,24 @@ class CommandBuildTest(unittest.TestCase):
     def test_legit_account_accepted(self) -> None:
         for good in ('ALL', '99a07e71', 'abcdef01', 'u-in', 'A' * 64):
             cmd = taskrun.build_command('claim', good)
-            self.assertEqual(cmd[2], good, '账号标识应作为独立 argv 传入')
+            # 账号标识作为独立 argv 传入（紧跟脚本路径之后）
+            self.assertIn(good, cmd, f'{good} 未出现在 argv 里')
+            self.assertEqual(cmd[cmd.index(str(taskrun._script_path())) + 1], good)
+
+    def test_unbuffered_flags_present(self) -> None:
+        """必须让子进程**不缓冲**输出。
+
+        非交互（管道）时 Python 的 stdout 是块缓冲，攒满 8KB 才刷；脚本每行约
+        80 字节，一次全量要跑满约 100 行才吐出第一批——用户看到的是「点了做任务
+        卡半天没输出，然后突然冒出一大段」（线上实测）。`-u` 与
+        `PYTHONUNBUFFERED=1` 两处都要在：任一被忽略时另一个兜住。
+        """
+        for mode in ('preview', 'claim', 'full'):
+            cmd = taskrun.build_command(mode, 'ALL')
+            self.assertIn('-u', cmd, f'{mode}: 缺 -u，输出会被块缓冲')
+            # -u 必须放在脚本路径**之前**，否则会被当成脚本参数
+            self.assertLess(cmd.index('-u'), cmd.index(str(taskrun._script_path())),
+                            f'{mode}: -u 必须在脚本路径之前')
 
     def test_unknown_mode_rejected(self) -> None:
         for bad in ('', 'FULL', 'full; rm -rf /', 'previewx', None):
@@ -110,6 +128,159 @@ class AvailabilityTest(unittest.TestCase):
             ok, msg = taskrun.start('claim', 'ALL')
         self.assertFalse(ok)
         self.assertIn('脚本不在', msg)
+
+
+class TimeoutPolicyTest(unittest.TestCase):
+    """超时策略：**按空闲判定**，不看总时长。
+
+    初版用的是固定总时长（30 分钟），而脚本耗时随账号数线性增长——全量一轮每号
+    约 40 个写动作、动作间隔 ≥1s，54 个账号光下限就约 36 分钟。于是大池子的
+    **正常**全量会被中途杀掉，账号做一半、还得重跑，比不设超时更糟。
+
+    正确模型：只要还有输出就说明活着（每个动作都会打一行），静默超阈值才判卡死。
+    """
+
+    def setUp(self) -> None:
+        # start() 会先做前置检查（脚本存在 + 账号目录存在），测试里要让它过
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_auth = config.AUTH_DIR
+        config.AUTH_DIR = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        config.AUTH_DIR = self._orig_auth
+        try:
+            self._tmp.cleanup()
+        except PermissionError:
+            pass
+
+    def test_idle_timeout_is_generous_but_bounded(self) -> None:
+        """空闲阈值要明显大于「单个动作最长耗时」，且必须有兜底总上限。"""
+        self.assertGreaterEqual(taskrun.IDLE_TIMEOUT_SECONDS, 120,
+                                '太短会把慢动作误判成卡死')
+        self.assertGreater(taskrun.MAX_TOTAL_SECONDS, 3600,
+                           '兜底总上限太短会砍掉大池子的正常全量')
+        # 36 分钟（54 账号下限估算）必须落在兜底上限之内
+        self.assertGreater(taskrun.MAX_TOTAL_SECONDS, 36 * 60,
+                           '兜底上限仍会砍掉 54 账号的正常全量')
+
+    def _run_script(self, body: str, idle: int) -> dict:
+        """跑一个替身脚本并返回最终状态（idle = 空闲阈值，压小便于测）。"""
+        script = Path(self._tmp.name) / 'fake.py'
+        script.write_text(body, encoding='utf-8')
+
+        async def go() -> dict:
+            with mock.patch.object(taskrun, '_script_path', lambda: script), \
+                 mock.patch.object(taskrun, 'IDLE_TIMEOUT_SECONDS', idle):
+                taskrun._state.update({'running': False, 'lines': [], 'error': '',
+                                       'exit_code': None, 'timed_out': False})
+                ok, msg = taskrun.start('preview', 'ALL')
+                assert ok, msg
+                for _ in range(300):
+                    if not taskrun.status()['running']:
+                        break
+                    await asyncio.sleep(0.1)
+                return taskrun.status()
+
+        return asyncio.run(go())
+
+    def test_progress_prevents_stall_detection(self) -> None:
+        """持续有输出时不该被判卡死 —— 即使总时长超过旧阈值。"""
+        st = self._run_script(
+            'import time\n'
+            'for i in range(6):\n'
+            '    print(f"step {i}")\n'
+            '    time.sleep(0.4)\n'
+            'print("task_runner done: ok=6")\n',
+            idle=1)
+        self.assertFalse(st['timed_out'], f'持续有输出却被判超时：{st["lines"]}')
+        self.assertEqual(st['exit_code'], 0)
+        self.assertTrue(any('done' in ln for ln in st['lines']), f'没跑完：{st["lines"]}')
+
+    def test_silent_process_is_killed(self) -> None:
+        """真的卡死（长时间无任何输出）要终止，不能无限挂着。"""
+        st = self._run_script(
+            'import time\n'
+            'print("starting")\n'
+            'time.sleep(30)\n'
+            'print("never")\n',
+            idle=1)
+        self.assertTrue(st['timed_out'], '静默进程没被判定卡死')
+        self.assertTrue(any('卡死' in ln for ln in st['lines']),
+                        f'缺少卡死说明：{st["lines"]}')
+
+
+class StreamingOutputTest(unittest.TestCase):
+    """首个输出行必须在**进程结束前**就能被读到（不能攒到最后一起出）。
+
+    这是「卡半天没反应」那个问题的行为判据：判据不是「最终能读到输出」，而是
+    「进程还在跑的时候就能读到」。
+
+    测法：直接用 `build_command()` 造出真实 argv 跑一个替身脚本（立刻打印、
+    随后睡 3 秒），看第一行到达时刻。**不经过 `taskrun.start()`** —— 那需要
+    一个长期存活的事件循环（后台任务），在单测里 `asyncio.run` 收尾时会把
+    未完成的子进程任务挂住，反倒测不准（写这版时踩到过：测试直接卡死）。
+
+    ⚠️ **这条用例在 Windows 上分辨不出缓冲问题**（实测：摘掉 `-u` 它照样绿）——
+    Windows 的管道 stdout 行为与 Linux 不同，子进程写管道是立即可见的。真正
+    守这件事的是 `CommandBuildTest.test_unbuffered_flags_present`：它断言 argv
+    里必须带 `-u`（反证过：摘掉后该用例变红）。这条行为用例只在 Linux 上才有
+    分辨力，属于「换个平台能多一层保障」，不能拿它当唯一防线。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.script = self.root / 'fake_task.py'
+        # 第一行用 flush 保证「若缓冲则第二行也要等」的语义清晰；替身脚本模拟
+        # 真实脚本的形态：先打头部，再干慢活
+        self.script.write_text(
+            'import time\n'
+            'print("mode=REAL accounts=[\'x\']")\n'
+            'time.sleep(3)\n'
+            'print("task_runner done: ok=1")\n',
+            encoding='utf-8')
+        self._orig_auth = config.AUTH_DIR
+        config.AUTH_DIR = self.root
+        self._patch = mock.patch.object(taskrun, '_script_path', lambda: self.script)
+        self._patch.start()
+
+    def tearDown(self) -> None:
+        self._patch.stop()
+        config.AUTH_DIR = self._orig_auth
+        try:
+            self._tmp.cleanup()
+        except PermissionError:
+            pass
+
+    def test_first_line_arrives_long_before_process_exit(self) -> None:
+        async def measure() -> tuple[float | None, float]:
+            argv = taskrun.build_command('preview', 'ALL')
+            t0 = time.time()
+            proc = await asyncio.create_subprocess_exec(
+                *argv, cwd=str(self.root),
+                env={**taskrun.os_environ(), 'WB2A_AUTHS': str(self.root),
+                     'PYTHONUNBUFFERED': '1'},
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                stdin=asyncio.subprocess.DEVNULL,
+            )
+            first: float | None = None
+            assert proc.stdout is not None
+            while True:
+                raw = await proc.stdout.readline()
+                if not raw:
+                    break
+                if first is None:
+                    first = time.time() - t0
+            await proc.wait()
+            return first, time.time() - t0
+
+        first, total = asyncio.run(measure())
+        self.assertIsNotNone(first, '一行输出都没有')
+        # 脚本要睡 3 秒；第一行若被块缓冲，会跟第二行一起在 ~3s 处才出现
+        self.assertLess(first or 99, 2.0,
+                        f'第一行等了 {first:.2f}s（总时长 {total:.2f}s）—— '
+                        '输出被块缓冲了，用户在界面上看到的就是「卡住没反应」')
 
 
 class ScheduleTest(unittest.TestCase):
