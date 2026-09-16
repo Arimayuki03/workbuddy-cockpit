@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -9,6 +10,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from . import config
+
+logger = logging.getLogger('workbuddy.db')
 
 _lock = threading.RLock()
 _conn: sqlite3.Connection | None = None
@@ -225,12 +228,9 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # 版本（cn / global）：界面按版本切换时日志与统计要跟着切。
     # 历史记录为 NULL —— 读的时候按 cn 归类（见 realm_of_model 的注释）。
     ('request_logs', 'realm', 'TEXT'),
-    # usage_daily 的 realm 需要能进主键才能把两个版本的同名模型分开累计。
-    # SQLite 不允许 ALTER 主键，因此**只加列**、不改主键：已有部署的
-    # usage_daily 主键仍是 (day, key_id, model)，此时两个版本的同名模型会
-    # 合并累计（历史既成事实，无法拆分）；新建库则从一开始就是四列主键。
-    # 这是有意的取舍：相比「重建表并可能丢历史」，接受旧库在这一维度上的
-    # 精度损失，且界面会如实标注该口径。
+    # usage_daily 的 realm 列。注意：**光加列不够**——写入侧用的是四列 UPSERT，
+    # 而旧库主键仍是三列，会直接抛 ON CONFLICT 不匹配（issue #9：统计静默停摆）。
+    # 主键的迁移由 _rebuild_usage_daily_pk 重建表完成（SQLite 不能 ALTER 主键）。
     ('usage_daily', 'realm', "TEXT NOT NULL DEFAULT 'cn'"),
     # API 密钥的版本归属（cn / global / 空 = 不限制）。
     # 存量密钥一律为空——即保持它们原本「两版都能调」的行为，不因为升级就把
@@ -253,6 +253,87 @@ def _migrate(conn: sqlite3.Connection) -> None:
         except sqlite3.Error:
             # 并发启动时可能已被另一进程加过，忽略即可
             pass
+    _rebuild_usage_daily_pk(conn)
+
+
+def _rebuild_usage_daily_pk(conn: sqlite3.Connection) -> bool:
+    """把存量库的 usage_daily 主键从三列迁到四列（含 realm）。返回是否迁移了。
+
+    为什么必须重建表：SQLite 不能改主键，`ALTER TABLE` 只加得上列。而写入侧
+    用的是四列 UPSERT（`ON CONFLICT(day, key_id, model, realm)`），在旧库上会
+    直接抛 `OperationalError: ON CONFLICT clause does not match any PRIMARY KEY
+    or UNIQUE constraint`。**这个异常在网关里被兜住只记 warning**（旁路统计
+    不该影响转发），于是表现为彻底静默：统计数字冻结在升级前、每笔请求刷一条
+    日志，而页面看不出任何异常（issue #9 的现象）。
+
+    上一版这里只做了 ADD COLUMN，注释里写「接受旧库在这一维度上的精度损失」
+    —— 判断错了：精度损失指的是「两个版本的同名模型合并累计」，而实际后果是
+    **一行都写不进去**，比精度损失严重得多。
+
+    迁移要点：
+      * 用 `INSERT OR REPLACE` 而非普通 INSERT：旧库合并累计的行在四列主键下
+        不会冲突，但万一有重复（(day,key_id,model) 不同而 realm 相同的脏数据），
+        替换比让整个迁移失败好——迁移失败会让服务起不来。
+      * 全程在事务里，失败则回滚并保留原表（先建好新表再 DROP 旧表，
+        任何异常都不会丢数据）。
+      * realm 不需要 COALESCE 兜底：旧库该列是迁移时 `ADD COLUMN ... NOT NULL
+        DEFAULT 'cn'` 建的，NULL 不存在于该列（实测写不进去）。
+    """
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='usage_daily'"
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if not row or not row[0]:
+        return False  # 表不存在（全新库由 SCHEMA 建好，就是四列主键）
+    ddl = row[0]
+    # 已经是四列主键（新库）→ 无需处理。判据取 "realm" 是否出现在主键括号里，
+    # 而不是简单看 DDL 里有没有 realm 字样——旧库也有 realm 列（ALTER 加的）。
+    pk_part = ddl[ddl.upper().find('PRIMARY KEY'):] if 'PRIMARY KEY' in ddl.upper() else ''
+    if 'realm' in pk_part.lower():
+        return False
+
+    try:
+        with conn:  # 事务：任一步失败自动回滚，旧表原样保留
+            conn.execute('''
+                CREATE TABLE usage_daily_new (
+                  day               TEXT    NOT NULL,
+                  key_id            INTEGER NOT NULL,
+                  model             TEXT    NOT NULL,
+                  requests          INTEGER NOT NULL DEFAULT 0,
+                  prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+                  completion_tokens INTEGER NOT NULL DEFAULT 0,
+                  credit            REAL    NOT NULL DEFAULT 0,
+                  realm             TEXT    NOT NULL DEFAULT 'cn',
+                  PRIMARY KEY (day, key_id, model, realm)
+                )
+            ''')
+            conn.execute('''
+                INSERT OR REPLACE INTO usage_daily_new
+                  (day, key_id, model, requests, prompt_tokens, completion_tokens, credit, realm)
+                SELECT day, key_id, model, requests, prompt_tokens, completion_tokens,
+                       credit, realm
+                FROM usage_daily
+            ''')
+            conn.execute('DROP TABLE usage_daily')
+            conn.execute('ALTER TABLE usage_daily_new RENAME TO usage_daily')
+        logger.info('usage_daily 主键已迁移为四列（含 realm），历史数据已保留')
+        return True
+    except sqlite3.Error as exc:
+        # 迁移失败不阻断启动（服务照常跑，统计在下次启动重试）——起不来比统计
+        # 不准严重得多。但**必须留下 error 级日志**：这个缺陷当初之所以拖了
+        # 好几个版本才被发现，正是因为它的表现是静默的（统计冻结、页面看不出
+        # 异常）。迁移再失败一次不能还是没人知道。
+        logger.error(
+            'usage_daily 主键迁移失败，用量统计将无法累计（历史数据未受影响，'
+            '重启会重试）：%s', exc,
+        )
+        try:
+            conn.execute('DROP TABLE IF EXISTS usage_daily_new')
+        except sqlite3.Error:
+            pass
+        return False
 
 
 def query(sql: str, args: Iterable[Any] = ()) -> list[sqlite3.Row]:
