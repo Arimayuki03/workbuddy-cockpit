@@ -355,5 +355,3 @@ func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
 	// 100% 同源——机制名存实亡且冗余，删除后 weightOf 为三因子。）
 	return w
 }
-
-// SetCredits 更新账号余额。
