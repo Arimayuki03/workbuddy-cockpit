@@ -1,0 +1,58 @@
+# 构建上下文排除清单。
+#
+# 为什么需要：CI 里 `npm ci` 与 `npm run build:export` 都在 docker build **之前**
+# 执行，因此 web/node_modules 此刻确实存在于工作区。多架构构建（buildx）会把整个
+# 上下文打包送到构建器容器，不排除的话每次发版都要多传几百 MB 的无用文件。
+# 这些目录镜像里一个都不需要——Dockerfile 只 COPY server/、web/out/、deploy/
+# 与两个 markdown。
+#
+# 注意：**不要**排除 web/out —— 它是前端构建产物，镜像要用（见 Dockerfile）。
+# 也不要用 web/ 这种粗粒度写法，那会连带排除掉 web/out。
+
+# 依赖与前端中间产物
+web/node_modules
+web/.next
+web/out/cache
+
+# 运行时数据与凭据（绝不能烘进镜像）
+data
+.env
+.env.local
+*.db
+*.db-wal
+*.db-shm
+users.json
+config.json
+.version
+
+# Python 缓存
+__pycache__
+**/__pycache__
+*.py[cod]
+.venv
+venv
+
+# 版本控制与 CI 自身
+.git
+.gitignore
+.github
+
+# 开发参考仓库与临时目录
+.ref
+.devdata
+dev
+
+# 编辑器 / 系统
+.DS_Store
+.idea
+.vscode
+.zcode
+*.log
+*.tsbuildinfo
+next-env.d.ts
+
+# 文档：README 与 CHANGELOG 由 Dockerfile 显式 COPY，其余不必进上下文
+docs
+*.md
+!README.md
+!CHANGELOG.md

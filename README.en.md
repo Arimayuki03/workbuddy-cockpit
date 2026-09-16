@@ -103,16 +103,16 @@ ideas belong in [this repository](https://github.com/ithtelab/workbuddy-manager/
 
 ### Reverse proxy gateway (`/v1`)
 - **OpenAI compatible** — point any standard SDK at it; streaming (SSE) and non-streaming
-- **Multi-key distribution** — per-key expiry, max IPs, IP allowlist, model allowlist and
-  token quota
+- **Multi-key distribution** — per-key **realm** (CN / Global), expiry, max IPs,
+  IP allowlist, model allowlist and token quota
 - **Key safety** — only a SHA-256 hash is stored; the plaintext is shown once at creation
 - **Model alias mapping** — map e.g. `gpt-4o-mini` to a real model so downstream clients
   can migrate without changes
 - **CN / Global switch** — one toggle in the top right (the upstream serves both realms
-  from a single instance sharing one account pool): accounts, models, playground and task
-  logs are filtered by realm, and "Add account" follows the switch (global accounts go
-  through region registration and a one-time trial). Request logs and usage are global
-  records; the UI says so explicitly
+  from a single instance sharing one account pool): accounts, models, playground, task
+  logs, request logs and usage stats are all filtered by realm, and "Add account" follows
+  the switch (global accounts go through region registration and a one-time trial).
+  **Keys can be realm-scoped too** — a CN key can only call CN models and vice versa
 - **Model catalogue** — a dedicated page for the models an account can actually use:
   display name, description, context, max output, **reasoning effort levels**,
   **credit multiplier**, and capability badges (vision / reasoning-only), grouped by series,
@@ -151,8 +151,8 @@ ideas belong in [this repository](https://github.com/ithtelab/workbuddy-manager/
   (credits expiring inside the window are spent first; empty or 0 disables it)
 - **Feature flags / session stickiness** — outbound fingerprint sanitisation, session
   binding TTL and cleanup interval
-- **Available models** — fetched live from the upstream with the source stated
-  (dynamic / built-in static fallback), plus a manual "Refetch" (the upstream caches for
+- **Available models** — fetched live from the upstream with the source stated,
+  plus a manual "Refetch" (the upstream caches for
   one hour). The list is fetched using one randomly chosen account, so **what you see
   depends on that account's entitlements**
 - Everything is validated on input (hours limited to 0-23, deduplicated and sorted;
@@ -261,7 +261,8 @@ ideas belong in [this repository](https://github.com/ithtelab/workbuddy-manager/
 <img src="docs/images/tasks.png" alt="Task logs" width="100%" />
 
 ### API keys
-> Independent quota, IP limits and model allowlists; plaintext shown once at creation
+> Realm-scoped (CN / Global), independent quota, IP limits and model allowlists;
+> plaintext shown once at creation
 
 <img src="docs/images/keys.png" alt="API keys" width="100%" />
 
@@ -419,6 +420,10 @@ Or pull the prebuilt image (pushed to GHCR on every release):
 docker pull ghcr.io/ithtelab/workbuddy-manager:latest
 ```
 
+> The image ships for **both `linux/amd64` and `linux/arm64`** (Apple Silicon and ARM
+> cloud hosts can pull it directly, with no QEMU emulation). `docker pull` picks the
+> right one for your machine automatically.
+
 **The container build has the same capabilities as a host install** — the compose file
 mounts three things to make that true:
 
@@ -521,10 +526,14 @@ On success the account is checked in, written to disk and the upstream container
 
 Open **Keys**, click **New key** and configure as needed:
 
+- **Realm** — a CN key may only call CN models; a Global key may only call models
+  prefixed with `global:` (cross-realm calls are rejected, and `/v1/models` returns only
+  that realm's models). Defaults to the realm you are currently viewing; pick
+  "Unrestricted" to allow both
 - **Expiry** — empty or 0 means it never expires
 - **Max IPs** — how many distinct source IPs may use the key
 - **IP allowlist** — stricter: only the listed IPs / CIDRs may call
-- **Model allowlist** — which models the key may use
+- **Model allowlist** — narrows the key down to specific models within the chosen realm
 - **Quota** — requests are rejected once the token budget is exhausted
 
 The key plaintext is **shown only once at creation** — save it immediately.

@@ -17,6 +17,9 @@ class KeyIn(BaseModel):
     ip_allowlist: list[str] = Field(default_factory=list)
     models: list[str] = Field(default_factory=list)
     quota: int = 0
+    # 版本归属：'' = 不限制（存量密钥的形态）。非 cn/global 的值由
+    # keysvc._norm_realm 归一化成 ''——不报错，免得旧前端（不带该字段）被拒。
+    realm: str = Field(default='', max_length=16)
 
 
 class KeyPatch(BaseModel):
@@ -27,6 +30,7 @@ class KeyPatch(BaseModel):
     ip_allowlist: list[str] | None = None
     models: list[str] | None = None
     quota: int | None = None
+    realm: str | None = None
 
 
 @router.get('')
@@ -44,6 +48,7 @@ def create_key(body: KeyIn, request: Request,
         ip_allowlist=body.ip_allowlist,
         models=body.models,
         quota=body.quota,
+        realm=body.realm,
     )
     # 密钥是拿额度用的凭证，发放必须留痕（含来源 IP）
     security.audit(user, 'create_key', str(created.get('name') or ''),

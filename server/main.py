@@ -14,7 +14,7 @@ import logging
 from . import config, db, security
 from .iputil import client_ip
 from .routers import (
-    accounts, auth, gateway, keys, logs, models, playground,
+    accounts, anthropic, auth, gateway, keys, logs, models, playground,
     security as security_router, settings, stats, system,
 )
 from .services import tasklog
@@ -56,7 +56,7 @@ def _warn_if_exposed() -> None:
 
 app = FastAPI(
     title='WorkBuddy Manager',
-    version='1.0.34',
+    version='1.0.36',
     lifespan=lifespan,
     # 生产环境默认关闭交互式文档与 OpenAPI 描述：
     # 它们会把管理接口全貌（路径、参数、结构）暴露给任何未认证访问者，
@@ -87,6 +87,8 @@ app.include_router(system.router)
 app.include_router(models.router)
 app.include_router(playground.router)
 app.include_router(gateway.router)
+# Anthropic Messages API 兼容层（/v1/messages）——给只认该协议的客户端用
+app.include_router(anthropic.router)
 
 
 @app.middleware('http')

@@ -201,6 +201,13 @@ export interface ApiKey {
   max_ips: number;
   ip_allowlist: string[];
   models: string[];
+  /**
+   * 版本归属：'cn' | 'global'，空串 = 不限制（两版都能调）。
+   *
+   * 空串是**存量密钥**的形态（该字段引入前创建的），保持其原有行为不变；
+   * 新建密钥会跟随当前所在版本写入。
+   */
+  realm: 'cn' | 'global' | '';
   quota: number | null;
   used_tokens: number;
   created_at: number;
@@ -266,6 +273,14 @@ export interface StatsSummary {
   total_tokens: number;
   active_keys: number;
   top_model: string | null;
+  /**
+   * 统计写入的健康状态。`ok: false` 时详情说明为什么可疑。
+   *
+   * 存在意义：统计是旁路写入（失败不影响转发），坏了以后界面看不出异常——
+   * 数字只是停着不动，页面照常轮询。所以要把「今天有请求但统计为 0」这种
+   * 组合显式报出来，而不是等用户自己发现。
+   */
+  usage_health?: {ok: boolean; detail: string};
 }
 
 export interface IpRule {

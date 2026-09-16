@@ -192,7 +192,8 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
             logger.warning('累计用量失败（不影响请求）: %s', exc)
 
 
-def _authorize(request: Request, model: str | None) -> tuple[dict | None, str, JSONResponse | None]:
+def _authorize(request: Request, model: str | None,
+               *, is_model_list: bool = False) -> tuple[dict | None, str, JSONResponse | None]:
     """返回 (key, ip, error_response)。"""
     ip = iputil.client_ip(request)
     ua = request.headers.get('user-agent')
@@ -222,7 +223,7 @@ def _authorize(request: Request, model: str | None) -> tuple[dict | None, str, J
 
     _log_ip(ip, path, False, ua)
 
-    reason = keysvc.validate(key, ip, model)
+    reason = keysvc.validate(key, ip, model, is_model_list=is_model_list)
     if reason:
         _record(key, ip, model or '', '', 403, 0, 0, 0, ua, reason, False)
         return None, ip, _oai_error(reason, 403, 'permission_error', 'forbidden')
@@ -289,9 +290,12 @@ def _scan_sse(pending: str, usage: dict) -> tuple[str, bool]:
 
 
 # ── 模型列表 ─────────────────────────────────────────────
+# 列表按密钥的版本归属过滤：国际版密钥只看到 `global:` 条目、国内版密钥只看到
+# 其余条目（限定了版本的密钥看不到另一版本，免得挑出一个注定 403 的模型）。
+# 未限定版本的密钥（存量）照旧看到全部——它们本来就两版都能调。
 @router.get('/v1/models')
 async def list_models(request: Request):
-    key, ip, err = _authorize(request, None)
+    key, ip, err = _authorize(request, None, is_model_list=True)
     if err:
         return err
     started = time.time()
@@ -300,11 +304,70 @@ async def list_models(request: Request):
             resp = await client.get(f'{config.WB2API_BASE}/v1/models', headers=_upstream_headers())
         latency = int((time.time() - started) * 1000)
         _record(key, ip, '', '', resp.status_code, 0, 0, latency, request.headers.get('user-agent'), None, False)
-        return JSONResponse(resp.json(), status_code=resp.status_code)
+        payload = _scope_models(resp.json(), key)
+        # Anthropic 客户端（Claude Code 等）也会调这个路径，但期望的结构不同
+        if request.headers.get('anthropic-version'):
+            payload = _as_anthropic_models(payload)
+        return JSONResponse(payload, status_code=resp.status_code)
     except Exception as exc:  # noqa: BLE001
         latency = int((time.time() - started) * 1000)
         _record(key, ip, '', '', 502, 0, 0, latency, request.headers.get('user-agent'), str(exc), False)
         return _oai_error(f'上游不可用: {exc}', 502, 'api_error', 'upstream_unavailable')
+
+
+def _as_anthropic_models(payload: object) -> object:
+    """把 OpenAI 形状的模型列表翻成 Anthropic 的形状。
+
+    两边都叫 `/v1/models`，结构却完全不同：Anthropic 是
+    `{data:[{type:"model", id, display_name, created_at}], has_more, first_id, last_id}`。
+    Claude Code 按这个结构解析，形状不对会直接报错——所以只能在**同一个路径上
+    按请求头分流**（用 `anthropic-version` 区分），而不能各注册一个路由
+    （FastAPI 里先注册的会赢，另一个永远收不到请求）。
+
+    认不出的结构**原样返回**：不在我们看不懂的响应上动手脚。
+    """
+    items = payload.get('data') if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return payload
+    data = [
+        {
+            'type': 'model',
+            'id': str(m.get('id') or ''),
+            'display_name': str(m.get('name') or m.get('id') or ''),
+            # 协议要求 ISO8601；上游给的是 created(epoch)，缺省时用纪元起点占位
+            'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(m.get('created') or 0)),
+        }
+        for m in items
+        if isinstance(m, dict) and m.get('id')
+    ]
+    return {
+        'data': data,
+        'has_more': False,
+        'first_id': data[0]['id'] if data else None,
+        'last_id': data[-1]['id'] if data else None,
+    }
+
+
+def _scope_models(payload: object, key: dict | None) -> object:
+    """按密钥版本裁剪模型列表（未限定版本时原样返回）。
+
+    上游的 /v1/models 用 `cn:` / `global:` 前缀区分版本，判定与
+    db.realm_of_model 保持一致（这也是网关转发时上游实际用的路由依据）。
+    结构不是预期的 `{data: [...]}` 时**原样透传**——配额耗尽之类的判断
+    不该因为我们认不出结构就去改动上游的响应。
+    """
+    want = keysvc._norm_realm((key or {}).get('realm'))
+    if not want or not isinstance(payload, dict):
+        return payload
+    items = payload.get('data')
+    if not isinstance(items, list):
+        return payload
+    kept = [
+        m for m in items
+        if isinstance(m, dict)
+        and ('global' if str(m.get('id') or '').lower().startswith('global:') else 'cn') == want
+    ]
+    return {**payload, 'data': kept}
 
 
 # ── 对话补全（v1 / v2）──────────────────────────────────
