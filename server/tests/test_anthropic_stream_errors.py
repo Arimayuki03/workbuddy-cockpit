@@ -26,6 +26,11 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 
+def _sse(obj) -> str:
+    """拼一个 SSE 帧（`data: {...}` + 空行分隔）。"""
+    return 'data: ' + json.dumps(obj) + '\n\n'
+
+
 class StreamErrorPassthroughTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -143,6 +148,24 @@ class StreamErrorPassthroughTest(unittest.TestCase):
         self.assertNotEqual(i_stop, -1, '没有 message_stop（部分客户端会一直等）')
         self.assertLess(i_err, i_stop,
                         'error 发在 message_stop 之后——客户端读到 stop 就不再读了')
+
+    def test_midstream_error_precedes_message_stop(self) -> None:
+        """状态码 **200** 但中途回 error 帧：同样要 error 在前。
+
+        与上面「上游直接报错」是同一原则的另一个入口——收尾逻辑只有一份，
+        这条守住它没被改回「先 stop 后 error」。此处流已经开始（已吐过
+        content），所以更容易被误认为「已经成功了，顺序无所谓」。
+        """
+        body = _sse({'choices': [{'delta': {'content': 'partial'},
+                                  'finish_reason': None}]}) + \
+               _sse({'error': {'message': 'upstream blew up mid-stream'}})
+        r = self._post_stream(200, body)
+        i_err = r.text.find('event: error')
+        i_stop = r.text.find('event: message_stop')
+        self.assertNotEqual(i_err, -1, '中途出错必须告诉客户端，否则只剩「空回复」')
+        self.assertNotEqual(i_stop, -1, '仍要给出收尾事件，否则客户端会一直等')
+        self.assertLess(i_err, i_stop, 'error 发在 message_stop 之后——客户端读到 stop 就不再读了')
+        self.assertIn('upstream blew up', r.text, '错误内容要透传')
 
     def test_large_error_body_also_works(self) -> None:
         """大错误体（原来唯一能过的情形）不能被改坏。"""

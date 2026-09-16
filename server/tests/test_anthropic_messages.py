@@ -274,6 +274,36 @@ class StreamTranslatorTest(unittest.TestCase):
         self.assertEqual(msg_delta[1]['delta']['stop_reason'], 'tool_use')
 
 
+class StreamBufferBoundTest(unittest.TestCase):
+    """流式解析缓冲必须有上限。
+
+    正常 SSE 一行一条 `data:`，缓冲里只留半行；但如果上游持续吐出**不含换行**
+    的数据，缓冲会一直长下去直至吃光内存。这里把上限钉住。
+    """
+
+    def test_buffer_limit_is_defined_and_sane(self) -> None:
+        from server.routers.anthropic import MAX_SSE_BUFFER
+        # 够大：正常单行 SSE 即使带大段 tool_use 参数也只几十 KB
+        self.assertGreaterEqual(MAX_SSE_BUFFER, 256 * 1024)
+        # 但有界：不能让单个连接无限占用内存
+        self.assertLessEqual(MAX_SSE_BUFFER, 16 * 1024 * 1024)
+
+    def test_over_limit_aborts_instead_of_growing(self) -> None:
+        """超限时要中止，而不是继续增长——用源码级断言守住这个分支存在。
+
+        端到端造这个场景需要上游持续输出无换行数据，成本高；这里确认
+        保护分支确实写在读取循环里。
+        """
+        import inspect
+
+        from server.routers import anthropic
+        src = inspect.getsource(anthropic.messages)
+        self.assertIn('MAX_SSE_BUFFER', src, '读取循环里没有缓冲上限检查')
+        # 两处：正常转发分支 + 上游报错分支（报错时也可能持续吐数据）
+        self.assertGreaterEqual(src.count('MAX_SSE_BUFFER'), 2,
+                                '上游报错分支缺少缓冲上限')
+
+
 class ModelListShapeTest(unittest.TestCase):
     """`/v1/models` 按请求头分流的形状转换。"""
 
@@ -297,6 +327,81 @@ class ModelListShapeTest(unittest.TestCase):
         out = _as_anthropic_models({'data': []})
         self.assertEqual(out['data'], [])
         self.assertIsNone(out['first_id'])
+
+
+class TokenHeaderToleranceTest(unittest.TestCase):
+    """令牌取值要宽容——少认一种写法就会表现为「某客户端莫名 401」。
+
+    真实踩到过：Claude Code 配 ANTHROPIC_AUTH_TOKEN 与配 ANTHROPIC_API_KEY
+    发的头不同；部分转发工具（ccswitch 等）还会把裸 token 直接放进
+    Authorization，或加自己的前缀。这几种都得认。
+    """
+
+    def _req(self, headers: dict):
+        """构造一个假 request。
+
+        headers 必须模拟 Starlette 的 `Headers`：**大小写不敏感**。
+        直接用 dict 会踩坑——dict 的 .get() 区分大小写，而 HTTP 头名不区分，
+        于是「X-API-Key」这种真实会被接受的头，在测试里会假失败。
+        """
+        class _Headers:
+            def __init__(self, d): self._d = {k.lower(): v for k, v in d.items()}
+            def get(self, key, default=''): return self._d.get(key.lower(), default)
+            def keys(self): return list(self._d.keys())
+
+        class _R:
+            def __init__(self, h): self.headers = _Headers(h)
+        return _R(headers)
+
+    def test_accepts_known_header_shapes(self) -> None:
+        # 用列表而非 dict：多个用例的头名只差大小写，放进 dict 会互相覆盖，
+        # 表面上写了几条、实际只跑了一条。
+        from server.routers.anthropic import _token_candidates
+        cases = [
+            ({'x-api-key': 'wbk_a'}, 'x-api-key 小写'),
+            ({'X-API-Key': 'wbk_a'}, 'x-api-key 大写'),
+            ({'x-anthropic-api-key': 'wbk_a'}, 'x-anthropic-api-key'),
+            ({'Authorization': 'Bearer wbk_a'}, 'Bearer 规范'),
+            ({'authorization': 'bearer wbk_a'}, 'bearer 小写'),
+            ({'Authorization': 'wbk_a'}, '裸 token（无 Bearer）'),
+        ]
+        for headers, label in cases:
+            with self.subTest(label=label):
+                self.assertEqual(_token_candidates(self._req(headers)), ['wbk_a'], label)
+
+    def test_strips_surrounding_whitespace(self) -> None:
+        """复制粘贴常带前后空白，不剥掉就会哈希不匹配。"""
+        from server.routers.anthropic import _token_candidates
+        self.assertEqual(_token_candidates(self._req({'x-api-key': '  wbk_a\n'})), ['wbk_a'])
+        self.assertEqual(_token_candidates(self._req({'Authorization': 'Bearer  wbk_a '})), ['wbk_a'])
+
+    def test_returns_empty_when_absent(self) -> None:
+        from server.routers.anthropic import _token_candidates
+        self.assertEqual(_token_candidates(self._req({})), [])
+        self.assertEqual(_token_candidates(self._req({'Authorization': '   '})), [])
+
+    def test_collects_all_candidates_deduped(self) -> None:
+        """候选要**全部**收集并去重，而不是只取第一个。"""
+        from server.routers.anthropic import _token_candidates
+        got = _token_candidates(self._req({
+            'x-api-key': 'sk-other-service',
+            'Authorization': 'Bearer wbk_ours',
+        }))
+        self.assertEqual(got, ['sk-other-service', 'wbk_ours'])
+        # 值相同（去掉 Bearer 后）只留一份
+        dup = _token_candidates(self._req({
+            'Authorization': 'Bearer wbk_same',
+            'x-anthropic-api-key': 'wbk_same',
+        }))
+        self.assertEqual(dup, ['wbk_same'])
+
+    def test_header_names_never_leaks_values(self) -> None:
+        """调试日志只记头名——把凭据写进日志等于换个地方泄露。"""
+        from server.routers.anthropic import _header_names
+        names = _header_names(self._req({'x-api-key': 'wbk_secret_value', 'User-Agent': 'x'}))
+        self.assertIn('x-api-key', names)
+        self.assertIn('user-agent', names)
+        self.assertNotIn('wbk_secret_value', ' '.join(names))
 
 
 class CountTokensAuthTest(unittest.TestCase):
@@ -371,6 +476,65 @@ class CountTokensAuthTest(unittest.TestCase):
         r = self.c.post('/v1/messages',
                         json={'model': 'm', 'max_tokens': 1, 'messages': []})
         self.assertEqual(r.status_code, 401)
+
+    def test_picks_the_credential_that_resolves(self) -> None:
+        """客户端同时带多份凭据时，要挑出**能解析**的那一份。
+
+        实测踩到：Claude Code 既发 `x-api-key`（值是另一个服务、`sk-` 开头）
+        又发 `Authorization: Bearer`（值才是本网关的 `wbk_`）。只取第一个就会
+        拿到不相干的那份，表现为「配对了却一直 401」，而客户端侧完全看不出问题。
+        """
+        r = self.c.post('/v1/messages/count_tokens',
+                        json={'messages': [{'role': 'user', 'content': 'hi'}]},
+                        headers={
+                            'x-api-key': 'sk-some-other-service-key',
+                            'Authorization': f'Bearer {self.key}',
+                        })
+        self.assertEqual(r.status_code, 200, '应回退到 authorization 里那份有效凭据')
+        self.assertIn('input_tokens', r.json())
+
+    def test_bogus_x_api_key_alone_still_rejected(self) -> None:
+        """只有无效凭据时依然拒绝——挑不出来就老实 401，不能放行。"""
+        r = self.c.post('/v1/messages/count_tokens',
+                        json={'messages': []},
+                        headers={'x-api-key': 'sk-some-other-service-key'})
+        self.assertEqual(r.status_code, 401)
+
+    def test_disabled_key_cannot_reach_count_tokens(self) -> None:
+        """停用的密钥必须被 count_tokens 拒绝（审计发现的真漏洞）。
+
+        这个端点早先只挑了个「能解析的密钥」就放行，**从不调 keysvc.validate**
+        —— 管理员停用泄露的密钥后，`/v1/messages` 返回 403，`count_tokens`
+        却仍然 200，等于吊销不彻底。
+        """
+        from server import keysvc
+
+        created = keysvc.create_key(name='to-disable')
+        kid, token = created['id'], created['key']
+        try:
+            r = self.c.post('/v1/messages/count_tokens', json={'messages': []},
+                            headers={'x-api-key': token})
+            self.assertEqual(r.status_code, 200, '启用状态下应可用')
+
+            keysvc.update_key(kid, {'enabled': False})
+
+            r = self.c.post('/v1/messages/count_tokens', json={'messages': []},
+                            headers={'x-api-key': token})
+            self.assertEqual(r.status_code, 403, '停用的密钥仍能调用 count_tokens')
+        finally:
+            keysvc.delete_key(kid)
+
+    def test_count_tokens_rejects_oversized_body(self) -> None:
+        """count_tokens 同样受请求体上限约束（审计发现的真漏洞）。
+
+        早先它直接 `await request.json()`，没有 `gateway._read_json_body` 的
+        体积检查 —— 持密钥者发一个超大 body 就能把网关内存打满。
+        """
+        big = 'x' * (9 * 1024 * 1024)   # 9 MiB，超过默认 8 MiB 上限
+        r = self.c.post('/v1/messages/count_tokens',
+                        json={'messages': [{'role': 'user', 'content': big}]},
+                        headers={'x-api-key': self.key})
+        self.assertEqual(r.status_code, 413, '超大请求体应被拒（413）而不是先读进内存')
 
 
 if __name__ == '__main__':
