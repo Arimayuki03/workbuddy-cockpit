@@ -199,6 +199,8 @@
     "emptyTitle": "暫無資料",
     "emptyDesc": "該維度在所選時間範圍內沒有呼叫",
     "tokenHint": "{v} Token"
+    ,"usageHealthTitle": "用量統計可能沒有正常累計"
+    ,"usageHealthDetail": "今天已有 {n} 次呼叫記錄，但用量統計為 0——統計可能沒有正常寫入。可嘗試「修復統計」；若仍為 0，請查看伺服器日誌。"
   },
   "accounts": {
     "title": "帳號管理",

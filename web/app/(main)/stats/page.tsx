@@ -48,6 +48,21 @@ const CHART_COLORS = [
   'var(--chart-5)',
 ];
 
+/**
+ * 统计健康提示的详情本地化。
+ *
+ * 服务端（`server/routers/stats.py` 的 `_usage_health`）返回的是**带数字的中文模板句**，
+ * 且其测试断言了详情里必须出现调用次数，所以这里不改服务端，改为按同一模板反解、
+ * 交给译文重排；解不出就原样显示服务端文案——宁可退化成中文，也不要显示空白或丢掉数字。
+ */
+const USAGE_HEALTH_DETAIL = /^今天已有 (\d+) 次调用记录，但用量统计为 0/;
+
+function usageHealthDetail(detail: string, t: (key: string, params?: Record<string, string>) => string): string {
+  const m = USAGE_HEALTH_DETAIL.exec(detail.trim());
+  if (!m) return detail;
+  return t('stats.usageHealthDetail', {n: fmtNumber(Number(m[1]))});
+}
+
 export default function StatsPage() {
   const {isAdmin} = useAuth();
   // 统计随顶部版本切换：两个版本走的是不同账号池，混在一起看没有意义
@@ -181,9 +196,11 @@ export default function StatsPage() {
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
           <div className="text-[11px] leading-5">
             <span className="font-medium text-amber-700 dark:text-amber-300">
-              用量统计可能没有正常累计
+              {t('stats.usageHealthTitle')}
             </span>
-            <div className="text-muted-foreground">{summary.usage_health.detail}</div>
+            <div className="text-muted-foreground">
+              {usageHealthDetail(summary.usage_health.detail, t)}
+            </div>
           </div>
         </div>
       )}

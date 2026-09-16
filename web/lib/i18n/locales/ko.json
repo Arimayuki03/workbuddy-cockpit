@@ -199,6 +199,8 @@
     "emptyTitle": "데이터 없음",
     "emptyDesc": "선택한 기간에 이 항목의 호출이 없습니다",
     "tokenHint": "{v} Token"
+    ,"usageHealthTitle": "사용량 통계가 정상적으로 누적되지 않았을 수 있습니다"
+    ,"usageHealthDetail": "오늘 이미 {n}건의 호출 기록이 있지만 사용량 통계는 0입니다. 통계가 정상적으로 기록되지 않았을 수 있습니다. '통계 복구'를 시도하고, 계속 0이면 서버 로그를 확인하세요."
   },
   "accounts": {
     "title": "계정 관리",
