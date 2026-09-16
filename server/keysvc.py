@@ -22,6 +22,47 @@ def _norm_realm(value: object) -> str:
     return v if v in ('cn', 'global') else ''
 
 
+def _json_list(raw: object) -> list[str]:
+    """把库里存的 JSON 数组文本解析成列表；**解析不了按「该列未设置」处理**。
+
+    为什么必须容错：`ip_allowlist` / `models` 是 JSON 文本列，而读取它的
+    `_parse` 被**列表接口**用到——只要**任意一把**密钥的这两列存了非法 JSON
+    （历史版本写入过、手工改过库、写入被截断、JSON 编码变更），整个
+    `GET /api/keys` 就抛 JSONDecodeError → 500，界面上**一把密钥都看不到**。
+
+    而这会伪装成「创建失败」：新建密钥的 POST 本身是成功的（数据已入库），
+    紧接着前端刷新列表才炸——用户看到 500 以为没建成，再点一次就多一把重复的。
+    症状极具误导性（数据明明进去了），所以这里宁可少显示一个字段，
+    也绝不让一列坏数据拖垮整个列表。
+
+    **注意这里的方向**：解析失败按空列表返回，而 `validate` 里是
+    `if allow and ...` / `if key['models'] and ...` —— 空列表意味着**跳过该项
+    检查**（不限制 IP / 不限制模型）。也就是说坏数据会**放宽**该密钥，不是收紧。
+    这是有意的取舍，理由见下：
+
+      * 坏数据只可能来自**已经损坏的库**，而那种库在修复前整个密钥页都打不开，
+        管理员连删掉它的入口都没有——修好列表是当务之急；
+      * 「不限制」不等于「无保护」：密钥本身仍要过哈希校验、启停、有效期、
+        配额与限流；IP 与模型白名单是**附加**收紧项，不是唯一防线；
+      * 反向选择（坏数据一律拒绝）会让那把密钥的所有调用都失败，而管理员
+        看不到任何原因（列表都打不开），排查成本更高。
+
+    所以界面上会把「解析失败」当作空列表展示——管理员看到某把密钥的白名单
+    是空的，若记得自己设过，就知道要重新设置一次。
+    """
+    if isinstance(raw, list):
+        return [str(x) for x in raw if x]
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(x) for x in parsed if x]
+
+
 def _parse(row) -> dict:
     return {
         'id': row['id'],
@@ -30,8 +71,8 @@ def _parse(row) -> dict:
         'enabled': bool(row['enabled']),
         'expires_at': row['expires_at'],
         'max_ips': row['max_ips'],
-        'ip_allowlist': json.loads(row['ip_allowlist'] or '[]'),
-        'models': json.loads(row['models'] or '[]'),
+        'ip_allowlist': _json_list(row['ip_allowlist']),
+        'models': _json_list(row['models']),
         'realm': _norm_realm(row['realm']),
         'quota': row['quota'],
         'used_tokens': row['used_tokens'],
