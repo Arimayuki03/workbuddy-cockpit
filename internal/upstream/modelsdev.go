@@ -211,9 +211,13 @@ func (f *modelsDevFetcher) ensureDocAsync(client *http.Client, baseOverride stri
 
 // fetchDoc 拉取并解析 models.dev 文档，建裸 id 索引（goroutine 内执行，永不 panic
 // 上抛：任何失败只静默冷却）。
+// 拒绝 nil client（不回落 http.DefaultClient）：生产调用方恒传非 nil，nil 只意味着
+// 测试疏漏——DefaultClient 无超时（挂起隐患）且会打真网（测试污染 + 不确定延迟），
+// 静默 WARN + 返回（与 fetch 失败同语义，降级 1M 兜底）让疏漏显式化。
 func (f *modelsDevFetcher) fetchDoc(client *http.Client, baseOverride string) {
 	if client == nil {
-		client = http.DefaultClient
+		log.Printf("WARN: [upstream] models.dev fetch: nil client rejected (no DefaultClient fallback, silent fallback to 1M)")
+		return
 	}
 	url := ModelsDevURL
 	if baseOverride != "" {

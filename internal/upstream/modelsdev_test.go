@@ -786,3 +786,31 @@ func TestParseModelsDevDocVendorTieBreakByProviderName(t *testing.T) {
 		}
 	}
 }
+
+// TestFetchDocNilClientDoesNotHitNetwork fetchDoc 拒绝 nil client：不回落
+// http.DefaultClient（无超时 + 打真网）。依据 pr134-watchlist-analysis.md #5：
+// 生产路径恒传非 nil（handler 恒传 cfg.Upstream.HTTP），nil 只出现在测试疏漏——
+// 静默打真网是最坏行为。断言 fake server 零命中 + doc 仍 nil（与 fetch 失败
+// 同语义：静默降级 1M 兜底）。
+func TestFetchDocNilClientDoesNotHitNetwork(t *testing.T) {
+	resetModelsDev()
+	f := newModelsDevServer(fakeModelsDevDoc(map[string]map[string][2]int64{
+		"zai": {"glm-5.2": {1000000, 131072}},
+	}))
+	defer f.ts.Close()
+
+	modelsDev.fetchDoc(nil, f.ts.URL)
+
+	f.mu.Lock()
+	hits := f.hits
+	f.mu.Unlock()
+	if hits != 0 {
+		t.Fatalf("nil client 不应打网络（回落 DefaultClient 打真网/被路由到 fake）: hits=%d", hits)
+	}
+	modelsDev.mu.Lock()
+	doc := modelsDev.doc
+	modelsDev.mu.Unlock()
+	if doc != nil {
+		t.Fatalf("nil client 时 doc 应保持 nil（拉取失败语义），got %d 条", len(doc))
+	}
+}
