@@ -42,6 +42,8 @@ dev/.ui-*
 dev/.variants-*
 dev/.pick-*
 dev/.ab-*
+# 复现脚本（repro_pool_mismatch.py）的临时数据目录
+dev/.repro
 
 # 安全测试脚本（临时）
 .sec*.py

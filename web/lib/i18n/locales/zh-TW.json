@@ -116,7 +116,7 @@
     "expired": "已過期",
     "urgent": "即將過期",
     "soon": "偏緊",
-    "healthy": "線上"
+    "valid": "有效"
   },
   "metric": {
     "credits": "積分餘額",
@@ -159,7 +159,8 @@
     "healthSnapshot": "帳號健康快照",
     "noAccounts": "暫無帳號",
     "noAccountsHint": "點擊底欄「快速新增」掃碼授權騰訊帳號",
-    "partialLoadFailed": "部分資料載入失敗"
+    "partialLoadFailed": "部分資料載入失敗",
+    "unusable": "{n} 個無法使用"
   },
   "stats": {
     "title": "用量統計",

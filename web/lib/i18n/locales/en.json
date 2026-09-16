@@ -125,7 +125,7 @@
     "expired": "Expired",
     "urgent": "Expiring soon",
     "soon": "Tight",
-    "healthy": "Online"
+    "valid": "Valid"
   },
   "metric": {
     "credits": "Credit balance",
@@ -174,7 +174,8 @@
     "healthSnapshot": "Account health snapshot",
     "noAccounts": "No accounts yet",
     "noAccountsHint": "Use Quick add in the bottom bar to sign in a Tencent account by QR code",
-    "partialLoadFailed": "Some data failed to load"
+    "partialLoadFailed": "Some data failed to load",
+    "unusable": "{n} unusable"
   },
   "stats": {
     "title": "Usage",

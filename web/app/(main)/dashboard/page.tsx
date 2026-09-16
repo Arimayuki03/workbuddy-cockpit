@@ -16,6 +16,14 @@ import {accountApi, statsApi, upstreamApi} from '@/lib/api';
 import {useRealm} from '@/lib/realm-context';
 import type {Account, StatsSummary, UpstreamStatus, UsagePoint} from '@/lib/types';
 import {expiryBarPercent, expiryVisual, fmtCompact, fmtNumber, fmtRemain} from '@/lib/format';
+import {
+  availabilityLabelKey,
+  availabilityTitleKey,
+  availabilityClass,
+  availabilityOf,
+  mergePoolStatus,
+  type AvailabilityTier,
+} from '@/lib/account-status';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {StatCard} from '@/components/common/layout/StatCard';
 import {EmptyState} from '@/components/common/layout/EmptyState';
@@ -66,16 +74,43 @@ export default function DashboardPage() {
   useHeartbeat(load, 30000);
 
   /**
-   * 按当前版本过滤。
+   * 合并上游池状态 + 按当前版本过滤。
    *
-   * 账号池里两种版本的账号都有，不过滤的话切到国际版仍会看到国内版的
-   * 账号数、积分与健康快照（用户反馈过这个问题）。realm 为空的存量账号
-   * 视为国内版，与后端判定一致。
+   * 只保留**一份**数组（`scoped`）：合并结果的每个字段都是原始字段的超集
+   * （`mergePoolStatus` 用 `...a` 展开），没有第二个数组就没有「两个数组说的
+   * 不一样」这种可能——而这次要修的正是「两处各自推导同一个事实」。
+   *
+   * 健康快照此前直接拿 `expiryVisual()` 的 label 当状态标签，而那个分档讲的是
+   * **Token 有效期**——于是只要令牌没过期就显示「在线」，账号在不在上游池里、
+   * 有没有被禁用冷却一概没看。结果同一个账号首页说「在线」、账号页说「未加载」
+   * （用户报的就是这个）。现在两页共用 `lib/account-status`。
+   *
+   * 版本过滤：账号池里两种版本的账号都有，不过滤的话切到国际版仍会看到国内版的
+   * 账号数、积分与健康快照。realm 为空的存量账号视为国内版，与后端判定一致。
    */
   const scoped = useMemo(
-    () => accounts.filter((a) => (a.realm ?? 'cn') === realm),
-    [accounts, realm],
+    () => mergePoolStatus(accounts, upstream).filter((a) => (a.realm ?? 'cn') === realm),
+    [accounts, upstream, realm],
   );
+
+  /** 可用性分档的汇总（只统计「能正常调用」的，与账号页说法一致） */
+  const availability = useMemo(() => {
+    const counts: Record<AvailabilityTier, number> = {
+      disabled: 0, expired: 0, unknown: 0, cooling: 0,
+      neverSucceeded: 0, notLoaded: 0, online: 0,
+    };
+    for (const a of scoped) counts[availabilityOf(a)] += 1;
+    return counts;
+  }, [scoped]);
+
+  /**
+   * 「不可用」的账号数：未加载 / 已禁用 / 一直失败 / 冷却中——这些是**用户需要
+   * 处理**的（去上游重载、重新登录、换模型等），而不是单纯「令牌快过期」。
+   * 与快照卡片的分档同源，所以卡片提示与快照不会互相打架。
+   * 上游状态读不到（unknown）不算进来：那是我们看不到，不是账号有问题。
+   */
+  const unusable = availability.notLoaded + availability.disabled
+    + availability.neverSucceeded + availability.cooling;
 
   const valid = scoped.filter((a) => !a.is_expired).length;
   const expiring = scoped.filter((a) => a.remain_seconds > 0 && a.remain_seconds < 3600).length;
@@ -150,13 +185,22 @@ export default function DashboardPage() {
           label={t('dashboard.valid')}
           value={fmtNumber(valid)}
           hint={
-            valid === scoped.length
-              ? t('dashboard.allOk')
-              : t('dashboard.abnormal', {count: scoped.length - valid, n: scoped.length - valid})
+            // 提示优先级：先说**不可用**（能真用的少了一个，需要处理），
+            // 再说令牌快过期，最后才是「全部正常」。
+            //
+            // 此前只看 `valid === scoped.length`（令牌都在有效期内）就说
+            // 「全部正常」——于是出现「卡片说全部正常、快照里却有账号未加载」的
+            // 矛盾。令牌有效不等于账号可用：它可能没进上游池、被禁用或一直在
+            // 失败。口径与快照卡片、账号页完全一致（同一套 availabilityOf）。
+            unusable > 0
+              ? t('dashboard.unusable', {count: unusable, n: unusable})
+              : valid === scoped.length
+                ? t('dashboard.allOk')
+                : t('dashboard.abnormal', {count: scoped.length - valid, n: scoped.length - valid})
           }
           icon={CircleCheck}
-          tone="success"
-          hintTone={valid === scoped.length ? 'success' : 'warning'}
+          tone={unusable > 0 ? 'warning' : 'success'}
+          hintTone={unusable > 0 ? 'warning' : (valid === scoped.length ? 'success' : 'warning')}
           delay={0.05}
         />
         <StatCard
@@ -289,25 +333,52 @@ export default function DashboardPage() {
       </section>
 
       <section className="rounded-[20px] bg-muted p-4">
-        <div className="mb-3 text-sm font-medium">{t('dashboard.healthSnapshot')}</div>
+        <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span className="text-sm font-medium">{t('dashboard.healthSnapshot')}</span>
+          {/* 各档汇总：一眼看清「有几个能真用」。文案与账号页共用同一套键，
+              两页不会出现「一个叫在线、一个叫正常」这种漂移。 */}
+          {(['online', 'notLoaded', 'cooling', 'neverSucceeded', 'disabled', 'expired', 'unknown'] as AvailabilityTier[])
+            .filter((tier) => availability[tier] > 0)
+            .map((tier) => (
+              <span
+                key={tier}
+                className={`text-[11px] tabular-nums ${availabilityClass(tier)}`}
+                title={availabilityTitleKey(tier) ? t(availabilityTitleKey(tier)!) : undefined}
+              >
+                {t(availabilityLabelKey(tier, scoped.find((a) => availabilityOf(a) === tier)))}
+                {' '}
+                {availability[tier]}
+              </span>
+            ))}
+        </div>
         {scoped.length ? (
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {scoped.slice(0, 9).map((a) => {
               const pct = expiryBarPercent(a.remain_seconds, a.ttl_seconds);
               const vis = expiryVisual(a.remain_seconds);
+              // 状态标签用**可用性**分档，而不是 Token 有效期分档：
+              // 后者只有「有效期内」这一个概念，会把不在池里/被禁用的账号
+              // 也写成「在线」（与账号页冲突）。有效期信息仍由下面的进度条
+              // 与剩余天数如实呈现，两者不再混在一起说。
+              const tier = availabilityOf(a);
+              const statusLabel = t(availabilityLabelKey(tier, a));
+              const titleKey = availabilityTitleKey(tier);
               return (
                 <div key={a.file} className="rounded-2xl bg-background/60 p-3">
                   <div className="flex items-center justify-between gap-2">
                     <span
                       className={
                         'truncate text-sm font-medium ' +
-                        (vis.tier === 'expired' ? 'text-muted-foreground' : '')
+                        (tier === 'expired' ? 'text-muted-foreground' : '')
                       }
                     >
                       {a.nickname || a.uid}
                     </span>
-                    <span className={'shrink-0 text-[10px] font-medium ' + vis.textClass}>
-                      {vis.label}
+                    <span
+                      className={'shrink-0 text-[10px] font-medium ' + availabilityClass(tier)}
+                      title={titleKey ? t(titleKey) : undefined}
+                    >
+                      {statusLabel}
                     </span>
                   </div>
                   <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-border">
@@ -317,7 +388,7 @@ export default function DashboardPage() {
                     />
                   </div>
                   <div className="mt-1.5 flex items-center justify-between gap-2">
-                    <span className={'text-[11px] tabular-nums ' + vis.textClass}>
+                    <span className={'text-[11px] tabular-nums ' + vis.textClass} title={t('accounts.expiryColumn')}>
                       {fmtRemain(a.remain_seconds)}
                     </span>
                     <span

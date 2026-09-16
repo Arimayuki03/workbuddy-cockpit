@@ -116,7 +116,7 @@
     "expired": "已过期",
     "urgent": "即将过期",
     "soon": "偏紧",
-    "healthy": "在线"
+    "valid": "有效"
   },
   "metric": {
     "credits": "积分余额",
@@ -159,7 +159,8 @@
     "healthSnapshot": "账号健康快照",
     "noAccounts": "暂无账号",
     "noAccountsHint": "点击底栏「快速添加」扫码授权腾讯账号",
-    "partialLoadFailed": "部分数据加载失败"
+    "partialLoadFailed": "部分数据加载失败",
+    "unusable": "{n} 个不可用"
   },
   "stats": {
     "title": "用量统计",

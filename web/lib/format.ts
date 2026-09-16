@@ -132,7 +132,11 @@ export function expiryVisual(remainSeconds: number): ExpiryVisual {
     tier: 'healthy',
     textClass: 'text-emerald-600 dark:text-emerald-400',
     barColor: '#10b981',
-    label: t('expiry.healthy'),
+    // 文案是「有效」而不是「在线」：这一档只说明**令牌在有效期内**，不说明账号
+    // 可用（它可能没进上游池、被禁用或一直在失败）。此前这里写「在线」，被首页
+    // 当成账号状态直接渲染，于是出现「首页说在线、账号页说未加载」的矛盾。
+    // 账号可用性一律走 `lib/account-status` 的 `availabilityOf()`。
+    label: t('expiry.valid'),
   };
 }
 

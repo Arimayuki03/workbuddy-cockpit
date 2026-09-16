@@ -19,6 +19,7 @@ import {notify} from '@/lib/toast';
 import {accountApi, upstreamApi, errText} from '@/lib/api';
 import type {Account, CreditsMeta, UpstreamStatus} from '@/lib/types';
 import {expiryBarPercent, expiryVisual, fmtAgo, fmtDateTime, fmtNumber, fmtRemain} from '@/lib/format';
+import {availabilityLabelKey, availabilityOf, mergePoolStatus} from '@/lib/account-status';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
@@ -149,45 +150,14 @@ export default function AccountsPage() {
     }
   }, [load]);
 
-  /** 将本地 auths 文件与上游账号池状态按 uid 合并 */
-  const merged = useMemo(() => {
-    const pool = new Map<string, Record<string, unknown>>();
-    for (const item of upstream?.accounts ?? []) {
-      const uid = String((item as Record<string, unknown>).uid ?? (item as Record<string, unknown>).UID ?? '');
-      if (uid) pool.set(uid, item as Record<string, unknown>);
-    }
-    /**
-     * 这次拿到的上游状态是否**可信**。
-     *
-     * 为什么必须区分：上游连接失败时 `/status` 仍然返回 200，只是 `connected:false`
-     * 且没有账号列表。若不看这个标记，池就是空的，于是**每个账号都被判成
-     * 「不在池里」**——界面把「连不上上游」误报成「账号文件坏了」，并提示用户
-     * 去重载配置、检查文件。账号页有 30 秒心跳，任何一次抖动都会命中，
-     * 30 秒后又自己恢复，用户会以为账号随机坏掉（实测确认过这个误报）。
-     */
-    const poolKnown = upstream?.connected === true;
-    return accounts.map((a) => {
-      // 上游状态取不到 → 不判断它在不在池里，如实标成「未知」
-      if (!poolKnown) return {...a, in_pool: undefined, poolUnknown: true};
-      const p = pool.get(a.uid);
-      // in_pool 由**本页这份上游快照**判定，而不是沿用后端那个标记：
-      // 本页其余所有状态字段（cooling/disabled/…）都取自这一份数据，
-      // 若单独用另一时刻的标记，二者可能不一致（都是两次 /status 调用）。
-      // 没进池的账号保留本地字段（含 invalid_reason），交给徽章如实展示。
-      if (!p) return {...a, in_pool: false, poolUnknown: false};
-      return {
-        ...a,
-        in_pool: true,
-        poolUnknown: false,
-        healthy: typeof p.healthy === 'boolean' ? p.healthy : null,
-        disabled: typeof p.disabled === 'boolean' ? p.disabled : null,
-        disabled_reason: typeof p.disabled_reason === 'string' ? p.disabled_reason : '',
-        in_flight: typeof p.in_flight === 'number' ? p.in_flight : null,
-        cooling: typeof p.cooling === 'boolean' ? p.cooling : null,
-        last_used: typeof p.last_used === 'number' ? p.last_used : null,
-      } satisfies Account;
-    });
-  }, [accounts, upstream]);
+  /**
+   * 将本地 auths 文件与上游账号池状态按 uid 合并。
+   *
+   * 合并与分档规则都在 `lib/account-status` 里——首页的健康快照要用**同一套**
+   * 规则（此前它只看 Token 有效期，于是同一个账号首页说「在线」、这里说
+   * 「未加载」，用户看到自相矛盾的面板）。
+   */
+  const merged = useMemo(() => mergePoolStatus(accounts, upstream), [accounts, upstream]);
 
   /**
    * 按当前版本过滤。
@@ -236,43 +206,45 @@ export default function AccountsPage() {
     }
   }
 
-  /** 账号状态徽章（表格与移动端卡片共用） */
+  /** 账号状态徽章（表格与移动端卡片共用）。
+   *
+   *  分档顺序与文案都取自 `lib/account-status`——首页的健康快照用**同一套**
+   *  判定，两页因此不会对同一个账号给出不同说法（此前首页只看 Token 有效期，
+   *  于是同一个账号首页说「在线」、这里说「未加载」）。
+   *  这里只负责「怎么画」，不再自行判断。 */
   function renderStatus(a: Account) {
-    if (a.disabled === true) {
-      // 上游对 11140（request illegal）是**硬禁用**、到期也不自愈，必须重新登录
-      // 才能恢复；只说「已禁用」会让人干等。原因里含 11140/request illegal 时
-      // 直接提示要重新授权。
+    const tier = availabilityOf(a);
+    const label = t(availabilityLabelKey(tier, a));
+
+    if (tier === 'disabled') {
       const reason = String(a.disabled_reason || '');
-      const needRelogin = /11140|request illegal/i.test(reason);
       return (
         <Badge
           variant="destructive"
           className="rounded-full"
           title={reason ? t('accounts.disabledReason', {reason}) : undefined}
         >
-          {needRelogin ? t('accounts.badgeDisabledRelogin') : t('accounts.badgeDisabled')}
+          {label}
         </Badge>
       );
     }
-    if (a.is_expired) return <Badge variant="destructive" className="rounded-full">{t('accounts.badgeExpired')}</Badge>;
+    if (tier === 'expired') {
+      return <Badge variant="destructive" className="rounded-full">{label}</Badge>;
+    }
     // 上游状态这次没取到 —— 冷却 / 禁用 / 在不在池里**全都无从判断**。
-    //
-    // 必须在这里拦住：否则下面所有分支的输入都是 null，会一路落到最后的
-    // 「● 在线」，把「看不到上游」显示成「一切正常」。反过来更糟的是落到
-    // 「未加载」——那会让一个完全正常的账号被说成文件有问题（实测确认过）。
-    // 本地能确定的（令牌是否过期）已在上面判过，不受影响。
-    if (a.poolUnknown) {
+    // 本地能确定的（令牌是否过期）已在分档里先判过，不受影响。
+    if (tier === 'unknown') {
       return (
         <Badge
           variant="secondary"
           className="rounded-full text-muted-foreground"
           title={t('accounts.badgeUnknownTitle')}
         >
-          {t('accounts.badgeUnknown')}
+          {label}
         </Badge>
       );
     }
-    if (a.cooling) {
+    if (tier === 'cooling') {
       // 带上「还要等多久」：只写「冷却中」的话用户不知道是几秒还是几小时，
       // 只能反复刷新碰运气。剩余时间是上游状态机给的权威值。
       const secs = a.cool_remaining_sec;
@@ -305,7 +277,7 @@ export default function AccountsPage() {
           className="rounded-full text-amber-600 dark:text-amber-400"
           title={tip || undefined}
         >
-          {t('accounts.badgeCooling')}{left ? ` · ${left}` : ''}
+          {label}{left ? ` · ${left}` : ''}
           {total > 0 && <span className="ml-1 opacity-70">{t('accounts.modelsCount', {count: total, n: total})}</span>}
         </Badge>
       );
@@ -316,24 +288,15 @@ export default function AccountsPage() {
     // 账号在面板上一直显示「正常」，实际每次请求都失败，可持续几小时
     // （issue #14 报告的第二点）。我们能做的是**把它标出来** —— 否则用户
     // 只看到「状态正常」却一直在报错，完全无从下手。
-    //
-    // 判据：有累计错误、且**从未成功过**（success_count 缺省或 0）。
-    //
-    // 注意**不要**用 `!a.last_success`：上游那个字段是 Go 的 `time.Time` 配
-    // `omitempty`，而 `omitempty` 对结构体类型**不生效** —— 从未成功过的账号
-    // 会序列化成 `"0001-01-01T00:00:00Z"`，在 JS 里是**真值**，判空永远不会
-    // 命中（这是实测确认的，Go 侧验证过）。用 success_count 才是可靠的：
-    // 它是 int64，`omitempty` 生效，0 时整个键都不出现。
-    const errs = typeof a.err_total === 'number' ? a.err_total : 0;
-    const oks = typeof a.success_count === 'number' ? a.success_count : 0;
-    if (errs > 0 && oks === 0) {
+    if (tier === 'neverSucceeded') {
+      const errs = typeof a.err_total === 'number' ? a.err_total : 0;
       return (
         <Badge
           variant="secondary"
           className="rounded-full text-rose-600 dark:text-rose-400"
           title={t('accounts.badgeNeverSucceededTitle', {errs})}
         >
-          {t('accounts.badgeNeverSucceeded')}
+          {label}
         </Badge>
       );
     }
@@ -346,7 +309,7 @@ export default function AccountsPage() {
     //
     // 也可能只是「刚添加、上游还没重载」，所以文案不写成故障，
     // 而是说明它尚未进入账号池、并给出可做的动作。
-    if (a.in_pool === false) {
+    if (tier === 'notLoaded') {
       const why = String(a.invalid_reason || '');
       return (
         <Badge
@@ -354,13 +317,13 @@ export default function AccountsPage() {
           className="rounded-full text-rose-600 dark:text-rose-400"
           title={why ? t('accounts.badgeNotLoadedWhy', {why}) : t('accounts.badgeNotLoadedTitle')}
         >
-          {t('accounts.badgeNotLoaded')}
+          {label}
         </Badge>
       );
     }
     return (
       <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">
-        {t('accounts.badgeOnline')}
+        {label}
       </Badge>
     );
   }
