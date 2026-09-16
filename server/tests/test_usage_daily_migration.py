@@ -278,6 +278,73 @@ class UsageHealthTest(unittest.TestCase):
         h = stats._usage_health(db.day_of(), 0)
         self.assertIn('ok', h)
 
+    # ── 版本口径：两边必须一致（真实误报教会的）─────────────────
+
+    def _log_realm(self, n: int, realm: str) -> None:
+        now = int(db.time.time())
+        for _ in range(n):
+            db.execute('INSERT INTO request_logs(ts,key_id,model,status,realm) '
+                       'VALUES(?,?,?,?,?)', (now, 1, 'm', 200, realm))
+
+    def test_global_not_flagged_when_only_cn_has_traffic(self) -> None:
+        """**核心回归**：只有国内版流量时，切到国际版不该报「统计没在累计」。
+
+        曾经的实现里，日志条数按**全版本**统计、用量按**当前版本**过滤 ——
+        于是「有国内版流量、没国际版流量」时，切到国际版必然触发
+        `n > 0 and today_requests == 0`，页面显示
+        「今天已有 605 次调用记录，但用量统计为 0」，
+        而点「修复统计」又说「统计与请求日志一致」。两条结论自相矛盾。
+        """
+        self._log_realm(605, 'cn')
+        h = stats._usage_health(db.day_of(), 0, 'global')
+        self.assertTrue(h['ok'], f'国际版不该被国内版流量误报：{h}')
+        self.assertEqual(h['detail'], '')
+
+    def test_cn_still_flagged_when_cn_traffic_but_no_stats(self) -> None:
+        """反证：国内版真的「有日志没统计」时，仍然必须报警。
+
+        修口径不能把检测本身改瞎——那等于把 issue #9 的防线拆了。
+        """
+        self._log_realm(5, 'cn')
+        h = stats._usage_health(db.day_of(), 0, 'cn')
+        self.assertFalse(h['ok'], '国内版有日志没统计时必须报警')
+        self.assertIn('国内版', h['detail'], '提示要指明是哪个版本')
+
+    def test_global_flagged_when_global_traffic_but_no_stats(self) -> None:
+        """国际版自己真的有「有日志没统计」时也要报警（别只顾一边）。"""
+        self._log_realm(7, 'global')
+        h = stats._usage_health(db.day_of(), 0, 'global')
+        self.assertFalse(h['ok'], '国际版有日志没统计时必须报警')
+        self.assertIn('国际版', h['detail'])
+
+    def test_cross_realm_counts_are_isolated(self) -> None:
+        """两个版本的日志互不干扰：各自只看自己的。"""
+        self._log_realm(4, 'cn')
+        self._log_realm(6, 'global')
+        # 国际版有日志、有统计 → ok
+        self.assertTrue(stats._usage_health(db.day_of(), 6, 'global')['ok'])
+        # 国际版有日志、统计为 0 → 报警，且报的是 6 次（不是 10 次）
+        h = stats._usage_health(db.day_of(), 0, 'global')
+        self.assertFalse(h['ok'])
+        self.assertIn('6', h['detail'], f'次数应只算国际版：{h["detail"]}')
+
+    def test_null_realm_history_counts_as_cn(self) -> None:
+        """历史日志 realm 为 NULL → 归 cn（与 realm_of_model 口径一致）。"""
+        db.execute('INSERT INTO request_logs(ts,key_id,model,status,realm) '
+                   'VALUES(?,?,?,?,?)', (int(db.time.time()), 1, 'm', 200, None))
+        self.assertFalse(stats._usage_health(db.day_of(), 0, 'cn')['ok'],
+                         'NULL 应算作国内版')
+        self.assertTrue(stats._usage_health(db.day_of(), 0, 'global')['ok'],
+                        'NULL 不该算进国际版')
+
+    def test_unscoped_check_counts_everything(self) -> None:
+        """不传版本时看全部（传给「不区分版本」的调用方）。"""
+        self._log_realm(2, 'cn')
+        self._log_realm(3, 'global')
+        h = stats._usage_health(db.day_of(), 0)
+        self.assertFalse(h['ok'])
+        self.assertIn('5', h['detail'], '不限版本时算全部')
+
 
 if __name__ == '__main__':
     unittest.main()
