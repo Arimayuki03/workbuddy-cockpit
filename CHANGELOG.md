@@ -7,6 +7,52 @@
 
 ---
 
+## [未发布]
+
+### 新增
+- **兼容 Anthropic Messages API（`/v1/messages`）**：Claude Code / Cursor / Cline /
+  Zed 等**只认 Anthropic 协议**的客户端现在可以直接接入本网关。
+
+  此前它们用不了——不是配置问题，而是协议不同：`system` 是顶层字段（不在 messages
+  里）、`max_tokens` **必填**、`content` 是 block 数组、流式是带 `event:` 行的事件流。
+  光靠改 `ANTHROPIC_BASE_URL` 指过来是不通的。
+
+  - 令牌两种传法都认：`x-api-key`（Anthropic SDK）与 `Authorization: Bearer`（Claude Code）
+  - **鉴权、IP 管控、配额、限流、日志与用量记账全部复用网关既有实现**，不另起一套
+  - 流式按规范逐事件转换：`message_start` → `content_block_start` →若干
+    `content_block_delta` → `content_block_stop` → `message_delta` → `message_stop`
+  - 工具调用双向映射：OpenAI 的**分片** `arguments` 字符串 ↔ Anthropic 的
+    `input_json_delta` 事件；非流式的 `input` 由字符串还原为对象
+  - 工具结果的消息形态差异也一并处理：Anthropic 把它放在 user 消息的 block 里，
+    OpenAI 要求是独立的 `role: tool` 消息（转换时会拆开并前置）
+  - `/v1/models` 按 `anthropic-version` 请求头分流为 Anthropic 形状
+    （两边路径同名但结构不同，只能按头分流；各注册一个路由会有一个永远收不到请求）
+  - 另提供 `/v1/messages/count_tokens`（按字符数粗估——拿不到上游分词器，
+    宁可高估留余量，也不低估导致真实请求超限）
+
+  > 与「转发热路径原样透传」不冲突：本层只改变**回给客户端的表达形式**，
+  > 不改动转发给上游的内容。`test_gateway_passthrough` 已相应标注这一例外。
+
+### 修复
+- **Anthropic 兼容层：上游报错时客户端收不到错误**（合并前评审发现，已在本版修掉）：
+  流式请求遇到上游报错（模型不存在、额度不足等）时，客户端收到的是**「成功但内容
+  为空」**——一套正常的 message_start → message_delta → message_stop，没有任何
+  错误信息。对 Claude Code 这类客户端，表现为模型静默返回空回复，比直接报错更难
+  排查（用户会以为是自己 prompt 的问题）。
+
+  两处成因，都在同一段收尾逻辑里：
+
+  - **错误体收集的阈值写反了**（`len(pending) > 4000`）。真实的上游错误体只有
+    一二百字节，永远不满足这个条件，于是错误文本恒为空。
+  - **事件顺序错了**：错误事件被发在 `message_stop` **之后**。多数 SDK 把
+    `message_stop` 当作流的终止信号，读到就不再读后续事件——那个错误永远不会
+    被看到。现已改为先发错误、再补收尾事件（部分客户端需要 message_stop 来结束
+    等待，缺了会挂住）。
+
+  非流式路径不受影响（它本来就是对的），所以这个缺陷只在流式下出现。
+
+---
+
 ## [1.0.36] - 2026-09-16
 
 ### 修复
