@@ -54,6 +54,19 @@ def _norm_realm(value: object) -> str:
     return v if v in ('cn', 'global') else ''
 
 
+def _bare_model(model: object) -> str:
+    """模型名归一化：去 `cn:` 前缀（`global:` 保留），用于白名单比对。
+
+    `cn:` 是上游的路由约定而非模型名的一部分，界面上显示的是腾讯裸名；存量密钥
+    的白名单里可能是带前缀的写法。归一化后两种写法等价，避免「升级后原本能用的
+    密钥突然报模型不在白名单里」。
+
+    **不动 `global:`**：它决定路由到哪个账号池，两个版本的同名模型不是一回事。
+    """
+    m = str(model or '').strip()
+    return m[3:] if m.lower().startswith('cn:') else m
+
+
 def _norm_cidrs(items: object) -> list[str]:
     """归一化 IP 白名单：逐项去空白、丢弃空项。
 
@@ -297,7 +310,14 @@ def validate(key: dict, ip: str, model: str | None,
         if not isinstance(model, str) or not model.strip():
             return Rejection('请求未指定 model，而该密钥启用了模型白名单', 400,
                              'invalid_request_error', 'model_not_allowed')
-        if model not in key['models']:
+        # 白名单比对**去掉 cn: 前缀**再比，两种写法都认。
+        #
+        # 为什么必须这样：`cn:` 只是上游的路由约定，不是模型名的一部分。界面上
+        # 现在显示的是腾讯自带的裸名（glm-5.2），用户照着填；而**存量密钥**的
+        # 白名单里可能写着带前缀的 `cn:glm-5.2`。若按字面比对，改版后前者会
+        # 被后者拒掉（用户看到「模型不在白名单内」却查不出哪里不对）。
+        # `global:` 不归一化——它决定路由，两个版本的同名模型是**不同的东西**。
+        if _bare_model(model) not in {_bare_model(x) for x in key['models']}:
             return Rejection(f'模型 {model} 不在密钥白名单内', 400,
                              'invalid_request_error', 'model_not_allowed')
     return None

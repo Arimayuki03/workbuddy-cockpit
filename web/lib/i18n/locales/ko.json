@@ -283,6 +283,7 @@
     "colPrefix": "키 접두사",
     "realm": "버전",
     "realmLimit": "버전 한정",
+    "realmFollowsPage": "새 키는 현재 보고 있는 버전을 따릅니다(보고 있는 버전의 키로 만들어집니다).",
     "realmCnOnly": "중국 버전만",
     "realmGlobalOnly": "글로벌 버전만",
     "realmAll": "제한 없음 (두 버전 모두)",

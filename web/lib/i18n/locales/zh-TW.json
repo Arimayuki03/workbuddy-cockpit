@@ -283,6 +283,7 @@
     "colPrefix": "金鑰前綴",
     "realm": "版本",
     "realmLimit": "限定版本",
+    "realmFollowsPage": "新建密鑰跟隨目前所在版本：在哪個版本的介面裡建立，就是哪個版本的密鑰。",
     "realmCnOnly": "僅中國版",
     "realmGlobalOnly": "僅國際版",
     "realmAll": "不限制（兩版都能呼叫）",
