@@ -62,6 +62,8 @@
     "systemSettings": "システム設定",
     "quickLinks": "クイックリンク",
     "uiReference": "UI リファレンス",
+    "community": "LINUX DO コミュニティ",
+    "communityTitle": "本プロジェクトは LINUX DO コミュニティで公開・議論されています",
     "help": "ヘルプ",
     "about": "WorkBuddy Manager について",
     "aboutDesc": "WorkBuddy Manager は workbuddy2api 向けのアカウントプール管理と OpenAI 互換リバースプロキシゲートウェイです。複数アカウントの QR 取り込み、自動チェックイン、キー配布、IP 制御、使用量統計に対応します。",

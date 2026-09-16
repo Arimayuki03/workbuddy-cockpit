@@ -62,6 +62,8 @@
     "systemSettings": "System settings",
     "quickLinks": "Quick links",
     "uiReference": "UI reference",
+    "community": "LINUX DO community",
+    "communityTitle": "This project is published and discussed in the LINUX DO community",
     "help": "Help",
     "about": "About WorkBuddy Manager",
     "aboutDesc": "WorkBuddy Manager is an account-pool console and OpenAI-compatible gateway built for workbuddy2api, with QR onboarding for multiple accounts, automatic check-in, key distribution, IP control and usage statistics.",

@@ -19,8 +19,11 @@ IP access control, request logs and usage stats — all in one panel.
 [![Release](https://img.shields.io/github/v/release/ithtelab/workbuddy-manager?color=22c55e&label=Release)](https://github.com/ithtelab/workbuddy-manager/releases)
 [![Changelog](https://img.shields.io/badge/Changelog-CHANGELOG-blue)](CHANGELOG.md)
 [![Issues](https://img.shields.io/github/issues/ithtelab/workbuddy-manager?color=f59e0b&label=Issues)](https://github.com/ithtelab/workbuddy-manager/issues)
+[![LINUX DO](https://img.shields.io/badge/Community-LINUX%20DO-1f6feb)](https://linux.do)
 
 **English** · [简体中文](README.md)
+
+Published and discussed in the [**LINUX DO**](https://linux.do) community — 佬友 welcome.
 
 <img src="docs/images/dashboard.png" alt="WorkBuddy Manager dashboard" width="100%" />
 
@@ -772,6 +775,7 @@ release notes, and creates a Release with the archives attached.
 
 ## Credits
 
+- [**LINUX DO**](https://linux.do) — the community where this project is published and discussed
 - [**linux-do/cdk**](https://github.com/linux-do/cdk) (MIT) — design tokens and floating
   dock component; this project's UI follows its visual language
 - [**Sliverkiss/workbuddy2api**](https://github.com/Sliverkiss/workbuddy2api) — the account

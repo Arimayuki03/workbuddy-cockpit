@@ -18,8 +18,11 @@
 [![Release](https://img.shields.io/github/v/release/ithtelab/workbuddy-manager?color=22c55e&label=Release)](https://github.com/ithtelab/workbuddy-manager/releases)
 [![Changelog](https://img.shields.io/badge/更新日志-CHANGELOG-blue)](CHANGELOG.md)
 [![Issues](https://img.shields.io/github/issues/ithtelab/workbuddy-manager?color=f59e0b&label=反馈)](https://github.com/ithtelab/workbuddy-manager/issues)
+[![LINUX DO](https://img.shields.io/badge/社区-LINUX%20DO-1f6feb)](https://linux.do)
 
 [English](README.en.md) · **简体中文**
+
+本项目在 [**LINUX DO**](https://linux.do) 社区发布与交流，欢迎佬友来玩。
 
 <img src="docs/images/dashboard.png" alt="WorkBuddy Manager 仪表盘" width="100%" />
 
@@ -684,6 +687,7 @@ CI 会构建前端、打包产物、从 CHANGELOG 提取对应版本段落作为
 
 ## 致谢
 
+- [**LINUX DO**](https://linux.do) —— 本项目的发布与交流社区
 - [**linux-do/cdk**](https://github.com/linux-do/cdk)（MIT）—— 界面设计令牌与浮动底栏组件来源，本项目 UI 视觉与其保持一致
 - [**Sliverkiss/workbuddy2api**](https://github.com/Sliverkiss/workbuddy2api) —— 底层账号池与 OpenAI 兼容代理
 - [**lbjlaq/Antigravity-Manager**](https://github.com/lbjlaq/Antigravity-Manager) —— 管理端功能形态参考
