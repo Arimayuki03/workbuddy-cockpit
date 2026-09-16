@@ -13,7 +13,26 @@
 
 services:
   workbuddy-manager:
-    build: .
+    build:
+      context: .
+      # 可选：Debian 软件源镜像。
+      #
+      # 官方源（deb.debian.org）走 Fastly CDN，中国大陆访问实测**频繁 502 且极慢**
+      # （约 367 kB/s，常在下载某个 .deb 时中断），构建会在第 2 步 "apt-get update"
+      # 直接失败——表现就是镜像建不出来、容器起不来、页面 ERR_CONNECTION_REFUSED。
+      #
+      # Dockerfile 里已内置一次自动降级（官方源失败自动改阿里云重试），所以多数情况
+      # 不配也能建成功，只是会先白等一轮。想完全避免等待就把下面两行取消注释，
+      # 或临时用命令行覆盖：
+      #   docker compose build --build-arg DEBIAN_MIRROR=mirrors.aliyun.com
+      #
+      # 可选镜像：mirrors.aliyun.com / mirrors.tuna.tsinghua.edu.cn / mirrors.ustc.edu.cn
+      args:
+        DEBIAN_MIRROR: ""
+        # 可选：PyPI 镜像（成因同上——官方源走国际 CDN，国内会抖动/失败）。
+        # 留空 = 官方源，失败时 Dockerfile 会自动降级到清华镜像重试。
+        # 可选镜像：https://pypi.tuna.tsinghua.edu.cn/simple / https://mirrors.aliyun.com/pypi/simple
+        PIP_INDEX_URL: ""
     image: workbuddy-manager:latest
     container_name: workbuddy-manager
     # 这个 restart 策略是容器版「一键更新」能生效的前提：
