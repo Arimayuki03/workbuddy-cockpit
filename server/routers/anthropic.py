@@ -175,8 +175,11 @@ def _authorize(request: Request, model: str | None) -> tuple[dict | None, str, J
     # （没有 model 就无从判定版本），但停用/过期/配额/IP 这些照常校验。
     reason = keysvc.validate(key, ip, model, is_model_list=(model is None))
     if reason:
-        gateway._record(key, ip, model or '', '', 403, 0, 0, 0, ua, reason, False)
-        return None, ip, _err(reason, 403, 'permission_error')
+        # 与 gateway._authorize 同口径：状态码来自 keysvc，不再一律 403
+        # （403 会被客户端显示成「API 密钥无效」，掩盖真实原因）。
+        status = getattr(reason, 'status', 403)
+        gateway._record(key, ip, model or '', '', status, 0, 0, 0, ua, reason, False)
+        return None, ip, _err(reason, status, getattr(reason, 'err_type', 'permission_error'))
 
     limited, _count = gateway._rate_limited(key)
     if limited:

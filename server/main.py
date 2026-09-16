@@ -15,7 +15,7 @@ from . import config, db, security
 from .iputil import client_ip
 from .routers import (
     accounts, anthropic, auth, gateway, keys, logs, models, playground,
-    security as security_router, settings, stats, system,
+    responses, security as security_router, settings, stats, system,
 )
 from .services import tasklog
 
@@ -127,6 +127,9 @@ app.include_router(playground.router)
 app.include_router(gateway.router)
 # Anthropic Messages API 兼容层（/v1/messages）——给只认该协议的客户端用
 app.include_router(anthropic.router)
+# OpenAI Responses API 兼容层（/v1/responses、/responses）——给 Codex /
+# DeepSeek Harness 的 openai-responses 协议用
+app.include_router(responses.router)
 
 
 @app.middleware('http')

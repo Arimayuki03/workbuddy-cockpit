@@ -501,6 +501,55 @@ for chunk in resp:
 > 流式请求会自动注入 `stream_options.include_usage=true`，以便精确统计 Token 消耗。
 
 <details>
+<summary><b>OpenAI Responses API（Codex / DeepSeek Harness 等）</b></summary>
+
+本服务同时提供 Responses 协议（`/v1/responses`，SDK 的 `baseURL` 不含 `/v1`
+时也支持 `/responses`）。请求体用 `input` 而非 `messages`，`instructions` 承载
+system 文本：
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="https://wb.example.com/v1", api_key="wbk_xxxxxxxx")
+
+resp = client.responses.create(
+    model="glm-5.2",
+    instructions="你是一个简洁的助手",
+    input="你好",
+    stream=True,
+)
+for event in resp:
+    if event.type == "response.output_text.delta":
+        print(event.delta, end="")
+```
+
+工具调用同样支持：客户端发扁平形状的 `tools`（`{type:"function", name, parameters}`），
+返回的是 `function_call` 输出项与 `response.function_call_arguments.delta` 事件。
+
+> 只发 `openai-responses` 协议的客户端（如 DeepSeek Harness 的自定义提供方）
+> 把「API 协议」选成 `openai-responses` 即可；它谈的协议与
+> `openai-completions` 不是同一个，需要单独建一个提供方。
+
+</details>
+
+<details>
+<summary><b>Anthropic Messages API（Claude Code / Cursor / Cline 等）</b></summary>
+
+只认 Anthropic 协议的客户端可直接把 Base URL 指向本服务——`ANTHROPIC_BASE_URL`
+配到根路径即可（协议层面 `/v1/messages` 与官方一致）：
+
+```bash
+export ANTHROPIC_BASE_URL=https://wb.example.com
+export ANTHROPIC_AUTH_TOKEN=wbk_xxxxxxxx   # 也接受 x-api-key 头
+export ANTHROPIC_MODEL=glm-5.2
+```
+
+模型名与 OpenAI 侧**同一套**（含 `global:` 前缀的版本规则与密钥版本隔离），
+`/v1/messages/count_tokens` 亦可用。
+
+</details>
+
+<details>
 <summary><b>可用模型</b></summary>
 
 以「设置 → 可用模型」实时拉取结果为准，常见如下（上下文均为 131072）：
@@ -517,6 +566,9 @@ for chunk in resp:
 |---|---|---|---|
 | `POST` | `/v1/chat/completions` | 网关密钥 | OpenAI 兼容对话（流式 / 非流式） |
 | `POST` | `/v2/chat/completions` | 网关密钥 | 同上（v2 路径） |
+| `POST` | `/v1/responses` `/responses` | 网关密钥 | OpenAI Responses API 兼容（流式 / 非流式） |
+| `POST` | `/v1/messages` | 网关密钥 | Anthropic Messages API 兼容（Claude Code 等） |
+| `POST` | `/v1/messages/count_tokens` | 网关密钥 | 按字符数粗估输入 token |
 | `GET` | `/v1/models` | 网关密钥 | 模型列表 |
 | `GET` | `/healthz` | 无 | 存活探测（含上游连通性） |
 | `GET` | `/api/me` | 会话 | 当前登录用户 |
