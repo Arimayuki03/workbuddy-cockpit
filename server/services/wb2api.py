@@ -104,6 +104,15 @@ def list_auth_accounts() -> list[dict]:
         exp = int(auth.get('expiresAt', 0) or 0)
         token = str(auth.get('accessToken') or '')
 
+        # 上游 `Parse` 明确拒绝的情形：accessToken 为空时直接返回
+        # `parse_error: missing accessToken`，`LoadDir` 随即静默跳过该文件
+        # —— 它**不在账号池里，永远选不中**。这里如实标出原因，前端据此
+        # 显示「未加载」而不是「在线」（否则会出现面板全绿、调用却报
+        # 「没有健康账号」的矛盾）。判据与上游一致：只判去空白后是否为空。
+        invalid_reason = ''
+        if not str(auth.get('accessToken') or '').strip():
+            invalid_reason = '缺少 accessToken'
+
         # 总时长：优先用 JWT 自身的 iat→exp（最权威）；JWT 解不出时退回用
         # 文件修改时间推算。上游刷新 token 后会原子写回该文件，因此 mtime
         # 近似等于「最近一次写入/刷新」时刻，于是 exp - mtime ≈ 本次有效期。
@@ -144,6 +153,11 @@ def list_auth_accounts() -> list[dict]:
                     realm_of({'realm': raw.get('realm') or auth.get('realm'),
                               'domain': auth.get('domain')})),
                 'source': 'file',
+                # 已知上游不会加载该文件时的原因（空 = 没发现明显问题）。
+                # 目前只覆盖「accessToken 为空」这一条——那是上游 `Parse`
+                # 明确拒绝、且我们能在本地确定判据的情形；其余情况（例如文件
+                # 能读但我们没解析出 uid）不臆测原因，交给 in_pool 如实反映。
+                'invalid_reason': invalid_reason,
             }
         )
     return out
@@ -154,6 +168,18 @@ def merge_pool_status(accounts: list[dict], status: dict) -> list[dict]:
 
     credits：账号当前可花费积分余额，由上游聚合所有套餐的
     CycleCapacityRemain 得出（见 upstream.UserResource）。
+
+    **in_pool 标记**：该账号是否出现在上游的账号池（`/status.accounts`）里。
+
+    为什么要这个标记：我们读的是 auths/ 目录下的**文件**，上游读的才是**池**。
+    两者并不总是一致——上游 `LoadDir` 对解析失败的 auth 文件**静默跳过**
+    （`Parse` 在 accessToken 为空时直接报错），那个文件因此不在池里、永远选不中。
+    而我们此前照样把它列出来，且因为 `/status` 里没有它，cooling / disabled
+    等字段全是 None，前端兜底分支就显示成「● 在线」——**面板全绿、调用却报
+    「没有健康账号」**，用户完全无从下手（这正是用户报的现象）。
+
+    `invalid_reason` 用于我们已经能确定「上游不会加载它」的情形，把原因写出来，
+    而不是让用户自己去猜文件哪里不对。
     """
     pool: dict[str, dict] = {}
     for item in (status or {}).get('accounts') or []:
@@ -162,8 +188,10 @@ def merge_pool_status(accounts: list[dict], status: dict) -> list[dict]:
 
     for a in accounts:
         p = pool.get(a['uid'])
+        a['in_pool'] = p is not None
         if not p:
-            # 上游未返回该账号（可能刚添加尚未重载），保持字段为 None
+            # 上游未返回该账号：可能刚添加尚未重载，也可能上游根本没加载成功。
+            # 保持其余字段为 None（前端据此单独展示，而不是当成「在线」）。
             a.setdefault('credits', None)
             continue
         credits = p.get('credits')

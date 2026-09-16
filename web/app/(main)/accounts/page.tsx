@@ -158,9 +158,14 @@ export default function AccountsPage() {
     }
     return accounts.map((a) => {
       const p = pool.get(a.uid);
-      if (!p) return a;
+      // in_pool 由**本页这份上游快照**判定，而不是沿用后端那个标记：
+      // 本页其余所有状态字段（cooling/disabled/…）都取自这一份数据，
+      // 若单独用另一时刻的标记，二者可能不一致（都是两次 /status 调用）。
+      // 没进池的账号保留本地字段（含 invalid_reason），交给徽章如实展示。
+      if (!p) return {...a, in_pool: false};
       return {
         ...a,
+        in_pool: true,
         healthy: typeof p.healthy === 'boolean' ? p.healthy : null,
         disabled: typeof p.disabled === 'boolean' ? p.disabled : null,
         disabled_reason: typeof p.disabled_reason === 'string' ? p.disabled_reason : '',
@@ -299,6 +304,27 @@ export default function AccountsPage() {
           title={t('accounts.badgeNeverSucceededTitle', {errs})}
         >
           {t('accounts.badgeNeverSucceeded')}
+        </Badge>
+      );
+    }
+    // 上游没有加载这个账号 —— 它**不在账号池里，永远选不中**。
+    //
+    // 为什么必须单独标：面板读的是 auths/ 目录下的文件，上游读的才是池。
+    // 上游 `LoadDir` 对解析失败的 auth 文件静默跳过（如 accessToken 为空），
+    // 那种文件永远进不了池。此前我们会兜底显示「● 在线」——于是出现
+    // 「面板全绿、调用却报没有健康账号」的矛盾，用户完全无从下手（实测反馈）。
+    //
+    // 也可能只是「刚添加、上游还没重载」，所以文案不写成故障，
+    // 而是说明它尚未进入账号池、并给出可做的动作。
+    if (a.in_pool === false) {
+      const why = String(a.invalid_reason || '');
+      return (
+        <Badge
+          variant="secondary"
+          className="rounded-full text-rose-600 dark:text-rose-400"
+          title={why ? t('accounts.badgeNotLoadedWhy', {why}) : t('accounts.badgeNotLoadedTitle')}
+        >
+          {t('accounts.badgeNotLoaded')}
         </Badge>
       );
     }

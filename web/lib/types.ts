@@ -47,6 +47,17 @@ export interface Account {
   last_success?: string | null;
   last_used?: number | null;
   source: 'file' | 'pool';
+  /**
+   * 该账号是否出现在上游账号池里（`/status.accounts`）。
+   *
+   * 我们读的是 auths/ 目录下的文件，上游读的才是池——两者不总一致：上游
+   * `LoadDir` 对解析失败的文件静默跳过（`Parse` 在 accessToken 为空时报错）。
+   * 那种文件不在池里、永远选不中；若不标出来，界面会显示成「在线」，
+   * 出现「面板全绿但调用报没有健康账号」的矛盾。
+   */
+  in_pool?: boolean;
+  /** 已知上游不会加载该文件时的原因（空 = 未发现明显问题） */
+  invalid_reason?: string;
   /** 账号所属版本（cn / global）；存量账号按域名回退，无该字段时视为 cn */
   realm?: 'cn' | 'global';
   /** 该版本是否支持签到体系（国际版没有） */
