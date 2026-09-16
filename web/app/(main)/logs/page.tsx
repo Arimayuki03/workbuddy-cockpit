@@ -14,6 +14,7 @@ import {useAuth} from '@/lib/auth-context';
 import {useRealm} from '@/lib/realm-context';
 import {Button} from '@/components/ui/button';
 import {CopyButton} from '@/components/ui/copy-button';
+import {useT} from '@/lib/i18n/provider';
 import {Badge} from '@/components/ui/badge';
 import {Input} from '@/components/ui/input';
 import {Label} from '@/components/ui/label';
@@ -43,6 +44,7 @@ import {
 const PAGE_SIZE = 20;
 
 export default function LogsPage() {
+  const t = useT();
   const {isAdmin} = useAuth();
   // 日志随顶部版本切换：两个版本走不同账号池，混看会把两个池子的调用搅在一起
   const {realm, label: realmName} = useRealm();
@@ -108,26 +110,26 @@ export default function LogsPage() {
   return (
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
-        title="请求日志"
-        description="反代网关的每一次调用记录，含状态、延迟与 Token 计量（每 60 秒自动刷新；含国内版与国际版调用，不按版本过滤）"
+        title={t('logs.title')}
+        description={t('logs.description')}
         actions={
           <>
             {isAdmin && (
               <ConfirmDialog
-                title="清空所有日志？"
-                description="将删除全部请求日志记录，用量统计的汇总数据不受影响。"
-                confirmText="清空"
+                title={t('logs.clearTitle')}
+                description={t('logs.clearDesc')}
+                confirmText={t('common.clear')}
                 destructive
                 onConfirm={async () => {
                   await logApi.clear();
-                  notify.ok('已清空');
+                  notify.ok(t('logs.cleared'));
                   setPage(1);
                   load();
                 }}
                 trigger={
                   <Button variant="outline" size="sm" className="rounded-full text-red-500">
                     <Trash2 />
-                    清空
+                    {t('common.clear')}
                   </Button>
                 }
               />
@@ -139,23 +141,23 @@ export default function LogsPage() {
       <section className="rounded-[20px] bg-muted p-4">
         <div className="grid grid-cols-2 items-end gap-3 md:grid-cols-6">
           <div className="space-y-1.5">
-            <Label className="text-[11px] text-muted-foreground">时间范围</Label>
+            <Label className="text-[11px] text-muted-foreground">{t('logs.filterRange')}</Label>
             <Select value={days} onValueChange={(v) => { setDays(v); setPage(1); }}>
               <SelectTrigger className="bg-background"><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="1">近 24 小时</SelectItem>
-                <SelectItem value="7">近 7 天</SelectItem>
-                <SelectItem value="30">近 30 天</SelectItem>
-                <SelectItem value="90">近 90 天</SelectItem>
+                <SelectItem value="1">{t('logs.last24h')}</SelectItem>
+                <SelectItem value="7">{t('stats.last7')}</SelectItem>
+                <SelectItem value="30">{t('stats.last30')}</SelectItem>
+                <SelectItem value="90">{t('stats.last90')}</SelectItem>
               </SelectContent>
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label className="text-[11px] text-muted-foreground">密钥</Label>
+            <Label className="text-[11px] text-muted-foreground">{t('logs.filterKey')}</Label>
             <Select value={keyId} onValueChange={(v) => { setKeyId(v); setPage(1); }}>
               <SelectTrigger className="bg-background"><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">全部密钥</SelectItem>
+                <SelectItem value="all">{t('logs.allKeys')}</SelectItem>
                 {keys.map((k) => (
                   <SelectItem key={k.id} value={String(k.id)}>{k.name}</SelectItem>
                 ))}
@@ -163,27 +165,27 @@ export default function LogsPage() {
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label className="text-[11px] text-muted-foreground">状态</Label>
+            <Label className="text-[11px] text-muted-foreground">{t('accounts.colStatus')}</Label>
             <Select value={status} onValueChange={(v) => { setStatus(v); setPage(1); }}>
               <SelectTrigger className="bg-background"><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">全部</SelectItem>
-                <SelectItem value="ok">成功</SelectItem>
-                <SelectItem value="error">失败</SelectItem>
+                <SelectItem value="all">{t('common.all')}</SelectItem>
+                <SelectItem value="ok">{t('common.success')}</SelectItem>
+                <SelectItem value="error">{t('common.failure')}</SelectItem>
               </SelectContent>
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label className="text-[11px] text-muted-foreground">模型</Label>
-            <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="全部" className="bg-background" />
+            <Label className="text-[11px] text-muted-foreground">{t('nav.models')}</Label>
+            <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder={t('common.all')} className="bg-background" />
           </div>
           <div className="space-y-1.5">
-            <Label className="text-[11px] text-muted-foreground">来源 IP</Label>
-            <Input value={ip} onChange={(e) => setIp(e.target.value)} placeholder="全部" className="bg-background" />
+            <Label className="text-[11px] text-muted-foreground">{t('logs.filterIp')}</Label>
+            <Input value={ip} onChange={(e) => setIp(e.target.value)} placeholder={t('common.all')} className="bg-background" />
           </div>
           <Button className="rounded-full" onClick={applyFilters}>
             <Search />
-            筛选
+            {t('logs.filter')}
           </Button>
         </div>
       </section>
@@ -192,15 +194,15 @@ export default function LogsPage() {
         <Table>
           <TableHeader>
             <TableRow className="border-b border-border/60 hover:bg-transparent">
-              <TableHead className="pl-4 text-[11px] text-muted-foreground">时间</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">密钥</TableHead>
+              <TableHead className="pl-4 text-[11px] text-muted-foreground">{t('logs.colTime')}</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('nav.keys')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">IP</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">模型</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">状态</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">首字</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">总耗时</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('nav.models')}</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colStatus')}</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('logs.colFirstToken')}</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('logs.colLatency')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">Token</TableHead>
-              <TableHead className="pr-4 text-[11px] text-muted-foreground">实付</TableHead>
+              <TableHead className="pr-4 text-[11px] text-muted-foreground">{t('metric.paid')}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -255,7 +257,7 @@ export default function LogsPage() {
                   ) : (
                     <span className="text-muted-foreground/70">—</span>
                   )}
-                  {l.stream && <span className="ml-1 text-[10px] text-muted-foreground">流</span>}
+                  {l.stream && <span className="ml-1 text-[10px] text-muted-foreground">{t('logs.streamShort')}</span>}
                 </TableCell>
                 <TableCell className="pr-4 text-xs tabular-nums">
                   {typeof l.credit === 'number' ? (
@@ -263,7 +265,7 @@ export default function LogsPage() {
                       {fmtCredit(l.credit)}
                     </span>
                   ) : (
-                    <span className="text-muted-foreground/70" title="上游未返回该项（不等于免费）">—</span>
+                    <span className="text-muted-foreground/70" title={t('logs.noCreditTitle')}>—</span>
                   )}
                 </TableCell>
               </TableRow>
@@ -274,15 +276,15 @@ export default function LogsPage() {
         {!logs.length && !loading && (
           <EmptyState
             icon={ScrollText}
-            title="暂无日志"
-            description="当有请求通过网关时，这里会显示调用记录"
+            title={t('logs.emptyTitle')}
+            description={t('logs.emptyDesc')}
             className="flex flex-col items-center justify-center py-16 text-center"
           />
         )}
 
         <div className="flex items-center justify-between px-4 py-3">
           <div className="text-[11px] text-muted-foreground">
-            共 {fmtNumber(total)} 条 · 第 {page} / {pages} 页
+            {t('logs.pageInfo', {total: fmtNumber(total), page, pages})}
           </div>
           <div className="flex gap-1">
             <Button
@@ -310,43 +312,45 @@ export default function LogsPage() {
       <Drawer open={!!detail} onOpenChange={(v) => !v && setDetail(null)}>
         <DrawerContent>
           <DrawerHeader>
-            <DrawerTitle>请求详情 #{detail?.id}</DrawerTitle>
+            <DrawerTitle>{t('logs.detailTitle', {id: detail?.id ?? ''})}</DrawerTitle>
             <DrawerDescription>{detail ? fmtDateTime(detail.ts) : ''}</DrawerDescription>
           </DrawerHeader>
           {detail && (
             <div className="space-y-3 px-4 pb-8 text-xs">
               {([
-                ['来源 IP', detail.ip],
-                ['密钥', detail.key_name || '—'],
-                ['模型', detail.model || '—'],
-                ['映射模型', detail.mapped_model || '—'],
-                ['状态码', String(detail.status)],
+                ['ip', t('logs.rowIp'), detail.ip],
+                ['key', t('logs.rowKey'), detail.key_name || '—'],
+                ['model', t('logs.rowModel'), detail.model || '—'],
+                ['mapped', t('logs.rowMappedModel'), detail.mapped_model || '—'],
+                ['status', t('logs.rowStatus'), String(detail.status)],
                 [
-                  '首字延迟',
+                  'firstToken',
+                  t('logs.rowFirstToken'),
                   detail.first_token_ms != null
                     ? fmtLatency(detail.first_token_ms)
-                    : '未采集（非流式请求）',
+                    : t('logs.notCollected'),
                 ],
-                ['总耗时', fmtLatency(detail.latency_ms)],
-                ['Prompt Token', fmtNumber(detail.prompt_tokens)],
-                ['Completion Token', fmtNumber(detail.completion_tokens)],
+                ['latency', t('logs.rowLatency'), fmtLatency(detail.latency_ms)],
+                ['promptTokens', 'Prompt Token', fmtNumber(detail.prompt_tokens)],
+                ['completionTokens', 'Completion Token', fmtNumber(detail.completion_tokens)],
                 [
-                  '实际扣费',
+                  'credit',
+                  t('logs.rowCredit'),
                   typeof detail.credit === 'number'
-                    ? fmtCredit(detail.credit) + (detail.credit > 0 ? '' : '（未计费）')
-                    : '上游未返回',
+                    ? fmtCredit(detail.credit) + (detail.credit > 0 ? '' : t('logs.unbilled'))
+                    : t('logs.noCredit'),
                 ],
-                ['流式', detail.stream ? '是' : '否'],
-                ['User-Agent', detail.ua || '—'],
-                ['错误', detail.error || '—'],
-              ] as [string, string][]).map(([k, v]) => {
+                ['stream', t('logs.rowStream'), detail.stream ? t('common.yes') : t('common.no')],
+                ['ua', 'User-Agent', detail.ua || '—'],
+                ['error', t('logs.rowError'), detail.error || '—'],
+              ] as [string, string, string][]).map(([id, k, v]) => {
                 // 这些字段内容较长且常需要贴出来（排查 / 反馈），给出复制入口
-                const copyable = ['来源 IP', 'User-Agent', '错误'].includes(k) && v !== '—';
+                const copyable = ['ip', 'ua', 'error'].includes(id) && v !== '—';
                 return (
-                  <div key={k} className="flex items-start gap-3">
+                  <div key={id} className="flex items-start gap-3">
                     <div className="w-32 shrink-0 text-muted-foreground">{k}</div>
                     <div className="min-w-0 flex-1 break-all font-mono">{v}</div>
-                    {copyable && <CopyButton value={v} title={`复制${k}`} className="-mt-1" />}
+                    {copyable && <CopyButton value={v} title={t('logs.copyField', {field: k})} className="-mt-1" />}
                   </div>
                 );
               })}

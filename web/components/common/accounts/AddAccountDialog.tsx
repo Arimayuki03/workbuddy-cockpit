@@ -3,6 +3,7 @@
 import {useCallback, useEffect, useRef, useState} from 'react';
 import {QRCodeSVG} from 'qrcode.react';
 import {notify} from '@/lib/toast';
+import {useT} from '@/lib/i18n/provider';
 import {Loader2, CheckCircle2, AlertTriangle, ExternalLink} from 'lucide-react';
 import {
   Select,
@@ -28,15 +29,16 @@ type Phase = 'loading' | 'waiting' | 'success' | 'error';
 /**
  * 国际版可选地区（与后端 INTERNATIONAL_REGIONS 保持一致）。
  * 取自国际版官网的短名单；不预选，因为地区属于账号归属信息。
+ * label 为 i18n 键：地区名要跟着界面语言走（代码本身是固定的 ISO 码）。
  */
 const INTERNATIONAL_REGIONS = [
-  {code: 'HK', label: '中国香港'},
-  {code: 'MO', label: '中国澳门'},
-  {code: 'SG', label: '新加坡'},
-  {code: 'TH', label: '泰国'},
-  {code: 'PH', label: '菲律宾'},
-  {code: 'MY', label: '马来西亚'},
-  {code: 'ID', label: '印度尼西亚'},
+  {code: 'HK', key: 'region.HK'},
+  {code: 'MO', key: 'region.MO'},
+  {code: 'SG', key: 'region.SG'},
+  {code: 'TH', key: 'region.TH'},
+  {code: 'PH', key: 'region.PH'},
+  {code: 'MY', key: 'region.MY'},
+  {code: 'ID', key: 'region.ID'},
 ] as const;
 
 export function AddAccountDialog({
@@ -48,6 +50,7 @@ export function AddAccountDialog({
   onOpenChange: (v: boolean) => void;
   onSuccess?: () => void;
 }) {
+  const t = useT();
   const [phase, setPhase] = useState<Phase>('loading');
   /** 版本跟随全站切换：切到国际版时扫码走国际版端点，并需要选地区 */
   const {realm, label: realmName} = useRealm();
@@ -71,14 +74,14 @@ export function AddAccountDialog({
   const start = useCallback(async () => {
     stopPoll();
     setPhase('loading');
-    setMessage('正在向腾讯申请授权链接…');
+    setMessage(t('addAccount.requesting'));
     setAuthUrl('');
     try {
       const data = await accountApi.start(realm);
       stateRef.current = data.state;
       setAuthUrl(data.authUrl);
       setPhase('waiting');
-      setMessage('等待手机扫码确认…');
+      setMessage(t('addAccount.waiting'));
 
       timerRef.current = window.setInterval(async () => {
         if (pollingRef.current) return;  // 上一次还没回来，跳过本轮
@@ -88,14 +91,19 @@ export function AddAccountDialog({
           if (res.status === 'success') {
             stopPoll();
             setPhase('success');
-            setMessage(`账号「${res.nickname || res.uid}」授权成功${res.updated ? '（已更新）' : ''}`);
+            const accountName = res.nickname || res.uid || '';
+            setMessage(
+              res.updated
+                ? t('addAccount.successUpdated', {name: accountName})
+                : t('addAccount.success', {name: accountName}),
+            );
             notify.ok(
-              `账号「${res.nickname || res.uid}」授权成功`,
+              t('addAccount.success', {name: accountName}),
               res.realm === 'global'
-                ? '国际版账号已加入账号池（国际版无签到，积分来自一次性 trial）'
+                ? t('addAccount.successGlobal')
                 : res.updated
-                  ? '已更新该账号的登录令牌，正在自动应用'
-                  : '已自动完成签到，正在加入账号池',
+                  ? t('addAccount.successToken')
+                  : t('addAccount.successCheckin'),
             );
             window.dispatchEvent(new Event('workbuddy-manager:accounts-changed'));
             onSuccess?.();
@@ -103,7 +111,7 @@ export function AddAccountDialog({
           } else if (res.status === 'expired' || res.status === 'invalid') {
             stopPoll();
             setPhase('error');
-            setMessage('二维码已失效，请关闭后重试');
+            setMessage(t('addAccount.qrExpired'));
           }
         } catch {
           /* 忽略单次轮询错误，等待下次 */
@@ -115,7 +123,7 @@ export function AddAccountDialog({
       setPhase('error');
       setMessage(errText(e));
     }
-  }, [onOpenChange, onSuccess, stopPoll, realm, region]);
+  }, [onOpenChange, onSuccess, stopPoll, realm, region, t]);
 
   useEffect(() => {
     if (open) {
@@ -132,11 +140,11 @@ export function AddAccountDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-[420px]" showCloseButton>
         <DialogHeader>
-          <DialogTitle>添加腾讯账号 · {realmName}</DialogTitle>
+          <DialogTitle>{t('addAccount.title', {realm: realmName})}</DialogTitle>
           <DialogDescription>
             {realm === 'global'
-              ? '扫码授权国际版账号（workbuddy.ai）。新号需先选地区完成注册，否则聊天会报 14017'
-              : '使用微信 / QQ 扫码完成授权，成功后自动签到并纳管'}
+              ? t('addAccount.descGlobal')
+              : t('addAccount.descCn')}
           </DialogDescription>
         </DialogHeader>
 
@@ -145,22 +153,22 @@ export function AddAccountDialog({
               放在二维码之前：地区一变就要重新申请授权码，先选好再扫省得白扫。 */}
           {realm === 'global' && (
             <div className="w-full space-y-1.5">
-              <div className="text-[11px] font-medium">地区（用于国际版注册）</div>
+              <div className="text-[11px] font-medium">{t('addAccount.regionLabel')}</div>
               <Select value={region} onValueChange={setRegion}>
                 <SelectTrigger className="h-9 w-full rounded-full text-xs">
-                  <SelectValue placeholder="请选择地区（不替你默认，避免归属填错）" />
+                  <SelectValue placeholder={t('addAccount.regionPlaceholder')} />
                 </SelectTrigger>
                 <SelectContent>
                   {INTERNATIONAL_REGIONS.map((r) => (
                     <SelectItem key={r.code} value={r.code} className="text-xs">
-                      {r.label}（{r.code}）
+                      {t('addAccount.regionOption', {label: t(r.key), code: r.code})}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
               {!region && (
                 <p className="text-[10px] leading-4 text-muted-foreground">
-                  不选也可扫码，但账号会停留在「未注册地区」状态，聊天报 14017 时需回来重选。
+                  {t('addAccount.regionHint')}
                 </p>
               )}
             </div>
@@ -195,13 +203,13 @@ export function AddAccountDialog({
                   value={authUrl}
                   size="sm"
                   showLabel
-                  label="复制链接"
+                  label={t('addAccount.copyLink')}
                   variant="outline"
                   className="rounded-full"
                 />
                 <ShareButton
-                  title="添加腾讯账号"
-                  text="打开这个链接完成扫码授权，之后会自动签到并纳入账号池"
+                  title={t('addAccount.shareTitle')}
+                  text={t('addAccount.shareText')}
                   url={authUrl}
                 />
               </div>
@@ -225,11 +233,11 @@ export function AddAccountDialog({
 
           <div className="flex w-full gap-2">
             <Button variant="outline" className="flex-1 rounded-full" onClick={() => onOpenChange(false)}>
-              取消
+              {t('common.cancel')}
             </Button>
             {phase === 'error' && (
               <Button className="flex-1 rounded-full" onClick={start}>
-                重新获取
+                {t('addAccount.retry')}
               </Button>
             )}
           </div>
