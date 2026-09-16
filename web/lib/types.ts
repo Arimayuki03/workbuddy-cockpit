@@ -426,6 +426,32 @@ export interface TaskLogResponse {
   collector: {at?: number; parsed?: number; added?: number; error?: string};
 }
 
+/**
+ * 成长任务一键执行的状态（调用上游自带的 scripts/task_runner.py）。
+ *
+ * 三种模式按**风险分级**，界面必须让用户看清区别：
+ *   preview 只查询（dry-run，不发写请求）
+ *   claim   只领已完成任务的奖励（幂等，不伪造行为）
+ *   full    点亮 + 领奖（会伪造活跃上报，有风控风险，需二次确认）
+ */
+export interface TaskRunStatus {
+  running: boolean;
+  mode: string;
+  target: string;
+  started_at: number;
+  finished_at: number;
+  exit_code: number | null;
+  timed_out: boolean;
+  error: string;
+  /** 输出尾部（脚本按行打印，后端只保留最近若干行） */
+  lines: string[];
+  /** 上游脚本与账号目录是否就位；false 时 unavailable_reason 说明原因与做法 */
+  available: boolean;
+  unavailable_reason: string;
+  /** 定时领奖配置（只有幂等的认领，不含点亮） */
+  schedule: {enabled?: boolean; hours?: number[]};
+}
+
 
 /** 签到记录分页返回 */
 export interface CheckinLogPage {

@@ -17,7 +17,7 @@ from .routers import (
     accounts, anthropic, auth, gateway, keys, logs, models, playground,
     responses, security as security_router, settings, stats, system,
 )
-from .services import tasklog
+from .services import tasklog, taskrun
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +31,14 @@ async def lifespan(app: FastAPI):
     # 后台采集上游自动任务日志（旅行/活跃/签到/保活），容器日志会被重建清掉，
     # 这里解析后落库长期保留，界面才能看到「这趟旅行领了多少积分」
     tasklog.start_collector()
+    # 定时领奖（成长任务里幂等的那一半）：只把已完成任务的奖励领回来，不伪造
+    # 任何活跃上报，因此可以安全地到点自动跑。点亮那半只允许手动（见 taskrun）
+    taskrun.start_scheduler()
     try:
         yield
     finally:
         tasklog.stop_collector()
+        taskrun.stop_scheduler()
 
 
 def _warn_if_exposed() -> None:
