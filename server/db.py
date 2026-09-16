@@ -274,8 +274,11 @@ def _rebuild_usage_daily_pk(conn: sqlite3.Connection) -> bool:
       * 用 `INSERT OR REPLACE` 而非普通 INSERT：旧库合并累计的行在四列主键下
         不会冲突，但万一有重复（(day,key_id,model) 不同而 realm 相同的脏数据），
         替换比让整个迁移失败好——迁移失败会让服务起不来。
-      * 全程在事务里，失败则回滚并保留原表（先建好新表再 DROP 旧表，
-        任何异常都不会丢数据）。
+      * 先建新表、数据搬运、再 DROP 旧表、最后改名：**旧表在新表数据就位之前
+        一直存在**，所以任何一步失败都不会丢数据。
+      * 开头先 `DROP TABLE IF EXISTS usage_daily_new`：SQLite **不回滚 DDL**，
+        迁移失败一次就会把那张半成品表留下，导致下次启动因重名再失败——形成
+        永远修不好的死循环（实测确认，见 test_usage_daily_migration）。
       * realm 不需要 COALESCE 兜底：旧库该列是迁移时 `ADD COLUMN ... NOT NULL
         DEFAULT 'cn'` 建的，NULL 不存在于该列（实测写不进去）。
     """
@@ -295,7 +298,17 @@ def _rebuild_usage_daily_pk(conn: sqlite3.Connection) -> bool:
         return False
 
     try:
-        with conn:  # 事务：任一步失败自动回滚，旧表原样保留
+        # 先清掉可能残留的临时表。**这一步是必须的**（实测确认）：SQLite 的
+        # 事务**不回滚 DDL** —— 在事务里 CREATE TABLE 之后即使抛异常回滚，
+        # 那张表依然留在库里。于是只要迁移失败过一次，下次的 CREATE TABLE
+        # 就会因重名失败，形成「每次启动都失败、统计永远修不好」的死循环。
+        # 幂等的前提是能重来，所以先把上次的残骸清掉。
+        conn.execute('DROP TABLE IF EXISTS usage_daily_new')
+    except sqlite3.Error:
+        pass
+
+    try:
+        with conn:  # 事务：任一步失败自动回滚
             conn.execute('''
                 CREATE TABLE usage_daily_new (
                   day               TEXT    NOT NULL,

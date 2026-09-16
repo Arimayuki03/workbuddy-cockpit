@@ -166,6 +166,35 @@ class LegacyUsageDailyMigrationTest(unittest.TestCase):
         self.assertEqual(row['c'], 1)
         self.assertEqual(row['r'], 7)
 
+    def test_recovers_from_leftover_table(self) -> None:
+        """上次迁移若留下半成品表，这次必须能自愈——否则永远修不好。
+
+        **SQLite 不回滚 DDL**（实测确认）：在事务里 `CREATE TABLE` 之后即使
+        抛异常回滚，那张表依然留在库里。所以迁移失败一次就会留下
+        `usage_daily_new`，下次启动的 `CREATE TABLE` 会因重名失败、再留下一次
+        ——如此循环，统计永远修不好，而每次的原因看起来都一样。
+
+        这里手工造出那个残留，验证迁移仍能完成。
+        """
+        self._make_legacy_db([('2026-09-10', 1, 'glm-5.2', 7, 700, 300, 1.5, 'cn')])
+        conn = sqlite3.connect(config.DB_PATH)
+        # 模拟「上次迁移中途失败」留下的半成品表（结构与真表不同，更接近残骸）
+        conn.execute('CREATE TABLE usage_daily_new (garbage TEXT)')
+        conn.commit()
+        conn.close()
+
+        db.connect()
+        self.assertIn('realm', self._pk_line(), '有残留表时迁移失败了')
+        self.assertEqual(db.query_one('SELECT COUNT(*) c FROM usage_daily')['c'], 1,
+                         '历史数据应已搬过来')
+        # 残留表必须被清掉，否则下次 CREATE 又会重名
+        left = db.query("SELECT name FROM sqlite_master WHERE type='table' "
+                        "AND name LIKE 'usage_daily%'")
+        self.assertEqual([r['name'] for r in left], ['usage_daily'],
+                         '残留的临时表没清干净')
+        # 而且要真的能写入（迁移成功的最终判据）
+        db.bump_usage(1, 'glm-5.2', 10, 20, credit=0.5, realm='cn')
+
     def test_new_db_untouched(self) -> None:
         """全新库本来就是四列主键，迁移不该动它。"""
         db.connect()
