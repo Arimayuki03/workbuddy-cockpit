@@ -38,6 +38,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import {notify} from '@/lib/toast';
+import {useT} from '@/lib/i18n/provider';
 
 const CHART_COLORS = [
   'var(--chart-1)',
@@ -47,10 +48,26 @@ const CHART_COLORS = [
   'var(--chart-5)',
 ];
 
+/**
+ * 统计健康提示的详情本地化。
+ *
+ * 服务端（`server/routers/stats.py` 的 `_usage_health`）返回的是**带数字的中文模板句**，
+ * 且其测试断言了详情里必须出现调用次数，所以这里不改服务端，改为按同一模板反解、
+ * 交给译文重排；解不出就原样显示服务端文案——宁可退化成中文，也不要显示空白或丢掉数字。
+ */
+const USAGE_HEALTH_DETAIL = /^今天已有 (\d+) 次调用记录，但用量统计为 0/;
+
+function usageHealthDetail(detail: string, t: (key: string, params?: Record<string, string>) => string): string {
+  const m = USAGE_HEALTH_DETAIL.exec(detail.trim());
+  if (!m) return detail;
+  return t('stats.usageHealthDetail', {n: fmtNumber(Number(m[1]))});
+}
+
 export default function StatsPage() {
   const {isAdmin} = useAuth();
   // 统计随顶部版本切换：两个版本走的是不同账号池，混在一起看没有意义
   const {realm, label: realmName} = useRealm();
+  const t = useT();
   const [summary, setSummary] = useState<StatsSummary | null>(null);
   const [daily, setDaily] = useState<UsagePoint[]>([]);
   const [byModel, setByModel] = useState<UsageBreakdown[]>([]);
@@ -69,7 +86,7 @@ export default function StatsPage() {
     if (results[2].status === 'fulfilled') setByModel(results[2].value);
     if (results[3].status === 'fulfilled') setByKey(results[3].value);
     if (results.some((r) => r.status === 'rejected')) notify.err(errText((results.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason));
-  }, [days, realm]);
+  }, [days, realm, t]);
 
   useEffect(() => {
     load();
@@ -87,30 +104,36 @@ export default function StatsPage() {
   return (
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
-        title="用量统计"
-        description={`按时间、模型与密钥维度统计 Token 消耗与请求量（每 60 秒自动刷新；当前只统计${realmName}）`}
+        title={t('stats.title')}
+        description={t('stats.description', {realm: realmName})}
         actions={
           <>
             <Select value={days} onValueChange={setDays}>
               <SelectTrigger className="h-8 w-[130px] rounded-full"><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="7">近 7 天</SelectItem>
-                <SelectItem value="30">近 30 天</SelectItem>
-                <SelectItem value="90">近 90 天</SelectItem>
+                <SelectItem value="7">{t('stats.last7')}</SelectItem>
+                <SelectItem value="30">{t('stats.last30')}</SelectItem>
+                <SelectItem value="90">{t('stats.last90')}</SelectItem>
               </SelectContent>
             </Select>
             {isAdmin && (
               <ConfirmDialog
-                title="按请求日志修复用量统计？"
-                description="将以「请求日志」为准，把尚未计入的历史用量补进统计。该操作幂等，可重复执行，不会重复累加。"
-                confirmText="开始修复"
+                title={t('stats.repairTitle')}
+                description={t('stats.repairDesc')}
+                confirmText={t('stats.repairStart')}
                 onConfirm={async () => {
                   try {
                     const r = await statsApi.repairUsage();
                     if (r.repaired > 0) {
-                      notify.ok('用量统计已修复', `补入 ${r.requests} 次请求、${r.tokens} Token`);
+                      notify.ok(
+                        t('stats.repaired'),
+                        t('stats.repairedDetail', {
+                          requests: fmtNumber(r.requests),
+                          tokens: fmtNumber(r.tokens),
+                        }),
+                      );
                     } else {
-                      notify.info('无需修复', '统计与请求日志一致');
+                      notify.info(t('stats.nothingToRepair'), t('stats.nothingToRepairDesc'));
                     }
                     await load();
                   } catch (e) {
@@ -120,25 +143,32 @@ export default function StatsPage() {
                 trigger={
                   <Button variant="outline" size="sm" className="rounded-full">
                     <Wrench className="h-3.5 w-3.5" />
-                    修复统计
+                    {t('stats.repairButton')}
                   </Button>
                 }
               />
             )}
             {isAdmin && (
               <ConfirmDialog
-                title="按请求日志重建用量统计？"
-                description="会清空现有汇总，再以「请求日志」为准重新生成。用于清理历史上因时区口径不一致导致的重复计数（同一次调用被算进两天）。注意：若请求日志曾被清空，那部分历史汇总会随之丢失。"
-                confirmText="开始重建"
+                title={t('stats.rebuildTitle')}
+                description={t('stats.rebuildDesc')}
+                confirmText={t('stats.rebuildStart')}
                 destructive
                 onConfirm={async () => {
                   try {
                     const r = await statsApi.rebuildUsage();
                     const d = r.tokens_delta;
                     notify.ok(
-                      '用量统计已重建',
-                      `汇总行 ${r.rows_before} → ${r.rows_after}` +
-                        (d !== 0 ? `，Token 修正 ${d > 0 ? '+' : ''}${fmtNumber(d)}` : '，总量无变化'),
+                      t('stats.rebuilt'),
+                      t('stats.rebuiltDetail', {
+                        before: fmtNumber(r.rows_before),
+                        after: fmtNumber(r.rows_after),
+                      }) +
+                        (d !== 0
+                          ? t('stats.rebuiltDetailTokens', {
+                              delta: `${d > 0 ? '+' : ''}${fmtNumber(d)}`,
+                            })
+                          : t('stats.rebuiltDetailSame')),
                     );
                     await load();
                   } catch (e) {
@@ -148,7 +178,7 @@ export default function StatsPage() {
                 trigger={
                   <Button variant="outline" size="sm" className="rounded-full text-amber-600 dark:text-amber-400">
                     <RotateCcw className="h-3.5 w-3.5" />
-                    重建统计
+                    {t('stats.rebuildButton')}
                   </Button>
                 }
               />
@@ -166,46 +196,48 @@ export default function StatsPage() {
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
           <div className="text-[11px] leading-5">
             <span className="font-medium text-amber-700 dark:text-amber-300">
-              用量统计可能没有正常累计
+              {t('stats.usageHealthTitle')}
             </span>
-            <div className="text-muted-foreground">{summary.usage_health.detail}</div>
+            <div className="text-muted-foreground">
+              {usageHealthDetail(summary.usage_health.detail, t)}
+            </div>
           </div>
         </div>
       )}
 
       <section className="grid grid-cols-2 gap-3 lg:grid-cols-4 md:gap-4">
         <StatCard
-          label="今日请求"
+          label={t('stats.todayRequests')}
           value={fmtNumber(summary?.today_requests)}
-          hint={`${fmtCompact(summary?.today_tokens)} Token`}
+          hint={t('stats.tokenHint', {v: fmtCompact(summary?.today_tokens)})}
           icon={Activity}
           tone="info"
           delay={0}
         />
         <StatCard
-          label="本周请求"
+          label={t('stats.weekRequests')}
           value={fmtNumber(summary?.week_requests)}
-          hint={`${fmtCompact(summary?.week_tokens)} Token`}
+          hint={t('stats.tokenHint', {v: fmtCompact(summary?.week_tokens)})}
           icon={TrendingUp}
           tone="accent"
           delay={0.05}
         />
         <StatCard
-          label="今日实付"
+          label={t('stats.todayPaid')}
           value={fmtCredit(summary?.today_credit)}
           hint={
             summary?.today_credit
-              ? `本周 ${fmtCredit(summary?.week_credit)}`
-              : '上游未返回扣费项'
+              ? t('stats.todayPaidHint', {v: fmtCredit(summary?.week_credit)})
+              : t('stats.noCreditFromUpstream')
           }
           icon={Coins}
           tone="warning"
           delay={0.1}
         />
         <StatCard
-          label="活跃密钥"
+          label={t('stats.activeKeys')}
           value={fmtNumber(summary?.active_keys)}
-          hint={summary?.top_model ? `主力模型 ${summary.top_model}` : '分布中'}
+          hint={summary?.top_model ? t('stats.topModel', {model: summary.top_model}) : t('stats.distributing')}
           icon={KeyRound}
           tone="success"
           delay={0.15}
@@ -214,8 +246,8 @@ export default function StatsPage() {
 
       <section className="rounded-[20px] bg-muted p-4">
         <div className="mb-3 flex items-center justify-between">
-          <div className="text-sm font-medium">Token 消耗趋势</div>
-          <div className="text-[11px] text-muted-foreground">按天聚合</div>
+          <div className="text-sm font-medium">{t('stats.tokenTrend')}</div>
+          <div className="text-[11px] text-muted-foreground">{t('stats.dailyAgg')}</div>
         </div>
         <div className="h-[260px] w-full">
           {chartData.length ? (
@@ -234,7 +266,7 @@ export default function StatsPage() {
                   }}
                   formatter={(value, name) => [
                     fmtNumber(Number(value)),
-                    String(name) === 'tokens' ? 'Token' : '请求数',
+                    String(name) === 'tokens' ? 'Token' : t('metric.requests'),
                   ]}
                 />
                 <Bar
@@ -248,14 +280,14 @@ export default function StatsPage() {
               </BarChart>
             </ResponsiveContainer>
           ) : (
-            <div className="grid h-full place-items-center text-xs text-muted-foreground">暂无用量数据</div>
+            <div className="grid h-full place-items-center text-xs text-muted-foreground">{t('stats.noUsageData')}</div>
           )}
         </div>
       </section>
 
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <BreakdownPanel title="按模型" icon={Cpu} items={byModel} />
-        <BreakdownPanel title="按密钥" icon={KeyRound} items={byKey} />
+        <BreakdownPanel title={t('stats.byModel')} icon={Cpu} items={byModel} />
+        <BreakdownPanel title={t('stats.byKey')} icon={KeyRound} items={byKey} />
       </section>
     </div>
   );
@@ -270,6 +302,7 @@ function BreakdownPanel({
   icon: typeof Cpu;
   items: UsageBreakdown[];
 }) {
+  const t = useT();
   const max = Math.max(1, ...items.map((i) => i.prompt_tokens + i.completion_tokens));
   return (
     <div className="rounded-[20px] bg-muted p-4">
@@ -281,10 +314,10 @@ function BreakdownPanel({
         <Table>
           <TableHeader>
             <TableRow className="border-b border-border/60 hover:bg-transparent">
-              <TableHead className="pl-0 text-[11px] text-muted-foreground">名称</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">请求</TableHead>
+              <TableHead className="pl-0 text-[11px] text-muted-foreground">{t('metric.name')}</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('metric.requestsShort')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">Token</TableHead>
-              <TableHead className="pr-0 text-[11px] text-muted-foreground">实付</TableHead>
+              <TableHead className="pr-0 text-[11px] text-muted-foreground">{t('metric.paid')}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -295,7 +328,7 @@ function BreakdownPanel({
                   <TableCell className="pl-0">
                     <div className="flex items-center gap-2">
                       <span className="h-2 w-2 rounded-full" style={{background: CHART_COLORS[i % CHART_COLORS.length]}} />
-                      <span className="max-w-[140px] truncate text-xs font-medium">{it.name || '未知'}</span>
+                      <span className="max-w-[140px] truncate text-xs font-medium">{it.name || t('metric.unknown')}</span>
                     </div>
                     <div className="mt-1.5 h-1 w-full max-w-[140px] overflow-hidden rounded-full bg-border">
                       <div
@@ -320,8 +353,8 @@ function BreakdownPanel({
       ) : (
         <EmptyState
           icon={Activity}
-          title="暂无数据"
-          description="该维度在所选时间范围内没有调用"
+          title={t('stats.emptyTitle')}
+          description={t('stats.emptyDesc')}
           className="flex flex-col items-center justify-center py-10 text-center"
         />
       )}

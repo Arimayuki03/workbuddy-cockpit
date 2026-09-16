@@ -33,6 +33,15 @@ next-env.d.ts
 
 # 调试用临时截图
 .*.png
+# 多语言验收脚本的输出
+dev/.verify-*
+# 图标探针 / 截图脚本的输出
+dev/.icon-*
+dev/.shot-*
+dev/.ui-*
+dev/.variants-*
+dev/.pick-*
+dev/.ab-*
 
 # 安全测试脚本（临时）
 .sec*.py

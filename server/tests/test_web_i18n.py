@@ -1,0 +1,181 @@
+"""前端多语言（web/lib/i18n）字典的结构守卫。
+
+与 test_readme_i18n.py 同一思路：不评判译文质量（那没法自动判定），只锁
+**机械可查的一致性**——漏翻、键名写错、占位符对不上、把中文抄进英文这些
+问题都会在构建前暴露，而不是等到用户切语言时才发现某个角落还是中文。
+
+检查项：
+1. 各语言文件存在、可解析、键集与源语言完全一致（多一个键也算错）；
+2. 没有空译文；
+3. 占位符集合一致（`{n}` 这类，译文漏掉或写错名字都会导致界面渲染出花括号）；
+4. 英文版不含中日韩汉字（复制粘贴中文原文最常见的症状）；
+5. 复数形式写成了对象时，必须带 other（渲染兜底依赖它）。
+"""
+from __future__ import annotations
+
+import json
+import re
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+_ROOT = Path(__file__).resolve().parents[2]
+_LOCALES_DIR = _ROOT / 'web' / 'lib' / 'i18n' / 'locales'
+
+# 源语言：其它语言以它的键集为基准
+_SOURCE = 'zh-CN'
+_LOCALES = ['zh-CN', 'zh-TW', 'en', 'ja', 'ko']
+
+# 复数分类（Intl.PluralRules）。写成对象时 other 必备，否则渲染没有兜底。
+_PLURAL_KEYS = {'zero', 'one', 'two', 'few', 'many', 'other'}
+
+_PLACEHOLDER = re.compile(r'\{(\w+)\}')
+_HAN = re.compile(r'[\u3400-\u4dbf\u4e00-\u9fff]')
+
+
+def _load(locale: str) -> dict:
+    return json.loads((_LOCALES_DIR / f'{locale}.json').read_text(encoding='utf-8'))
+
+
+def _flatten(node, prefix: str = '') -> dict[str, object]:
+    """把嵌套字典压成 a.b.c → 值，便于逐键比对。
+
+    phrases 子树单独校验（见 WebPhraseTest）：它的键是中文源文，
+    源语言自身不重复维护一份，因此不参与「键集完全一致」的比对。
+    """
+    flat: dict[str, object] = {}
+    for key, value in node.items():
+        path = f'{prefix}{key}'
+        if prefix == '' and key == 'phrases':
+            continue
+        if isinstance(value, dict) and not _is_plural(value):
+            flat.update(_flatten(value, f'{path}.'))
+        else:
+            flat[path] = value
+    return flat
+
+
+def _is_plural(value: dict) -> bool:
+    """值是不是复数形式对象：键必须全部落在复数分类里。"""
+    return bool(value) and set(value).issubset(_PLURAL_KEYS)
+
+
+def _texts(value: object) -> list[str]:
+    """取出该条目所有可能渲染出来的文本（复数形式会展开成多条）。"""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [v for v in value.values() if isinstance(v, str)]
+    return []
+
+
+def _placeholders(value: object) -> set[str]:
+    found: set[str] = set()
+    for text in _texts(value):
+        found.update(_PLACEHOLDER.findall(text))
+    return found
+
+
+class WebLocaleTest(unittest.TestCase):
+    """字典结构必须各语言对齐。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.dicts = {locale: _load(locale) for locale in _LOCALES}
+        cls.flat = {locale: _flatten(cls.dicts[locale]) for locale in _LOCALES}
+        cls.source_keys = set(cls.flat[_SOURCE])
+
+    def test_files_exist(self) -> None:
+        for locale in _LOCALES:
+            self.assertTrue((_LOCALES_DIR / f'{locale}.json').is_file(),
+                            f'缺少语言文件 {locale}.json')
+
+    def test_same_key_set(self) -> None:
+        """键集必须与源语言完全一致：漏翻与多写的键都报出来。"""
+        for locale in _LOCALES:
+            if locale == _SOURCE:
+                continue
+            missing = sorted(self.source_keys - set(self.flat[locale]))
+            extra = sorted(set(self.flat[locale]) - self.source_keys)
+            self.assertEqual(missing, [], f'{locale} 缺少 {len(missing)} 个键：{missing[:10]}')
+            self.assertEqual(extra, [], f'{locale} 多出 {len(extra)} 个键：{extra[:10]}')
+
+    def test_no_empty_translation(self) -> None:
+        for locale in _LOCALES:
+            for key, value in self.flat[locale].items():
+                texts = _texts(value)
+                self.assertTrue(texts, f'{locale}.{key} 没有任何文本')
+                for text in texts:
+                    self.assertTrue(text.strip(), f'{locale}.{key} 是空译文')
+
+    def test_placeholders_match_source(self) -> None:
+        """占位符必须与源语言一致：漏了会让译文缺值，多了会渲染出花括号。"""
+        for locale in _LOCALES:
+            if locale == _SOURCE:
+                continue
+            for key, value in self.flat[locale].items():
+                want = _placeholders(self.flat[_SOURCE].get(key))
+                got = _placeholders(value)
+                self.assertEqual(
+                    got, want,
+                    f'{locale}.{key} 占位符不一致（源语言 {sorted(want)} / 译文 {sorted(got)}）',
+                )
+
+    def test_plural_forms_have_other(self) -> None:
+        for locale in _LOCALES:
+            for key, value in self.flat[locale].items():
+                if isinstance(value, dict):
+                    self.assertIn('other', value, f'{locale}.{key} 的复数形式缺少 other 兜底')
+
+    def test_english_has_no_han(self) -> None:
+        """英文版混进汉字 = 忘了翻译，直接复制了原文。"""
+        offenders = [
+            key for key, value in self.flat['en'].items()
+            if any(_HAN.search(text) for text in _texts(value))
+        ]
+        self.assertEqual(offenders, [], f'en 里有 {len(offenders)} 处未翻译的中文：{offenders[:10]}')
+
+
+class WebPhraseTest(unittest.TestCase):
+    """短语表（gettext 风格，键为中文源文）的结构守卫。
+
+    设置页的配置项说明以中文原文当键，因此源语言不维护自身副本；
+    这里改为要求**各目标语言的短语键集完全一致**，并逐条校验非空与未混入中文。
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.dicts = {locale: _load(locale) for locale in _LOCALES}
+        cls.phrases = {locale: cls.dicts[locale].get('phrases', {}) for locale in _LOCALES}
+
+    def test_target_locales_share_phrase_keys(self) -> None:
+        reference = set(self.phrases['en'])
+        self.assertTrue(reference, 'en 的 phrases 表为空')
+        for locale in _LOCALES:
+            if locale in ('zh-CN', 'en'):
+                continue
+            keys = set(self.phrases[locale])
+            missing = sorted(reference - keys)
+            extra = sorted(keys - reference)
+            self.assertEqual(missing, [], f'{locale} 缺少 {len(missing)} 条短语：{missing[:5]}')
+            self.assertEqual(extra, [], f'{locale} 多出 {len(extra)} 条短语：{extra[:5]}')
+
+    def test_phrase_values_are_non_empty(self) -> None:
+        for locale, table in self.phrases.items():
+            for key, value in table.items():
+                self.assertIsInstance(value, str, f'{locale}.phrases[{key}] 必须是字符串')
+                self.assertTrue(value.strip(), f'{locale}.phrases[{key}] 是空译文')
+
+    def test_source_phrase_is_not_duplicated(self) -> None:
+        """源语言不该维护 phrases 副本：否则改文案时要同时改两处，必然漂移。"""
+        self.assertEqual(self.phrases['zh-CN'], {}, 'zh-CN 不应包含 phrases（中文原文即键）')
+
+    def test_english_phrases_have_no_han(self) -> None:
+        offenders = [key for key, value in self.phrases['en'].items() if _HAN.search(value)]
+        self.assertEqual(offenders, [], f'en.phrases 里有 {len(offenders)} 条未翻译：{offenders[:5]}')
+
+
+if __name__ == '__main__':
+    unittest.main()
