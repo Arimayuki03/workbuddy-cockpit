@@ -199,6 +199,8 @@
     "emptyTitle": "暂无数据",
     "emptyDesc": "该维度在所选时间范围内没有调用",
     "tokenHint": "{v} Token"
+    ,"usageHealthTitle": "用量统计可能没有正常累计"
+    ,"usageHealthDetail": "今天已有 {n} 次调用记录，但用量统计为 0——统计可能没有正常写入。可尝试「修复统计」；若仍为 0，请查看服务端日志。"
   },
   "accounts": {
     "title": "账号管理",

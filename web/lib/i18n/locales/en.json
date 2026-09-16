@@ -214,6 +214,8 @@
     "emptyTitle": "No data",
     "emptyDesc": "No calls for this dimension in the selected range",
     "tokenHint": "{v} tokens"
+    ,"usageHealthTitle": "Usage statistics may not be accumulating"
+    ,"usageHealthDetail": "There are {n} requests logged today but usage statistics show 0 — the stats may not be written correctly. Try Repair stats; if it stays at 0, check the server logs."
   },
   "accounts": {
     "title": "Accounts",
