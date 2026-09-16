@@ -241,6 +241,8 @@
     "badgeExpired": "● 已过期",
     "badgeCooling": "● 冷却中",
     "badgeOnline": "● 在线",
+    "badgeNeverSucceeded": "● 一直失败",
+    "badgeNeverSucceededTitle": "该账号已尝试 {errs} 次、从未成功过。上游对这类失败（如被风控拦下的 403）只换号不冷却，所以状态看着正常，实际每次请求都会失败。建议重新登录该账号，或把它删除。",
     "modelsCount": "（{n} 个模型）",
     "etaRecovery": "预计 {left}后恢复",
     "limitedModels": "被限流的模型：{models}（稍后会自动恢复）",

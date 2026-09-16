@@ -188,6 +188,14 @@ def merge_pool_status(accounts: list[dict], status: dict) -> list[dict]:
         a['in_flight'] = p.get('in_flight')
         a['breaker_fails'] = p.get('breaker_fails')
         a['last_success'] = p.get('last_success')
+        # 累计错误数与最后一次错误时刻。为什么要透出：上游对**未命中它那几条
+        # 规则**的 4xx（例如被 WAF 拦下的 403）只「换号不罚」——不冷却、不熔断、
+        # 不禁用（见其 applyErrorPolicy 的 default 分支）。于是这种账号在面板上
+        # 一直显示「正常」，却每次请求都失败、持续几小时。用户报的正是这个
+        # （issue #14 第二点）。有了这两个数，界面才能把「一直失败但状态正常」
+        # 标出来，用户才知道该重新登录或删掉它。
+        a['err_total'] = p.get('err_total')
+        a['last_err'] = p.get('last_err')
     return accounts
 
 

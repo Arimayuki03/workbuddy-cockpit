@@ -275,6 +275,33 @@ export default function AccountsPage() {
         </Badge>
       );
     }
+    // 「一直在失败，但状态看着正常」——上游对**未命中它那几条规则**的 4xx
+    // （例如被 WAF 拦下的 403）只「换号不罚」：不冷却、不熔断、不禁用
+    // （其 applyErrorPolicy 的 default 分支，为防雪崩而刻意如此）。于是这种
+    // 账号在面板上一直显示「正常」，实际每次请求都失败，可持续几小时
+    // （issue #14 报告的第二点）。我们能做的是**把它标出来** —— 否则用户
+    // 只看到「状态正常」却一直在报错，完全无从下手。
+    //
+    // 判据：有累计错误、且**从未成功过**（success_count 缺省或 0）。
+    //
+    // 注意**不要**用 `!a.last_success`：上游那个字段是 Go 的 `time.Time` 配
+    // `omitempty`，而 `omitempty` 对结构体类型**不生效** —— 从未成功过的账号
+    // 会序列化成 `"0001-01-01T00:00:00Z"`，在 JS 里是**真值**，判空永远不会
+    // 命中（这是实测确认的，Go 侧验证过）。用 success_count 才是可靠的：
+    // 它是 int64，`omitempty` 生效，0 时整个键都不出现。
+    const errs = typeof a.err_total === 'number' ? a.err_total : 0;
+    const oks = typeof a.success_count === 'number' ? a.success_count : 0;
+    if (errs > 0 && oks === 0) {
+      return (
+        <Badge
+          variant="secondary"
+          className="rounded-full text-rose-600 dark:text-rose-400"
+          title={t('accounts.badgeNeverSucceededTitle', {errs})}
+        >
+          {t('accounts.badgeNeverSucceeded')}
+        </Badge>
+      );
+    }
     return (
       <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">
         {t('accounts.badgeOnline')}
