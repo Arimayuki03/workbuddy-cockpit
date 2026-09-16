@@ -483,7 +483,11 @@ async def _chat(request: Request, upstream_path: str):
             async for chunk in resp.aiter_bytes():
                 if status_code >= 400:
                     pending += chunk.decode('utf-8', errors='ignore')
-                    if len(pending) > 4000:
+                    # 有数据就留一份：早先要等到 4000 字节才取，而上游的错误体
+                    # 通常只有几百字节 → error_text 恒为空，**错误被静默丢弃**：
+                    # 客户端看得到（原样透传），管理端日志却什么都不记，用户来问
+                    # 「为什么失败」时查不到任何线索。与 anthropic 层同口径。
+                    if error_text is None and pending.strip():
                         error_text = pending[:500]
                     yield chunk
                     continue
