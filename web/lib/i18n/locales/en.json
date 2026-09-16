@@ -343,6 +343,8 @@
     "modelPrefixNote": "Narrows to specific models within the pinned edition: `global:gpt-5.4` is a Global-edition model, `glm-5.2` a China-edition one. Leave empty for no restriction.",
     "create": "Create",
     "createdTitle": "Key created",
+    "createdButRefreshFailed": "Key created, but refreshing the list failed",
+    "createdButRefreshFailedHint": "Refresh the page to see it",
     "createdDesc": "Copy it now — once this dialog closes the full key cannot be shown again",
     "copyKey": "Copy key",
     "copyBaseUrl": "Copy Base URL",

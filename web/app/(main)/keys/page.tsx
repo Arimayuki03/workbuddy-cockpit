@@ -1,6 +1,6 @@
 'use client';
 
-import {useCallback, useEffect, useState} from 'react';
+import {useCallback, useEffect, useRef, useState} from 'react';
 import {KeyRound, Plus, Trash2, Ban, CircleCheck, Pencil, RotateCcw} from 'lucide-react';
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
@@ -88,6 +88,18 @@ export default function KeysPage() {
   const [form, setForm] = useState<FormState>(emptyForm);
   const [busy, setBusy] = useState(false);
   const [issued, setIssued] = useState<string | null>(null);
+  /**
+   * 提交锁（同步生效，与 `busy` 的渲染状态无关）。
+   *
+   * 为什么状态不够：`setBusy(true)` 要等下一次渲染才反映到按钮的 disabled 上，
+   * 而快速连点/回车触发的第二次提交可能在那之前就进来了 —— 结果创建出**多把
+   * 同名密钥**（实测：连点 3 次进 3 把）。用 ref 记录「已提交」，在当前这次
+   * 调用栈里立即生效，不依赖渲染。
+   *
+   * 另外这把锁在 `finally` 里释放，失败（比如接口 500）时用户可以重试 ——
+   * 不能因为一次报错就把表单永久锁死。
+   */
+  const submitting = useRef(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -131,10 +143,14 @@ export default function KeysPage() {
   }
 
   async function submit() {
+    // 同步锁：必须在任何 await / setState 之前判断并置位。
+    // 只看 `busy` 不够——那个状态要等重渲染才生效，连点会漏过去。
+    if (submitting.current) return;
     if (!form.name.trim()) {
       notify.err(t('keys.nameRequired'));
       return;
     }
+    submitting.current = true;
     setBusy(true);
     try {
       const days = Number(form.expiresDays) || 0;
@@ -174,11 +190,17 @@ export default function KeysPage() {
         if (created.key) setIssued(created.key);
       }
       setFormOpen(false);
-      load();
+      // load() 失败**不能**把这次创建判成失败：密钥已经建好了。
+      // 单独兜住，否则一个列表刷新异常会冒到下面的 catch 里，提示
+      // 「创建失败」——而实际上成功（用户会再点一次，建出重复的）。
+      load().catch(() =>
+        notify.warn(t('keys.createdButRefreshFailed'), t('keys.createdButRefreshFailedHint')),
+      );
     } catch (e) {
       notify.err(errText(e));
     } finally {
       setBusy(false);
+      submitting.current = false;
     }
   }
 

@@ -328,6 +328,8 @@
     "modelPrefixNote": "選択したエディションの中でさらにモデルを絞り込みます: `global:gpt-5.4` はグローバル版、`glm-5.2` は中国版のモデルです。空欄なら制限しません。",
     "create": "作成",
     "createdTitle": "キーを作成しました",
+    "createdButRefreshFailed": "キーは作成されましたが、一覧の更新に失敗しました",
+    "createdButRefreshFailedHint": "ページを再読み込みすると表示されます",
     "createdDesc": "今すぐコピーして保存してください。閉じるとキーの全文は再表示できません",
     "copyKey": "キーをコピー",
     "copyBaseUrl": "Base URL をコピー",

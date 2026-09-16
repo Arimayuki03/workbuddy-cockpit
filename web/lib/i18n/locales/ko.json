@@ -328,6 +328,8 @@
     "modelPrefixNote": "선택한 버전 안에서 모델을 더 좁힙니다. `global:gpt-5.4`는 글로벌 버전, `glm-5.2`는 중국 버전 모델입니다. 비워 두면 제한하지 않습니다.",
     "create": "생성",
     "createdTitle": "키가 생성되었습니다",
+    "createdButRefreshFailed": "키는 생성되었지만 목록 새로고침에 실패했습니다",
+    "createdButRefreshFailedHint": "페이지를 새로고침하면 표시됩니다",
     "createdDesc": "지금 바로 복사해 보관하세요. 창을 닫으면 전체 키를 다시 볼 수 없습니다",
     "copyKey": "키 복사",
     "copyBaseUrl": "Base URL 복사",
