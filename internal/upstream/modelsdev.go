@@ -24,6 +24,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -47,7 +48,18 @@ const modelsDevNegativeTTL = 24 * time.Hour
 // 扫描。分批摊销是为避免每次 lookup 都做 O(n) 全扫——第 4 级触发点在 /v1/models 里
 // 每个模型各调一次（handler 遍历模型列表逐条 V4），n 大时全扫会被请求数放大成 CPU
 // 开销。淘汰只针对 TTL 已过期的条目，故低于上限时不扫也不会让任何有效条目过期失效。
+//
+// 注意「只扫过期条目」不足以保证有界：TTL 从**首次未命中**起算（见 lookup 的写回
+// 判断），若模型名持续出现在 /v1/models 名单里，一个 TTL 窗口内所有条目都会被反复
+// 盖章成 fresh，扫描一条也删不掉，规模只增不减。因此超过**硬上限**（两倍软上限）
+// 时额外丢弃最旧的条目——负缓存是纯性能优化（miss 时多查一次进程内索引），丢条目
+// 只可能让某个模型重新进一次扫描，不改变任何对外语义。
 const modelsDevNegativesSoftCap = 1024
+
+// modelsDevNegativesHardCap 负缓存 map 的硬上限：超过即按时间序丢弃最旧条目
+// （见 modelsDevNegativesSoftCap 注释）。取两倍软上限，给「一轮 /v1/models 新增」
+// 留出余量，正常规模远达不到。
+const modelsDevNegativesHardCap = 2 * modelsDevNegativesSoftCap
 
 // modelsDevMaxBody 拉取响应体上限（文档实测 ~4.7MB，留余量；防异常大响应拖死）。
 const modelsDevMaxBody = 32 << 20
@@ -125,6 +137,17 @@ func (f *modelsDevFetcher) lookup(model string) (modelsDevEntry, bool) {
 		f.negatives = make(map[string]time.Time)
 	}
 	now := time.Now()
+	// 未命中「重复查询」不再刷新记录时刻：TTL 只从**首次未命中**起算。
+	// 否则覆盖写等于每次查询都把条目续期——一个持续出现在 /v1/models 名单里的
+	// 未知模型（每条 listing 经 ContextWindowListingV4 + MaxOutputTokensListingV4
+	// 各查一次，即每请求 2 次写回）其条目永远 fresh，下面的惰性淘汰一条也扫不掉；
+	// 又因淘汰只在超软上限时才扫，规模超限后只增不减（进程生命周期内无界增长，
+	// 与 #121 同一类泄漏，仅「不再被查询」的那部分被 #121 覆盖）。
+	// 续期对行为零影响：negativeFresh 只判是否存在 + within TTL，未过 TTL 的条目
+	// 无论是否续期都同样短路第 4 级触发。
+	if _, seen := f.negatives[model]; !seen {
+		f.negatives[model] = now
+	}
 	// 惰性淘汰已过期的负缓存条目：TTL 到期后 negativeFresh 本就判 false（等效不存在），
 	// 条目继续留着只是内存泄漏——models.dev 永不收录的模型名（model 由客户端任意指定）
 	// 查一次就永久驻留，而全库唯一的删除点 backfillMisses 只删「文档里查到」的模型，
@@ -137,7 +160,20 @@ func (f *modelsDevFetcher) lookup(model string) (modelsDevEntry, bool) {
 			}
 		}
 	}
-	f.negatives[model] = now
+	// 硬上限兜底：TTL 未到期的条目本就无可淘汰（上一轮扫描已删净过期项），若规模
+	// 仍超硬上限说明输入模型名太多，按时间序丢弃最旧条目、削回软上限
+	// （纯性能优化：负缓存 miss 只会多查一次进程内索引，丢条目无语义影响）。
+	if len(f.negatives) > modelsDevNegativesHardCap {
+		cut := len(f.negatives) - modelsDevNegativesSoftCap
+		oldest := make([]string, 0, len(f.negatives))
+		for m := range f.negatives {
+			oldest = append(oldest, m)
+		}
+		sort.Slice(oldest, func(i, j int) bool { return f.negatives[oldest[i]].Before(f.negatives[oldest[j]]) })
+		for _, m := range oldest[:cut] {
+			delete(f.negatives, m)
+		}
+	}
 	return modelsDevEntry{}, false
 }
 

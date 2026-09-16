@@ -685,3 +685,44 @@ func TestModelsDevNegativesEvictsExpired(t *testing.T) {
 			after, probes+1)
 	}
 }
+
+// TestModelsDevNegativesReStampBlocksEviction 反复被查询的负缓存条目永不淘汰（#121 同类残留）。
+//
+// 缺陷：lookup 未命中的收尾无条件执行 `f.negatives[model] = now`，把条目的记录时刻
+// **重置为本次查询时刻**——TTL 因此从「最近一次查询」而非「首次未命中」起算。
+// 而 /v1/models 每次列出一个模型都会经 ContextWindowListingV4 +
+// MaxOutputTokensListingV4 各查一次，未知模型名又完全由客户端指定：只要这份名单
+// 稳定存在（每轮都被列出），其条目就永远 fresh，惰性淘汰（now.Sub(t) >= TTL）
+// 一条也扫不掉，且因为淘汰只在 len > 软上限时才扫，规模超限后**只增不减**。
+// #121 修的是「不再被查询的条目永不回收」，持续被查询的条目仍无界驻留。
+//
+// 断言：多轮重复列出同一批（超过软上限的）未知模型，map 规模必须保持有界。
+// 修复前：每轮都重新盖章，三轮后条目数 = 3*perRound 且永不回收 → RED。
+func TestModelsDevNegativesReStampBlocksEviction(t *testing.T) {
+	resetModelsDev()
+	resetModelCatalog()
+
+	modelsDev.mu.Lock()
+	modelsDev.doc = map[string]modelsDevEntry{"known-model": {Context: 100000, Output: 8192}}
+	modelsDev.fetched = true
+	modelsDev.lastFetch = time.Now()
+	modelsDev.mu.Unlock()
+
+	// 三轮，每轮把此前所有幽灵模型连同新增的一批一起再列一次（等价 /v1/models 反复输出）。
+	const perRound = modelsDevNegativesSoftCap + 200
+	const rounds = 3
+	for round := 0; round < rounds; round++ {
+		for i := 0; i < perRound*(round+1); i++ {
+			ContextWindowListingV4("ghost-"+itoa(int64(i)), 0, nil)
+		}
+	}
+
+	modelsDev.mu.Lock()
+	after := len(modelsDev.negatives)
+	modelsDev.mu.Unlock()
+	// 上限口径：软上限 + 一轮的新增（淘汰是惰性的，允许跨一个扫描窗口）。
+	if max := 2 * modelsDevNegativesSoftCap; after > max {
+		t.Errorf("反复被查询的负缓存条目无界增长: negatives=%d want <= %d（旧行为下为 %d 且永不回收）",
+			after, max, perRound*rounds)
+	}
+}
