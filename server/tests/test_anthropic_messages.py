@@ -110,6 +110,53 @@ class RequestTranslationTest(unittest.TestCase):
         forced = to_openai_request({**base, 'tool_choice': {'type': 'tool', 'name': 'f'}})
         self.assertEqual(forced['tool_choice']['function']['name'], 'f')
 
+    def test_tool_choice_none_is_forwarded(self) -> None:
+        """type=none 是「这一轮别调工具」，漏掉它等于放开了客户端的限制。
+
+        Anthropic 的 none 与 OpenAI 的 'none' 语义一致，直接透传即可。先前只认
+        auto/any/tool，none 被静默丢弃——客户端明确要求别调工具，上来的却是默认的
+        auto，模型照样可能回 tool_use。
+        """
+        base = {'model': 'x', 'max_tokens': 10, 'messages': []}
+        self.assertEqual(
+            to_openai_request({**base, 'tool_choice': {'type': 'none'}})['tool_choice'],
+            'none',
+        )
+
+    def test_disable_parallel_tool_use_maps_to_parallel_tool_calls(self) -> None:
+        """disable_parallel_tool_use 藏在 tool_choice 里，且只在 true 时才写。
+
+        这个开关在 Anthropic 的 tool_choice 对象内（不在顶层），漏掉它的症状是
+        「看起来一切正常」：客户端按串行编排，上游却一次回多个 tool_use。
+
+        另一面同样要守：未给该字段时 Anthropic 默认允许并发，若我们无条件写成
+        parallel_tool_calls=False，反而把默认行为改掉了——必须只在显式 true 时写。
+        """
+        base = {'model': 'x', 'max_tokens': 10, 'messages': [], 'tools': [
+            {'name': 'f', 'input_schema': {'type': 'object'}},
+        ]}
+
+        off = to_openai_request({**base, 'tool_choice': {
+            'type': 'auto', 'disable_parallel_tool_use': True,
+        }})
+        self.assertIs(off['parallel_tool_calls'], False)
+        self.assertEqual(off['tool_choice'], 'auto')
+
+        # any / tool 下也要带上该开关（客户端在任何一种选择下都能禁并发）
+        repeated = to_openai_request({**base, 'tool_choice': {
+            'type': 'any', 'disable_parallel_tool_use': True,
+        }})
+        self.assertIs(repeated['parallel_tool_calls'], False)
+
+        # 未给该字段、或显式 false：都不该凭空写出 parallel_tool_calls
+        for choice in (
+            {'type': 'auto'},
+            {'type': 'auto', 'disable_parallel_tool_use': False},
+        ):
+            out = to_openai_request({**base, 'tool_choice': choice})
+            self.assertNotIn('parallel_tool_calls', out,
+                             f'{choice} 不该改动并发默认值')
+
     def test_scalar_params(self) -> None:
         out = to_openai_request({
             'model': 'x', 'max_tokens': 55, 'temperature': 0.3, 'top_p': 0.9,

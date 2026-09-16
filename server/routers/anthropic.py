@@ -345,6 +345,16 @@ def to_openai_request(body: dict) -> dict:
                 'type': 'function',
                 'function': {'name': str(choice['name'])},
             }
+        elif kind == 'none':
+            out['tool_choice'] = 'none'
+
+        # `disable_parallel_tool_use` 是 Anthropic 的「这一轮只准调一个工具」开关，
+        # 藏在 tool_choice 里而不是顶层。漏掉它，客户端以为并发被禁了、实际没禁：
+        # 上游可能一次回多个 tool_use，客户端的串行编排会拿到意料之外的结果。
+        # 只在显式要求禁用时映射——Anthropic 的默认（未给该字段）就是允许并发，
+        # 而 OpenAI 侧默认同样是允许，因此不写字段即语义一致。
+        if choice.get('disable_parallel_tool_use') is True:
+            out['parallel_tool_calls'] = False
     return out
 
 

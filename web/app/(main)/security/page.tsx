@@ -61,6 +61,20 @@ function auditDetail(detail: string | null | undefined, t: (key: string, params?
       if (part === '密码=已重置') return t('security.detailPasswordReset');
       const role = /^角色=(.+)$/.exec(part);
       if (role) return t('security.detailRole', {role: role[1]});
+      // 「段=upstream,pool」：本次实际改动过的配置段。段名是后端的键名，不翻译，
+      // 只把「段=」这个标签换掉。
+      const segment = /^段=(.*)$/.exec(part);
+      if (segment) return t('security.detailSegment', {segments: segment[1]});
+      // 「改密码、改角色」：用户资料变更标记，用「、」连接成一串，逐个词翻译后
+      // 再用目标语言的连接符拼回去。认不全就整段原样保留（宁可不译也不译错）。
+      const tokens = part.split('、').map((token) => {
+        if (token === '改密码') return t('security.detailPasswordChanged');
+        if (token === '改角色') return t('security.detailRoleChanged');
+        return null;
+      });
+      if (tokens.every((v) => v !== null)) {
+        return tokens.join(t('security.detailChangedSeparator'));
+      }
       return part;
     })
     .join(t('security.detailSeparator'));
@@ -378,7 +392,10 @@ export default function SecurityPage() {
                       {AUDIT_LABEL_KEYS[a.action] ? t(AUDIT_LABEL_KEYS[a.action]) : a.action}
                     </Badge>
                   </TableCell>
-                  <TableCell className="text-xs">{a.actor || '—'}</TableCell>
+                  {/* 登录失败时后端把「没填用户名」记成 (空) —— 这个标记也要跟着界面语言走 */}
+                  <TableCell className="text-xs">
+                    {a.actor === '(空)' ? t('security.actorEmpty') : a.actor || '—'}
+                  </TableCell>
                   <TableCell className="text-xs text-muted-foreground">{a.target || '—'}</TableCell>
                   <TableCell className="max-w-[420px] truncate pr-4 text-[11px] text-muted-foreground" title={a.detail}>
                     {auditDetail(a.detail, t)}
