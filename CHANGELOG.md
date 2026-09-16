@@ -33,7 +33,63 @@
   > 与「转发热路径原样透传」不冲突：本层只改变**回给客户端的表达形式**，
   > 不改动转发给上游的内容。`test_gateway_passthrough` 已相应标注这一例外。
 
+- **界面多语言（简体中文 / 繁體中文 / English / 日本語 / 한국어）**：管理端原本
+  只有简体中文，非中文用户无法使用。现在右上角可切换（登录页也有，未登录也能换），
+  默认跟随浏览器语言，选择记在 `localStorage`。
+
+  不做语言路由前缀而是客户端切换：前端是 `next build` 静态导出、由 FastAPI 托管，
+  加 `/en/...` 要改所有跳转与后端静态路由；而语言偏好本就是单个使用者的本地设置。
+
+  - 两种取值方式分工明确：界面文案走**键名**（`t('accounts.title')`）；设置页那上百条
+    与上游 `config.json` 一一对应的配置项说明走**短语表**（`tp('中文原文')`，
+    gettext 风格），省掉一层「键名 ↔ 文案」映射，新加上游字段时照抄原文即可
+  - **后端返回的文案也跟随语言**：`lib/api.ts` 的错误提取会过一遍短语表，
+    因此服务端报错、签到结果、积分流水等固定文案同样会翻译；未收录的保持中文原文，
+    不会显示成键名或空白
+  - 刻意不翻的内容（CHANGELOG 正文、后端枚举值、开发者可见的异常）与取舍都写在
+    [docs/i18n.md](docs/i18n.md)
+  - 新增结构守卫 `server/tests/test_web_i18n.py`（键集一致、占位符一致、无空译文、
+    英文版不得残留汉字、短语表键集一致）与两个开发工具：`dev/i18n-scan.mjs`
+    （扫描未提取的硬编码文案）、`dev/i18n-verify.mjs`（真浏览器逐语言逐页取可见
+    文本，报告残留中文）
+
+- **Windows 本地启动脚本**：Windows 上没有 systemd，无法套用 `deploy/install.sh`
+  那一套。新增 `start.cmd` / `start.ps1`（前台启动）与 `service-tools.ps1`
+  （`start` / `stop` / `status` / `restart`，后台独立进程，日志写 `data/`）、`stop.ps1`。
+
+  其中 `PYTHONUTF8=1` 是 Windows 上的必要设置：中文 Windows 默认 GBK，而
+  `docker logs` 与腾讯接口返回的都是 UTF-8，不开会让「读上游日志」的线程抛
+  `UnicodeDecodeError`、任务记录页取不到数据。**只在启动脚本里设环境变量，
+  未改动项目源码。**
+
 ### 修复
+- **Docker 构建在国内网络下直接失败，导致容器起不来、页面 ERR_CONNECTION_REFUSED**：
+  官方软件源不可达——`deb.debian.org` 走 Fastly CDN，实测约 367 kB/s 且频繁返回 502，
+  `apt-get update` 在第 2 步就中断（拉 PyPI 也有同类 `SSL: UNEXPECTED_EOF`）。
+  这种「端口拒绝连接」很容易被误判成服务问题，实际是**镜像根本没建出来**。
+
+  - 新增 `DEBIAN_MIRROR` / `PIP_INDEX_URL` 两个构建参数，可显式指定国内镜像源
+  - **并内置一次自动降级**：官方源失败时自动改用阿里云（apt）/ 清华（pip）重试，
+    不配任何参数也能构建成功。降级分支用「故意指向不存在的镜像源」实测过
+  - 调小 apt 的重试与超时，减少官方源不通时的无谓等待
+  - `deploy/README.md` 增补排查步骤（含「打开 7863 显示 404 是正常的」这一高频困惑：
+    7863 是纯 API 的上游网关，本就没有网页界面）
+
+- **按钮里的图标又大又虚**：按钮内图标本应是 16px，但 `[&_svg:not([class*='size-'])]:size-4`
+  经 Tailwind 编译出来是 `svg:not([class*="'size-'"])`——属性值里多了两个引号，
+  **永远匹配不到**，图标一直按 lucide 默认的 24px 渲染（按钮才 32px 高）。
+  现已改为在 `globals.css` 里统一处理：默认 16px、描边与渲染保持 lucide 默认
+  （与底部工具栏图标一致）。选择器同时覆盖 trigger——`<ConfirmDialog trigger={<Button/>}>`
+  这类组合里 Radix 的 `asChild` 会把 `data-slot="button"` 覆写成 `alert-dialog-trigger`，
+  只匹配 button 会漏掉「删除账号 / 强制重启 / 清空日志」等危险操作按钮。
+
+  > 记一次该走回头路的弯路：起初为了让自造的「实心黑 / 中间灰像素比」指标好看，
+  > 加过 `stroke-width: 3` 与 `shape-rendering: crispEdges`，指标从 1.2 升到 4.6，
+  > 但**观感反而更糊**——crispEdges 关掉弧形描边的抗锯齿，`hand-coins` 这类小尺寸
+  > 曲线图标直接糊成色块。指标被骗的原因是它奖励「灰像素少」，而抗锯齿消失恰好让
+  > 灰像素归零。结论：小尺寸曲线图标必须保留抗锯齿；判断清晰度要看真机截图，
+  > 不要只看像素统计（`dev/icon-ab.mjs`、`dev/icon-probe.mjs`）。
+
 - **Anthropic 兼容层：上游报错时客户端收不到错误**（合并前评审发现，已在本版修掉）：
   流式请求遇到上游报错（模型不存在、额度不足等）时，客户端收到的是**「成功但内容
   为空」**——一套正常的 message_start → message_delta → message_stop，没有任何
