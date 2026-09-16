@@ -155,8 +155,16 @@ def delete_key(key_id: int) -> bool:
     return True
 
 
-def reset_usage(key_id: int) -> None:
+def reset_usage(key_id: int) -> bool:
+    """把已用 Token 归零。返回是否真的命中了密钥。
+
+    返回布尔值是为了让路由能对「不存在的 id」报 404 —— 原来静默成功会让
+    前端提示「已重置」，而实际什么都没发生。
+    """
+    if not db.query_one('SELECT id FROM api_keys WHERE id = ?', (key_id,)):
+        return False
     db.execute('UPDATE api_keys SET used_tokens = 0 WHERE id = ?', (key_id,))
+    return True
 
 
 def resolve(token: str) -> dict | None:
