@@ -147,11 +147,21 @@ def _classify(rest: str, sev: str | None) -> tuple[int, str]:
     lower = rest.lower()
 
     m_reward = re.search(r'reward=(\d+)', rest)
-    m_adopt = re.search(r'adopt ok\s*\(\+?(\d+)\s*credits?\)', rest, re.IGNORECASE)
     if m_reward:
         return int(m_reward.group(1)), 'credit'
-    if m_adopt:
-        return int(m_adopt.group(1)), 'credit'
+
+    # 通用收益形态：`<动作> ok (+N credit[s])`，括号里**只有** credit 一项。
+    #
+    # 为什么写成通用而不是逐个动作列举：上游这类「动作 + ok (+N credit)」的日志
+    # 一直在增加，每加一个我们就要跟着补一条规则——漏掉的后果是收益显示为 0
+    # （把「赚到了」显示成「没赚」，用户看到的数字是错的，但不会有任何报错）。
+    # 已经出现过三次：`adopt ok (+300 credits)`、连登的 `gift` / `compensation`。
+    # 收紧条件为「括号里只有 credit、后面直接是右括号」，因此不会误吞
+    # `redeem tier=7d ok (+100 credit, +5 energy, +1 chances)` 那种多项括号
+    # （那条由下面的 redeem 规则单独处理）。
+    m_gain = re.search(r'ok\s*\(\+?(\d+)\s*credits?\s*\)', rest, re.IGNORECASE)
+    if m_gain:
+        return int(m_gain.group(1)), 'credit'
 
     # 连登奖励（上游 91418c5 新增）：`redeem tier=7d ok (+100 credit, +5 energy, +1 chances)`。
     # 不解析的话界面上收益显示为 0——而这是真实到账的积分，等于把「赚到了」显示成「没赚」。
