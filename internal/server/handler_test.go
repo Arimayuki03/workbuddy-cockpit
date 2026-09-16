@@ -2470,3 +2470,227 @@ func TestStaleSnapshotBoundedByPickGate(t *testing.T) {
 		t.Fatalf("绑定应收敛到 good（stale 被 Pick 闸拒绝后解绑回落），got %s ok=%v", uid, ok)
 	}
 }
+
+// ---- prompt.mode=append 端到端（issue #129 C 组） ----
+
+// newBodyCaptureUpstream 返回捕获每次出站请求体的 fake 上游（behavior 按
+// 第几次调用返回响应；最后一次之后的调用沿用末次行为）。
+func newBodyCaptureUpstream(t *testing.T, bodies *[][]byte, behavior func(call int, body string) (int, string, bool)) *upstream.Client {
+	t.Helper()
+	return &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			raw, _ := io.ReadAll(r.Body)
+			*bodies = append(*bodies, raw)
+			status, respBody, isStream := behavior(len(*bodies), string(raw))
+			ct := "application/json"
+			if isStream {
+				ct = "text/event-stream"
+			}
+			return &http.Response{
+				StatusCode: status,
+				Header:     http.Header{"Content-Type": []string{ct}},
+				Body:       io.NopCloser(strings.NewReader(respBody)),
+			}, nil
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+}
+
+// TestHandlerAppendEndToEnd C1：mode=append → 上游收到：开头块原样 + GW 紧跟其后 + user 不动。
+func TestHandlerAppendEndToEnd(t *testing.T) {
+	var bodies [][]byte
+	up := newBodyCaptureUpstream(t, &bodies, func(call int, body string) (int, string, bool) {
+		return 200, sseOK, true
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "append", PromptText: "网关人格"})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[
+			{"role":"system","content":"项目规范"},
+			{"role":"developer","content":"工具约定"},
+			{"role":"user","content":"你好"}]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("want 1 upstream call, got %d", len(bodies))
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(bodies[0], &obj); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, bodies[0])
+	}
+	msgs := obj["messages"].([]any)
+	if len(msgs) != 4 {
+		t.Fatalf("messages len=%d want 4: %s", len(msgs), bodies[0])
+	}
+	// 原始 system/developer 逐字在场。
+	if msgs[0].(map[string]any)["content"] != "项目规范" {
+		t.Errorf("original system missing: %s", bodies[0])
+	}
+	if msgs[1].(map[string]any)["content"] != "工具约定" {
+		t.Errorf("original developer missing: %s", bodies[0])
+	}
+	// GW 紧跟开头块。
+	gw := msgs[2].(map[string]any)
+	if gw["role"] != "system" || gw["content"] != "网关人格" {
+		t.Errorf("GW msg wrong: %v", gw)
+	}
+	// user 不动。
+	if msgs[3].(map[string]any)["content"] != "你好" {
+		t.Errorf("user content changed: %s", bodies[0])
+	}
+}
+
+// TestHandlerAppendDegradedActiveReplaces C2：降级期 append 退化为 replace(Degraded)——
+// 原始 system 不在场、Degraded 在场（降级矩阵第三行）。
+func TestHandlerAppendDegradedActiveReplaces(t *testing.T) {
+	var bodies [][]byte
+	up := newBodyCaptureUpstream(t, &bodies, func(call int, body string) (int, string, bool) {
+		return 200, sseOK, true
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "append", PromptText: "网关人格"})
+	h.degrade.Trigger() // 预置降级期（模拟 append 首遇后进入降级窗口）
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[
+			{"role":"system","content":"原始指纹"},
+			{"role":"user","content":"hi"}]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("want 1 upstream call (direct to Degraded), got %d", len(bodies))
+	}
+	out := string(bodies[0])
+	if !strings.Contains(out, prompt.Degraded) {
+		t.Errorf("body should contain Degraded: %s", out)
+	}
+	if strings.Contains(out, "原始指纹") {
+		t.Errorf("original system must be REMOVED in degraded append (replace fallback): %s", out)
+	}
+	if strings.Contains(out, "网关人格") {
+		t.Errorf("append PromptText should NOT be used in degraded window: %s", out)
+	}
+}
+
+// TestHandlerAppendContentBlockedTriggersDegrade C3：首遇 400 content-blocked
+// → Trigger + 同请求以 Degraded-replace 重试成功；degradeGate.Active()。
+func TestHandlerAppendContentBlockedTriggersDegrade(t *testing.T) {
+	var bodies [][]byte
+	up := newBodyCaptureUpstream(t, &bodies, func(call int, body string) (int, string, bool) {
+		if call == 1 {
+			return 400, `{"code":11128,"msg":"blocked by security policy"}`, false
+		}
+		return 200, sseOK, true
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "append", PromptText: "网关人格"})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[
+			{"role":"system","content":"原始指纹"},
+			{"role":"user","content":"hi"}]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s (want 200 after degraded retry)", rec.Code, rec.Body)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("want 2 upstream calls, got %d", len(bodies))
+	}
+	// 首次出站是 append 语义（原始 system 在场 + GW 在场）。
+	if !strings.Contains(string(bodies[0]), "原始指纹") || !strings.Contains(string(bodies[0]), "网关人格") {
+		t.Errorf("first body should be append semantics: %s", bodies[0])
+	}
+	// 重试出站是 replace(Degraded)（原始 system 移除）。
+	if !strings.Contains(string(bodies[1]), prompt.Degraded) {
+		t.Errorf("retry body should contain Degraded: %s", bodies[1])
+	}
+	if strings.Contains(string(bodies[1]), "原始指纹") {
+		t.Errorf("retry body should not contain original system: %s", bodies[1])
+	}
+	if !h.degrade.Active() {
+		t.Error("degrade should be active after content-blocked trigger in append mode")
+	}
+}
+
+// TestHandlerAppendContentBlockedSecondFailPassthrough C4：两次 content-blocked
+// → 客户端收 400 + 上游原文（既有透传路径复用）。
+func TestHandlerAppendContentBlockedSecondFailPassthrough(t *testing.T) {
+	var bodies [][]byte
+	up := newBodyCaptureUpstream(t, &bodies, func(call int, body string) (int, string, bool) {
+		return 400, `{"code":11128,"msg":"blocked by security policy"}`, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "append", PromptText: "网关人格"})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[
+			{"role":"system","content":"x"},
+			{"role":"user","content":"hi"}]}`)))
+	if rec.Code != 400 {
+		t.Fatalf("code=%d want 400 (second content-blocked passthrough)", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"code":"content_blocked"`) {
+		t.Errorf("want content_blocked code: %s", body)
+	}
+	// error-passthrough：上游 code/msg 原文在场。
+	if !strings.Contains(body, "blocked by security policy") || !strings.Contains(body, "11128") {
+		t.Errorf("want upstream raw body passthrough: %s", body)
+	}
+	if len(bodies) != 2 {
+		t.Errorf("want 2 upstream calls (first + one degraded retry), got %d", len(bodies))
+	}
+}
+
+// TestHandlerAppendTurnKeyStable C7：append 改写不得影响轮级聚合键——
+// handler 在改写前提取 turnKey（§3.4 槽位纪律），出站 X-Conversation-Request-ID
+// 应等于按**原始 body**（改写前）派生的 TurnRequestID(TurnKey(原))，而非按
+// append 后 body 派生的（TurnKey 键含最后一条 user 的下标，插 system 会移位）。
+func TestHandlerAppendTurnKeyStable(t *testing.T) {
+	var reqIDs []string
+	var bodies [][]byte
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			raw, _ := io.ReadAll(r.Body)
+			bodies = append(bodies, raw)
+			reqIDs = append(reqIDs, r.Header.Get("X-Conversation-Request-ID"))
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(sseOK)),
+			}, nil
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "append", PromptText: "网关人格"})
+
+	original := `{"model":"glm-5.2","messages":[
+		{"role":"system","content":"项目规范"},
+		{"role":"user","content":"你好"}]}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(original)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	// 出站 body 确为 append 语义（插了 GW）。
+	if !strings.Contains(string(bodies[0]), "网关人格") {
+		t.Fatalf("outbound body should be append-rewritten: %s", bodies[0])
+	}
+	// 聚合键按原始 body 派生（改写前提取）。
+	want := session.TurnRequestID(session.TurnKey([]byte(original)))
+	if want == "" {
+		t.Fatal("want non-empty TurnRequestID for original body")
+	}
+	if len(reqIDs) != 1 || reqIDs[0] != want {
+		t.Errorf("X-Conversation-Request-ID=%v want %q (derived from pre-rewrite body)", reqIDs, want)
+	}
+}
