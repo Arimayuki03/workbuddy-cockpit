@@ -170,12 +170,27 @@ def _classify(rest: str, sev: str | None) -> tuple[int, str]:
     if m_redeem:
         return int(m_redeem.group(1)), 'credit'
 
-    # 连登抽奖（同提交）：`lottery drawn prize=50 credits (credit)`。
-    # 奖品种类不止积分（也有谢谢参与/道具），只有 prize 文本里带 credits 才计入收益，
-    # 否则是无积分奖励的抽奖，仍算成功。
-    m_draw = re.search(r'lottery\s+drawn\s+prize=(\d+)\s*credits?', rest, re.IGNORECASE)
+    # 连登抽奖：上游的日志是
+    #     `lottery drawn prize=<PrizeName> (<PrizeType>)`
+    # 例如 `prize=10 积分 (credit)` / `prize=谢谢参与 (none)` / 实物奖。
+    #
+    # 注意**判据是括号里的 PrizeType，不是奖品名里的数字**：奖品名是腾讯返回的
+    # 中文文本（`10 积分`），不是 `50 credits` 这种英文串 —— 上一版按
+    # `prize=(\d+)\s*credits?` 写，匹配的是一个上游从未产生过的格式，于是真实
+    # 日志一律被提取成 0（格式取自上游 scheduler.go:622 与它自己的测试夹具）。
+    #
+    # 积分奖的名字里带数量（`10 积分`），从中取第一个整数；取不到时仍标成 credit
+    # 事件（说明这次确实发的是积分）但收益记 0，不编造数字。
+    m_draw = re.search(r'lottery\s+drawn\s+prize=([^()]*?)\s*(?:\(([^)]*)\))?$',
+                       rest.strip(), re.IGNORECASE)
     if m_draw:
-        return int(m_draw.group(1)), 'credit'
+        prize_name = (m_draw.group(1) or '').strip()
+        prize_type = (m_draw.group(2) or '').strip().lower()
+        if prize_type == 'credit':
+            num = re.search(r'(\d+)', prize_name)
+            return (int(num.group(1)), 'credit') if num else (0, 'credit')
+        # 实物 / 未中奖等：算成功，但没有积分收益
+        return 0, 'ok'
 
     # 账号被禁用属于严重结果，即使上游只标了 WARN 也按失败展示
     if '禁用' in rest or 'session dead' in lower:
@@ -355,6 +370,31 @@ _MESSAGE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r'连续 (\d+) 次 12153 session dead — 禁用'), '连续 {0} 次会话失效，账号已禁用'),
     (re.compile(r'^(\d+) session dead$'), '会话失效（错误码 {0}）'),
     (re.compile(r'连续 (\d+) 次 12153 session dead'), '连续 {0} 次会话失效'),
+    # ── 成长中心（连登 / 礼包 / 抽奖）───────────────────────────
+    # 上游 2026-09-16 起新增的这一批日志，任务页会把原始英文当主文案显示，
+    # 不翻译的话用户看到的是 `gift ok (+100 credit)` 这种开发者文本。
+    # 顺序要紧：`redeem` 与 `lottery` 的形态更具体，必须排在通用 `ok (+N credit)`
+    # 之前，否则会被它先匹配掉（`_MESSAGE_RULES` 是首次命中即返回）。
+    (re.compile(r'redeem tier=(\S+) ok \(\+(\d+) credit'), '连登奖励领取成功（{0} 档，获得 {1} 积分）'),
+    (re.compile(r'redeem tier=(\S+) skip'), '连登奖励跳过（{0} 档：已领过或天数不足）'),
+    (re.compile(r'redeem tier=(\S+):'), '连登奖励领取失败（{0} 档）'),
+    (re.compile(r'lottery drawn prize=([^()]*?)\s*\(credit\)'), '抽奖中奖：{0}'),
+    (re.compile(r'lottery drawn prize=([^()]*?)\s*\(physical\)'), '抽奖中奖（实物）：{0}'),
+    (re.compile(r'lottery drawn prize=([^()]*?)\s*\(none\)'), '抽奖未中奖'),
+    (re.compile(r'lottery draw ok'), '抽奖成功'),
+    (re.compile(r'lottery skip \(no chances or disabled\)'), '抽奖跳过：无次数或未开启'),
+    (re.compile(r'lottery skip \(no chances\)'), '抽奖跳过：无抽奖次数'),
+    (re.compile(r'lottery-chances:'), '查询抽奖次数失败'),
+    (re.compile(r'lottery draw:'), '抽奖失败'),
+    (re.compile(r'makeup ok (\S+) \(\+streak kept\)'), '已用补签卡保住连登（{0}）'),
+    (re.compile(r'makeup (\S+):'), '补签失败（{0}）'),
+    (re.compile(r'gift ok \(\+(\d+) credit\)'), '新手礼包领取成功（获得 {0} 积分）'),
+    (re.compile(r'compensation ok \(\+(\d+) credit\)'), '活动补偿领取成功（获得 {0} 积分）'),
+    (re.compile(r'gift already claimed'), '新手礼包已领过'),
+    (re.compile(r'compensation already claimed'), '活动补偿已领过'),
+    (re.compile(r'reward-state:'), '查询奖励状态失败'),
+    # 通用兜底放最后：`<动作> ok (+N credit)`（上游还在持续加新动作）
+    (re.compile(r'^(\w[\w-]*) ok \(\+(\d+) credits?\)$'), '任务成功（获得 {0} 积分）'),
 )
 
 _MESSAGE_EXACT = {

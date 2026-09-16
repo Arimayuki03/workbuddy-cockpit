@@ -22,6 +22,26 @@ def _norm_realm(value: object) -> str:
     return v if v in ('cn', 'global') else ''
 
 
+def _norm_cidrs(items: object) -> list[str]:
+    """归一化 IP 白名单：逐项去空白、丢弃空项。
+
+    **为什么必须在写入时归一化**（而不是只在路由里校验）：路由校验的是
+    `str(raw).strip()`，若存库时存了**原始值**，两者就会不一致 ——
+    实测 `" 10.0.0.0/8"`（带空格）能通过校验，存进库后
+    `ip_matches()` 却匹配不上任何 IP（`ip_network` 解析失败），于是这把密钥
+    **对所有来源都被拒绝**，而报错只说「不在白名单内」，用户完全看不出
+    是自己粘进了一个多余空格。校验与存储必须是同一份数据。
+    """
+    if not isinstance(items, list):
+        return []
+    out: list[str] = []
+    for raw in items:
+        s = str(raw).strip()
+        if s:
+            out.append(s)
+    return out
+
+
 def _json_list(raw: object) -> list[str]:
     """把库里存的 JSON 数组文本解析成列表；**解析不了按「该列未设置」处理**。
 
@@ -105,7 +125,7 @@ def create_key(
             token[:12],
             expires_at,
             max_ips,
-            json.dumps(ip_allowlist or []),
+            json.dumps(_norm_cidrs(ip_allowlist)),
             json.dumps(models or []),
             _norm_realm(realm),
             quota,
@@ -132,7 +152,8 @@ def update_key(key_id: int, patch: dict) -> dict | None:
     if 'max_ips' in patch:
         fields['max_ips'] = int(patch['max_ips'] or 0)
     if 'ip_allowlist' in patch:
-        fields['ip_allowlist'] = json.dumps(patch['ip_allowlist'] or [])
+        # 与创建同一条归一化路径：校验与存储必须是同一份数据（见 _norm_cidrs）
+        fields['ip_allowlist'] = json.dumps(_norm_cidrs(patch['ip_allowlist']))
     if 'models' in patch:
         fields['models'] = json.dumps(patch['models'] or [])
     if 'realm' in patch:

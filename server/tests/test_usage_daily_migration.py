@@ -246,10 +246,13 @@ class UsageHealthTest(unittest.TestCase):
             pass
 
     def _log_today(self, n: int = 1) -> None:
-        now = int(db.time.time())
-        for _ in range(n):
-            db.execute('INSERT INTO request_logs(ts,key_id,model,status,realm) '
-                       'VALUES(?,?,?,?,?)', (now, 1, 'glm-5.2', 200, 'cn'))
+        # 必须带 token：`_usage_health` 只数**本该累计用量**的日志
+        # （有 key 且 token/扣费非 0），与 `bump_usage` 的调用条件对齐。
+        # 不带 token 的日志（如被 403 拒绝的调用）根本不会产生用量行，
+        # 把它们算进去会造成误报 —— 那是修掉的 bug，不是这里要复现的场景。
+        self._log_realm(n, 'cn')
+
+
 
     def test_flags_when_logs_exist_but_stats_empty(self) -> None:
         """今天有调用记录、统计却为 0 —— 正是 issue #9 的形态。"""
@@ -283,8 +286,9 @@ class UsageHealthTest(unittest.TestCase):
     def _log_realm(self, n: int, realm: str) -> None:
         now = int(db.time.time())
         for _ in range(n):
-            db.execute('INSERT INTO request_logs(ts,key_id,model,status,realm) '
-                       'VALUES(?,?,?,?,?)', (now, 1, 'm', 200, realm))
+            db.execute('INSERT INTO request_logs(ts,key_id,model,status,realm,'
+                       'prompt_tokens,completion_tokens) VALUES(?,?,?,?,?,?,?)',
+                       (now, 1, 'm', 200, realm, 10, 5))
 
     def test_global_not_flagged_when_only_cn_has_traffic(self) -> None:
         """**核心回归**：只有国内版流量时，切到国际版不该报「统计没在累计」。
@@ -330,12 +334,35 @@ class UsageHealthTest(unittest.TestCase):
 
     def test_null_realm_history_counts_as_cn(self) -> None:
         """历史日志 realm 为 NULL → 归 cn（与 realm_of_model 口径一致）。"""
-        db.execute('INSERT INTO request_logs(ts,key_id,model,status,realm) '
-                   'VALUES(?,?,?,?,?)', (int(db.time.time()), 1, 'm', 200, None))
+        db.execute('INSERT INTO request_logs(ts,key_id,model,status,realm,'
+                   'prompt_tokens,completion_tokens) VALUES(?,?,?,?,?,?,?)',
+                   (int(db.time.time()), 1, 'm', 200, None, 10, 5))
         self.assertFalse(stats._usage_health(db.day_of(), 0, 'cn')['ok'],
                          'NULL 应算作国内版')
         self.assertTrue(stats._usage_health(db.day_of(), 0, 'global')['ok'],
                         'NULL 不该算进国际版')
+
+    def test_rejected_calls_do_not_trigger_the_warning(self) -> None:
+        """**反误报**：只发生被拒绝的调用时不该报警。
+
+        `request_logs` 是无条件写的，而 `bump_usage` 只在「有 key 且
+        token/扣费非 0」时调用 —— 所以「今天只有 403 / 429 / 无 key 的调用」
+        会留下日志却没有用量行。那种部署**完全健康**，此前却被报
+        「统计可能没有正常写入」（实测复现过）。判据必须与累计条件对齐。
+        """
+        now = int(db.time.time())
+        # 被拒绝的调用：有日志、无 token、key_id 为 NULL
+        for _ in range(5):
+            db.execute('INSERT INTO request_logs(ts,key_id,model,status,realm,error) '
+                       'VALUES(?,?,?,?,?,?)', (now, None, '', 403, 'cn', 'IP 被拦截'))
+        # 只调了 /v1/models：有 key 但 0 token、无扣费
+        db.execute('INSERT INTO request_logs(ts,key_id,model,status,realm,'
+                   'prompt_tokens,completion_tokens) VALUES(?,?,?,?,?,?,?)',
+                   (now, 1, '', 200, 'cn', 0, 0))
+        self.assertEqual(db.query_one('SELECT COUNT(*) c FROM usage_daily')['c'], 0,
+                         '这些调用本就不该产生用量行')
+        h = stats._usage_health(db.day_of(), 0, 'cn')
+        self.assertTrue(h['ok'], f'健康部署不该被误报：{h}')
 
     def test_unscoped_check_counts_everything(self) -> None:
         """不传版本时看全部（传给「不区分版本」的调用方）。"""

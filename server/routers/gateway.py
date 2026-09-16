@@ -131,10 +131,21 @@ def _rate_limited(key: dict) -> tuple[bool, int]:
 
 
 def _log_ip(ip: str, path: str, blocked: bool, ua: str | None) -> None:
-    db.execute(
-        'INSERT INTO ip_access_logs(ts, ip, path, blocked, ua) VALUES(?, ?, ?, ?, ?)',
-        (int(time.time()), ip, path, 1 if blocked else 0, ua),
-    )
+    """记录一次入站访问（含被拒绝的）。
+
+    **这条路径在校验密钥之前执行**，所以它是**未鉴权可达**的写库入口：
+    「没有 token」「token 无效」都会先写一行。因此这里必须自我约束，
+    否则任何匿名者都能用它膨胀数据库（实测：带 2KB UA 的请求每条约 1.3KB，
+    而 ip_access_logs 此前既无清洗也无上限、更没有清理机制）：
+
+      * `ua` / `path` 都过 `db._clean`（去换行等控制字符 + 截断）——
+        文档一直声称「日志写入前统一 `_clean()`」，但实际上只有 audit_logs
+        这么做了，网关这两张表被漏掉：带换行的 UA 能伪造出额外日志行，
+        污染事后排查（实测确认）。
+      * 写入走 `db.add_ip_access_log`，由它负责行数上限（超出就丢最旧的），
+        避免表无限增长直到磁盘写满。
+    """
+    db.add_ip_access_log(ip, path, blocked, ua)
 
 
 def _usage_credit(usage: dict | None) -> float | None:
@@ -172,11 +183,23 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
     try:
         # realm 由**请求的模型名**判定（上游按 `cn:` / `global:` 前缀路由）：
         # 它决定这次调用实际走了哪个账号池，也是界面按版本切换日志/统计的依据。
-        realm = db.realm_of_model(model)
+        #
+        # **所有外部来源的文本都要清洗 + 截断**（`db._clean`）：
+        #   * `model` 来自请求体，长度无上限。此前一个 1 MiB 的 model 会被写进
+        #     `request_logs.model`、`mapped_model` 以及 `usage_daily.model`
+        #     **三处**（后者还在主键里，等于再加一份索引），单次请求就能放大
+        #     数 MB —— 持密钥者可用少量请求把库撑大（实测 11 次请求 25MB）。
+        #   * `ua` / `error` 同样来自外部（error 还含上游响应原文），带换行就能
+        #     在日志页伪造出额外行，污染排查。
+        # 清洗只影响入库文本，**不影响转发给上游的内容**（body 早已发走）。
+        model_clean = db._clean(model, 128)
+        realm = db.realm_of_model(model_clean)
         db.execute(
             'INSERT INTO request_logs(ts, key_id, ip, model, mapped_model, status, prompt_tokens, completion_tokens, latency_ms, first_token_ms, ua, error, stream, credit, realm) '
             'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (int(time.time()), key['id'] if key else None, ip, model, mapped, status, pt, ct, latency, first_token, ua, error, 1 if stream else 0, credit, realm),
+            (int(time.time()), key['id'] if key else None, db._clean(ip, 64),
+             model_clean, db._clean(mapped, 128), status, pt, ct, latency, first_token,
+             db._clean(ua, 512), db._clean(error, 500), 1 if stream else 0, credit, realm),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning('写入请求日志失败（不影响请求）: %s', exc)
@@ -187,7 +210,7 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
             total = pt + ct
             keysvc.touch(key, ip, total)
             if total or credit:
-                db.bump_usage(key['id'], model, pt, ct, credit, realm=realm)
+                db.bump_usage(key['id'], model_clean, pt, ct, credit, realm=realm)
         except Exception as exc:  # noqa: BLE001
             logger.warning('累计用量失败（不影响请求）: %s', exc)
 

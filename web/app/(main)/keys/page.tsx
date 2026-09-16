@@ -101,12 +101,22 @@ export default function KeysPage() {
    */
   const submitting = useRef(false);
 
-  const load = useCallback(async () => {
+  /**
+   * 拉取密钥列表。**返回是否成功** —— 调用方需要区分这两种失败。
+   *
+   * 为什么不能吞掉异常了事：创建成功后要刷新列表，若刷新失败而这里已把异常
+   * 吃掉，`load().catch(...)` 永远不会触发，用户看到的是「创建失败」——于是
+   * 他会再点一次，建出重复密钥（正是要避免的）。所以这里如实返回结果，
+   * 由调用方决定怎么提示。
+   */
+  const load = useCallback(async (): Promise<boolean> => {
     setLoading(true);
     try {
       setKeys(await keyApi.list());
+      return true;
     } catch (e) {
       notify.err(errText(e));
+      return false;
     } finally {
       setLoading(false);
     }
@@ -190,12 +200,13 @@ export default function KeysPage() {
         if (created.key) setIssued(created.key);
       }
       setFormOpen(false);
-      // load() 失败**不能**把这次创建判成失败：密钥已经建好了。
-      // 单独兜住，否则一个列表刷新异常会冒到下面的 catch 里，提示
-      // 「创建失败」——而实际上成功（用户会再点一次，建出重复的）。
-      load().catch(() =>
-        notify.warn(t('keys.createdButRefreshFailed'), t('keys.createdButRefreshFailedHint')),
-      );
+      // 刷新失败**不能**把这次创建判成失败：密钥已经建好了。
+      // 所以这里用 load() 的返回值判断，而不是 `.catch()` —— load 内部已经
+      // 把异常吃掉并弹了通用错误提示，返回的 Promise 永远不 reject，
+      // 用 .catch 的话这段提示永远不会出现，用户只会看到「失败了」。
+      if (!(await load())) {
+        notify.warn(t('keys.createdButRefreshFailed'), t('keys.createdButRefreshFailedHint'));
+      }
     } catch (e) {
       notify.err(errText(e));
     } finally {

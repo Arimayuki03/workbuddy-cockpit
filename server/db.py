@@ -587,6 +587,57 @@ def list_audit_logs(limit: int = 200, offset: int = 0) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# 入站访问日志（ip_access_logs）保留的最大行数。
+#
+# 为什么必须有上限：这张表的写入点在网关鉴权**之前**（缺 token / token 无效
+# 都会记一行），也就是**未鉴权可达**。此前它既无清洗也无上限、更没有清理机制，
+# 于是任何匿名者都能用「无效 key + 超长 UA」反复写库把磁盘灌满，进而拖垮
+# 管理端与上游（实测：2KB UA 每条约 1.3KB，百万请求约 2GB）。
+#
+# 取 2 万行：按每次拒绝一行估算足够回溯近期攻击，占用约几 MB；超出后按最旧丢弃
+# （滚动窗口），写入成本是常数级的。
+_IP_ACCESS_LOG_MAX = 20000
+
+# 清理的触发间隔：不必每次写入都查一次 COUNT（那是一趟全表扫描）。
+# 每 500 次写入检查一次，超限时一次删到上限以下，均摊成本可忽略。
+_IP_ACCESS_LOG_CHECK_EVERY = 500
+_ip_log_writes = 0
+
+
+def add_ip_access_log(ip: object, path: object, blocked: bool, ua: object) -> None:
+    """写入一条入站访问日志：清洗 + 截断 + 行数上限。
+
+    清洗与截断是**硬要求**（不只是节省空间）：`ua` / `path` 来自外部输入，
+    含换行就能在日志界面上伪造出额外行，污染事后排查。审计表一直这么做
+    （见 `add_audit_log`），但网关这张表此前漏了 —— 文档里「日志写入前统一
+    `_clean()`」的说法与实际不符，这里补齐。
+    """
+    global _ip_log_writes
+    execute(
+        'INSERT INTO ip_access_logs(ts, ip, path, blocked, ua) VALUES(?, ?, ?, ?, ?)',
+        (int(time.time()), _clean(ip, 64), _clean(path, 256),
+         1 if blocked else 0, _clean(ua, 512)),
+    )
+    _ip_log_writes += 1
+    if _ip_log_writes < _IP_ACCESS_LOG_CHECK_EVERY:
+        return
+    _ip_log_writes = 0
+    try:
+        row = query_one('SELECT COUNT(*) AS n FROM ip_access_logs')
+        n = int(row['n']) if row else 0
+        if n > _IP_ACCESS_LOG_MAX:
+            # 删掉最旧的一批，留出余量（避免下一次写入又立刻触发清理）
+            execute(
+                'DELETE FROM ip_access_logs WHERE id IN ('
+                '  SELECT id FROM ip_access_logs ORDER BY id LIMIT ?'
+                ')',
+                (n - _IP_ACCESS_LOG_MAX + _IP_ACCESS_LOG_MAX // 10,),
+            )
+    except Exception:  # noqa: BLE001
+        # 清理是旁路，失败不能影响写入本身（更不能影响转发）
+        pass
+
+
 def count_audit_logs() -> int:
     row = query_one('SELECT COUNT(*) AS n FROM audit_logs')
     return int(row['n']) if row else 0

@@ -260,6 +260,8 @@
     "badgeNeverSucceededTitle": "This account has been tried {errs} time(s) and never succeeded. The upstream only rotates away from such failures (e.g. a WAF-blocked 403) without cooling the account down, so it looks healthy here while every request actually fails. Consider signing in again or deleting it.",
     "badgeNotLoaded": "● Not loaded",
     "badgeNotLoadedTitle": "This account is not in the upstream pool yet, so the gateway will never pick it. Reload the config on the upstream (Save settings); if it stays this way, check that the account file is complete.",
+    "badgeUnknown": "● Status unknown",
+    "badgeUnknownTitle": "The upstream status is currently unavailable (its container may have just restarted or be temporarily unreachable), so this account's availability cannot be determined. It retries automatically; locally known details (such as token expiry) are still accurate.",
     "badgeNotLoadedWhy": "This account file looks broken: {why}. Sign in again, or delete and re-add the account.",
     "modelsCount": " ({n} models)",
     "etaRecovery": "Recovers in about {left}",
@@ -978,6 +980,6 @@
     "国际版": "Global edition",
     "国际版（workbuddy.ai）路由开关与基址。关闭即锁死纯 CN": "Routing switch and base URLs for the Global edition (workbuddy.ai). Turning it off locks the deployment to China only",
     "国际版单账号最大并发": "Max concurrency per global-edition account",
-    "国际版单独用这个上限（不填则跟随上面的「单账号最大并发」）。国际版的风控更严，官方默认压到 2——并发越高越容易被判为异常流量": "The global edition uses this limit instead (leave empty to follow \"Max concurrency per account\" above). The global edition is subject to stricter anti-abuse checks and officially defaults to 2 — higher concurrency is more likely to be flagged as abnormal traffic."
+    "国际版单独用这个上限。国际版的风控更严，官方默认压到 2——并发越高越容易被判为异常流量。填 0 表示用默认值 2（注意与上面那个「0 = 不限制」不同）": "The global edition uses this limit separately. It is subject to stricter anti-abuse checks and officially defaults to 2 — higher concurrency is more likely to be flagged as abnormal traffic. Setting 0 means \"use the default 2\" (note this differs from the \"0 = unlimited\" above)."
   }
 }

@@ -156,16 +156,29 @@ export default function AccountsPage() {
       const uid = String((item as Record<string, unknown>).uid ?? (item as Record<string, unknown>).UID ?? '');
       if (uid) pool.set(uid, item as Record<string, unknown>);
     }
+    /**
+     * 这次拿到的上游状态是否**可信**。
+     *
+     * 为什么必须区分：上游连接失败时 `/status` 仍然返回 200，只是 `connected:false`
+     * 且没有账号列表。若不看这个标记，池就是空的，于是**每个账号都被判成
+     * 「不在池里」**——界面把「连不上上游」误报成「账号文件坏了」，并提示用户
+     * 去重载配置、检查文件。账号页有 30 秒心跳，任何一次抖动都会命中，
+     * 30 秒后又自己恢复，用户会以为账号随机坏掉（实测确认过这个误报）。
+     */
+    const poolKnown = upstream?.connected === true;
     return accounts.map((a) => {
+      // 上游状态取不到 → 不判断它在不在池里，如实标成「未知」
+      if (!poolKnown) return {...a, in_pool: undefined, poolUnknown: true};
       const p = pool.get(a.uid);
       // in_pool 由**本页这份上游快照**判定，而不是沿用后端那个标记：
       // 本页其余所有状态字段（cooling/disabled/…）都取自这一份数据，
       // 若单独用另一时刻的标记，二者可能不一致（都是两次 /status 调用）。
       // 没进池的账号保留本地字段（含 invalid_reason），交给徽章如实展示。
-      if (!p) return {...a, in_pool: false};
+      if (!p) return {...a, in_pool: false, poolUnknown: false};
       return {
         ...a,
         in_pool: true,
+        poolUnknown: false,
         healthy: typeof p.healthy === 'boolean' ? p.healthy : null,
         disabled: typeof p.disabled === 'boolean' ? p.disabled : null,
         disabled_reason: typeof p.disabled_reason === 'string' ? p.disabled_reason : '',
@@ -242,6 +255,23 @@ export default function AccountsPage() {
       );
     }
     if (a.is_expired) return <Badge variant="destructive" className="rounded-full">{t('accounts.badgeExpired')}</Badge>;
+    // 上游状态这次没取到 —— 冷却 / 禁用 / 在不在池里**全都无从判断**。
+    //
+    // 必须在这里拦住：否则下面所有分支的输入都是 null，会一路落到最后的
+    // 「● 在线」，把「看不到上游」显示成「一切正常」。反过来更糟的是落到
+    // 「未加载」——那会让一个完全正常的账号被说成文件有问题（实测确认过）。
+    // 本地能确定的（令牌是否过期）已在上面判过，不受影响。
+    if (a.poolUnknown) {
+      return (
+        <Badge
+          variant="secondary"
+          className="rounded-full text-muted-foreground"
+          title={t('accounts.badgeUnknownTitle')}
+        >
+          {t('accounts.badgeUnknown')}
+        </Badge>
+      );
+    }
     if (a.cooling) {
       // 带上「还要等多久」：只写「冷却中」的话用户不知道是几秒还是几小时，
       // 只能反复刷新碰运气。剩余时间是上游状态机给的权威值。

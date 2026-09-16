@@ -67,6 +67,16 @@ app = FastAPI(
 )
 
 if config.CORS_ORIGINS:
+    # 只允许**明确列出的**来源。绝不要把 WB_CORS_ORIGINS 设成 `*`：
+    # 本应用用 Cookie 认证管理端，而 Starlette 在 allow_credentials=True 时
+    # 会把 `*` 回显成请求方 Origin（不是字面 `*`），于是**任意网站**都能带着
+    # 管理员的 Cookie 调 /api/* 并读到响应 —— 等于把控制台交给任何网页。
+    # 留空（默认）即同源部署，安全。
+    if any(o.strip() == '*' for o in config.CORS_ORIGINS):
+        logging.getLogger('workbuddy').error(
+            'WB_CORS_ORIGINS 含 `*` 且已启用凭据：任意网站都能冒用管理员身份读取 '
+            '/api/*。请改为列出具体来源，或留空（同源部署）。'
+        )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=config.CORS_ORIGINS,
@@ -74,6 +84,34 @@ if config.CORS_ORIGINS:
         allow_methods=['*'],
         allow_headers=['*'],
     )
+
+# 管理端请求体上限。网关那条路有自己的逐块校验（gateway._read_json_body），
+# 但 `/api/*` 此前**没有任何上限** —— 未鉴权的 `/api/login` 就能用大 body
+# 把内存占住（实测：12MB 请求体被完整缓冲并解析，没有 413）。这里统一兜住。
+# 取得比网关默认（8MB）宽松些：管理端有「保存上游配置」这类正常的大请求。
+MAX_API_BODY_BYTES = 16 * 1024 * 1024
+
+
+@app.middleware('http')
+async def limit_api_body(request: Request, call_next):
+    """给 `/api/*` 的请求体加上限。
+
+    只看 `Content-Length`：本中间件拦的是「声明了超大长度」这条最容易发起、
+    也最容易自动化的路径（无鉴权即可打 /api/login）。ASGI 在中间件之前不会把
+    body 读进内存，所以先声明后读没有意义；不带该头的分块请求由 uvicorn 自身的
+    缓冲与并发限制兜底。
+    """
+    if request.url.path.startswith('/api/'):
+        try:
+            declared = int(request.headers.get('content-length') or 0)
+        except ValueError:
+            declared = 0
+        if declared > MAX_API_BODY_BYTES:
+            return JSONResponse(
+                {'detail': f'请求体过大（上限 {MAX_API_BODY_BYTES // 1024 // 1024} MB）'},
+                status_code=413,
+            )
+    return await call_next(request)
 
 # ── 路由注册顺序很重要：先 API / 网关，最后挂静态文件 ──
 app.include_router(auth.router)
