@@ -659,7 +659,17 @@
     "kindTaskrun": "一键执行",
     "creditLedger": "余额 +{delta}（{prev} → {next}）",
     "runLogHistoryClaim": "一键领奖（{target}）{summary}",
-    "runLogHistoryFull": "一键做任务（{target}）{summary}"
+    "runLogHistoryFull": "一键做任务（{target}）{summary}",
+    "runResultOk": "执行成功（{script}）",
+    "runResultFail": "执行失败（{msg}）",
+    "runScheduledSkip": "计划任务未执行：{reason}",
+    "runCheckinSummary": "本轮签到完成：共 {total} 个，成功 {ok}，已签到 {already}，失败 {fail}，跳过 {skipped}",
+    "checkinCodeReturn": "签到返回 code={code}",
+    "checkinException": "签到异常: {exc}",
+    "checkinReadFailed": "读取失败: {exc}",
+    "runExitCode": "退出码 {code}",
+    "runFailed": "失败：{msg}",
+    "stageLine": "{label}：{detail}"
   },
   "addAccount": {
     "title": "添加腾讯账号 · {realm}",
