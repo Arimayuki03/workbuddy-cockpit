@@ -95,6 +95,30 @@ for (const locale of targets) {
     page.click('button[type=submit]'),
   ]);
 
+  /*
+   * 账号昵称是**用户数据**（上游带回来的，本来就可能是中文），不翻译，
+   * 也就不该被算成漏翻 —— 早先没剔除，任务页与账号页会整片误报，把真正的
+   * 漏翻淹掉。先把当前账号池的昵称取出来，逐行剔除后再判汉字。
+   */
+  const nicknames = await page
+    .evaluate(async () => {
+      try {
+        const res = await fetch('/api/accounts', {credentials: 'same-origin'});
+        const data = await res.json();
+        const list = Array.isArray(data) ? data : (data.accounts ?? data.items ?? []);
+        const names = list.map((a) => a.nickname).filter((n) => typeof n === 'string' && n);
+        // 头像位只显示昵称首字（accounts 页的 avatar），一并算作数据
+        return [...names, ...names.map((n) => n.slice(0, 1))];
+      } catch {
+        return [];
+      }
+    })
+    .catch(() => []);
+  // 长的先替换，否则「阿」会先把「阿延yan」切碎
+  nicknames.sort((a, b) => b.length - a.length);
+  /** 剔除昵称：结果行里剩下的汉字才是真漏翻 */
+  const stripData = (line) => nicknames.reduce((acc, n) => acc.split(n).join(''), line);
+
   for (const route of PAGES) {
     await page.goto(`${BASE}${route}`, {waitUntil: 'load', timeout: 20000});
     await page.waitForTimeout(SETTLE_MS);
@@ -104,10 +128,11 @@ for (const locale of targets) {
       .filter(Boolean);
 
     for (const line of lines) {
-      const hasHan = HAN.test(line);
+      const text = stripData(line);
+      const hasHan = HAN.test(text);
       if (NO_HAN.includes(locale) && hasHan) {
         findings.push({locale, route, kind: 'han', line});
-      } else if (locale !== 'zh-CN' && SIMPLIFIED_MARKERS.some((m) => line.includes(m)) && hasHan) {
+      } else if (locale !== 'zh-CN' && SIMPLIFIED_MARKERS.some((m) => text.includes(m)) && hasHan) {
         findings.push({locale, route, kind: 'simplified', line});
       }
     }
