@@ -584,5 +584,80 @@ class CountTokensAuthTest(unittest.TestCase):
         self.assertEqual(r.status_code, 413, '超大请求体应被拒（413）而不是先读进内存')
 
 
+class ToolResultImageTest(unittest.TestCase):
+    """tool_result 内嵌图片：旧实现把 base64 序列化成文本发给上游。
+
+    事故现场：Claude Code 的 Read 读一张 2.3MB 的 PNG，tool_result 里只有
+    image 块没有 text 块 → `_text_of(...) or str(content)` 落到兜底分支，
+    整段 base64 连同结构标记被压成 Python repr 文本发上游。上游按文本 BPE
+    分词，实测 3.36MB 的图算出 2,349,045 token（> 1M 上限）报 prompt too long；
+    且该 tool_use/tool_result 对被自动压缩原样保留，会话彻底卡死。
+    修法：tool 消息只留文字，图片提升为紧随其后的 user 消息。
+    """
+
+    def _convert(self, tool_content: list, extra_blocks: list | None = None) -> list:
+        blocks = [{'type': 'tool_result', 'tool_use_id': 'toolu_x',
+                   'content': tool_content}]
+        blocks.extend(extra_blocks or [])
+        out = to_openai_request({
+            'model': 'x', 'max_tokens': 10,
+            'messages': [{'role': 'user', 'content': blocks}],
+        })
+        return out['messages']
+
+    def test_image_only_result_does_not_leak_base64(self) -> None:
+        """纯图片：tool.content 必须是占位文字，图片以 data URL 提升到 user 消息。"""
+        data = 'iVBORw0KGgo' + 'A' * 100000
+        msgs = self._convert([
+            {'type': 'image', 'source': {
+                'type': 'base64', 'media_type': 'image/png', 'data': data}}])
+        self.assertEqual(len(msgs), 2)
+        self.assertEqual(msgs[0]['role'], 'tool')
+        self.assertEqual(msgs[0]['content'], '[图片]')
+        self.assertEqual(msgs[1]['role'], 'user')
+        self.assertEqual(msgs[1]['content'][0]['image_url']['url'],
+                         f'data:image/png;base64,{data}')
+
+    def test_text_and_image_keeps_both(self) -> None:
+        """文字 + 图片：文字留在 tool 消息，图片提升到 user 消息。"""
+        msgs = self._convert([
+            {'type': 'text', 'text': '截图如下'},
+            {'type': 'image', 'source': {
+                'type': 'base64', 'media_type': 'image/jpeg', 'data': 'BBBB'}}])
+        self.assertEqual(msgs[0]['content'], '截图如下')
+        self.assertEqual(msgs[1]['content'][0]['image_url']['url'],
+                         'data:image/jpeg;base64,BBBB')
+
+    def test_image_merges_with_following_text(self) -> None:
+        """提升的图片应与同条消息的后续文本合并为一条 user 消息。"""
+        msgs = self._convert(
+            [{'type': 'image', 'source': {
+                'type': 'base64', 'media_type': 'image/png', 'data': 'CCCC'}}],
+            [{'type': 'text', 'text': '这张图什么颜色'}])
+        self.assertEqual(len(msgs), 2)
+        self.assertEqual(msgs[1]['content'][0]['type'], 'image_url')
+        self.assertEqual(msgs[1]['content'][1],
+                         {'type': 'text', 'text': '这张图什么颜色'})
+
+    def test_unknown_shape_still_stringified(self) -> None:
+        """既无文字也无图片的未知形态：保持旧兜底，不因本次修复丢内容。"""
+        msgs = self._convert([{'type': 'document', 'data': 'weird'}])
+        self.assertEqual(len(msgs), 1, '无图片则不应产生额外的 user 消息')
+        self.assertIn('document', msgs[0]['content'])
+
+    def test_large_image_never_becomes_text(self) -> None:
+        """回归底线：3MB 级图片不得以字符串形态出现在任何消息里。"""
+        data = 'A' * 3_000_000
+        msgs = self._convert([
+            {'type': 'image', 'source': {
+                'type': 'base64', 'media_type': 'image/png', 'data': data}}])
+        tool_len = len(msgs[0]['content'])
+        self.assertLess(tool_len, 1000, f'tool 消息疑似携带图片数据（{tool_len} 字符）')
+        self.assertIsInstance(msgs[1]['content'], list,
+                              '图片须以结构化 image_url 块承载，而非字符串')
+        url = msgs[1]['content'][0]['image_url']['url']
+        self.assertTrue(url.startswith('data:image/png;base64,'))
+
+
 if __name__ == '__main__':
     unittest.main()

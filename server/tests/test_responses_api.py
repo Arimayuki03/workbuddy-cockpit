@@ -110,6 +110,72 @@ def delta(content: str | None = None, reasoning: str | None = None,
 
 # ── 测试 ──────────────────────────────────────────────────────
 
+class ToolOutputImageTest(unittest.TestCase):
+    """function_call_output 里的图片：不能丢、更不能被 repr 成文本。
+
+    与 Anthropic 层同一个坑（那边由 PR #25 修复并被采纳）：tool 消息的 content
+    在 OpenAI 协议里只能是字符串，放不下结构化图片。两种错法都要避免：
+      · 只取文字 → 工具输出的图片**静默丢失**，模型看不到图；
+      · 把整段内容 str() → 图片 base64 被当**文本**分词，一张几 MB 的图能算出
+        上百万 token，直接撑爆上下文（Anthropic 层实测 3.36MB ≈ 234 万 token）。
+    正确做法：文字留在 tool 消息，图片提升为紧随其后的 user 消息。
+    """
+
+    def test_image_only_output_is_lifted_not_stringified(self) -> None:
+        big = 'A' * 3_360_000
+        out = R.to_chat_request({'model': 'm', 'input': [
+            {'type': 'function_call', 'call_id': 'c1', 'name': 'read', 'arguments': '{}'},
+            {'type': 'function_call_output', 'call_id': 'c1', 'output': [
+                {'type': 'input_image', 'image_url': 'data:image/png;base64,' + big}]},
+        ]})
+        tool_msg = next(m for m in out['messages'] if m['role'] == 'tool')
+        self.assertIsInstance(tool_msg['content'], str)
+        # 关键断言：base64 **不能**出现在文本里
+        self.assertNotIn('AAAA', tool_msg['content'])
+        self.assertLess(len(tool_msg['content']), 50,
+                        f'图片被序列化进文本了：长度 {len(tool_msg["content"])}')
+        img_msg = next(m for m in out['messages'] if m['role'] == 'user')
+        self.assertEqual([b['type'] for b in img_msg['content']], ['image_url'])
+
+    def test_text_and_image_keeps_both(self) -> None:
+        out = R.to_chat_request({'model': 'm', 'input': [
+            {'type': 'function_call_output', 'call_id': 'c1', 'output': [
+                {'type': 'input_text', 'text': '截图如下'},
+                {'type': 'input_image', 'image_url': 'data:image/png;base64,QUJD'}]},
+        ]})
+        tool_msg = next(m for m in out['messages'] if m['role'] == 'tool')
+        self.assertEqual(tool_msg['content'], '截图如下')
+        img_msg = next(m for m in out['messages'] if m['role'] == 'user')
+        self.assertEqual(img_msg['content'][0]['type'], 'image_url', '图片被丢掉了')
+
+    def test_plain_text_output_unchanged(self) -> None:
+        """纯文本工具结果的行为必须与改动前一致（不凭空多出 user 消息）。"""
+        out = R.to_chat_request({'model': 'm', 'input': [
+            {'type': 'function_call_output', 'call_id': 'c1', 'output': 'plain result'},
+        ]})
+        self.assertEqual([m['role'] for m in out['messages']], ['tool'])
+        self.assertEqual(out['messages'][0]['content'], 'plain result')
+
+    def test_string_image_url_accepted(self) -> None:
+        """image_url 允许是字符串或 {url:...}；两种都要提到 user 消息里。"""
+        out = R.to_chat_request({'model': 'm', 'input': [
+            {'type': 'function_call_output', 'call_id': 'c1', 'output': [
+                {'type': 'input_image', 'image_url': 'https://x/y.png'}]},
+        ]})
+        img_msg = next(m for m in out['messages'] if m['role'] == 'user')
+        self.assertEqual(img_msg['content'][0]['image_url']['url'], 'https://x/y.png')
+
+    def test_image_follows_its_own_tool_message(self) -> None:
+        """图片必须紧跟它那次工具调用的 tool 消息（顺序即归属）。"""
+        out = R.to_chat_request({'model': 'm', 'input': [
+            {'type': 'function_call_output', 'call_id': 'c1', 'output': [
+                {'type': 'input_image', 'image_url': 'https://x/a.png'}]},
+            {'type': 'function_call_output', 'call_id': 'c2', 'output': 'done'},
+        ]})
+        roles = [m['role'] for m in out['messages']]
+        self.assertEqual(roles, ['tool', 'user', 'tool'])
+
+
 class RequestConversionTest(unittest.TestCase):
     """Responses 请求 → Chat Completions 请求。"""
 
