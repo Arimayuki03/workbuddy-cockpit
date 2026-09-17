@@ -44,7 +44,8 @@
     "password": "密码",
     "passwordPlaceholder": "请输入密码",
     "submit": "登录",
-    "legal": "登录即表示您已获得该系统的访问授权，所有操作将被记录。"
+    "legal": "登录即表示您已获得该系统的访问授权，所有操作将被记录。",
+    "emptySubmit": "用户名或密码为空：若使用了浏览器自动填充，请手动把密码重新输入一次。"
   },
   "notFound": {
     "line1": "页面",
@@ -240,6 +241,12 @@
     "restarted": "已重启上游",
     "disabledReason": "禁用原因：{reason}",
     "badgeDisabled": "● 已禁用",
+    "badgeDisabledByPanel": "● 已停用",
+    "badgeDisabledByPanelTitle": "你已在本面板临时停用该账号：上游不会加载它、不会被选中。点右侧的「启用」可随时恢复（凭证不会丢失）。",
+    "disableTitle": "临时停用该账号（不会被上游选中，可随时恢复）",
+    "enableTitle": "启用该账号（恢复被上游选中）",
+    "disabled": "已停用该账号",
+    "enabled": "已启用该账号",
     "badgeDisabledRelogin": "● 已禁用（需重新登录）",
     "badgeExpired": "● 已过期",
     "badgeCooling": "● 冷却中",

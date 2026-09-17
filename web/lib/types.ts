@@ -65,6 +65,14 @@ export interface Account {
   poolUnknown?: boolean;
   /** 已知上游不会加载该文件时的原因（空 = 未发现明显问题） */
   invalid_reason?: string;
+  /**
+   * 本面板**主动临时禁用**（issue #21）——文件名带 `.disabled` 后缀，
+   * 上游的 `workbuddy*.json` glob 因此不再匹配它、不加载该账号。
+   *
+   * 与 `disabled` 是两回事：那个是上游按错误分类自动禁的（需重新登录），
+   * 这个是运维手动停用的，在面板上再点一次「启用」即可恢复。
+   */
+  disabled_by_panel?: boolean;
   /** 账号所属版本（cn / global）；存量账号按域名回退，无该字段时视为 cn */
   realm?: 'cn' | 'global';
   /** 该版本是否支持签到体系（国际版没有） */

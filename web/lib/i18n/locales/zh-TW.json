@@ -44,7 +44,8 @@
     "password": "密碼",
     "passwordPlaceholder": "請輸入密碼",
     "submit": "登入",
-    "legal": "登入即表示您已獲得該系統的存取授權，所有操作將被記錄。"
+    "legal": "登入即表示您已獲得該系統的存取授權，所有操作將被記錄。",
+    "emptySubmit": "使用者名稱或密碼為空：若使用了瀏覽器自動填入，請手動重新輸入一次密碼。"
   },
   "notFound": {
     "line1": "頁面",
@@ -240,6 +241,12 @@
     "restarted": "已重新啟動上游",
     "disabledReason": "停用原因：{reason}",
     "badgeDisabled": "● 已停用",
+    "badgeDisabledByPanel": "● 已停用",
+    "badgeDisabledByPanelTitle": "你已在本面板臨時停用該帳號：上游不會載入它、不會被選中。點右側的「啟用」可隨時恢復（憑證不會遺失）。",
+    "disableTitle": "臨時停用該帳號（不會被上游選中，可隨時恢復）",
+    "enableTitle": "啟用該帳號（恢復被上游選中）",
+    "disabled": "已停用該帳號",
+    "enabled": "已啟用該帳號",
     "badgeDisabledRelogin": "● 已停用（需重新登入）",
     "badgeExpired": "● 已過期",
     "badgeCooling": "● 冷卻中",
