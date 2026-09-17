@@ -95,10 +95,143 @@ _state: dict = {
 _task: asyncio.Task | None = None
 
 
-def _script_path() -> Path:
-    """上游脚本路径（`<上游目录>/scripts/task_runner.py`）。"""
+def _host_script() -> Path | None:
+    """宿主机挂载目录里的脚本（`<上游目录>/scripts/task_runner.py`），没有则 None。
+
+    这条路径适用于**源码部署 / 完整挂载**的形态：上游目录是宿主机上的 git 仓库，
+    scripts/ 就在那里。
+    """
     from . import updater  # 复用既有的上游目录推断，避免两处口径不一
-    return updater._upstream_dir() / 'scripts' / 'task_runner.py'
+    p = updater._upstream_dir() / 'scripts' / 'task_runner.py'
+    return p if p.is_file() else None
+
+
+def _extract_dir() -> Path:
+    """从上游容器镜像提取出的脚本的存放目录。"""
+    return config.DATA_DIR / 'upstream-scripts'
+
+
+# 提取失败的冷却时间（秒）。
+#
+# 为什么需要：界面的「一键执行」面板闲着时每 15 秒轮询一次 `status()`，而
+# `status()` 会调 `available()` → `_script_path()` → 可能触发提取。脚本缺失时
+# （例如用户没挂 docker.sock）不设冷却就会每 15 秒 fork 一次 `docker cp` 并失败，
+# 日志被刷满、CPU 白耗，而用户看到的东西没有任何变化。
+# 取 60 秒：既不让人等太久，也不会把面板开着就变成后台进程生成器。
+_EXTRACT_COOLDOWN_SECONDS = 60
+_last_extract_failure: dict = {'at': 0.0, 'reason': ''}
+
+
+def _cache_is_fresh() -> bool:
+    """提取出来的脚本是否还对应**当前**上游容器镜像。
+
+    用镜像 ID 作指纹：上游更新（`docker compose up -d --build` 重建镜像）后 ID
+    会变，我们就重新提取。这也顺带保证了版本一致 —— 脚本与容器里的上游二进制
+    始终来自同一份代码，不会出现「脚本比上游新/旧」的漂移。
+    """
+    stamp = _extract_dir() / '.image-id'
+    try:
+        return stamp.read_text(encoding='utf-8').strip() == _upstream_image_id()
+    except OSError:
+        return False
+
+
+def _upstream_image_id() -> str:
+    """上游容器的镜像 ID；取不到返回空串（视为「无法比较」，走重取）。"""
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ['docker', 'inspect', '--format', '{{.Image}}', config.WB2API_CONTAINER],
+            capture_output=True, text=True, timeout=15,
+        )
+        return (proc.stdout or '').strip() if proc.returncode == 0 else ''
+    except Exception:  # noqa: BLE001
+        return ''
+
+
+def extract_scripts(rep: logging.Logger | None = None) -> tuple[bool, str]:
+    """把上游容器里的 `scripts/` 提取到本地，供本面板调用。
+
+    为什么要提取而不是 `docker exec` 每次跑：
+      · 脚本会 glob `auths/` 并读写文件、还会访问网络；在容器里跑要处理它的
+        工作目录、uid、以及把 auths 暴露进去 —— 每个环节都是新的失败面；
+      · 提取一次后就是普通文件，与宿主机部署完全同一条执行路径，调试、日志、
+        超时控制都复用同一套；
+      · 用**镜像 ID** 作指纹，上游更新后自动重取，不存在版本漂移。
+
+    提取的是**整组**脚本而不是单个 task_runner.py：它 `import task_common` 与
+    `school_open_day_2026`（后者又 import task_common），少一个就会在运行时
+    ImportError。拷贝用 `docker cp <容器>:<目录>/.` 保留整组。
+
+    失败后 60 秒内不再重试（见 `_EXTRACT_COOLDOWN_SECONDS`）：调用方是轮询路径，
+    没冷却会变成每 15 秒 fork 一次必然失败的 docker。
+    """
+    import subprocess
+
+    now = time.time()
+    if now - _last_extract_failure['at'] < _EXTRACT_COOLDOWN_SECONDS:
+        return False, _last_extract_failure['reason']
+
+    container = config.WB2API_CONTAINER
+    dest = _extract_dir()
+
+    def _fail(reason: str) -> tuple[bool, str]:
+        _last_extract_failure.update({'at': time.time(), 'reason': reason})
+        return False, reason
+
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        proc = subprocess.run(
+            ['docker', 'cp', f'{container}:/app/scripts/.', str(dest)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except FileNotFoundError:
+        return _fail('未找到 docker 命令，无法从上游容器提取脚本')
+    except Exception as exc:  # noqa: BLE001
+        return _fail(f'从上游容器提取脚本失败：{exc}')
+
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or '').strip()
+        return _fail(f'从上游容器提取脚本失败（{container}）：{err}')
+
+    if not (dest / 'task_runner.py').is_file():
+        return _fail('提取后仍未找到 task_runner.py（容器内 /app/scripts/ 是否存在？）')
+
+    # 记指纹：写失败不影响本次可用（下次会重取，只是多花一次 docker cp）
+    try:
+        (dest / '.image-id').write_text(_upstream_image_id(), encoding='utf-8')
+    except OSError:
+        pass
+    _last_extract_failure.update({'at': 0.0, 'reason': ''})
+    if rep:
+        rep.info('已从上游容器提取任务脚本到 %s', dest)
+    return True, str(dest / 'task_runner.py')
+
+
+def _script_path() -> Path:
+    """定位 task_runner.py：宿主机挂载目录优先，其次容器提取。
+
+    两种部署形态各对应一条：
+      · 源码 / 完整挂载（`WB_UPSTREAM_DIR` 是宿主机上的仓库）→ 直接用挂载目录，
+        这是最省事的，也不需要 docker；
+      · **官方镜像部署**（issue #29）→ 脚本被 COPY 进镜像的 `/app/scripts/`，
+        宿主机那个目录里**根本没有 scripts/**（你只挂了 config.json 与 auths），
+        所以回落去容器里提取。
+
+    注意不要为了「让第一条路径有东西」而让用户手动拷贝脚本：那样每次上游更新
+    都要重来一次，迟早版本对不上（issue 里正是这么抱怨的）。
+    """
+    host = _host_script()
+    if host is not None:
+        return host
+    extracted = _extract_dir() / 'task_runner.py'
+    if extracted.is_file() and _cache_is_fresh():
+        return extracted
+    ok, _ = extract_scripts()
+    if ok:
+        return extracted
+    return extracted  # 返回该路径，由 available() 给出可读的失败说明
 
 
 def _python() -> str:
@@ -117,8 +250,13 @@ def available() -> tuple[bool, str]:
     if not script.is_file():
         return False, (
             f'未找到上游任务脚本（{script}）。'
-            '该功能调用的是上游 workbuddy2api 自带的 scripts/task_runner.py，'
-            '请确认上游目录已挂载且版本较新（可到「设置 → 系统更新」更新上游）。'
+            '该功能调用的是上游 workbuddy2api 自带的 scripts/task_runner.py。\n'
+            '两种部署形态各有一种修法：\n'
+            '  · 官方镜像部署：本面板会尝试用 `docker cp` 从上游容器里提取脚本，'
+            '但它需要能访问 docker（挂载 /var/run/docker.sock，且容器名与 '
+            'WB2API_CONTAINER 一致）。请检查这两项，然后点「预览」重试。\n'
+            '  · 源码部署：请确认上游目录（WB_UPSTREAM_DIR）已挂载且版本较新，'
+            '可到「设置 → 系统更新」更新上游。'
         )
     if not config.AUTH_DIR.is_dir():
         return False, (

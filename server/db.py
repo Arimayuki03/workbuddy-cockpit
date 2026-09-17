@@ -206,16 +206,71 @@ def _restrict_db_permissions() -> None:
             pass
 
 
+def _explain_db_open_failure(exc: Exception) -> str:
+    """把 `unable to open database file` 翻译成「该怎么做」。
+
+    这个报错的原始信息**完全无法定位**（issue #30）：它既不说哪个路径，
+    也不说为什么。实测最常见的原因是**目录/文件的属主不对** ——
+    容器以 uid 10001 运行，而 bind mount（`./data:/app/data`）的属主由宿主机
+    决定：docker 首次自动创建 `./data` 时归 root，容器内的 10001 就写不进去。
+
+    上游自己的 compose 对 `./data` 写了 chown 提示，我们的漏了 —— 于是同样的坑
+    在管理端这边表现为一条 sqlite 报错，用户完全猜不到是权限。
+    """
+    import os as _os
+
+    path = config.DB_PATH
+    parent = path.parent
+    lines = [f'无法打开数据库文件：{path}']
+    reasons: list[str] = []
+
+    try:
+        if not parent.exists():
+            reasons.append(f'目录不存在：{parent}')
+        elif not _os.access(str(parent), _os.W_OK):
+            reasons.append(f'目录不可写：{parent}')
+        elif path.exists() and not _os.access(str(path), _os.W_OK):
+            reasons.append(f'数据库文件不可写：{path}')
+    except OSError:
+        pass
+
+    if reasons:
+        lines.append('  原因：' + '；'.join(reasons))
+    lines.append(f'  原始错误：{exc}')
+    lines.append(
+        '  最常见的成因是**目录属主不对**：容器以 uid 10001 运行，而 bind mount\n'
+        '  （compose 里的 `./data:/app/data`）属主由宿主机决定 —— docker 首次自动\n'
+        '  创建该目录时归 root，容器内的 10001 写不进去。宿主机执行一次即可：\n'
+        '    chown -R 10001:10001 ./data\n'
+        '  （在 docker-compose.yml 所在目录执行；10001 是镜像内 app 用户的 uid）\n'
+        '  若目录是网络文件系统（NFS/SMB）且不支持属主修改，改用命名卷：\n'
+        '    volumes:\n      - wb-manager-data:/app/data\n'
+        '  volumes:\n    wb-manager-data:'
+    )
+    return '\n'.join(lines)
+
+
 def connect() -> sqlite3.Connection:
     global _conn
     if _conn is None:
         config.ensure_dirs()
-        _conn = sqlite3.connect(str(config.DB_PATH), check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-        _conn.execute('PRAGMA journal_mode=WAL')
-        _conn.execute('PRAGMA synchronous=NORMAL')
-        _conn.executescript(SCHEMA)
-        _migrate(_conn)
+        try:
+            _conn = sqlite3.connect(str(config.DB_PATH), check_same_thread=False)
+            _conn.row_factory = sqlite3.Row
+            _conn.execute('PRAGMA journal_mode=WAL')
+            _conn.execute('PRAGMA synchronous=NORMAL')
+            _conn.executescript(SCHEMA)
+            _migrate(_conn)
+        except sqlite3.OperationalError as exc:
+            # 失败时不要留下半开的连接：否则后续调用会拿到一个不能用的 _conn，
+            # 报出更莫名的错误（例如「attempt to write a readonly database」）
+            if _conn is not None:
+                try:
+                    _conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                _conn = None
+            raise RuntimeError(_explain_db_open_failure(exc)) from exc
         _conn.commit()
         # 建表之后再收紧权限：库文件此刻才确定存在，WAL 伴生文件也在初始化后出现
         _restrict_db_permissions()

@@ -130,6 +130,160 @@ class AvailabilityTest(unittest.TestCase):
         self.assertIn('脚本不在', msg)
 
 
+class ScriptExtractionTest(unittest.TestCase):
+    """从上游容器提取脚本（issue #29）。
+
+    报障现象：官方**镜像**部署上游时，面板说
+    「未找到上游任务脚本（/opt/workbuddy2api/scripts/task_runner.py）」。
+    原因是上游镜像把脚本 COPY 进容器内的 `/app/scripts/`，而宿主机挂载目录里
+    根本没有 `scripts/`（用户只挂了 config.json 与 auths）—— 于是无论怎么配
+    都找不到，除非手动从镜像里扒脚本出来（那就每次上游更新都要重来一遍）。
+
+    修法：找不到就 `docker cp` 从容器里提取到本地缓存，并以**镜像 ID** 为指纹
+    —— 上游重建镜像后自动重取，脚本与上游二进制始终同版本。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_data = config.DATA_DIR
+        self._orig_auth = config.AUTH_DIR
+        config.DATA_DIR = Path(self._tmp.name)
+        config.AUTH_DIR = Path(self._tmp.name) / 'auths'
+        config.AUTH_DIR.mkdir(parents=True, exist_ok=True)
+        taskrun._last_extract_failure.update({'at': 0.0, 'reason': ''})
+
+    def tearDown(self) -> None:
+        config.DATA_DIR = self._orig_data
+        config.AUTH_DIR = self._orig_auth
+        taskrun._last_extract_failure.update({'at': 0.0, 'reason': ''})
+        self._tmp.cleanup()
+
+    def _fake_cp(self, *, rc: int = 0, files=('task_runner.py', 'task_common.py',
+                                             'school_open_day_2026.py')):
+        """伪造 docker cp：按需写出脚本文件。"""
+        def _run(cmd, **kw):
+            class R:
+                returncode = rc
+                stdout = ''
+                stderr = '' if rc == 0 else 'No such container: workbuddy2api'
+            if rc == 0:
+                dest = taskrun._extract_dir()
+                dest.mkdir(parents=True, exist_ok=True)
+                for f in files:
+                    (dest / f).write_text('# stub\n', encoding='utf-8')
+            return R()
+        return _run
+
+    def test_extracts_whole_script_group(self) -> None:
+        """要提取**整组**脚本，不能只拿 task_runner.py。
+
+        task_runner `import task_common` 与 `school_open_day_2026`（后者又
+        import task_common）；只拷一个文件的话，运行时会 ImportError——
+        而那时用户已经点了「做任务」，看到的是脚本崩了。
+        """
+        with mock.patch('subprocess.run', side_effect=self._fake_cp()), \
+             mock.patch.object(taskrun, '_upstream_image_id', return_value='img1'):
+            ok, path = taskrun.extract_scripts()
+        self.assertTrue(ok, path)
+        dest = taskrun._extract_dir()
+        for name in ('task_runner.py', 'task_common.py', 'school_open_day_2026.py'):
+            self.assertTrue((dest / name).is_file(), f'缺少 {name}')
+
+    def test_cp_uses_container_and_app_scripts(self) -> None:
+        """docker cp 的来源必须是 `<容器>:/app/scripts/.`（上游镜像里的位置）。"""
+        seen: list[list[str]] = []
+
+        def _run(cmd, **kw):
+            seen.append(list(cmd))
+            class R:
+                returncode = 0; stdout = ''; stderr = ''
+            dest = taskrun._extract_dir()
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / 'task_runner.py').write_text('# x', encoding='utf-8')
+            return R()
+
+        with mock.patch('subprocess.run', side_effect=_run), \
+             mock.patch.object(taskrun, '_upstream_image_id', return_value='img1'):
+            taskrun.extract_scripts()
+        self.assertTrue(seen, '没有调用 docker')
+        cmd = seen[0]
+        self.assertEqual(cmd[:2], ['docker', 'cp'])
+        self.assertTrue(cmd[2].endswith(':/app/scripts/.'), cmd[2])
+        self.assertIn(config.WB2API_CONTAINER, cmd[2])
+
+    def test_host_mount_wins_over_extraction(self) -> None:
+        """宿主机挂载目录里有脚本时**直接用**，不碰 docker。
+
+        源码部署的用户没必要为这个功能装 docker / 挂 socket。
+        """
+        host = Path(self._tmp.name) / 'upstream' / 'scripts'
+        host.mkdir(parents=True)
+        (host / 'task_runner.py').write_text('# host\n', encoding='utf-8')
+        with mock.patch.object(taskrun, '_host_script',
+                              return_value=host / 'task_runner.py'), \
+             mock.patch('subprocess.run') as sl:
+            got = taskrun._script_path()
+        self.assertEqual(got, host / 'task_runner.py')
+        sl.assert_not_called()
+
+    def test_cache_invalidated_when_image_changes(self) -> None:
+        """上游重建镜像后必须重新提取 —— 否则脚本与上游版本漂移。"""
+        with mock.patch('subprocess.run', side_effect=self._fake_cp()), \
+             mock.patch.object(taskrun, '_upstream_image_id', return_value='img-old'):
+            taskrun.extract_scripts()
+        with mock.patch.object(taskrun, '_upstream_image_id', return_value='img-old'):
+            self.assertTrue(taskrun._cache_is_fresh(), '同镜像应命中缓存')
+        with mock.patch.object(taskrun, '_upstream_image_id', return_value='img-new'):
+            self.assertFalse(taskrun._cache_is_fresh(), '换了镜像就该重取')
+
+    def test_failure_is_cooled_down(self) -> None:
+        """失败后要冷却，否则界面每 15 秒轮询会变成每 15 秒 fork 一次失败 docker。
+
+        面板闲着时按 15 秒轮询 status()，而 status() → available() → 可能触发
+        提取；没有冷却的话，用户只是把页面开着，就会持续产生失败的子进程。
+        """
+        calls = {'n': 0}
+
+        def _fail(cmd, **kw):
+            calls['n'] += 1
+            class R:
+                returncode = 1; stdout = ''; stderr = 'No such container'
+            return R()
+
+        with mock.patch('subprocess.run', side_effect=_fail):
+            for _ in range(5):
+                taskrun.available()
+        self.assertEqual(calls['n'], 1, f'冷却没生效，试了 {calls["n"]} 次')
+
+        # 冷却过去后允许再试（不能永久放弃）
+        taskrun._last_extract_failure['at'] = time.time() - 61
+        with mock.patch('subprocess.run', side_effect=_fail):
+            taskrun.available()
+        self.assertEqual(calls['n'], 2, '冷却过后应允许再试')
+
+    def test_successful_extract_resets_cooldown(self) -> None:
+        """成功要清掉失败标记，免得下一次因冷却被跳过。"""
+        with mock.patch('subprocess.run', side_effect=self._fake_cp(rc=1)):
+            taskrun.available()
+        self.assertNotEqual(taskrun._last_extract_failure['at'], 0.0)
+
+        taskrun._last_extract_failure['at'] = time.time() - 61
+        with mock.patch('subprocess.run', side_effect=self._fake_cp()), \
+             mock.patch.object(taskrun, '_upstream_image_id', return_value='img1'):
+            taskrun.available()
+        self.assertEqual(taskrun._last_extract_failure['at'], 0.0,
+                         '成功后没清冷却标记')
+
+    def test_error_message_mentions_both_deployment_shapes(self) -> None:
+        """失败说明要覆盖两种部署形态的修法 —— 用户只知道「找不到脚本」。"""
+        with mock.patch('subprocess.run', side_effect=self._fake_cp(rc=1)), \
+             mock.patch.object(taskrun, '_host_script', return_value=None):
+            ok, why = taskrun.available()
+        self.assertFalse(ok)
+        self.assertIn('docker.sock', why, '镜像部署要说清需要 docker 访问')
+        self.assertIn('WB_UPSTREAM_DIR', why, '源码部署要指出挂载目录')
+
+
 class TimeoutPolicyTest(unittest.TestCase):
     """超时策略：**按空闲判定**，不看总时长。
 
