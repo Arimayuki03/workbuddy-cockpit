@@ -17,7 +17,7 @@ import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {RichText} from '@/lib/i18n/rich-text';
 import {useI18n, useT} from '@/lib/i18n/provider';
-import {tp as tpStatic} from '@/lib/i18n';
+import {t as tStatic, tp as tpStatic} from '@/lib/i18n';
 import {accountApi, errText} from '@/lib/api';
 import type {CheckinLog, TaskLog, TaskLogResponse} from '@/lib/types';
 import {fmtDateTime, fmtNumber} from '@/lib/format';
@@ -67,6 +67,8 @@ const KIND_LABEL_KEYS: Record<string, string> = {
   credit: 'tasks.kindCredit',
   school: 'tasks.kindSchool',
   cat: 'tasks.kindCat',
+  // 面板发起的一次执行（server/services/taskrun.py 写入，含 claim / full 两种模式）
+  taskrun: 'tasks.kindTaskrun',
 };
 
 /**
@@ -75,8 +77,32 @@ const KIND_LABEL_KEYS: Record<string, string> = {
  */
 function resultText(l: TaskLog): string {
   const raw = l.message_cn || l.message;
-  // 积分流水是模板句（含数字），先按模板重排，其余走短语表
-  return creditLedgerText(raw, tpStatic);
+  // 模板句（含数字 / 账号）先反解重排，其余走短语表
+  return creditLedgerText(taskRunHistoryText(raw), tpStatic);
+}
+
+/**
+ * 一键执行的历史记录文案本地化。
+ *
+ * 服务端（`server/services/taskrun.py` 的 `_record_history`）按
+ * `{标签}（{target}）{结果摘要}` 的模板写库：标签是固定两种，摘要则是上游脚本的
+ * 英文汇总行（`task_runner done: …`）——原文都原样保留。这里按同一模板反解，
+ * 只把外层的标签与括号交给译文重排（中文的「（）」在其它语言里并不通用），
+ * 解不出就原样返回，不会把内容弄丢。
+ */
+const TASK_RUN_HISTORY = /^(一键领奖|一键做任务)（(.*?)）([\s\S]*)$/;
+const TASK_RUN_HISTORY_KEYS: Record<string, string> = {
+  一键领奖: 'tasks.runLogHistoryClaim',
+  一键做任务: 'tasks.runLogHistoryFull',
+};
+
+function taskRunHistoryText(message: string): string {
+  const m = TASK_RUN_HISTORY.exec(message.trim());
+  if (!m) return message;
+  const key = TASK_RUN_HISTORY_KEYS[m[1]];
+  if (!key) return message;
+  // 摘要沿用上游英文原文；标签按当前语言，括号位置交给译文模板决定
+  return tStatic(key, {target: m[2], summary: m[3].trim()});
 }
 
 /**
