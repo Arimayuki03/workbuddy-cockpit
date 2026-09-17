@@ -105,6 +105,82 @@ const RULES: LineRule[] = [
   [/^\[skip\] (\S+) global realm 不适用 CN 任务$/, (m) =>
     tStatic('tasks.runLogGlobalSkip', {uid: m[1]})],
 
+  // ── 上游 2026-09-17（7e43884）新增/改写的行 ────────────────────────
+  // 这一批来自上游的「accept 登记验证与重试」「小程序成长任务接入」
+  // （school_season 校园日 / minichat 等）与 first_buddy 领养链路。
+  // 顺序：具体者在前，`{status}` 这类通配形态放最后，免得把细节行吞掉。
+
+  // 领取结果（含「已领」变体；{ast} 是上游的状态枚举，属数据）
+  // 注意顺序：带进度 `status/cur` 的那条**必须在前** ——
+  // `(\S+)` 能把 `in_progress/3` 整个吞下，放后面就永远轮不到它。
+  [runner('(\\S+)/(\\d+) -> claimed（本轮已入账）'), (m) =>
+    tStatic('tasks.runLogClaimedThisRoundProgress', {
+      uid: m[1], code: m[2], status: m[3], cur: m[4]})],
+  [runner('(\\S+) -> claimed（本轮已入账）'), (m) =>
+    tStatic('tasks.runLogClaimedThisRound', {uid: m[1], code: m[2], status: m[3]})],
+
+  // 点亮结果三分支：只有前缀「（未变化）/（点亮）/（部分点亮…）」是文案
+  // 顺序同样是「部分点亮」在前 —— 它比「（点亮）」更长，但 `（点亮）` 那条用的是
+  // `$` 锚定整行，两者不会互相吞；这里保持具体者优先的习惯。
+  [runner('(\\S+) -> (\\S+)/(\\S+)（部分点亮，未达 target）'), (m) =>
+    tStatic('tasks.runLogLightPartial', {
+      uid: m[1], code: m[2], status: m[3], after: m[4], afterProg: m[5]})],
+  [runner('(\\S+) -> (\\S+)/(\\S+)（未变化）'), (m) =>
+    tStatic('tasks.runLogLightNoChange', {
+      uid: m[1], code: m[2], status: m[3], after: m[4], afterProg: m[5]})],
+  [runner('(\\S+) -> (\\S+)/(\\S+)（点亮）'), (m) =>
+    tStatic('tasks.runLogLightDone', {
+      uid: m[1], code: m[2], status: m[3], after: m[4], afterProg: m[5]})],
+
+  // accept 登记验证与重试（上游 c793ae3）
+  // 上游原文：`accept 尝试{N} {http状态} status={返回的status} 回读={回读到的accept_status}{' -> 生效' if ok}`
+  // 「-> 生效」只在回读确认登记成功时出现。它**不是**自由文本，而是上游写死的
+  // 固定短语，所以走短语表（tpStatic）而不是硬编码一个占位值 —— 早先我传的是
+  // `'1'`/`''`，界面上会直接显示「回读=accepted1」，那个 1 毫无意义。
+  // 注意捕获组序号：runner() 先占了 uid/code 两个，故 attempt 从 3 起。
+  [runner('accept 尝试(\\d+) (\\d+) status=(\\S+) 回读=(\\S+)( -> 生效)?'), (m) =>
+    tStatic('tasks.runLogAcceptVerify', {
+      uid: m[1], code: m[2], attempt: m[3], st: m[4], status: m[5], readback: m[6],
+      ok: m[7] ? tpStatic('-> 生效') : ''})],
+  [runner('accept 未登记生效，本轮跳过待下次'), (m) =>
+    tStatic('tasks.runLogAcceptNotRegistered', {uid: m[1], code: m[2]})],
+
+  // 小程序成长任务（school_season 校园日 / minichat 等）
+  [runner('query (\\S+)\\((\\d+)/(\\d+)\\) -> 可点亮\\((\\S+)\\)，dry-run 跳过'), (m) =>
+    tStatic('tasks.runLogLightUpKindDryRun', {
+      uid: m[1], code: m[2], status: m[3], cur: m[4], target: m[5], kind: m[6]})],
+  [runner('query (\\S+)\\((\\d+)/(\\d+)\\) -> 已完成/已领，跳过'), (m) =>
+    tStatic('tasks.runLogAlreadyDone', {
+      uid: m[1], code: m[2], status: m[3], cur: m[4], target: m[5]})],
+  [runner('query (\\S+) -> school 未映射\\(人工/未知\\)，skip'), (m) =>
+    tStatic('tasks.runLogSchoolUnmapped', {uid: m[1], code: m[2], status: m[3]})],
+  [runner('report (\\S+) code=(\\S+) 前置解锁'), (m) =>
+    tStatic('tasks.runLogPreUnlock', {uid: m[1], code: m[2], status: m[3], sc: m[4]})],
+  [runner('viewed 激活 (\\S+)'), (m) =>
+    tStatic('tasks.runLogViewedActivated', {uid: m[1], code: m[2], status: m[3]})],
+  [runner('viewed 失败: (.*)'), (m) =>
+    tStatic('tasks.runLogViewedFailed', {uid: m[1], code: m[2], err: m[3]})],
+  [runner('report 失败 #(\\d+): (.*)'), (m) =>
+    tStatic('tasks.runLogReportFailed', {uid: m[1], code: m[2], i: m[3], err: m[4]})],
+  [runner('claim 失败: (.*)（可稍后补领）'), (m) =>
+    tStatic('tasks.runLogClaimFailed', {uid: m[1], code: m[2], err: m[3]})],
+
+  // mp（小程序）口径的分支
+  [runner('mp list_tasks 失败: (.*)'), (m) =>
+    tStatic('tasks.runLogMpListFailed', {uid: m[1], code: m[2], err: m[3]})],
+  [runner('mp 口径任务不存在，skip'), (m) =>
+    tStatic('tasks.runLogMpTaskMissing', {uid: m[1], code: m[2]})],
+  [runner('only_claim 跳过（未 completed）'), (m) =>
+    tStatic('tasks.runLogOnlyClaimNotCompleted', {uid: m[1], code: m[2]})],
+
+  // 账号级（注意：这两条的账号位是 uid8，后面接的是固定词而非任务码）
+  [/^\[task_runner\] (\S+) school 活动非进行期（in_period=false），school 段跳过$/, (m) =>
+    tStatic('tasks.runLogSchoolNotInPeriod', {uid: m[1]})],
+  [/^\[task_runner\] (\S+) school\/tasks 拉取失败: (.*)$/, (m) =>
+    tStatic('tasks.runLogSchoolFetchFailed', {uid: m[1], err: m[2]})],
+  [/^\[task_runner\] (\S+) (\S+): mp 查询失败: (.*)$/, (m) =>
+    tStatic('tasks.runLogMpQueryFailed', {uid: m[1], code: m[2], err: m[3]})],
+
   // ── 后端子进程看护自己追加的行（server/services/taskrun.py）──────
   // 后端保持中文原文（\`test_taskrun.py\` 的卡死用例按「卡死」断言），
   // 翻译只发生在展示层。

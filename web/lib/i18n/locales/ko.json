@@ -669,7 +669,28 @@
     "checkinReadFailed": "읽기 실패: {exc}",
     "runExitCode": "종료 코드 {code}",
     "runFailed": "실패: {msg}",
-    "stageLine": "{label}: {detail}"
+    "stageLine": "{label}: {detail}",
+    "runLogClaimedThisRound": "[task_runner] {uid} {code}: {status} -> claimed(이번 회차 반영됨)",
+    "runLogClaimedThisRoundProgress": "[task_runner] {uid} {code}: {status}/{cur} -> claimed(이번 회차 반영됨)",
+    "runLogLightNoChange": "[task_runner] {uid} {code}: {status} -> {after}/{afterProg}(변화 없음)",
+    "runLogLightDone": "[task_runner] {uid} {code}: {status} -> {after}/{afterProg}(점등)",
+    "runLogLightPartial": "[task_runner] {uid} {code}: {status} -> {after}/{afterProg}(일부만 점등, target 미달)",
+    "runLogAcceptVerify": "[task_runner] {uid} {code}: accept 시도 {attempt} {st} status={status} 재확인={readback}{ok}",
+    "runLogAcceptNotRegistered": "[task_runner] {uid} {code}: accept 미등록, 이번 회차는 건너뛰고 다음에 재시도",
+    "runLogLightUpKindDryRun": "[task_runner] {uid} {code}: query {status}({cur}/{target}) -> 점등 가능({kind}), dry-run 건너뜀",
+    "runLogAlreadyDone": "[task_runner] {uid} {code}: query {status}({cur}/{target}) -> 완료/수령됨, 건너뜀",
+    "runLogSchoolUnmapped": "[task_runner] {uid} {code}: query {status} -> school 미매핑(수동/알 수 없음), skip",
+    "runLogPreUnlock": "[task_runner] {uid} {code}: report {status} code={sc} 사전 조건 해제",
+    "runLogViewedActivated": "[task_runner] {uid} {code}: viewed 활성화 {status}",
+    "runLogViewedFailed": "[task_runner] {uid} {code}: viewed 실패: {err}",
+    "runLogReportFailed": "[task_runner] {uid} {code}: report 실패 #{i}: {err}",
+    "runLogClaimFailed": "[task_runner] {uid} {code}: claim 실패: {err}(나중에 수령 가능)",
+    "runLogMpListFailed": "[task_runner] {uid} {code}: mp list_tasks 실패: {err}",
+    "runLogMpTaskMissing": "[task_runner] {uid} {code}: mp 기준 작업이 없음, skip",
+    "runLogMpQueryFailed": "[task_runner] {uid} {code}: mp 조회 실패: {err}",
+    "runLogOnlyClaimNotCompleted": "[task_runner] {uid} {code}: only_claim 건너뜀(completed 아님)",
+    "runLogSchoolNotInPeriod": "[task_runner] {uid} school 이벤트 기간 아님(in_period=false), school 구간 건너뜀",
+    "runLogSchoolFetchFailed": "[task_runner] {uid} school/tasks 가져오기 실패: {err}"
   },
   "addAccount": {
     "title": "Tencent 계정 추가 · {realm}",
@@ -982,6 +1003,8 @@
     "闲置补偿上限": "유휴 가중치 상한",
     "闲置加成的封顶值，避免某个账号权重无限增大": "유휴 가산의 상한값으로, 한 계정의 가중치가 끝없이 커지는 것을 막습니다",
     "快过期积分窗口": "만료 임박 크레딧 창",
+    "成本档位探索周期": "비용 등급 탐색 주기",
+    "上游的选号优化：长时间只用高成本档位时，每隔这么久会改走一次低成本档位探测，成功就留在低档（省钱）。留空 = 用上游默认 30m，填 0 = 关闭该优化": "업스트림 계정 선택 최적화: 고비용 등급만 오래 쓰면 이 주기마다 저비용 등급으로 한 번 전환해 시도하고, 성공하면 저비용 등급에 머뭅니다(절약). 비우면 업스트림 기본값 30m, 0 = 이 최적화 사용 안 함",
     "到期时间落在此窗口内的积分会被标记为「快过期」，选号时优先消耗掉，避免白白过期。留空或填 0 = 关闭该优化": "만료 시각이 이 창에 들어오는 크레딧은 '만료 임박'으로 표시되어 계정 선택 시 먼저 소모됩니다. 비우거나 0이면 이 최적화를 끕니다",
     "出站请求指纹脱敏": "아웃바운드 요청 지문 정리",
     "对发往上游的请求做轻量脱敏，降低被判定异常的概率。除非在排查问题，否则建议保持开启": "업스트림으로 나가는 요청을 가볍게 정리해 이상으로 판정될 확률을 낮춥니다. 문제를 조사 중이 아니라면 켜 두는 것을 권장합니다",
@@ -997,7 +1020,7 @@
     "passthrough（透传客户端 system，默认）": "passthrough (클라이언트 system 전달, 기본)",
     "custom（替换为网关提示词）": "custom (게이트웨이 프롬프트로 교체)",
     "自定义提示词文件": "사용자 지정 프롬프트 파일",
-    "仅在 custom 模式下生效。留空使用内置默认提示词": "custom 모드에서만 적용됩니다. 비우면 내장 기본 프롬프트를 사용합니다",
+    "在 custom 与 append 模式下生效。留空使用内置默认提示词": "custom 및 append 모드에서 모두 적용됩니다. 비우면 내장 기본 프롬프트를 사용합니다",
     "路径必须存在于上游容器内且可读；写错会导致上游启动失败、反代不可用。不确定就留空。": "경로는 업스트림 컨테이너 안에 존재하고 읽을 수 있어야 합니다. 잘못 입력하면 업스트림이 시작되지 않아 게이트웨이를 쓸 수 없습니다. 확실하지 않으면 비워 두세요.",
     "留空 = 使用内置默认": "비우면 내장 기본값 사용",
     "请求体上限": "요청 본문 상한",
@@ -1092,6 +1115,7 @@
     "计划任务未执行": "예약 작업 미실행",
     "令牌无效": "토큰 무효",
     "未授权": "인증되지 않음",
-    "会话失效": "세션 만료"
+    "会话失效": "세션 만료",
+    "-> 生效": "-> 반영됨"
   }
 }

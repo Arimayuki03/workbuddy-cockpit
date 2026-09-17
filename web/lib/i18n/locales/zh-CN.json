@@ -207,9 +207,9 @@
     "byKey": "按密钥",
     "emptyTitle": "暂无数据",
     "emptyDesc": "该维度在所选时间范围内没有调用",
-    "tokenHint": "{v} Token"
-    ,"usageHealthTitle": "用量统计可能没有正常累计"
-    ,"usageHealthDetail": "今天已有 {n} 次调用记录，但用量统计为 0——统计可能没有正常写入。可尝试「修复统计」；若仍为 0，请查看服务端日志。"
+    "tokenHint": "{v} Token",
+    "usageHealthTitle": "用量统计可能没有正常累计",
+    "usageHealthDetail": "今天已有 {n} 次调用记录，但用量统计为 0——统计可能没有正常写入。可尝试「修复统计」；若仍为 0，请查看服务端日志。"
   },
   "accounts": {
     "title": "账号管理",
@@ -501,9 +501,9 @@
     "seriesHunyuan": "腾讯混元",
     "seriesAuto": "自动选择",
     "seriesOther": "其他",
-    "sourceTencent": "腾讯模型接口（含显示名与推理档位）"
-    ,"sourceUpstream": "上游 /v1/models（无显示名；推理档位取上游透出值）"
-    ,"sourceNone": "暂无可用的模型数据来源"
+    "sourceTencent": "腾讯模型接口（含显示名与推理档位）",
+    "sourceUpstream": "上游 /v1/models（无显示名；推理档位取上游透出值）",
+    "sourceNone": "暂无可用的模型数据来源"
   },
   "playground": {
     "title": "聊天测试台",
@@ -669,7 +669,28 @@
     "checkinReadFailed": "读取失败: {exc}",
     "runExitCode": "退出码 {code}",
     "runFailed": "失败：{msg}",
-    "stageLine": "{label}：{detail}"
+    "stageLine": "{label}：{detail}",
+    "runLogClaimedThisRound": "[task_runner] {uid} {code}: {status} -> claimed（本轮已入账）",
+    "runLogClaimedThisRoundProgress": "[task_runner] {uid} {code}: {status}/{cur} -> claimed（本轮已入账）",
+    "runLogLightNoChange": "[task_runner] {uid} {code}: {status} -> {after}/{afterProg}（未变化）",
+    "runLogLightDone": "[task_runner] {uid} {code}: {status} -> {after}/{afterProg}（点亮）",
+    "runLogLightPartial": "[task_runner] {uid} {code}: {status} -> {after}/{afterProg}（部分点亮，未达 target）",
+    "runLogAcceptVerify": "[task_runner] {uid} {code}: accept 尝试{attempt} {st} status={status} 回读={readback}{ok}",
+    "runLogAcceptNotRegistered": "[task_runner] {uid} {code}: accept 未登记生效，本轮跳过待下次",
+    "runLogLightUpKindDryRun": "[task_runner] {uid} {code}: query {status}({cur}/{target}) -> 可点亮({kind})，dry-run 跳过",
+    "runLogAlreadyDone": "[task_runner] {uid} {code}: query {status}({cur}/{target}) -> 已完成/已领，跳过",
+    "runLogSchoolUnmapped": "[task_runner] {uid} {code}: query {status} -> school 未映射(人工/未知)，skip",
+    "runLogPreUnlock": "[task_runner] {uid} {code}: report {status} code={sc} 前置解锁",
+    "runLogViewedActivated": "[task_runner] {uid} {code}: viewed 激活 {status}",
+    "runLogViewedFailed": "[task_runner] {uid} {code}: viewed 失败: {err}",
+    "runLogReportFailed": "[task_runner] {uid} {code}: report 失败 #{i}: {err}",
+    "runLogClaimFailed": "[task_runner] {uid} {code}: claim 失败: {err}（可稍后补领）",
+    "runLogMpListFailed": "[task_runner] {uid} {code}: mp list_tasks 失败: {err}",
+    "runLogMpTaskMissing": "[task_runner] {uid} {code}: mp 口径任务不存在，skip",
+    "runLogMpQueryFailed": "[task_runner] {uid} {code}: mp 查询失败: {err}",
+    "runLogOnlyClaimNotCompleted": "[task_runner] {uid} {code}: only_claim 跳过（未 completed）",
+    "runLogSchoolNotInPeriod": "[task_runner] {uid} school 活动非进行期（in_period=false），school 段跳过",
+    "runLogSchoolFetchFailed": "[task_runner] {uid} school/tasks 拉取失败: {err}"
   },
   "addAccount": {
     "title": "添加腾讯账号 · {realm}",

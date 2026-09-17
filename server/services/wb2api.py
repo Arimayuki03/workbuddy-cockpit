@@ -371,10 +371,16 @@ def models_source(items: list) -> str:
     部署（那种情况下如实标「非实时」依然有用）。
 
     判据（取上游内部实现细节）：
-      * 动态条目带 `max_output_tokens`（上游 modelList 的动态分支才写该键）；
+      * 动态条目经 `applyModelInfoFields` 写出 `name`（上游模型对象带 Name 时必写）
+        与 `max_output_tokens`（四级查找命中时写）；
       * 老版本上游的静态表**只覆盖 CN**，条目为裸名或 `cn:` 前缀；
-      * 故「无该键 + 没有 global 条目」才判 static——国际版的探测结果在窄表
-        形态下同样没有 max_output_tokens，若不加前缀约束会被误报成静态回退。
+      * 故「没有动态特征键 + 没有 global 条目」才判 static——国际版的探测结果在窄表
+        形态下同样不带这些键，若不加前缀约束会被误报成静态回退。
+
+    为什么同时看 `name` 和 `max_output_tokens`：后者是**四级查找全不命中就省略**
+    （上游 handler.go 的 `MaxOutputTokensListingV4`，兜底是「省略字段」而非填默认值），
+    理论上存在整张表都没这个键的情况；`name` 的写出条件宽得多（模型对象自带 Name 即可）。
+    两个信号任一命中即判动态，比只认一个稳。
 
     判不出来返回 'unknown'，前端据此回退到中性文案，绝不因此报错。
     """
@@ -383,7 +389,7 @@ def models_source(items: list) -> str:
     dicts = [x for x in items if isinstance(x, dict)]
     if not dicts:
         return 'unknown'
-    if any('max_output_tokens' in x for x in dicts):
+    if any('max_output_tokens' in x or 'name' in x for x in dicts):
         return 'dynamic'
     if not all('id' in x for x in dicts):
         return 'unknown'
@@ -628,6 +634,22 @@ def _sanitize_section(section: str, incoming: dict) -> dict:
             if not _DURATION_RE.match(raw.strip()):
                 raise ValueError(f'{key} 时长格式有误，应为 30s / 10m / 2h / 1d')
             out[key] = raw.strip()
+        elif section == 'pool' and key == 'cost_explore_interval':
+            # 成本档位条件探索的周期（上游 2026-09-17 新增，默认 "30m"）。
+            #
+            # 必须在这里拦：上游对它是 `time.ParseDuration` 失败即**启动报错**
+            # （cmd/server/config.go:383 的 fail fast）。而它既不匹配上面那条按
+            # `_cooldown`/`_rate` 后缀的规则，也不在下面两张区间表里 —— 不补这条
+            # 就等于「填错也保存成功，然后上游起不来」，正是本节注释里点名的
+            # 最坏形态。可达路径是 `POST /api/settings/upstream` 直接透传 body，
+            # 不经过前端表单。
+            #
+            # **"0" 是合法值**（关停该特性，与上游 `CostExploreIntervalDur = 0` 一致），
+            # 所以不能要求必须匹配时长格式。
+            val = str(raw or '').strip()
+            if val and val != '0' and not _DURATION_RE.match(val):
+                raise ValueError('cost_explore_interval 时长格式有误，应为 30m / 1h；0 = 关停')
+            out[key] = val
         elif section == 'pool' and key == 'expiring_soon':
             # 快过期积分窗口（上游 2026-09-14 新增）：选号时优先消耗窗口内到期的
             # 积分。语义与普通时长不同——**空串或 "0" 表示禁用分桶**，不是非法值，

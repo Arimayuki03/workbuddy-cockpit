@@ -669,7 +669,28 @@
     "checkinReadFailed": "読み取り失敗: {exc}",
     "runExitCode": "終了コード {code}",
     "runFailed": "失敗：{msg}",
-    "stageLine": "{label}: {detail}"
+    "stageLine": "{label}: {detail}",
+    "runLogClaimedThisRound": "[task_runner] {uid} {code}: {status} -> claimed（今回分を入帳済み）",
+    "runLogClaimedThisRoundProgress": "[task_runner] {uid} {code}: {status}/{cur} -> claimed（今回分を入帳済み）",
+    "runLogLightNoChange": "[task_runner] {uid} {code}: {status} -> {after}/{afterProg}（変化なし）",
+    "runLogLightDone": "[task_runner] {uid} {code}: {status} -> {after}/{afterProg}（点灯）",
+    "runLogLightPartial": "[task_runner] {uid} {code}: {status} -> {after}/{afterProg}（一部のみ点灯、target 未達）",
+    "runLogAcceptVerify": "[task_runner] {uid} {code}: accept 試行{attempt} {st} status={status} 再読取={readback}{ok}",
+    "runLogAcceptNotRegistered": "[task_runner] {uid} {code}: accept が登録されず、今回はスキップして次回に持ち越し",
+    "runLogLightUpKindDryRun": "[task_runner] {uid} {code}: query {status}({cur}/{target}) -> 点灯可能({kind})、dry-run でスキップ",
+    "runLogAlreadyDone": "[task_runner] {uid} {code}: query {status}({cur}/{target}) -> 完了/受取済み、スキップ",
+    "runLogSchoolUnmapped": "[task_runner] {uid} {code}: query {status} -> school 未マッピング(手動/不明)、skip",
+    "runLogPreUnlock": "[task_runner] {uid} {code}: report {status} code={sc} 前提条件を解除",
+    "runLogViewedActivated": "[task_runner] {uid} {code}: viewed 有効化 {status}",
+    "runLogViewedFailed": "[task_runner] {uid} {code}: viewed 失敗: {err}",
+    "runLogReportFailed": "[task_runner] {uid} {code}: report 失敗 #{i}: {err}",
+    "runLogClaimFailed": "[task_runner] {uid} {code}: claim 失敗: {err}（後で受け取れます）",
+    "runLogMpListFailed": "[task_runner] {uid} {code}: mp list_tasks 失敗: {err}",
+    "runLogMpTaskMissing": "[task_runner] {uid} {code}: mp 口径のタスクが存在しません、skip",
+    "runLogMpQueryFailed": "[task_runner] {uid} {code}: mp 照会失敗: {err}",
+    "runLogOnlyClaimNotCompleted": "[task_runner] {uid} {code}: only_claim スキップ（未 completed）",
+    "runLogSchoolNotInPeriod": "[task_runner] {uid} school キャンペーン期間外（in_period=false）、school 区間をスキップ",
+    "runLogSchoolFetchFailed": "[task_runner] {uid} school/tasks 取得失敗: {err}"
   },
   "addAccount": {
     "title": "Tencent アカウント追加 · {realm}",
@@ -982,6 +1003,8 @@
     "闲置补偿上限": "アイドル補正の上限",
     "闲置加成的封顶值，避免某个账号权重无限增大": "アイドル補正の上限値。1 つのアカウントの重みが無限に増えるのを防ぎます",
     "快过期积分窗口": "期限間近クレジットの窓",
+    "成本档位探索周期": "コスト帯の探索間隔",
+    "上游的选号优化：长时间只用高成本档位时，每隔这么久会改走一次低成本档位探测，成功就留在低档（省钱）。留空 = 用上游默认 30m，填 0 = 关闭该优化": "上流のアカウント選択の最適化：高コスト帯だけを長く使い続けると、この間隔ごとに低コスト帯へ一度切り替えて試し、成功すればそのまま低コスト帯に留まります（節約）。空欄 = 上流の既定値 30m、0 = この最適化を無効化",
     "到期时间落在此窗口内的积分会被标记为「快过期」，选号时优先消耗掉，避免白白过期。留空或填 0 = 关闭该优化": "有効期限がこの窓に入るクレジットは「まもなく期限切れ」とされ、アカウント選択時に優先的に消費されます。空欄または 0 でこの最適化を無効にします",
     "出站请求指纹脱敏": "送信リクエストの指紋サニタイズ",
     "对发往上游的请求做轻量脱敏，降低被判定异常的概率。除非在排查问题，否则建议保持开启": "上流へのリクエストを軽くサニタイズし、異常と判定される確率を下げます。調査中でない限り有効のままを推奨します",
@@ -997,7 +1020,7 @@
     "passthrough（透传客户端 system，默认）": "passthrough（クライアント system を転送、既定）",
     "custom（替换为网关提示词）": "custom（ゲートウェイのプロンプトに置換）",
     "自定义提示词文件": "カスタムプロンプトファイル",
-    "仅在 custom 模式下生效。留空使用内置默认提示词": "custom モードでのみ有効です。空欄なら内蔵の既定プロンプトを使用します",
+    "在 custom 与 append 模式下生效。留空使用内置默认提示词": "custom と append モードの両方で有効です。空欄なら内蔵の既定プロンプトを使用します",
     "路径必须存在于上游容器内且可读；写错会导致上游启动失败、反代不可用。不确定就留空。": "パスは上流コンテナ内に存在し読み取り可能である必要があります。誤ると上流が起動せず、ゲートウェイが利用できなくなります。不明な場合は空欄にしてください。",
     "留空 = 使用内置默认": "空欄 = 内蔵の既定を使用",
     "请求体上限": "リクエストボディ上限",
@@ -1092,6 +1115,7 @@
     "计划任务未执行": "スケジュールタスクは未実行",
     "令牌无效": "トークンが無効",
     "未授权": "未認証",
-    "会话失效": "セッションが無効"
+    "会话失效": "セッションが無効",
+    "-> 生效": "-> 有効"
   }
 }

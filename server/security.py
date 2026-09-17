@@ -199,10 +199,16 @@ def issue_token(username: str, role: str, *, orig: int | None = None) -> str:
 def idle_expired(obj: dict) -> bool:
     """会话是否因**闲置**超时而失效。
 
-    缺 `iat` 的载荷（本次改动之前签发的旧 cookie，或伪造的）一律判失效：
-    无法判断它的活动时间，就不能当它「刚活动过」——那是 fail-open。
-    代价是一次性重新登录（安全修复的合理代价，已在 CHANGELOG 说明）。
+    关闭空闲判定时（`SESSION_IDLE_HOURS` = 0）**不看 `iat`**：此时会话寿命完全
+    由载荷里的 `exp`（总时长）决定，缺 `iat` 不构成风险，再拒绝一次就是白踢用户
+    ——而且升级前签发的旧 cookie 本来就都没有 `iat`，那种部署一升级会被立刻
+    全部登出，与「我特意关掉了空闲判定」的意图相反。
+
+    开启时空缺 `iat` 一律判失效：那时确实无法判断它「多久没活动」，不能假设刚活动过
+    （fail-open）。代价是一次性重新登录，已在 CHANGELOG 说明。
     """
+    if config.SESSION_IDLE_HOURS <= 0:
+        return False
     iat = obj.get('iat')
     if not isinstance(iat, int) or iat <= 0:
         return True
@@ -214,11 +220,15 @@ def needs_renewal(obj: dict) -> bool:
 
     只在走过 1/3 空闲窗口时才续：每次请求都重签会让 cookie 频繁变化，
     也没有额外收益（真正的约束是「多久没活动」，不是「签了几次」）。
+    空闲判定关闭时（0）自然也不续期。
     """
     iat = obj.get('iat')
     if not isinstance(iat, int) or iat <= 0:
         return False
-    return (time.time() - iat) > (config.SESSION_IDLE_HOURS * 3600) / 3
+    hours = config.SESSION_IDLE_HOURS
+    if hours <= 0:
+        return False
+    return (time.time() - iat) > (hours * 3600) / 3
 
 
 def cookie_secure(request: Request) -> bool:

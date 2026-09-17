@@ -669,7 +669,28 @@
     "checkinReadFailed": "讀取失敗: {exc}",
     "runExitCode": "退出碼 {code}",
     "runFailed": "失敗：{msg}",
-    "stageLine": "{label}：{detail}"
+    "stageLine": "{label}：{detail}",
+    "runLogClaimedThisRound": "[task_runner] {uid} {code}: {status} -> claimed（本輪已入帳）",
+    "runLogClaimedThisRoundProgress": "[task_runner] {uid} {code}: {status}/{cur} -> claimed（本輪已入帳）",
+    "runLogLightNoChange": "[task_runner] {uid} {code}: {status} -> {after}/{afterProg}（未變化）",
+    "runLogLightDone": "[task_runner] {uid} {code}: {status} -> {after}/{afterProg}（點亮）",
+    "runLogLightPartial": "[task_runner] {uid} {code}: {status} -> {after}/{afterProg}（部分點亮，未達 target）",
+    "runLogAcceptVerify": "[task_runner] {uid} {code}: accept 嘗試{attempt} {st} status={status} 回讀={readback}{ok}",
+    "runLogAcceptNotRegistered": "[task_runner] {uid} {code}: accept 未登記生效，本輪跳過待下次",
+    "runLogLightUpKindDryRun": "[task_runner] {uid} {code}: query {status}({cur}/{target}) -> 可點亮({kind})，dry-run 跳過",
+    "runLogAlreadyDone": "[task_runner] {uid} {code}: query {status}({cur}/{target}) -> 已完成/已領，跳過",
+    "runLogSchoolUnmapped": "[task_runner] {uid} {code}: query {status} -> school 未映射(人工/未知)，skip",
+    "runLogPreUnlock": "[task_runner] {uid} {code}: report {status} code={sc} 前置解鎖",
+    "runLogViewedActivated": "[task_runner] {uid} {code}: viewed 啟用 {status}",
+    "runLogViewedFailed": "[task_runner] {uid} {code}: viewed 失敗: {err}",
+    "runLogReportFailed": "[task_runner] {uid} {code}: report 失敗 #{i}: {err}",
+    "runLogClaimFailed": "[task_runner] {uid} {code}: claim 失敗: {err}（可稍後補領）",
+    "runLogMpListFailed": "[task_runner] {uid} {code}: mp list_tasks 失敗: {err}",
+    "runLogMpTaskMissing": "[task_runner] {uid} {code}: mp 口徑任務不存在，skip",
+    "runLogMpQueryFailed": "[task_runner] {uid} {code}: mp 查詢失敗: {err}",
+    "runLogOnlyClaimNotCompleted": "[task_runner] {uid} {code}: only_claim 跳過（未 completed）",
+    "runLogSchoolNotInPeriod": "[task_runner] {uid} school 活動非進行期（in_period=false），school 段跳過",
+    "runLogSchoolFetchFailed": "[task_runner] {uid} school/tasks 拉取失敗: {err}"
   },
   "addAccount": {
     "title": "新增騰訊帳號 · {realm}",
@@ -982,6 +1003,8 @@
     "闲置补偿上限": "閒置補償上限",
     "闲置加成的封顶值，避免某个账号权重无限增大": "閒置加成的封頂值，避免某個帳號權重無限增大",
     "快过期积分窗口": "快過期積分視窗",
+    "成本档位探索周期": "成本檔位探索週期",
+    "上游的选号优化：长时间只用高成本档位时，每隔这么久会改走一次低成本档位探测，成功就留在低档（省钱）。留空 = 用上游默认 30m，填 0 = 关闭该优化": "上游的選號優化：長時間只用高成本檔位時，每隔這麼久會改走一次低成本檔位探測，成功就留在低檔（省錢）。留空 = 用上游預設 30m，填 0 = 關閉該優化",
     "到期时间落在此窗口内的积分会被标记为「快过期」，选号时优先消耗掉，避免白白过期。留空或填 0 = 关闭该优化": "到期時間落在此視窗內的積分會被標記為「快過期」，選號時優先消耗掉，避免白白過期。留空或填 0 = 關閉該最佳化",
     "出站请求指纹脱敏": "出站請求指紋脫敏",
     "对发往上游的请求做轻量脱敏，降低被判定异常的概率。除非在排查问题，否则建议保持开启": "對發往上游的請求做輕量脫敏，降低被判定異常的機率。除非在排查問題，否則建議保持開啟",
@@ -997,7 +1020,7 @@
     "passthrough（透传客户端 system，默认）": "passthrough（透傳客戶端 system，預設）",
     "custom（替换为网关提示词）": "custom（替換為閘道提示詞）",
     "自定义提示词文件": "自訂提示詞檔案",
-    "仅在 custom 模式下生效。留空使用内置默认提示词": "僅在 custom 模式下生效。留空使用內建預設提示詞",
+    "在 custom 与 append 模式下生效。留空使用内置默认提示词": "在 custom 與 append 模式下生效。留空使用內建預設提示詞",
     "路径必须存在于上游容器内且可读；写错会导致上游启动失败、反代不可用。不确定就留空。": "路徑必須存在於上游容器內且可讀；寫錯會導致上游啟動失敗、反向代理無法使用。不確定就留空。",
     "留空 = 使用内置默认": "留空 = 使用內建預設",
     "请求体上限": "請求內文上限",
@@ -1092,6 +1115,7 @@
     "计划任务未执行": "計畫任務未執行",
     "令牌无效": "權杖無效",
     "未授权": "未授權",
-    "会话失效": "工作階段失效"
+    "会话失效": "工作階段失效",
+    "-> 生效": "-> 生效"
   }
 }
