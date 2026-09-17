@@ -43,18 +43,36 @@ def _bearer(request: Request) -> str:
     return request.headers.get('x-api-key', '').strip()
 
 
-# 请求体上限跟随上游的 server.max_body_mb（默认 8 MiB）。
+# 请求体上限。
 #
-# 不能写死：上游该值**可配置**（管理端设置页也能改），写死会让本端变成隐性瓶颈——
-# 用户把上游上限调大后，请求仍会在本端先被 413 拦掉，且看不出是谁拦的。
-# 每次读配置有 IO 成本，故做 10 秒缓存：改动很快生效，又不必每请求读文件。
+# 上游 9d1a21b **移除了** `server.max_body_mb`，其 chat handler 也不再预拦截
+# （`io.ReadAll(r.Body)` 不设限，超限问题交给上游自然响应）。所以本端不能再拿
+# 那个键当上限来源 —— 读不到就回落默认值的话，本端会变成**隐性瓶颈**：
+# 用户发一个 20MB 的正常大上下文请求，上游能处理，我们却先 413 拦掉，而且
+# 报错里指的那个配置项在上游已经不存在了，按文档怎么调都没用。
+#
+# 但**不能因此去掉上限**：上游是 Go，读的是流且能背压；本端要在内存里拼出完整
+# body 再 json.loads，几个并发的大请求就能把内存吃光（这正是当初加上限的原因）。
+# 所以做法是：上限改成**本端自己的**配置（`WB_GATEWAY_MAX_BODY_MB`），默认调到
+# 32 MB —— 足够容纳常见的长上下文与附件，又不会让单进程内存失控。
+#
+# 兼容：上游若仍是**旧版**（配置里还有 server.max_body_mb），继续尊重它的取值
+# （见 max_body_bytes），这样升级顺序不受限：先升哪边都不会出现「一边说 256MB
+# 另一边 413」的错配。
 _BODY_LIMIT_TTL = 10
 _body_limit_cache: dict[str, float | int] = {'at': 0.0, 'bytes': 0}
-DEFAULT_MAX_BODY_MB = 8
+DEFAULT_MAX_BODY_MB = _env_int('WB_GATEWAY_MAX_BODY_MB', 32)
 
 
 def max_body_bytes() -> int:
-    """当前生效的请求体上限（字节）。读取上游 config.json 的 server.max_body_mb。"""
+    """当前生效的请求体上限（字节）。
+
+    取值顺序：
+      1. 上游 config.json 的 `server.max_body_mb`（**仅旧版上游还有这个键**）；
+      2. 否则用本端默认值（`WB_GATEWAY_MAX_BODY_MB`，默认 32 MB）。
+
+    每次读配置有 IO 成本，故做 10 秒缓存：改动很快生效，又不必每请求读文件。
+    """
     now = time.time()
     cached = int(_body_limit_cache['bytes'])
     if cached and now - float(_body_limit_cache['at']) < _BODY_LIMIT_TTL:
@@ -76,8 +94,9 @@ def max_body_bytes() -> int:
 def _payload_too_large(limit: int) -> JSONResponse:
     mb = limit // 1024 // 1024
     return _oai_error(
-        f'请求体超过 {mb} MB 上限：请压缩内容（精简上下文或附件），'
-        f'或在管理端「设置 → 上游配置 → 请求上限」调大 server.max_body_mb 后重试',
+        f'请求体超过 {mb} MB 上限：请压缩内容（精简上下文或附件）。'
+        f'该上限由本网关设置（环境变量 WB_GATEWAY_MAX_BODY_MB），'
+        f'上游自 9d1a21b 起已不再限制请求体大小',
         413, 'invalid_request_error', 'payload_too_large',
     )
 

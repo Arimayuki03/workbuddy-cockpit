@@ -449,12 +449,23 @@ const PROMPT_FIELDS: Field[] = [
   },
 ];
 
+/**
+ * `server` 段（旧版上游的请求体上限）。
+ *
+ * 上游 9d1a21b **移除了** `server.max_body_mb`（其 chat handler 不再预拦截请求体）。
+ * 这里保留字段是为了**兼容仍跑旧版上游的部署**：那些部署的这个键依然生效，界面上
+ * 还能调。新建部署在新上游上会看到它「未生效」的提示。
+ *
+ * 本端自己的请求体上限是另一个东西（`WB_GATEWAY_MAX_BODY_MB`，默认 32 MB）——
+ * 那是本网关读进内存前必须有的保护，与上游无关，因此不在这里暴露（要改改环境变量）。
+ */
 const SERVER_FIELDS: Field[] = [
   {
     key: 'max_body_mb',
     kind: 'num',
-    label: '请求体上限',
-    desc: '单个请求体最大体积，超过返回 413。反代网关也按此值限制入站请求，调大可容纳更长的上下文',
+    label: '请求体上限（旧版上游）',
+    desc: '仅对**旧版**上游生效：上游 9d1a21b 起已移除该配置、不再限制请求体大小。'
+      + '本网关自身的入站上限由环境变量 WB_GATEWAY_MAX_BODY_MB 控制（默认 32 MB）',
     unit: 'MB',
     min: 1,
     max: 256,
@@ -614,8 +625,8 @@ const GROUPS: GroupDef[] = [
   {
     id: 'server',
     section: 'server',
-    title: '请求上限',
-    desc: '网关自身的请求约束',
+    title: '请求上限（旧版上游）',
+    desc: '仅当上游仍是 9d1a21b 之前的版本时生效',
     fields: SERVER_FIELDS,
   },
   {
