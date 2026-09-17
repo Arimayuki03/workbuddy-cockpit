@@ -116,7 +116,10 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		if r2, ok := msg["role"].(string); ok && r2 != "" {
 			role = r2
 		}
-		if txt, ok := msg["content"].(string); ok {
+		if txt, ok := msg["content"].(string); ok && txt != "" {
+			// 非空才认「已取到正文」（issue #142）：空串不占 latch 名额——
+			// 否则空 message 帧吞掉 latch，后续真正文被 !gotAnyContent 守卫静默拒绝。
+			// 空 content 帧的 role/reasoning_content/tool_calls 照常合并（下方不受影响）。
 			content.WriteString(txt)
 			gotAnyContent = true
 		}
@@ -169,7 +172,9 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 								if r2, ok := delta["role"].(string); ok && r2 != "" {
 									role = r2
 								}
-								if txt, ok := delta["content"].(string); ok {
+								if txt, ok := delta["content"].(string); ok && txt != "" {
+									// 非空才 latch（issue #142，与 message 分支同一口径）：OpenAI 风格
+									// role-only 首帧（content=""）不占名额，后续正文照常采入。
 									content.WriteString(txt)
 									gotAnyContent = true
 								}
