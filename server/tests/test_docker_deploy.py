@@ -22,6 +22,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -417,6 +418,70 @@ class ComposeLocalCustomizationTest(unittest.TestCase):
             self.assertIn('external: true', text, 'external 声明在更新后丢了')
             self.assertIn('127.0.0.1:7863:7863', text, '端口收敛没重新施加')
             self.assertNotIn('"7863:7863"', text, '公网绑定残留')
+
+
+class DbOpenFailureMessageTest(unittest.TestCase):
+    """issue #30：数据库打不开时要说清「哪个路径、为什么、怎么修」。
+
+    报障现象：docker compose 部署后容器起不来，日志里只有一行
+
+        sqlite3.OperationalError: unable to open database file
+
+    ——既不说路径也不说原因。最常见的成因是 **bind mount 的属主不对**：
+    容器以 uid 10001 运行，而 docker 首次自动创建 `./data` 时归 root，
+    于是容器内的 10001 写不进去。上游自己的 compose 对 `./data` 写了 chown
+    提示，我们这边漏了，用户只能靠猜。
+    """
+
+    def test_message_names_path_reason_and_fix(self) -> None:
+        from server import config, db
+        exc = sqlite3.OperationalError('unable to open database file')
+        msg = db._explain_db_open_failure(exc)
+        self.assertIn(str(config.DB_PATH), msg, '必须指出是哪个库文件')
+        self.assertIn('chown', msg, '要给出可直接执行的修法')
+        self.assertIn('10001', msg, '要说明是哪个 uid')
+        self.assertIn('./data', msg, '要指向宿主机上的那个目录')
+
+    def test_message_mentions_named_volume_fallback(self) -> None:
+        """改不了属主的场景（NFS/SMB）要给替代方案，不能只说 chown。"""
+        from server import db
+        msg = db._explain_db_open_failure(sqlite3.OperationalError('x'))
+        self.assertIn('卷', msg, '应提示命名卷作为替代')
+
+    def test_connect_wraps_into_runtime_error(self) -> None:
+        """connect() 要把 sqlite 的原始错误换成上面那条说明。
+
+        直接抛 OperationalError 的话，用户看到的还是那句无信息量的原文。
+        """
+        from server import db
+        with mock.patch.object(db.sqlite3, 'connect',
+                               side_effect=sqlite3.OperationalError('unable to open database file')):
+            with self.assertRaises(RuntimeError) as ctx:
+                db.connect()
+        self.assertIn('chown', str(ctx.exception))
+
+    def test_failed_connect_leaves_no_half_open_connection(self) -> None:
+        """失败后不能留下半开的 `_conn`。
+
+        留着的话，后续调用会拿到一个不可用的连接，报出更莫名的错误
+        （例如「attempt to write a readonly database」），把真正的原因埋掉。
+        """
+        from server import db
+        db._conn = None
+        with mock.patch.object(db, 'SCHEMA', 'CREATE TABLE t(a); SELECT bogus syntax'):
+            with self.assertRaises(Exception):
+                db.connect()
+        self.assertIsNone(db._conn, 'failed connect 后应把 _conn 复位')
+
+    def test_compose_documents_data_ownership(self) -> None:
+        """compose 里 `./data` 那条必须带权限提示（上游 compose 就有）。"""
+        compose = (_ROOT / 'docker-compose.yml').read_text(encoding='utf-8')
+        idx = compose.find('- ./data:/app/data')
+        self.assertGreater(idx, 0, '没找到 data 挂载')
+        # 该行上方 200 字符内应有 chown 提示
+        above = compose[max(0, idx - 400):idx]
+        self.assertIn('chown', above, './data 挂载缺少属主提示（issue #30 的成因）')
+        self.assertIn('10001', above, '应写明 uid')
 
 
 class DockerAssetsTest(unittest.TestCase):

@@ -148,7 +148,10 @@ export function TaskRunnerPanel() {
       {unavailable && (
         <div className="mb-3 flex items-start gap-2 rounded-xl bg-muted px-3 py-2">
           <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-amber-500" />
-          <span className="text-[11px] leading-relaxed text-muted-foreground">
+          {/* whitespace-pre-line：这段说明是**分条的**（两种部署形态各一条修法），
+              不加的话换行会被折成空格、整段挤成一坨，正好把「我该做哪一步」
+              这个最有用的信息淹掉。 */}
+          <span className="text-[11px] leading-relaxed whitespace-pre-line text-muted-foreground">
             {status?.unavailable_reason}
           </span>
         </div>
