@@ -98,6 +98,15 @@ interface DurationField {
   label: string;
   desc: string;
   def: string;
+  /**
+   * 允许 `0` / 空串（上游语义：**关闭该特性**，不是格式错误）。
+   *
+   * 必须显式声明：`DURATION_RE` 只认「数字+单位」，`0` 与空串都过不了它。
+   * 早先「留空或填 0 = 关闭」只写在 desc 里、没告诉校验器，于是用户按提示填 0
+   * 想关掉优化，`pickValues` 又把它当成非法值**静默换回默认**（168h）——
+   * 界面看不出任何异常，用户以为自己关掉了，其实一直开着。
+   */
+  offWhenZero?: boolean;
 }
 
 interface SelectField {
@@ -133,6 +142,18 @@ type Field =
 
 /** 时长格式校验：数字 + 单位（s/m/h/d） */
 const DURATION_RE = /^\d+\s*(s|m|h|d)$/i;
+
+/**
+ * 一个时长字段的取值是否合法。
+ *
+ * `offWhenZero` 的字段额外接受 `0` 与空串（上游把两者都当「关闭」，见该字段注释）；
+ * 其余字段仍要求严格的「数字+单位」。
+ */
+function durationOk(f: DurationField, raw: unknown): boolean {
+  const text = String(raw ?? '').trim();
+  if (f.offWhenZero && (text === '' || text === '0')) return true;
+  return DURATION_RE.test(text);
+}
 
 /** 把时刻数组格式化为可读文本，如 [9,21] -> "9, 21" */
 function hoursToText(v: unknown): string {
@@ -350,7 +371,19 @@ const POOL_FIELDS: Field[] = [
     kind: 'duration',
     label: '快过期积分窗口',
     desc: '到期时间落在此窗口内的积分会被标记为「快过期」，选号时优先消耗掉，避免白白过期。留空或填 0 = 关闭该优化',
+    offWhenZero: true,
     def: '168h',
+  },
+  {
+    key: 'cost_explore_interval',
+    kind: 'duration',
+    label: '成本档位探索周期',
+    // 语义偏「调优」而非「必需」，如实说清代价：探索期间会改走成本更低的档位，
+    // 因此可能与平时选到的账号不同。默认 30m 相当于每模型每天最多 48 次。
+    desc: '上游的选号优化：长时间只用高成本档位时，每隔这么久会改走一次低成本档位探测，'
+      + '成功就留在低档（省钱）。留空 = 用上游默认 30m，填 0 = 关闭该优化',
+    offWhenZero: true,
+    def: '30m',
   },
 ];
 
@@ -409,7 +442,7 @@ const PROMPT_FIELDS: Field[] = [
     key: 'file',
     kind: 'text',
     label: '自定义提示词文件',
-    desc: '仅在 custom 模式下生效。留空使用内置默认提示词',
+    desc: '在 custom 与 append 模式下生效。留空使用内置默认提示词',
     caution: '路径必须存在于上游容器内且可读；写错会导致上游启动失败、反代不可用。不确定就留空。',
     placeholder: '留空 = 使用内置默认',
     def: '',
@@ -628,7 +661,7 @@ function pickValues(fields: Field[], source: Record<string, unknown> | undefined
         out[f.key] = Array.isArray(raw) ? hoursToText(raw) : hoursToText(f.def);
         break;
       case 'duration':
-        out[f.key] = typeof raw === 'string' && DURATION_RE.test(raw) ? raw : f.def;
+        out[f.key] = durationOk(f, raw) ? String(raw).trim() : f.def;
         break;
       case 'select':
         // 只接受枚举内的取值；配置里是别的值（上游改过枚举）时回退默认
@@ -662,7 +695,7 @@ function fieldError(f: Field, raw: FieldValue): string | undefined {
     return r.ok ? undefined : r.error;
   }
   if (f.kind === 'duration') {
-    return DURATION_RE.test(String(raw).trim()) ? undefined : tGlobal('settings.errDuration');
+    return durationOk(f, raw) ? undefined : tGlobal('settings.errDuration');
   }
   if (f.kind === 'text' && /[\r\n\u0000-\u001f]/.test(String(raw))) {
     return tGlobal('settings.errNoNewline');
@@ -681,7 +714,7 @@ function toWire(
   }
   if (f.kind === 'duration') {
     const t = String(raw).trim();
-    return DURATION_RE.test(t)
+    return durationOk(f, t)
       ? {ok: true, value: t}
       : {ok: false, error: tGlobal('settings.errDuration')};
   }

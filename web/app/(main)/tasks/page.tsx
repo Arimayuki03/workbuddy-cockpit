@@ -17,8 +17,7 @@ import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {RichText} from '@/lib/i18n/rich-text';
 import {useI18n, useT} from '@/lib/i18n/provider';
-import {t as tStatic, tp as tpStatic} from '@/lib/i18n';
-import {translateRunSummary, translateTaskLogText} from '@/lib/i18n/tasklog';
+import {checkinResultText, taskLogResultText} from '@/lib/tasklog-text';
 import {accountApi, errText} from '@/lib/api';
 import type {CheckinLog, TaskLog, TaskLogResponse} from '@/lib/types';
 import {fmtDateTime, fmtNumber} from '@/lib/format';
@@ -73,74 +72,10 @@ const KIND_LABEL_KEYS: Record<string, string> = {
 };
 
 /**
- * 结果文案：后端已把上游英文日志转成中文（`message_cn`），这里再过一遍短语表，
- * 让收录过的结果行跟随界面语言；未收录的（含数字的模板句）保持中文原文。
+ * 结果文案：三层接力（一键执行历史 → 积分流水 → 服务端模板 → 短语表兜底）。
+ * 实现抽到 `lib/tasklog-text.ts`，好让 `dev/i18n-pipeline-check.mjs` 能真实
+ * import 它逐语言验收 —— 这段接错只会安静地渲染出键名或原文，光看页面容易漏。
  */
-function resultText(l: TaskLog): string {
-  const raw = l.message_cn || l.message;
-  // 先按已知模板反解（一键执行历史 / 积分流水 / 服务端模板句），未命中再退到短语表。
-  // 模板各自带**自己的译文键**，所以不能再把 tp() 传进去当取值函数
-  // （那样会拿 tasks.creditLedger 去查短语表，界面上直接显示键名）。
-  const staged = creditLedgerText(taskRunHistoryText(raw));
-  return translateTaskLogText(staged) ?? tpStatic(staged);
-}
-
-/**
- * 一键执行的历史记录文案本地化。
- *
- * 服务端（`server/services/taskrun.py` 的 `_record_history`）按
- * `{标签}（{target}）{结果摘要}` 的模板写库：标签是固定两种，摘要则是上游脚本的
- * 英文汇总行（`task_runner done: …`）——原文都原样保留。这里按同一模板反解，
- * 只把外层的标签与括号交给译文重排（中文的「（）」在其它语言里并不通用），
- * 解不出就原样返回，不会把内容弄丢。
- */
-const TASK_RUN_HISTORY = /^(一键领奖|一键做任务)（(.*?)）([\s\S]*)$/;
-const TASK_RUN_HISTORY_KEYS: Record<string, string> = {
-  一键领奖: 'tasks.runLogHistoryClaim',
-  一键做任务: 'tasks.runLogHistoryFull',
-};
-
-function taskRunHistoryText(message: string): string {
-  const m = TASK_RUN_HISTORY.exec(message.trim());
-  if (!m) return message;
-  const key = TASK_RUN_HISTORY_KEYS[m[1]];
-  if (!key) return message;
-  // 摘要先本地化（`退出码 N` / `完成` 这类是后端写的固定文案）再拼进模板，
-  // 否则整行带上译文标签后就再没有模板能匹配上摘要了。
-  return tStatic(key, {target: m[2], summary: translateRunSummary(m[3])});
-}
-
-/**
- * 积分流水的文案本地化。
- *
- * `余额 +100（2100 → 2200）` 由服务端（`server/services/credits.py`）按模板生成并存库——
- * 存的是固定句式加数字。这里按同一模板反解，交给译文重排（中文的括号与箭头位置
- * 在其它语言里并不通用）；解不出就原样返回，不会把内容弄丢。
- */
-const CREDIT_LEDGER = /^余额 \+(\d+)（(\d+) → (\d+)）(?:\s·\s(.*))?$/;
-
-function creditLedgerText(message: string): string {
-  const m = CREDIT_LEDGER.exec(message.trim());
-  if (!m) return message;
-  const [, delta, prev, next, nickname] = m;
-  return (
-    tStatic('tasks.creditLedger', {delta, prev, next}) + (nickname ? ` · ${nickname}` : '')
-  );
-}
-
-/**
- * 签到记录「结果」列的文案。
- *
- * 两种来源：本端触发的写 `checkin_logs.message`（固定文案，含「国际版无签到体系，
- * 已跳过」这类），上游自动签到的写 `task_logs.message_cn`（含「本轮签到完成：共 N 个…」
- * 这类模板句）。两者都是中文原文，因此先在展示层反解模板，再走短语表兜底，
- * 都认不出来时保留中文原文（宁可显示原文，也不显示键名或空白）。
- */
-function checkinResultText(l: CheckinLog): string {
-  const raw = l.message || '';
-  return translateTaskLogText(raw) ?? (tpStatic(raw) || (l.success ? tStatic('common.success') : tStatic('common.failure')));
-}
-
 /**
  * 单次拉取条数上限。
  *
@@ -681,7 +616,7 @@ export default function TasksPage() {
                     className={'mt-1 break-words text-[11px] leading-4 ' + (LEVEL_TONE[l.level] || 'text-muted-foreground')}
                     title={l.message}
                   >
-                    {resultText(l)}
+                    {taskLogResultText(l)}
                   </div>
                   <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
                     <span className="truncate" title={l.uid}>
@@ -718,7 +653,7 @@ export default function TasksPage() {
                         className={`max-w-[520px] truncate text-xs ${LEVEL_TONE[l.level] || ''}`}
                         title={l.message}
                       >
-                        {resultText(l)}
+                        {taskLogResultText(l)}
                       </TableCell>
                       <TableCell className="pr-4 text-right text-xs font-medium tabular-nums">
                         {l.credits > 0 ? (

@@ -78,7 +78,72 @@ class ParseTaskLines(unittest.TestCase):
             assert ev is not None, line
             self.assertEqual(ev['level'], 'error', line)
 
-    # ── 上游 2026-09-12 起的日志格式变化 ────────────────
+    # ── 上游 2026-09-17 起的日志格式变化：账号标识变成 `昵称(uid8)` ────
+    #
+    # 上游 `logfmt.Label()`（internal/logfmt/logfmt.go:60）把约 30 处调度日志的
+    # 账号标识从纯 uid8 改成 `昵称(uid8)`，理由是排障时人眼没法从 uid8 认出是哪个号。
+    #
+    # 这一组测试是**防静默失效**的：解析器原先只认 [0-9A-Za-z_-]，遇到含中文与
+    # 括号的标签会直接不匹配——不报错、不崩溃，只是「任务记录」里账号维度的行
+    # 全部消失。其中最要命的是 travel 的 `claim ok … reward=…`，它是唯一能拿到
+    # 旅行积分的日志源，丢了它积分收益会恒显示 0（把「赚到了」显示成「没赚」）。
+    def test_nickname_label_form(self) -> None:
+        """`昵称(uid8)` 形态要能解析，且 uid 归一化回 uid8。"""
+        ev = tasklog.parse_line(f'{DOCKER}checkin 猫猫(9b212d8c): 今日已签到')
+        assert ev is not None
+        self.assertEqual(ev['kind'], 'checkin')
+        self.assertEqual(ev['uid'], '9b212d8c',
+                         'uid 必须归一化回 uid8 —— 否则同一账号会按昵称分裂成多个')
+
+    def test_nickname_label_keeps_credits(self) -> None:
+        """旅行领奖的积分不能因为标签变形而丢失（这是唯一的积分来源）。"""
+        ev = tasklog.parse_line(
+            f'{DOCKER}travel 猫猫(9b212d8c): claim ok record=12 reward=100'
+        )
+        assert ev is not None
+        self.assertEqual(ev['uid'], '9b212d8c')
+        self.assertEqual(ev['credits'], 100)
+        self.assertEqual(ev['level'], 'credit')
+
+    def test_nickname_label_stage_line(self) -> None:
+        """阶段行（标签与阶段名之间是空格）同样要认。"""
+        ev = tasklog.parse_line(f'{DOCKER}checkin 猫猫(9b212d8c) refresh: invalid_grant')
+        assert ev is not None
+        self.assertEqual(ev['uid'], '9b212d8c')
+        self.assertIn('refresh', ev['message'])
+
+    def test_nickname_label_with_warn_prefix(self) -> None:
+        ev = tasklog.parse_line(f'{DOCKER}WARN: activity 猫猫(9b212d8c): streak days=0')
+        assert ev is not None
+        self.assertEqual(ev['uid'], '9b212d8c')
+        self.assertEqual(ev['level'], 'warn')
+
+    def test_nickname_containing_parens_and_spaces(self) -> None:
+        """昵称是自由文本：可能自带括号、空格、英文。
+
+        取最外层括号 + 要求括号内是合法 uid 形态，才能正确切出 uid8。
+        """
+        for nick in ('猫猫(小)', 'My Cat 01', 'a(b)(c)', '小黑·测试'):
+            with self.subTest(nick=nick):
+                ev = tasklog.parse_line(f'{DOCKER}checkin {nick}(9b212d8c): 今日已签到')
+                assert ev is not None, f'昵称 {nick!r} 的行被丢弃了'
+                self.assertEqual(ev['uid'], '9b212d8c')
+
+    def test_label_does_not_swallow_reserved_words(self) -> None:
+        """放宽账号标识的匹配后，done / skipped 这类不能又被当成账号。
+
+        这是改造的**主要风险**：`_LABEL_TOKEN` 放宽成「任意文本」，若不经过
+        `_normalize_uid` 的保留字过滤，`checkin done: total=…` 会凭空多出一个
+        叫 done 的账号，界面上就出现不存在的号。
+        """
+        for line in ('checkin done: total=3 ok=1 fail=0 skipped=0',
+                     'scheduled checkin skipped: not in window',
+                     'scheduled activity skipped: window'):
+            with self.subTest(line=line):
+                ev = tasklog.parse_line(f'{DOCKER}{line}')
+                uid = (ev or {}).get('uid', '')
+                self.assertEqual(uid, '', f'不该解析出账号: {line} → uid={uid!r}')
+
     def test_uid_truncated_to_8_chars(self) -> None:
         """上游把日志里的 uid 截成前 8 位。"""
         ev = tasklog.parse_line(

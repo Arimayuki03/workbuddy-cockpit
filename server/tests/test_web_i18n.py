@@ -39,6 +39,16 @@ _HAN = re.compile(r'[\u3400-\u4dbf\u4e00-\u9fff]')
 # 前面不允许是字母、数字、`.`、`$`——否则 foo.t('x') 这类别的对象的方法会被算进来。
 _T_CALL_KEY = re.compile(r"""(?<![\w.$])t\(\s*['\"]([A-Za-z0-9_.]+)['\"]""")
 
+# 别名形式：`import {t as tStatic} from '@/lib/i18n'` 之后写的 tStatic('a.b.c')。
+#
+# 必须单独认出来：上面那条要求 `t` 后面紧跟 `(`，而别名是 `tStatic(` —— `t` 后面
+# 是 `S`，一条也匹配不上。于是两个文件（lib/i18n/taskrun.ts / tasklog.ts，合计数
+# 十条文案规则）的键全部绕过了守卫：把其中某个键写成 `tasks.runExitCod`，
+# 字典校验、短语校验、本条守卫会一起通过，用户却在界面上直愣愣看到键名。
+# 键名是写死的，只是换了绑定的局部名——静态查得出来，就该查。
+_T_ALIAS_KEY = re.compile(
+    r"""(?<![\w.$])(?:tStatic|tGlobal|translate)\(\s*['\"]([A-Za-z0-9_.]+)['\"]""")
+
 
 def _load(locale: str) -> dict:
     return json.loads((_LOCALES_DIR / f'{locale}.json').read_text(encoding='utf-8'))
@@ -150,32 +160,56 @@ class WebKeyUsageTest(unittest.TestCase):
     字典校验照样全绿，用户却在界面上直愣愣看到 `accounts.expiryColumn`。
     本测试补上这一环——扫描前端源码里的字面量键，逐个回字典里查。
 
-    （动态拼出来的键、短语表 tp('中文') 不在此列；前者静态不可知，后者另有守卫。）
+    （动态拼出来的键、短语表 tp('中文') 不在此列；前者静态不可知，后者另有守卫。
+    别名导入的调用（tStatic / tGlobal / translate）由 _T_ALIAS_KEY 一并扫描。）
     """
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.flat = _flatten(_load(_SOURCE))
         cls.used: dict[str, list[str]] = {}
+        cls.aliased: dict[str, list[str]] = {}
         for path in sorted((_ROOT / 'web').rglob('*')):
             if path.suffix not in ('.ts', '.tsx') or 'node_modules' in path.parts:
                 continue
-            for key in _T_CALL_KEY.findall(path.read_text(encoding='utf-8')):
-                cls.used.setdefault(key, []).append(str(path.relative_to(_ROOT)))
+            text = path.read_text(encoding='utf-8')
+            # 一律用 posix 分隔符：断言里写的路径是 `web/lib/...` 这种形态，
+            # 而 Windows 上 str(Path) 会给反斜杠，直接比会永远对不上。
+            rel = path.relative_to(_ROOT).as_posix()
+            for key in _T_CALL_KEY.findall(text):
+                cls.used.setdefault(key, []).append(rel)
+            for key in _T_ALIAS_KEY.findall(text):
+                cls.aliased.setdefault(key, []).append(rel)
 
     def test_scan_is_not_vacuous(self) -> None:
         """先确认扫描真的抓到了东西，免得正则失效后测试空转照样绿。"""
         self.assertGreater(len(self.used), 100, '没扫到几个键，正则可能失配了')
         self.assertIn('security.auditLog', self.used)
 
+    def test_alias_scan_is_not_vacuous(self) -> None:
+        r"""别名的扫描同样要确认抓到了东西。
+
+        这条正是缺口本身：加了别名扫描但正则没生效（比如写成 ``t\w+`` 却漏了
+        左边界的负向断言），下面那条测试仍会通过——因为 ``used`` 有内容。
+        所以这里要求别名键**确实**抓到了相当数量，并且覆盖到两个新文件。
+        """
+        self.assertGreater(len(self.aliased), 20,
+                           f'别名键只扫到 {len(self.aliased)} 个，正则可能失配')
+        files = {f for fs in self.aliased.values() for f in fs}
+        for expect in ('web/lib/i18n/taskrun.ts', 'web/lib/i18n/tasklog.ts'):
+            self.assertIn(expect, files, f'{expect} 的键没被扫到 —— 别名守卫没生效')
+
     def test_all_literal_keys_exist(self) -> None:
-        missing = {
-            key: sorted(set(files))
-            for key, files in self.used.items()
-            if key not in self.flat
-        }
-        detail = '; '.join(f'{k} ← {v[0]}' for k, v in sorted(missing.items())[:10])
-        self.assertEqual(missing, {}, f'有 {len(missing)} 个键在字典里不存在：{detail}')
+        for name, table in (('t()', self.used), ('别名', self.aliased)):
+            with self.subTest(form=name):
+                missing = {
+                    key: sorted(set(files))
+                    for key, files in table.items()
+                    if key not in self.flat
+                }
+                detail = '; '.join(f'{k} ← {v[0]}' for k, v in sorted(missing.items())[:10])
+                self.assertEqual(missing, {},
+                                 f'{name} 有 {len(missing)} 个键在字典里不存在：{detail}')
 
 
 class WebPhraseTest(unittest.TestCase):

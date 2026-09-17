@@ -79,6 +79,32 @@ class ModelsSourceTest(unittest.TestCase):
                   'owned_by': 'workbuddy', 'context_length': 131072}]
         self.assertEqual(wb2api.models_source(items), 'static')
 
+    def test_dynamic_entry_with_name_but_no_max_output_tokens(self) -> None:
+        """动态条目可能整表都没有 `max_output_tokens`，靠 `name` 仍能认出是动态。
+
+        `max_output_tokens` 是**四级查找全不命中就省略**（上游 handler.go 的
+        `MaxOutputTokensListingV4`，兜底是省略字段而不是填默认值），所以理论上存在
+        整张表都不带它的部署。而 `name` 的写出条件宽得多（模型对象自带 Name 即可，
+        见 `applyModelInfoFields`）。只认前者会在这类部署上误报「上游动态拉取失败，
+        已回退静态表」——用户会以为是自己账号或配置坏了。
+        """
+        items = [{'id': 'cn:glm-5.2', 'object': 'model', 'created': 1753600000,
+                  'owned_by': 'workbuddy', 'context_length': 262144,
+                  'name': 'GLM-5.2'}]
+        self.assertEqual(wb2api.models_source(items), 'dynamic')
+
+    def test_static_table_has_no_name_field(self) -> None:
+        """判据的前提：老上游的静态条目**不带** `name`。
+
+        若哪天静态表也带上 name，上面那条判据就会把「回退」误报成「实时」，
+        所以把这个前提也钉住（对照上游 `1b7ce4a~1` 的 staticModels 定义：
+        条目只有 id/object/created/owned_by/context_length）。
+        """
+        static_entry = {'id': 'glm-5.2', 'object': 'model', 'created': 1753600000,
+                        'owned_by': 'workbuddy', 'context_length': 131072}
+        self.assertNotIn('name', static_entry)
+        self.assertEqual(wb2api.models_source([static_entry]), 'static')
+
 
 if __name__ == '__main__':
     unittest.main()

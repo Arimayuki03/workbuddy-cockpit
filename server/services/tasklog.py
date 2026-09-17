@@ -33,6 +33,25 @@ _KINDS = 'travel|activity|checkin|keepalive|user-resource'
 # 账号 uid 的形态：字母数字（允许 - _），长度 >= 6。
 _UID_SHAPE = re.compile(r'^[0-9A-Za-z_-]{6,64}$')
 
+# 账号**标签**形态（上游 7e43884 起）：`昵称(uid8)`，昵称为空时退化成纯 uid8。
+#
+# 为什么必须认它：上游 `logfmt.Label()` 把调度日志里的账号标识从纯 uid8 改成
+# `昵称(uid8)`（`internal/scheduler/scheduler.go:340` 等约 30 处），理由是排障时
+# 人眼没法从 uid8 认出是哪个号。**而我们的解析器只认 `[0-9A-Za-z_-]`**，于是
+# 全部账号维度的行会静默消失——不报错、不崩溃，只是「任务记录」里越来越少。
+# 最要命的是 `travel …: claim ok record=… reward=…` 是唯一能拿到旅行积分的日志源，
+# 丢掉它等于积分收益恒显示 0（把「赚到了」显示成「没赚」）。
+#
+# 解析出的 uid 一律**归一化回 uid8**（见 `_normalize_uid`）：界面按 uid 聚合
+# 「某账号 N 条记录」，若直接拿 `昵称(uid8)` 当 uid，同一个号会因昵称变化而分裂成
+# 好几个不存在的账号。昵称本身由 `routers/accounts.py` 的 `_nickname_resolver`
+# 从账号表查，不依赖日志里的这一份。
+_LABEL_SHAPE = re.compile(r'^(.{1,64}?)\(([0-9A-Za-z_-]{6,64})\)$')
+
+# 账号标识的**贪婪**匹配式（含中文昵称与括号），用在下面那几种行形态里。
+# 用非贪婪 + 回溯定位紧随其后的分隔符，比穷举字符集稳：昵称可以是任意文本。
+_LABEL_TOKEN = r'(.+?)'
+
 # 但上游除任务行外还会打「阶段行」与「汇总行」，形如
 #   `checkin done: total=3 ok=1 ...`
 #   `scheduled checkin skipped: ...`
@@ -47,17 +66,18 @@ _RESERVED_TOKENS = {
     'already', 'scheduled', 'start', 'end', 'begin', 'result', 'error',
 }
 
-# 主形态：[WARN:|ERR:] <kind> <uid>: <rest>
+# 主形态：[WARN:|ERR:] <kind> <uid 或 昵称(uid8)>: <rest>
 # 上游 2026-09-12 起：uid 截前 8 位，可疑/失败行加 WARN:/ERR: 前缀
+# 上游 7e43884 起：uid8 前面多了 `昵称(…)`，故改用 _LABEL_TOKEN 匹配。
 _TASK_LINE = re.compile(
-    r'(?:(WARN|ERR):\s+)?\b(' + _KINDS + r')\s+([0-9A-Za-z_-]+):\s*(.*)$'
+    r'(?:(WARN|ERR):\s+)?\b(' + _KINDS + r')\s+' + _LABEL_TOKEN + r':\s*(.*)$'
 )
 
-# 阶段形态：[WARN:|ERR:] <kind> <uid> <stage>: <rest>
-# 例：`checkin 9b212d8c refresh: <err>`、`checkin 9b212d8c save: <err>`
-# 注意 uid 与阶段名之间是空格而非冒号，主形态匹配不到，需单独认。
+# 阶段形态：[WARN:|ERR:] <kind> <标签> <stage>: <rest>
+# 例：`checkin 9b212d8c refresh: <err>`、`checkin 猫猫(9b212d8c) save: <err>`
+# 注意标签与阶段名之间是空格而非冒号，主形态匹配不到，需单独认。
 _STAGE_LINE = re.compile(
-    r'(?:(WARN|ERR):\s+)?\b(' + _KINDS + r')\s+([0-9A-Za-z_-]+)\s+'
+    r'(?:(WARN|ERR):\s+)?\b(' + _KINDS + r')\s+' + _LABEL_TOKEN + r'\s+'
     r'([a-z][a-z0-9_-]{1,20}):\s*(.*)$'
 )
 
@@ -136,11 +156,27 @@ def _event(ts: int, kind: str, uid: str, level: str, credits: int, message: str)
     }
 
 
-def _is_uid(token: str) -> bool:
+def _normalize_uid(token: str) -> str:
+    """把日志里的账号标识归一化成 uid8；不是已知形态则返回空串。
+
+    ``昵称(uid8)`` → uid8；纯 uid8 原样返回；其余（含保留字 done / skipped）
+    返回空串，调用方据此跳过该行。
+
+    昵称里可能自带括号（如「猫猫(小)」），所以 `_LABEL_SHAPE` 用**非贪婪**匹配
+    最外层的一对括号，并以「括号内必须是合法 uid 形态」为判据 —— `a(b)(c)` 这种
+    会正确取到 `(c)`。
+    """
     tok = token or ''
     if tok.lower() in _RESERVED_TOKENS:
-        return False
-    return bool(_UID_SHAPE.match(tok))
+        return ''
+    m = _LABEL_SHAPE.match(tok)
+    if m:
+        return m.group(2)
+    return tok if _UID_SHAPE.match(tok) else ''
+
+
+def _is_uid(token: str) -> bool:
+    return bool(_normalize_uid(token))
 
 
 def _classify(rest: str, sev: str | None) -> tuple[int, str]:
@@ -295,22 +331,26 @@ def parse_line(line: str) -> dict | None:
             f'计划任务未执行：{reason}' if reason else '计划任务未执行',
         )
 
-    # 形态 1：任务结果（uid 必须像 uid）
+    # 形态 1：任务结果（账号标识必须认得出来）
     m = _TASK_LINE.search(body)
-    if m and _is_uid(m.group(3)):
-        sev, kind, uid = m.group(1), m.group(2), m.group(3)
-        rest = m.group(4).strip()
-        credits, level = _classify(rest, sev)
-        return _event(ts, kind, uid, level, credits, rest)
+    if m:
+        uid = _normalize_uid(m.group(3))
+        if uid:
+            sev, kind = m.group(1), m.group(2)
+            rest = m.group(4).strip()
+            credits, level = _classify(rest, sev)
+            return _event(ts, kind, uid, level, credits, rest)
 
-    # 形态 2：阶段失败（uid 后跟阶段名，如 `checkin <uid> refresh: ...`）
+    # 形态 2：阶段失败（标签后跟阶段名，如 `checkin <标签> refresh: ...`）
     m = _STAGE_LINE.search(body)
-    if m and _is_uid(m.group(3)):
-        sev, kind, uid = m.group(1), m.group(2), m.group(3)
-        stage, rest = m.group(4), m.group(5).strip()
-        message = f'{stage}: {rest}'
-        credits, level = _classify(message, sev)
-        return _event(ts, kind, uid, level, credits, message)
+    if m:
+        uid = _normalize_uid(m.group(3))
+        if uid:
+            sev, kind = m.group(1), m.group(2)
+            stage, rest = m.group(4), m.group(5).strip()
+            message = f'{stage}: {rest}'
+            credits, level = _classify(message, sev)
+            return _event(ts, kind, uid, level, credits, message)
 
     return None
 

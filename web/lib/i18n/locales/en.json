@@ -684,7 +684,28 @@
     "checkinReadFailed": "Read failed: {exc}",
     "runExitCode": "Exit code {code}",
     "runFailed": "Failed: {msg}",
-    "stageLine": "{label}: {detail}"
+    "stageLine": "{label}: {detail}",
+    "runLogClaimedThisRound": "[task_runner] {uid} {code}: {status} -> claimed (credited this round)",
+    "runLogClaimedThisRoundProgress": "[task_runner] {uid} {code}: {status}/{cur} -> claimed (credited this round)",
+    "runLogLightNoChange": "[task_runner] {uid} {code}: {status} -> {after}/{afterProg} (no change)",
+    "runLogLightDone": "[task_runner] {uid} {code}: {status} -> {after}/{afterProg} (lit up)",
+    "runLogLightPartial": "[task_runner] {uid} {code}: {status} -> {after}/{afterProg} (partially lit, below target)",
+    "runLogAcceptVerify": "[task_runner] {uid} {code}: accept attempt {attempt} {st} status={status} read-back={readback}{ok}",
+    "runLogAcceptNotRegistered": "[task_runner] {uid} {code}: accept not registered; skipping this round, will retry next time",
+    "runLogLightUpKindDryRun": "[task_runner] {uid} {code}: query {status}({cur}/{target}) -> can light up ({kind}), dry-run skipped",
+    "runLogAlreadyDone": "[task_runner] {uid} {code}: query {status}({cur}/{target}) -> completed/claimed, skipped",
+    "runLogSchoolUnmapped": "[task_runner] {uid} {code}: query {status} -> school not mapped (manual/unknown), skip",
+    "runLogPreUnlock": "[task_runner] {uid} {code}: report {status} code={sc} prerequisite unlocked",
+    "runLogViewedActivated": "[task_runner] {uid} {code}: viewed activated {status}",
+    "runLogViewedFailed": "[task_runner] {uid} {code}: viewed failed: {err}",
+    "runLogReportFailed": "[task_runner] {uid} {code}: report failed #{i}: {err}",
+    "runLogClaimFailed": "[task_runner] {uid} {code}: claim failed: {err} (can claim later)",
+    "runLogMpListFailed": "[task_runner] {uid} {code}: mp list_tasks failed: {err}",
+    "runLogMpTaskMissing": "[task_runner] {uid} {code}: task not found in mp scope, skip",
+    "runLogMpQueryFailed": "[task_runner] {uid} {code}: mp query failed: {err}",
+    "runLogOnlyClaimNotCompleted": "[task_runner] {uid} {code}: only_claim skipped (not completed)",
+    "runLogSchoolNotInPeriod": "[task_runner] {uid} school activity not in period (in_period=false); school section skipped",
+    "runLogSchoolFetchFailed": "[task_runner] {uid} school/tasks fetch failed: {err}"
   },
   "addAccount": {
     "title": "Add Tencent account · {realm}",
@@ -997,6 +1018,8 @@
     "闲置补偿上限": "Idle weight cap",
     "闲置加成的封顶值，避免某个账号权重无限增大": "Caps the idle bonus so one account's weight cannot grow without bound",
     "快过期积分窗口": "Expiring-credits window",
+    "成本档位探索周期": "Cost-tier exploration interval",
+    "上游的选号优化：长时间只用高成本档位时，每隔这么久会改走一次低成本档位探测，成功就留在低档（省钱）。留空 = 用上游默认 30m，填 0 = 关闭该优化": "An upstream account-picking optimisation: when only a high-cost tier has been used for a while, it switches to a low-cost tier to probe once every this interval, and stays there if it succeeds (saving credits). Empty = upstream default 30m, 0 = disable this optimisation",
     "到期时间落在此窗口内的积分会被标记为「快过期」，选号时优先消耗掉，避免白白过期。留空或填 0 = 关闭该优化": "Credits expiring inside this window are marked as expiring soon and consumed first when picking an account, so they are not wasted. Empty or 0 disables the optimisation",
     "出站请求指纹脱敏": "Outbound fingerprint sanitising",
     "对发往上游的请求做轻量脱敏，降低被判定异常的概率。除非在排查问题，否则建议保持开启": "Lightly sanitises outbound requests to reduce the chance of being flagged as anomalous. Keep it on unless you are debugging",
@@ -1012,7 +1035,7 @@
     "passthrough（透传客户端 system，默认）": "passthrough (forward client system, default)",
     "custom（替换为网关提示词）": "custom (replace with the gateway prompt)",
     "自定义提示词文件": "Custom prompt file",
-    "仅在 custom 模式下生效。留空使用内置默认提示词": "Only applies in custom mode. Empty uses the built-in default prompt",
+    "在 custom 与 append 模式下生效。留空使用内置默认提示词": "Applies in both custom and append modes. Empty uses the built-in default prompt",
     "路径必须存在于上游容器内且可读；写错会导致上游启动失败、反代不可用。不确定就留空。": "The path must exist and be readable inside the upstream container; a wrong value makes upstream fail to start and the gateway unavailable. Leave it empty if unsure.",
     "留空 = 使用内置默认": "empty = use the built-in default",
     "请求体上限": "Max request body",
@@ -1107,6 +1130,7 @@
     "计划任务未执行": "The scheduled task did not run",
     "令牌无效": "Invalid token",
     "未授权": "Unauthorized",
-    "会话失效": "Session expired"
+    "会话失效": "Session expired",
+    "-> 生效": "-> registered"
   }
 }
