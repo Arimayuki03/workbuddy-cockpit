@@ -100,6 +100,10 @@ export function AddAccountDialog({
         pollingRef.current = true;
         try {
           const res = await accountApi.poll(stateRef.current, realm, region || undefined);
+          // 拿到任何一次正常响应就清零：计数要表达的是「**连续**失败」，
+          // 而不是「累计失败了几次」。不清零的话，几分钟内零散抖三次
+          // （每次之间都恢复正常）也会触发中断，把一次正常的扫码打断。
+          failsRef.current = 0;
           if (res.status === 'success') {
             stopPoll();
             setPhase('success');

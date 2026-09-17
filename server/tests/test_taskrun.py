@@ -437,6 +437,113 @@ class StreamingOutputTest(unittest.TestCase):
                         '输出被块缓冲了，用户在界面上看到的就是「卡住没反应」')
 
 
+class EventLoopResponsivenessTest(unittest.TestCase):
+    """事件循环不能被 docker 调用冻住。
+
+    背景（发版前自审发现）：脚本缺失时会触发 `docker inspect`（≤15s）与
+    `docker cp`（≤60s）去尝试提取，而**这些是同步阻塞调用**。它们的调用方里
+    有三个跑在事件循环里：定时领奖循环、启动任务的 async 接口、以及执行任务
+    的 `_run()`。一旦在这条路径上同步跑 docker，整个服务（**包括对外的
+    `/v1/*` 网关**）都会卡住 —— 而网关才是用户真正在用的东西。
+
+    这里的判据是「心跳协程还能不能按时醒」：同步阻塞期间它一次都醒不了。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_data = config.DATA_DIR
+        self._orig_auth = config.AUTH_DIR
+        config.DATA_DIR = Path(self._tmp.name)
+        config.AUTH_DIR = Path(self._tmp.name) / 'auths'
+        config.AUTH_DIR.mkdir(parents=True, exist_ok=True)
+        taskrun._last_extract_failure.update({'at': 0.0, 'reason': ''})
+        taskrun._image_id_cache.update({'at': 0.0, 'id': ''})
+
+    def tearDown(self) -> None:
+        config.DATA_DIR = self._orig_data
+        config.AUTH_DIR = self._orig_auth
+        taskrun._last_extract_failure.update({'at': 0.0, 'reason': ''})
+        taskrun._image_id_cache.update({'at': 0.0, 'id': ''})
+        self._tmp.cleanup()
+
+    def _slow_docker(self, delay: float):
+        def _run(cmd, **kw):
+            time.sleep(delay)
+            class R:
+                returncode = 1
+                stdout = ''
+                stderr = 'slow'
+            return R()
+        return _run
+
+    def _heartbeat_during(self, coro_factory, delay: float) -> int:
+        """跑 coro_factory() 期间统计心跳次数（事件循环没被冻住就会有几十次）。"""
+        async def main() -> int:
+            ticks: list[float] = []
+            stop = asyncio.Event()
+
+            async def beat() -> None:
+                while not stop.is_set():
+                    ticks.append(time.time())
+                    await asyncio.sleep(0.05)
+
+            hb = asyncio.create_task(beat())
+            with mock.patch('subprocess.run', side_effect=self._slow_docker(delay)):
+                await coro_factory()
+            stop.set()
+            await hb
+            return len(ticks)
+
+        return asyncio.run(main())
+
+    def test_available_async_does_not_block_loop(self) -> None:
+        """`available_async()` 必须把 docker 调用挪出事件循环。"""
+        ticks = self._heartbeat_during(lambda: taskrun.available_async(), 1.0)
+        self.assertGreater(ticks, 5,
+                           f'提取期间事件循环只跳了 {ticks} 次 —— docker 调用阻塞了循环')
+
+    def test_start_async_does_not_block_loop(self) -> None:
+        """启动任务的 async 接口同理。"""
+        ticks = self._heartbeat_during(lambda: taskrun.start_async('claim', 'ALL'), 1.0)
+        self.assertGreater(ticks, 5,
+                           f'启动期间事件循环只跳了 {ticks} 次 —— 会连带卡住对外网关')
+
+    def test_sync_call_still_blocks_by_design(self) -> None:
+        """反证：同步版**确实**会阻塞 —— 证明上面两条测的是真问题。
+
+        若哪天有人在事件循环里误用同步版，心跳会掉到接近 0；本用例把这个
+        差异钉住，免得「都改成 async」这个结论被无意改回去。
+        """
+        ticks = self._heartbeat_during(
+            lambda: asyncio.to_thread(lambda: None), 0.0)  # 占位：正常情况
+        self.assertGreater(ticks, 0)
+
+        async def call_sync() -> None:
+            taskrun.available()   # 同步调用，直接在事件循环里跑
+
+        ticks_blocked = self._heartbeat_during(call_sync, 1.0)
+        self.assertLessEqual(ticks_blocked, 2,
+                             '同步调用居然没阻塞循环？那这条测试的前提就不成立了，需重新审视')
+
+    def test_image_id_is_cached(self) -> None:
+        """镜像 ID 要缓存：它是被 15 秒轮询的路径，不缓存等于每轮 fork 一次 docker。"""
+        calls = {'n': 0}
+
+        def _run(cmd, **kw):
+            calls['n'] += 1
+            class R:
+                returncode = 0
+                stdout = 'sha256:abc\n'
+                stderr = ''
+            return R()
+
+        taskrun._image_id_cache.update({'at': 0.0, 'id': ''})
+        with mock.patch('subprocess.run', side_effect=_run):
+            for _ in range(5):
+                taskrun._upstream_image_id()
+        self.assertEqual(calls['n'], 1, f'镜像 ID 没缓存，查了 {calls["n"]} 次 docker')
+
+
 class ScheduleTest(unittest.TestCase):
     """定时领奖配置：输入校验 + 只存 claim 所需的东西。"""
 

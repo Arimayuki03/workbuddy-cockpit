@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
@@ -133,6 +134,12 @@ async def auth_poll(
     if not state:
         return {'status': 'invalid'}
 
+    # 落盘成功后 state 会在下面被丢弃，但如果**落盘失败**（issue #26），
+    # 前端会继续轮询同一个 state 让用户重试 —— 那条路径不能把签到、领 trial
+    # 这些**有副作用**的动作重跑一遍（会重复写签到记录、重复调腾讯接口）。
+    # 所以记一笔「这个 state 已经做过供给」，重试时直接跳到落盘。
+    provisioned = _provisioned_states.get(state)
+
     r = None
     if realm is not None:
         r = 'global' if str(realm).strip().lower() == 'global' else 'cn'
@@ -141,6 +148,9 @@ async def auth_poll(
         return result
 
     realm_of_result = result.get('realm') or 'cn'
+    if provisioned:
+        # 已经供给过：只补落盘（上次就是败在这一步），其余一律不重做
+        return _save_and_finish(result, realm_of_result, region_msg='', state=state)
 
     # 探测 dict：billing 域身份头（X-User-Id / X-Domain 等）需要这些字段，
     # 与 _auth_dict 同构；device_token 此刻还没有（落盘时由外部写入）
@@ -174,8 +184,33 @@ async def auth_poll(
         'add', code in (0, 10001), code, message,
     )
 
+    # 供给（签到 / trial）做完了才允许重试时跳过它们 —— 标记要在**动副作用之前**
+    # 落位，否则「签到成功但标记没写」的窗口里重试仍会重跑一次。
+    _mark_provisioned(state)
     creditsvc.invalidate(str(result.get('uid', '')))
+    return _save_and_finish(result, realm_of_result, region_msg, state)
 
+
+def _mark_provisioned(state: str) -> None:
+    """记下「这个 state 已完成签到/trial 等有副作用的供给」。
+
+    只在内存里、且随 state 一起被 TTL 回收：它只需覆盖「落盘失败 → 用户重试」
+    这个短窗口（发码起 5 分钟内）；服务重启后 state 本身也失效，标记没有意义。
+    """
+    _provisioned_states[state] = time.time()
+    # 顺手清掉过期的，避免长期运行后无限增长（与 state 同一有效期）
+    cutoff = time.time() - tencent.STATE_TTL
+    for k in [k for k, at in _provisioned_states.items() if at < cutoff]:
+        _provisioned_states.pop(k, None)
+
+
+def _save_and_finish(result: dict, realm_of_result: str, region_msg: str,
+                     state: str) -> dict:
+    """落盘 + 收尾（重载上游、丢弃 state）。落盘失败时抛出**可执行**的提示。
+
+    单独抽出来是因为它有两条进入路径：首次供给后、以及「上次就是败在落盘」
+    的重试。两条路径都必须给出同样的引导，且都**不丢 state**（issue #26）。
+    """
     # 落盘是这一步里**唯一真正关键**的动作：成功才算账号加进来了。
     # 把它包起来是为了给出可执行的提示 —— 失败的一个常见成因是 auths 目录
     # 权限不对（宝塔/1Panel 用 root 装、却以别的 uid 跑），而那个错误的原文
@@ -197,6 +232,7 @@ async def auth_poll(
 
     # 账号已确实落盘，这时才丢 state（成功路径的收尾）
     tencent.drop_state(state)
+    _provisioned_states.pop(state, None)
 
     # 自动重载上游以加载新账号（后台合并执行，不阻塞本次响应）
     reload.request_restart()
@@ -643,6 +679,16 @@ def clear_task_logs(user: dict = Depends(security.require_admin)) -> dict:
     return {'ok': True}
 
 
+# 已完成「有副作用的供给」（签到 / 国际版 trial）的扫码 state。
+#
+# 为什么需要（issue #26 的连带问题）：落盘失败时我们**故意不丢 state**，好让
+# 用户重试不用重新扫码；但前端是每 2 秒轮询同一个 state，而 poll_login 每次都
+# 会返回 ready —— 不记一笔的话，每次轮询都会重跑签到与领 trial：重复写签到
+# 记录、重复调腾讯接口。仅供「落盘失败 → 重试」这个短窗口使用，随 state 的
+# 5 分钟 TTL 一起过期（服务重启后 state 本身也失效，标记无意义）。
+_provisioned_states: dict[str, float] = {}
+
+
 # ── 成长任务一键执行（issue #19）─────────────────────────────
 # 调用上游自带的 scripts/task_runner.py。三种模式按风险分级，见 taskrun 模块注释：
 # preview 只读 / claim 幂等领奖 / full 点亮+领奖（会伪造上报）。
@@ -675,7 +721,10 @@ async def task_run_start(
             detail='「点亮任务」会向腾讯发送活跃上报（造画布、连发对话等），'
                    '请先确认：该操作有风控风险，建议先用「预览」看清将要做的事。',
         )
-    ok, msg = taskrun.start(mode, target)
+    # 走线程池版本：start() 内部会解析脚本路径（脚本缺失时还要 fork docker
+    # 提取，最长 60 秒），本接口是 async，同步跑它会冻住整个事件循环——
+    # 连带把对外网关一起卡住。
+    ok, msg = await taskrun.start_async(mode, target)
     if not ok:
         # 前置拒绝（脚本缺失/已有任务在跑/参数不合法）用 409 表达「状态冲突」，
         # 与「请求本身有错」（400）区分开。

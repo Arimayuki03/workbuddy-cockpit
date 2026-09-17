@@ -134,7 +134,15 @@ RUN set -eux; \
 #
 # 装在 /usr/local/lib/docker/cli-plugins（官方约定的插件目录），文件名必须是
 # `docker-compose`（连字符），`docker compose` 子命令才认得它。
-ARG COMPOSE_VERSION=v5.5.1
+#
+# **必须停在 compose v2，不要升到 v5**（发版前自审实测）：
+#   v5.0.0 移除了内置 builder，`up --build` 改为调用**外部的 buildx 插件**
+#   （`docker-compose/pkg/compose/build_bake.go` 里 `exec.CommandContext` 直接
+#   执行 buildx，要求 buildx ≥ 0.17，且**没有回退分支**）。而我们的镜像只装了
+#   docker CLI + compose，没有 buildx —— 升到 v5 会让「一键更新上游」重新坏在
+#   `up --build` 上（正是 issue #28 报的那个失败）。
+#   v2 有 `build_classic.go`（内置 builder）作为回退，所以不需要 buildx。
+ARG COMPOSE_VERSION=v2.40.3
 RUN set -eux; \
     case "${TARGETARCH:-$(uname -m)}" in \
         amd64 | x86_64)  COMPOSE_ARCH=x86_64 ;; \

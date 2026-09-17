@@ -270,6 +270,32 @@ class ComposeCommandTest(unittest.TestCase):
         self.assertIn('armv7', block, 'armv7l 应映射到 armv7（compose 的命名）')
         self.assertIn('aarch64', block, 'arm64 应映射到 aarch64')
 
+    def test_compose_version_stays_on_v2(self) -> None:
+        """compose 必须停在 v2 —— 升到 v5 会让 `up --build` 重新坏掉。
+
+        发版前自审实测（读 compose 源码）：
+          · v5.0.0 **移除**了内置 builder，`up --build` 改为调用外部 buildx 插件
+            （`pkg/compose/build_bake.go` 里 `exec.CommandContext(ctx, buildx.Path...)`，
+            要求 buildx ≥ 0.17，且**没有回退分支**）；
+          · 我们的镜像只装 docker CLI + compose，**没有 buildx**；
+          · 于是升到 v5 会让「一键更新上游」重新失败在 `up --build` 上 ——
+            正是 issue #28 报的那个症状；
+          · v2 有 `build_classic.go`（内置 builder）兜底，所以不需要 buildx。
+
+        这条测试不看源码，只钉住版本号：**升级 compose 前请先确认 v2 之外的分支
+        是否还需要 buildx 插件**，否则用户的一键更新会再次中断。
+        """
+        df = (_ROOT / 'Dockerfile').read_text(encoding='utf-8')
+        m = re.search(r'ARG\s+COMPOSE_VERSION=(v[\d.]+)', df)
+        self.assertIsNotNone(m, 'Dockerfile 里没找到 COMPOSE_VERSION')
+        version = m.group(1)
+        major = int(version.lstrip('v').split('.')[0])
+        self.assertEqual(
+            major, 2,
+            f'compose 版本被改成了 {version}。若确实要升到 v3+，请先确认它是否仍'
+            f'自带 builder —— v5 起 `up --build` 依赖外部 buildx 插件，而本镜像'
+            f'没有装 buildx，会让一键更新上游失败。')
+
     def test_resolver_tries_both_forms(self) -> None:
         """解析顺序：宿主已有的 v2 → v1 → 都没有返回 None。"""
         m = self.mod
