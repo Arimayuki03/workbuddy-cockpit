@@ -267,6 +267,7 @@ def to_openai_request(body: dict) -> dict:
         parts: list[dict] = []      # 文本 / 图片（当前消息的常规内容）
         tool_calls: list[dict] = []  # assistant 发起的工具调用
         tool_results: list[dict] = []  # user 回传的工具结果 → 要拆成独立消息
+        tool_images: list[dict] = []  # 工具结果里的图片 → 提升到后续 user 消息
 
         for block in content:
             if not isinstance(block, dict):
@@ -289,14 +290,39 @@ def to_openai_request(body: dict) -> dict:
                     },
                 })
             elif kind == 'tool_result':
+                # OpenAI 的 role:tool 消息 content 只能是字符串，图片物理上无处安放。
+                # 旧写法在「只有图片、没有文字」时落到 str(content) 兜底，会把整段
+                # base64 连同结构标记压成 Python repr 文本发给上游——实测 3.3MB 的
+                # 图被上游按 234 万 token 计数（prompt too long: 2349045 > 1048576），
+                # 上下文瞬间撑爆且会话无法恢复。
+                # 正确做法：tool 消息只留文字，图片提升到紧随其后的 user 消息。
+                raw_result = block.get('content')
+                result_text = _text_of(raw_result)
+                result_images: list[dict] = []
+                if isinstance(raw_result, list):
+                    for sub in raw_result:
+                        if isinstance(sub, dict) and sub.get('type') == 'image':
+                            url = _image_url(sub.get('source'))
+                            if url:
+                                result_images.append(
+                                    {'type': 'image_url', 'image_url': {'url': url}})
+                if not result_text and not result_images:
+                    # 既无文字也无图片：保留原兜底，未知形态仍以文本透出
+                    result_text = str(raw_result or '')
+                elif not result_text:
+                    result_text = '[图片]'  # 上游要求 tool content 非空
+                tool_images.extend(result_images)
                 tool_results.append({
                     'role': 'tool',
                     'tool_call_id': str(block.get('tool_use_id') or ''),
-                    'content': _text_of(block.get('content')) or str(block.get('content') or ''),
+                    'content': result_text,
                 })
 
         # 工具结果必须先于本条的其余内容（它们对应上一轮 assistant 的调用）
         messages.extend(tool_results)
+        # 工具结果里的图片提升到这里：并入同一条 user 消息，与人类上传的图片
+        # 同等对待，上游（workbuddy2api → CodeBuddy）实测能识别为视觉输入。
+        parts = tool_images + parts
 
         if tool_calls:
             msg: dict = {'role': 'assistant', 'tool_calls': tool_calls}
