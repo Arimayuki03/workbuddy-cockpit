@@ -148,7 +148,8 @@ cp config.example.json config.json
 编辑 `config.json`，**至少设置 `api_key`**（`留空 = 不鉴权`，公网部署务必设置）。示例中的 `test_key` 等均为占位符，`config.example.json` 不含任何真实密钥。
 
 ```bash
-# 登录添加账号（重复执行可加多号）
+# 登录添加账号（重复执行可加多号；注意：执行过下方说明中的 chown 后，
+# host 侧 login.sh 会被可写性预检拦截——此时请在容器内登录，见下方说明）
 ./login.sh
 
 # 启动服务
@@ -167,7 +168,7 @@ curl -s http://localhost:7863/healthz
 > chown -R 10001:10001 ./auths
 > ```
 >
-> 之后新增账号建议进**容器内**登录（`app` 自身落盘，属主即 10001，无需反复 chown；容器内无 docker CLI，完成后回宿主机重启）：
+> 之后新增账号**必须**进**容器内**登录（`app` 自身落盘，属主即 10001，无需反复 chown；chown 后 host 侧 `./login.sh` 无写权限，脚本会在启动浏览器授权前直接退出并提示，不会白走一遍 OAuth。容器内无 docker CLI，完成后回宿主机重启）：
 >
 > ```bash
 > docker compose exec -it wb2api bash -c './login.sh' && docker compose restart wb2api
