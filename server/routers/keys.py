@@ -51,6 +51,9 @@ class KeyIn(BaseModel):
     ip_allowlist: list[str] = Field(default_factory=list)
     models: list[str] = Field(default_factory=list)
     quota: int = 0
+    # 积分额度（issue #27）：0 = 不限。与 token 额度各自独立，任一超限即拒绝。
+    # 用 float：上游 credit 是小数（如 0.05 表示按倍率扣费）。
+    quota_credit: float = 0
     # 版本归属：'' = 不限制（存量密钥的形态）。非 cn/global 的值由
     # keysvc._norm_realm 归一化成 ''——不报错，免得旧前端（不带该字段）被拒。
     realm: str = Field(default='', max_length=16)
@@ -64,6 +67,7 @@ class KeyPatch(BaseModel):
     ip_allowlist: list[str] | None = None
     models: list[str] | None = None
     quota: int | None = None
+    quota_credit: float | None = None
     realm: str | None = None
 
 
@@ -85,6 +89,7 @@ def create_key(body: KeyIn, request: Request,
         models=body.models,
         quota=body.quota,
         realm=body.realm,
+        quota_credit=body.quota_credit,
     )
     # 密钥是拿额度用的凭证，发放必须留痕（含来源 IP）
     security.audit(user, 'create_key', str(created.get('name') or ''),

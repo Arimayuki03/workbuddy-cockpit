@@ -175,7 +175,28 @@ async def auth_poll(
     )
 
     creditsvc.invalidate(str(result.get('uid', '')))
-    filename, existed = tencent.write_auth_file(result)
+
+    # 落盘是这一步里**唯一真正关键**的动作：成功才算账号加进来了。
+    # 把它包起来是为了给出可执行的提示 —— 失败的一个常见成因是 auths 目录
+    # 权限不对（宝塔/1Panel 用 root 装、却以别的 uid 跑），而那个错误的原文
+    # 只有一行 PermissionError，用户看不出「该 chown 哪个目录」。
+    try:
+        filename, existed = tencent.write_auth_file(result)
+    except OSError as exc:
+        # 不 drop state：用户此刻重试（或前端再轮询一次）应当能成功，
+        # 而不是拿到「二维码已失效」被引导去重新扫码（issue #26 的现象）。
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f'账号已授权成功，但写入账号文件失败：{exc}。'
+                f'请检查 {config.AUTH_DIR} 的目录权限（容器部署见 compose 里 '
+                f'chown 10001:10001 的说明），修好后**直接重试本弹窗**即可，'
+                f'不需要重新扫码。'
+            ),
+        ) from exc
+
+    # 账号已确实落盘，这时才丢 state（成功路径的收尾）
+    tencent.drop_state(state)
 
     # 自动重载上游以加载新账号（后台合并执行，不阻塞本次响应）
     reload.request_restart()

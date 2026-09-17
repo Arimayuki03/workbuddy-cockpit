@@ -362,7 +362,10 @@
     "keyUpdated": "키를 업데이트했습니다",
     "keyCreated": "키를 생성했습니다",
     "enabled": "활성화됨",
-    "disabled": "비활성화됨"
+    "disabled": "비활성화됨",
+    "quotaCredit": "크레딧 한도",
+    "quotaCreditHint": "업스트림이 반환한 실제 과금으로 누적됩니다(token 추정이 아님). 위의 token 한도와 별개이며, 둘 중 하나를 초과하면 호출이 거부됩니다. 0이면 무제한",
+    "creditUsed": "크레딧 {used} / {quota}"
   },
   "logs": {
     "title": "요청 로그",
@@ -711,7 +714,9 @@
     "copyLink": "링크 복사",
     "shareTitle": "Tencent 계정 추가",
     "shareText": "이 링크를 열어 QR 인증을 완료하세요. 이후 자동으로 출석하고 계정 풀에 등록됩니다",
-    "retry": "다시 받기"
+    "retry": "다시 받기",
+    "stateLost": "QR 코드가 무효가 되었습니다(대기 중 서버가 재시작됨). 다시 받아주세요",
+    "realmMismatch": "이 QR 코드는 다른 에디션(국내 / 글로벌)의 것입니다. 다시 받아주세요"
   },
   "region": {
     "HK": "중국 홍콩",

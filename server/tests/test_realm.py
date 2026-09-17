@@ -205,6 +205,159 @@ class StateRealmTest(unittest.TestCase):
         self.assertEqual(out['status'], 'invalid')
 
 
+class PollDoesNotDropStateTest(unittest.TestCase):
+    """issue #26：`poll_login` 拿到 ready 后**不能**自己丢 state。
+
+    报障现象：微信扫码确认后，弹窗显示「二维码已失效」。
+
+    根因链：`poll_login` 早先是拿到 uid 就 `drop_state`，而真正落盘在**路由**里
+    （`accounts.py` 的 `write_auth_file`）。若落盘抛错（宝塔/1Panel 部署下 auths
+    目录属主不对 → PermissionError 很常见），那次请求 500、前端 catch 静默吞掉；
+    下一轮轮询时 state 已被丢掉 → 返回 `invalid` → 界面显示「二维码已失效」，
+    把用户引向「重新扫码」—— 而重扫必然同样失败，因为问题是目录权限。
+
+    正确语义：state 的有效期是「发码起 5 分钟」（由 TTL 分支负责），
+    不是「拿到 token 就作废」；成功路径由调用方在**落盘之后**显式 drop。
+    """
+
+    def setUp(self) -> None:
+        tencent._state_cache.clear()
+
+    def tearDown(self) -> None:
+        tencent._state_cache.clear()
+
+    def _poll_with_stubbed_tencent(self, tokens: dict) -> dict:
+        """跑一次 poll_login，把出站 HTTP 换成假响应，避免真发请求。"""
+        import asyncio
+
+        class _Resp:
+            def __init__(self, payload: dict) -> None:
+                self._payload = payload
+
+            def json(self) -> dict:
+                return self._payload
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, url, params=None, headers=None):
+                if 'auth/token' in url:
+                    return _Resp({'code': 0, 'data': tokens})
+                return _Resp({'code': 0, 'data': {'uid': 'u123', 'nickname': 'n',
+                                                  'enterpriseId': ''}})
+
+        class _Ctx:
+            async def __aenter__(self):
+                return _Client()
+
+            async def __aexit__(self, *a):
+                return False
+
+        with mock.patch.object(config, 'http_client', lambda *a, **k: _Ctx()):
+            return asyncio.run(tencent.poll_login('s1', 'cn'))
+
+    def test_ready_keeps_state_for_caller(self) -> None:
+        """拿到 ready 后 state 必须还在 —— 落盘失败时用户才能重试。"""
+        import time
+
+        tencent._state_cache['s1'] = (time.time(), 'cn')
+        out = self._poll_with_stubbed_tencent(
+            {'accessToken': 'AT', 'refreshToken': 'RT', 'expiresIn': 3600, 'domain': ''})
+        self.assertEqual(out['status'], 'ready')
+        self.assertTrue(tencent.is_pending('s1'),
+                        'poll_login 提前丢了 state —— 落盘失败后重试会被误报成「二维码失效」')
+
+    def test_caller_can_drop_after_saving(self) -> None:
+        """成功路径由调用方在落盘后收尾，drop 之后才判 invalid。"""
+        import time
+
+        tencent._state_cache['s1'] = (time.time(), 'cn')
+        self._poll_with_stubbed_tencent(
+            {'accessToken': 'AT', 'refreshToken': 'RT', 'expiresIn': 3600, 'domain': ''})
+        tencent.drop_state('s1')
+        self.assertFalse(tencent.is_pending('s1'))
+
+    def test_ttl_still_bounds_the_retry_window(self) -> None:
+        """不 drop 不等于永不过期：TTL 仍会兜住（否则 state 缓存会无限涨）。"""
+        import asyncio
+        import time
+
+        tencent._state_cache['old'] = (time.time() - tencent.STATE_TTL - 1, 'cn')
+        out = asyncio.run(tencent.poll_login('old', 'cn'))
+        self.assertEqual(out['status'], 'expired')
+        self.assertFalse(tencent.is_pending('old'), '过期时应顺手清掉')
+
+
+class AuthPollSaveFailureTest(unittest.TestCase):
+    """落盘失败要给出**可执行的**提示，且不能把 state 一起弄丢（issue #26）。"""
+
+    def setUp(self) -> None:
+        tencent._state_cache.clear()
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_auth = config.AUTH_DIR
+        self._orig_db = config.DB_PATH
+        self._orig_users = config.USERS_FILE
+        config.AUTH_DIR = Path(self._tmp.name) / 'auths'
+        config.DB_PATH = Path(self._tmp.name) / 'm.db'
+        config.USERS_FILE = Path(self._tmp.name) / 'users.json'
+        from server import db
+        db._conn = None
+        db.connect()
+        self._db = db
+
+    def tearDown(self) -> None:
+        if self._db._conn is not None:
+            self._db._conn.close()
+        self._db._conn = None
+        config.AUTH_DIR = self._orig_auth
+        config.DB_PATH = self._orig_db
+        config.USERS_FILE = self._orig_users
+        tencent._state_cache.clear()
+        self._tmp.cleanup()
+
+    def test_save_failure_message_is_actionable_and_keeps_state(self) -> None:
+        import time
+
+        from fastapi.testclient import TestClient
+        from server import security
+        from server.main import app
+        from server.routers import accounts as accounts_mod
+
+        security.save_users({'secret': 'S', 'users': [
+            {'username': 'admin', 'role': 'admin', 'pwd_hash': security.make_hash('p')}],
+            'api_keys': []})
+        c = TestClient(app)
+        self.assertEqual(c.post('/api/login',
+                                json={'username': 'admin', 'password': 'p'}).status_code, 200)
+
+        tencent._state_cache['s1'] = (time.time(), 'cn')
+        ready = {
+            'status': 'ready', 'uid': 'u1', 'nickname': 'n', 'enterprise_id': '',
+            'access_token': 'AT', 'refresh_token': 'RT',
+            'expires_at': int(time.time()) + 3600, 'domain': '', 'realm': 'cn',
+        }
+        with mock.patch.object(tencent, 'poll_login', return_value=ready), \
+             mock.patch.object(tencent, 'checkin', return_value=(0, 'ok')), \
+             mock.patch.object(tencent, 'write_auth_file',
+                               side_effect=PermissionError('permission denied')), \
+             mock.patch.object(accounts_mod.reload, 'request_restart'):
+            r = c.get('/api/auth/poll', params={'state': 's1', 'realm': 'cn'})
+
+        self.assertEqual(r.status_code, 500, r.text)
+        detail = r.json()['detail']
+        # 提示必须说清三件事：已授权成功、去哪查权限、不用重新扫码
+        self.assertIn('授权成功', detail)
+        self.assertIn('权限', detail)
+        self.assertIn('不需要重新扫码', detail)
+        # 最关键的：state 还在，用户重试能成功
+        self.assertTrue(tencent.is_pending('s1'),
+                        '落盘失败却丢了 state —— 用户重试会看到「二维码已失效」')
+
+
 class WriteAuthFileTest(unittest.TestCase):
     """落盘要带 realm，且用不含逃生门的解析。"""
 
