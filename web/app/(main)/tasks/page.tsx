@@ -18,6 +18,7 @@ import {notify} from '@/lib/toast';
 import {RichText} from '@/lib/i18n/rich-text';
 import {useI18n, useT} from '@/lib/i18n/provider';
 import {t as tStatic, tp as tpStatic} from '@/lib/i18n';
+import {translateRunSummary, translateTaskLogText} from '@/lib/i18n/tasklog';
 import {accountApi, errText} from '@/lib/api';
 import type {CheckinLog, TaskLog, TaskLogResponse} from '@/lib/types';
 import {fmtDateTime, fmtNumber} from '@/lib/format';
@@ -77,8 +78,11 @@ const KIND_LABEL_KEYS: Record<string, string> = {
  */
 function resultText(l: TaskLog): string {
   const raw = l.message_cn || l.message;
-  // 模板句（含数字 / 账号）先反解重排，其余走短语表
-  return creditLedgerText(taskRunHistoryText(raw), tpStatic);
+  // 先按已知模板反解（一键执行历史 / 积分流水 / 服务端模板句），未命中再退到短语表。
+  // 模板各自带**自己的译文键**，所以不能再把 tp() 传进去当取值函数
+  // （那样会拿 tasks.creditLedger 去查短语表，界面上直接显示键名）。
+  const staged = creditLedgerText(taskRunHistoryText(raw));
+  return translateTaskLogText(staged) ?? tpStatic(staged);
 }
 
 /**
@@ -101,8 +105,9 @@ function taskRunHistoryText(message: string): string {
   if (!m) return message;
   const key = TASK_RUN_HISTORY_KEYS[m[1]];
   if (!key) return message;
-  // 摘要沿用上游英文原文；标签按当前语言，括号位置交给译文模板决定
-  return tStatic(key, {target: m[2], summary: m[3].trim()});
+  // 摘要先本地化（`退出码 N` / `完成` 这类是后端写的固定文案）再拼进模板，
+  // 否则整行带上译文标签后就再没有模板能匹配上摘要了。
+  return tStatic(key, {target: m[2], summary: translateRunSummary(m[3])});
 }
 
 /**
@@ -114,13 +119,26 @@ function taskRunHistoryText(message: string): string {
  */
 const CREDIT_LEDGER = /^余额 \+(\d+)（(\d+) → (\d+)）(?:\s·\s(.*))?$/;
 
-function creditLedgerText(message: string, t: (key: string, params?: Record<string, string>) => string): string {
+function creditLedgerText(message: string): string {
   const m = CREDIT_LEDGER.exec(message.trim());
   if (!m) return message;
   const [, delta, prev, next, nickname] = m;
   return (
-    t('tasks.creditLedger', {delta, prev, next}) + (nickname ? ` · ${nickname}` : '')
+    tStatic('tasks.creditLedger', {delta, prev, next}) + (nickname ? ` · ${nickname}` : '')
   );
+}
+
+/**
+ * 签到记录「结果」列的文案。
+ *
+ * 两种来源：本端触发的写 `checkin_logs.message`（固定文案，含「国际版无签到体系，
+ * 已跳过」这类），上游自动签到的写 `task_logs.message_cn`（含「本轮签到完成：共 N 个…」
+ * 这类模板句）。两者都是中文原文，因此先在展示层反解模板，再走短语表兜底，
+ * 都认不出来时保留中文原文（宁可显示原文，也不显示键名或空白）。
+ */
+function checkinResultText(l: CheckinLog): string {
+  const raw = l.message || '';
+  return translateTaskLogText(raw) ?? (tpStatic(raw) || (l.success ? tStatic('common.success') : tStatic('common.failure')));
 }
 
 /**
@@ -427,7 +445,7 @@ export default function TasksPage() {
                         }
                         title={l.message}
                       >
-                        {tp(l.message) || (l.success ? t('common.success') : t('common.failure'))}
+                        {checkinResultText(l)}
                       </span>
                     </div>
                     <div className="mt-0.5 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
@@ -468,7 +486,7 @@ export default function TasksPage() {
                             }
                             title={l.message}
                           >
-                            {tp(l.message) || (l.success ? t('common.success') : t('common.failure'))}
+                            {checkinResultText(l)}
                           </span>
                         </TableCell>
                       </TableRow>
