@@ -82,6 +82,8 @@ export const authApi = {
   login: (username: string, password: string) =>
     post<{ok: boolean; username: string; role: string}>('/api/login', {username, password}),
   logout: () => post<{ok: boolean}>('/api/logout'),
+  /** 吊销当前用户的**全部**会话（含本机）——服务端递增会话版本，所有 cookie 立即失效。 */
+  revokeSessions: () => post<{ok: boolean; relogin_required: boolean}>('/api/sessions/revoke'),
 };
 
 /* ── 账号 ───────────────────────────────────────────── */
