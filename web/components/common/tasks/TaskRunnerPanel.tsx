@@ -12,9 +12,10 @@ import {
   DialogTitle,
 } from '@/components/animate-ui/radix/dialog';
 import {accountApi, errText} from '@/lib/api';
-import {useT} from '@/lib/i18n/provider';
+import {useI18n} from '@/lib/i18n/provider';
 import {RichText} from '@/lib/i18n/rich-text';
 import {notify} from '@/lib/toast';
+import {translateRunLine} from '@/lib/i18n/taskrun';
 import type {TaskRunStatus} from '@/lib/types';
 
 /**
@@ -31,7 +32,7 @@ import type {TaskRunStatus} from '@/lib/types';
  * 定时只跑「领奖」：点亮绝不进定时（后端的调度器硬性只允许 claim）。
  */
 export function TaskRunnerPanel() {
-  const t = useT();
+  const {t, tp} = useI18n();
   const [status, setStatus] = useState<TaskRunStatus | null>(null);
   const [confirmFull, setConfirmFull] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -66,8 +67,9 @@ export function TaskRunnerPanel() {
   async function run(mode: 'preview' | 'claim' | 'full', confirm = false) {
     setBusy(true);
     try {
-      const r = await accountApi.taskRunStart(mode, 'ALL', confirm);
-      notify.ok(t('tasks.runStarted'), r.message);
+      await accountApi.taskRunStart(mode, 'ALL', confirm);
+      // 描述用界面的模式名（后端回的是「已开始执行（preview）」这类中文原文）
+      notify.ok(t('tasks.runStarted'), t(`tasks.runMode_${mode}`));
       await load();
     } catch (e) {
       notify.err(errText(e));
@@ -80,7 +82,8 @@ export function TaskRunnerPanel() {
     setBusy(true);
     try {
       const r = await accountApi.taskRunStop();
-      (r.ok ? notify.ok : notify.info)(r.message);
+      // 后端只回两种固定文案（已停止 / 当前没有正在执行的任务），走短语表
+      (r.ok ? notify.ok : notify.info)(tp(r.message));
       await load();
     } catch (e) {
       notify.err(errText(e));
@@ -159,7 +162,9 @@ export function TaskRunnerPanel() {
       {status && status.lines.length > 0 && (
         <div className="max-h-[240px] overflow-auto rounded-xl bg-muted/60 p-3">
           <pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-relaxed text-foreground/80">
-            {status.lines.join('\n')}
+            {/* 面板回显的是上游脚本的原始 stdout（写死中文）。译文只在展示层按模板
+                逐行替换，存储与上游脚本都保持原文 —— 详见 lib/i18n/taskrun.ts。 */}
+            {status.lines.map((l) => translateRunLine(l)).join('\n')}
           </pre>
         </div>
       )}
