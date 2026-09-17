@@ -437,7 +437,9 @@ journalctl -u workbuddy-web | grep -A3 '初始管理员'
 | `WB_DATA_DIR` | `./data` | 本服务数据目录 |
 | `WB_STATIC_DIR` | `./web/out` | 静态导出目录 |
 | `WB_ADMIN_PASSWORD` | 随机生成 | 首次启动的 admin 密码 |
-| `WB_SECURE_COOKIE` | `auto` | 依 `X-Forwarded-Proto` 判定 |
+| `WB_SECURE_COOKIE` | `auto` | 会话 Cookie 的 `Secure` 标志：`auto` 依 `X-Forwarded-Proto` 判定、也可写死 `true`/`false` |
+| `WB_SESSION_DAYS` | `1` | 会话**总时长**上限（天），到点必须重新登录 |
+| `WB_SESSION_IDLE_HOURS` | `12` | 会话**空闲**上限（小时）：多久没操作就失效（滑动续期窗口） |
 | `WB_HTTP_PROXY` | 空 | 出口代理，留空 = 全部直连 |
 
 完整清单见 [`.env.example`](.env.example)。

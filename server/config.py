@@ -71,7 +71,14 @@ ENABLE_DOCS = _env('WB_ENABLE_DOCS', '0') == '1'
 # 留空时所有请求都不使用任何代理：httpx 默认 trust_env=True 会读取系统/环境代理，
 # 会把内网请求（如 127.0.0.1:7863）也交给系统代理，导致连接被劫持或长时间超时。
 HTTP_PROXY = _env('WB_HTTP_PROXY', '')
-SESSION_DAYS = _env_int('WB_SESSION_DAYS', 7)
+# 会话**总时长**上限（天）：登录后最多维持这么久，到点必须重新登录。
+SESSION_DAYS = _env_int('WB_SESSION_DAYS', 1)
+# 会话**空闲**上限（小时）：距上次活动超过它就失效（滑动续期的窗口）。
+#
+# 为什么要有这个、而不只是把总时长调短：只减总时长会惩罚**天天用**的人
+# （每天都要重登一次），却对「登录一次就再也不碰」的会话没有额外约束。
+# 滑动续期把两件事分开——常用的人不断续、不被打扰；放着不用的会话自己过期。
+SESSION_IDLE_HOURS = _env_int('WB_SESSION_IDLE_HOURS', 12)
 COOKIE_NAME = 'wb_session'
 SECURE_COOKIE = _env('WB_SECURE_COOKIE', 'auto')  # auto | true | false
 

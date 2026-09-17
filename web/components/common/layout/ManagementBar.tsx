@@ -16,13 +16,14 @@ import {
   PlusCircle,
   User,
   LogOut as LogOutIcon,
+  ShieldAlert as ShieldAlertIcon,
   Link2,
   FolderGit2,
   ChevronRight,
 } from 'lucide-react';
 import {useThemeUtils} from '@/hooks/use-theme-utils';
 import {useAuth} from '@/lib/auth-context';
-import {accountApi, systemApi} from '@/lib/api';
+import {accountApi, authApi, errText, systemApi} from '@/lib/api';
 import {useT} from '@/lib/i18n/provider';
 import {notify} from '@/lib/toast';
 import {CountingNumber} from '@/components/animate-ui/text/counting-number';
@@ -565,6 +566,41 @@ export function ManagementBar() {
                               >
                                 <LogOutIcon className="size-3.5" />
                                 {t('profile.logout')}
+                              </Button>
+                            }
+                          />
+                        </div>
+
+                        {/* 吊销全部会话：与「退出登录」的区别是它**让服务端所有已签发的
+                            cookie 立即失效**，而不只是清掉本机这一个。用于怀疑会话被人
+                            拿到（在别人电脑上登过、旧设备没退、备份里有 cookie）——
+                            不必改密码（那会连带影响下游配置）。 */}
+                        <div className="mt-2 flex justify-end">
+                          <ConfirmDialog
+                            title={t('profile.revokeTitle')}
+                            description={t('profile.revokeDesc')}
+                            confirmText={t('profile.revoke')}
+                            destructive
+                            onConfirm={async () => {
+                              try {
+                                await authApi.revokeSessions();
+                                notify.ok(t('profile.revoked'));
+                                // 服务端已失效所有会话（含本机），必须回登录页
+                                setProfileOpen(false);
+                                logout();
+                              } catch (e) {
+                                notify.err(errText(e));
+                              }
+                            }}
+                            trigger={
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-8 shrink-0 rounded-full text-muted-foreground hover:text-amber-600"
+                                title={t('profile.revokeHint')}
+                              >
+                                <ShieldAlertIcon className="size-3.5" />
+                                {t('profile.revoke')}
                               </Button>
                             }
                           />

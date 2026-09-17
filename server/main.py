@@ -152,6 +152,31 @@ async def cache_headers(request: Request, call_next):
       限制外联目标，降低 XSS 得手后的影响面
     """
     response = await call_next(request)
+
+    # 会话滑动续期：current_user 判定「该续了」时在这里重签 cookie。
+    #
+    # 为什么放中间件而不是 current_user 里：那个函数是 FastAPI 依赖，只负责
+    # **解析身份**，在它里面写响应会耦合出不必要的层，而且它被大量接口调用、
+    # 有的还是只读的。中间件是唯一能看到「响应对象 + 请求状态」的地方。
+    if getattr(request.state, 'session_renew', False):
+        try:
+            token = request.cookies.get(config.COOKIE_NAME) or ''
+            cfg = security.load_users()
+            obj = security._unsign(token, cfg['secret']) or {}
+            username = str(obj.get('username') or '')
+            if username:
+                # orig 原样延续 —— 续期只推后**空闲截止**，不延长**总寿命**。
+                # role 传空：鉴权一律以用户表为准（载荷里的 role 仅作展示参考）。
+                fresh = security.issue_token(username, '', orig=int(obj.get('orig') or 0) or None)
+                response.set_cookie(
+                    config.COOKIE_NAME, fresh,
+                    max_age=config.SESSION_DAYS * 86400, httponly=True,
+                    samesite='lax', secure=security.cookie_secure(request), path='/',
+                )
+        except Exception as exc:  # noqa: BLE001
+            # 续期失败不能让请求失败 —— 用户这次照常，只是下次要重登
+            logger.warning('会话续期失败（不影响本次请求）: %s', exc)
+
     path = request.url.path
     if path.startswith('/_next/static/'):
         # 文件名含内容哈希，内容变了文件名就变，可长期强缓存

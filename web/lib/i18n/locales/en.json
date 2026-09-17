@@ -71,7 +71,12 @@
     "versionFallback": " (runtime version unavailable)",
     "logout": "Sign out",
     "logoutTitle": "Sign out?",
-    "logoutDesc": "You will need to enter your username and password again to access the console."
+    "logoutDesc": "You will need to enter your username and password again to access the console.",
+    "revoke": "Revoke all sessions",
+    "revoked": "All sessions revoked — please sign in again",
+    "revokeHint": "Invalidate every issued sign-in credential server-side (no password change needed)",
+    "revokeTitle": "Revoke all sessions?",
+    "revokeDesc": "Every signed-in session (including this one) is invalidated immediately and you will need to sign in again. Use it when you suspect a credential was captured — e.g. you signed in on someone else's computer, an old device is still signed in, or a backup contains the cookie. It is stronger than Sign out: sign-out only clears this device, revocation voids every credential on the server."
   },
   "theme": {
     "light": "Light mode",
