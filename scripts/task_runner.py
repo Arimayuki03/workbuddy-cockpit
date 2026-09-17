@@ -1152,16 +1152,41 @@ def process_task(auth, code, t, opts, stats):
     light_up(auth, code, spec, cur, target, uid8, opts, stats)
 
 
+def _accept_with_verify(auth, code, uid8, gap) -> bool:
+    """accept 并验证登记生效：读 results[].status（而非只看 HTTP 200/msg——
+    实测上游存在 200 + msg=OK 但 status 非 accepted、accept 未真正登记的形态，
+    此时上报事件全部不归账，任务永远点不亮）。
+
+    返回 True=accept 已生效（本轮或此前）；False=重试后仍未生效。
+    判定以回读 accept_status 为准（响应 status 只是初筛）。
+    """
+    for attempt in (1, 2):
+        st, r = tc.accept_tasks(auth, [code])
+        status = ""
+        if isinstance(r, dict):
+            results = ((r.get("data") or {}).get("results") or [])
+            status = (results[0].get("status") or "") if results else (r.get("msg") or "")
+        else:
+            status = str(r)
+        # 回读确认登记生效（响应可能说 accepted 但服务端未落账）
+        t = tc.task_status(auth, code) or {}
+        ast = t.get("accept_status") or "not_accepted"
+        ok = (st == 200 and status == "accepted" and ast != "not_accepted")
+        print(f"[task_runner] {uid8} {code}: accept 尝试{attempt} {st} status={status} "
+              f"回读={ast}{' -> 生效' if ok else ''}")
+        if ok:
+            return True
+        time.sleep(gap)
+    return False
+
+
 def light_up(auth, code, spec, cur, target, uid8, opts, stats, cap=0):
-    """accept(若未接) → 按 target 补齐上报 → 回读 → 已满则 claim。"""
+    """accept(若未接，带登记验证与重试) → 按 target 补齐上报 → 回读 → 已满则 claim。"""
     ast = tc.task_status(auth, code)
     ast = ast.get("accept_status") if ast else "not_accepted"
     if ast == "not_accepted":
-        st_a, r_a = tc.accept_tasks(auth, [code])
-        msg = r_a.get("msg") if isinstance(r_a, dict) else r_a
-        print(f"[task_runner] {uid8} {code}: accept {st_a} {msg}")
-        time.sleep(opts.gap)
-        if st_a != 200:
+        if not _accept_with_verify(auth, code, uid8, opts.gap):
+            print(f"[task_runner] {uid8} {code}: accept 未登记生效，本轮跳过待下次")
             stats["fail"] += 1
             return
 
