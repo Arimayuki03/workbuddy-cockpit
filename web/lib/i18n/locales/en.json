@@ -1013,6 +1013,9 @@
     "国际版": "Global edition",
     "国际版（workbuddy.ai）路由开关与基址。关闭即锁死纯 CN": "Routing switch and base URLs for the Global edition (workbuddy.ai). Turning it off locks the deployment to China only",
     "国际版单账号最大并发": "Max concurrency per global-edition account",
-    "国际版单独用这个上限。国际版的风控更严，官方默认压到 2——并发越高越容易被判为异常流量。填 0 表示用默认值 2（注意与上面那个「0 = 不限制」不同）": "The global edition uses this limit separately. It is subject to stricter anti-abuse checks and officially defaults to 2 — higher concurrency is more likely to be flagged as abnormal traffic. Setting 0 means \"use the default 2\" (note this differs from the \"0 = unlimited\" above)."
+    "国际版单独用这个上限。国际版的风控更严，官方默认压到 2——并发越高越容易被判为异常流量。填 0 表示用默认值 2（注意与上面那个「0 = 不限制」不同）": "The global edition uses this limit separately. It is subject to stricter anti-abuse checks and officially defaults to 2 — higher concurrency is more likely to be flagged as abnormal traffic. Setting 0 means \"use the default 2\" (note this differs from the \"0 = unlimited\" above).",
+    "passthrough：原样透传客户端传来的 system 消息；custom：网关用自有提示词替换它；append：两者并用——在开头连续的 system/developer 块之后插入网关 system，既有消息逐字不动": "passthrough: client system messages pass through unchanged; custom: the gateway replaces them with its own prompt; append: both — the gateway system is inserted after the leading system/developer blocks, leaving existing messages untouched",
+    "默认 passthrough 会把下游的 system prompt 原样送给上游。若你依赖网关自己的提示词来稳定行为（或避免 system 指纹被判异常），请改为 custom；若既要保留客户端原始 system、又要网关的提示词生效，用 append。": "The default passthrough sends the downstream system prompt upstream as-is. Switch to custom if you rely on the gateway prompt to stabilise behaviour (or to avoid the system fingerprint being flagged); use append when you want to keep the client system message and have the gateway prompt take effect too.",
+    "append（保留客户端 system，其后插入网关提示词）": "append (keep client system, insert gateway prompt after it)"
   }
 }

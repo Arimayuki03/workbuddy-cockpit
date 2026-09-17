@@ -393,11 +393,14 @@ const PROMPT_FIELDS: Field[] = [
     key: 'mode',
     kind: 'select',
     label: '系统提示词模式',
-    desc: 'passthrough：原样透传客户端传来的 system 消息；custom：网关用自有提示词替换它',
+    desc: 'passthrough：原样透传客户端传来的 system 消息；custom：网关用自有提示词替换它；'
+      + 'append：两者并用——在开头连续的 system/developer 块之后插入网关 system，既有消息逐字不动',
     caution:
-      '默认 passthrough 会把下游的 system prompt 原样送给上游。若你依赖网关自己的提示词来稳定行为（或避免 system 指纹被判异常），请改为 custom。',
+      '默认 passthrough 会把下游的 system prompt 原样送给上游。若你依赖网关自己的提示词来稳定行为（或避免 system 指纹被判异常），请改为 custom；'
+      + '若既要保留客户端原始 system、又要网关的提示词生效，用 append。',
     options: [
       {value: 'passthrough', label: 'passthrough（透传客户端 system，默认）'},
+      {value: 'append', label: 'append（保留客户端 system，其后插入网关提示词）'},
       {value: 'custom', label: 'custom（替换为网关提示词）'},
     ],
     def: 'passthrough',

@@ -643,8 +643,14 @@ def _sanitize_section(section: str, incoming: dict) -> dict:
             out[key] = _check_float(key, raw)
         elif section == 'prompt' and key == 'mode':
             mode = str(raw or '').strip().lower()
-            if mode not in ('custom', 'passthrough'):
-                raise ValueError('prompt.mode 只能是 custom 或 passthrough')
+            # 取值必须与上游 `normalizePrompt` 的白名单**保持一致**：上游对非法值
+            # 是**启动即报错**（fail fast），所以这里拦不住的话，用户会存进一份让
+            # 上游起不来的配置——表现为「保存成功，然后上游挂了」，比当场报错难查得多。
+            # `append` 是上游 2026-09-17 新增（issue #129）：开头连续 system/developer
+            # 块后插网关 system，既有消息逐字不动。我们此前只认 custom/passthrough，
+            # 会把用户填的合法值拒掉（上游支持、面板说不合法）。
+            if mode not in ('custom', 'append', 'passthrough'):
+                raise ValueError('prompt.mode 只能是 custom、append 或 passthrough')
             out[key] = mode
         elif section == 'prompt' and key == 'file':
             # 路径非空但不可读会让上游启动直接失败（fail fast），
