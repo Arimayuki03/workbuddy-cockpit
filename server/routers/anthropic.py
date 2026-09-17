@@ -618,8 +618,8 @@ async def messages(request: Request):
         # 一律写死 400 会让客户端在「体太大」时误判为格式问题——它只会原样重试，
         # 而不会去压缩上下文或调大上限（gateway 那条路给的就是 413 + 调参建议）。
         if getattr(err, 'status_code', 0) == 413:
-            return _err('请求体超过上限：请压缩上下文或附件，'
-                        '或在管理端「设置 → 上游配置 → 请求上限」调大 server.max_body_mb 后重试', 413)
+            return _err('请求体超过上限：请压缩上下文或附件。'
+                        '该上限由本网关设置（环境变量 WB_GATEWAY_MAX_BODY_MB）', 413)
         return _err('请求体不是合法 JSON 对象')
 
     model = body.get('model')

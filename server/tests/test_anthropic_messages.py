@@ -576,8 +576,14 @@ class CountTokensAuthTest(unittest.TestCase):
 
         早先它直接 `await request.json()`，没有 `gateway._read_json_body` 的
         体积检查 —— 持密钥者发一个超大 body 就能把网关内存打满。
+
+        体积按**当前生效的上限**算，不写死数字：上限的默认值会随上游变化调整
+        （上游 9d1a21b 移除 max_body_mb 后，本端默认从 8MB 提到 32MB），写死的话
+        这条测试会静默失效 —— 而它测的是内存防护，失效了没人会注意到。
         """
-        big = 'x' * (9 * 1024 * 1024)   # 9 MiB，超过默认 8 MiB 上限
+        from server.routers import gateway
+        limit_mb = gateway.max_body_bytes() // 1024 // 1024
+        big = 'x' * ((limit_mb + 1) * 1024 * 1024)   # 超过当前上限 1 MiB
         r = self.c.post('/v1/messages/count_tokens',
                         json={'messages': [{'role': 'user', 'content': big}]},
                         headers={'x-api-key': self.key})
