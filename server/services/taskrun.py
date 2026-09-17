@@ -121,6 +121,15 @@ def _extract_dir() -> Path:
 _EXTRACT_COOLDOWN_SECONDS = 60
 _last_extract_failure: dict = {'at': 0.0, 'reason': ''}
 
+# 镜像 ID 的缓存（见 `_upstream_image_id`）。为什么必须有：`available()` 每次都会
+# 走到镜像指纹比较，而它是被**界面每 15 秒轮询**的路径；不缓存就等于每 15 秒
+# fork 一次 `docker inspect`。
+#
+# TTL 取 5 秒：远小于轮询间隔（不会变成轮询放大器），又远大于一次检查的耗时，
+# 于是「上游刚更新完」最多 5 秒后就被发现，用户感知不到延迟。
+_IMAGE_ID_TTL_SECONDS = 5
+_image_id_cache: dict = {'at': 0.0, 'id': ''}
+
 
 def _cache_is_fresh() -> bool:
     """提取出来的脚本是否还对应**当前**上游容器镜像。
@@ -137,17 +146,35 @@ def _cache_is_fresh() -> bool:
 
 
 def _upstream_image_id() -> str:
-    """上游容器的镜像 ID；取不到返回空串（视为「无法比较」，走重取）。"""
+    """上游容器的镜像 ID；取不到返回空串（视为「无法比较」，走重取）。
+
+    这是**阻塞**调用（`docker inspect`，最多 15 秒），且被 `available()` 间接
+    调用 —— 而 `available()` 的调用方里有事件循环内的路径（定时领奖循环、
+    启动任务的 async 接口）。因此：
+
+      * 结果带 5 秒缓存：`available()` 每次都会走到这里（路径解析 → 缓存新鲜度
+        判断），不缓存就变成「每个请求 fork 一次 docker inspect」；
+      * 事件循环里的调用方请用 `available_async()`，它会把这个函数丢进线程池，
+        否则一次 docker 卡顿就会冻住整个服务（含对外网关）。
+    """
     import subprocess
 
+    now = time.time()
+    cached_at, cached_id = _image_id_cache['at'], _image_id_cache['id']
+    if now - cached_at < _IMAGE_ID_TTL_SECONDS:
+        return cached_id
+
+    value = ''
     try:
         proc = subprocess.run(
             ['docker', 'inspect', '--format', '{{.Image}}', config.WB2API_CONTAINER],
             capture_output=True, text=True, timeout=15,
         )
-        return (proc.stdout or '').strip() if proc.returncode == 0 else ''
+        value = (proc.stdout or '').strip() if proc.returncode == 0 else ''
     except Exception:  # noqa: BLE001
-        return ''
+        value = ''
+    _image_id_cache.update({'at': now, 'id': value})
+    return value
 
 
 def extract_scripts(rep: logging.Logger | None = None) -> tuple[bool, str]:
@@ -245,6 +272,9 @@ def available() -> tuple[bool, str]:
 
     单独抽出来是为了让接口能在**动手前**就拒绝，并把原因说清楚 ——
     用户看到「跑不了」时最想知道的是「为什么、我该怎么办」。
+
+    **这是阻塞调用**（可能 fork `docker inspect` / `docker cp`）。在事件循环里
+    调用请改用 `available_async()`，否则一次 docker 卡顿会冻住整个服务。
     """
     script = _script_path()
     if not script.is_file():
@@ -266,8 +296,25 @@ def available() -> tuple[bool, str]:
     return True, ''
 
 
+async def available_async() -> tuple[bool, str]:
+    """`available()` 的**线程池**版本，供事件循环内的调用方使用。
+
+    为什么需要：`available()` 可能 fork `docker inspect`（≤15s）与 `docker cp`
+    （≤60s）。在事件循环里直接调它，一次 docker 卡顿就会冻住**整个服务** ——
+    包括对外的 `/v1/*` 网关（那才是用户真正在用的东西）。而它有两个调用方
+    正好在事件循环里：定时领奖循环、启动任务的 async 接口。
+
+    与 `tasklog` 读容器日志同一个做法（那里也是 `asyncio.to_thread`）。
+    """
+    return await asyncio.to_thread(available)
+
+
 def status() -> dict:
-    """当前/上次运行状态（供界面轮询）。"""
+    """当前/上次运行状态（供界面轮询）。
+
+    同步版本：路由层是 `def`（FastAPI 会丢进线程池），所以这里阻塞是安全的。
+    事件循环里请用 `status_async()`。
+    """
     snap = dict(_state)
     snap['lines'] = list(_state['lines'])
     snap['available'], snap['unavailable_reason'] = available()
@@ -289,8 +336,21 @@ def build_command(mode: str, target: str) -> list[str]:
     return [_python(), '-u', str(_script_path()), target, *_MODE_ARGS[mode]]
 
 
+async def start_async(mode: str, target: str = 'ALL') -> tuple[bool, str]:
+    """`start()` 的**线程池**版本，供事件循环内的调用方使用。
+
+    定时领奖循环与启动任务的 async 接口都走这里 —— `start()` 里的
+    `available()`（可能 fork docker）与 `build_command()`（要解析脚本路径）
+    都是阻塞的，直接在事件循环里跑会冻住整个服务（含对外网关）。
+    """
+    return await asyncio.to_thread(start, mode, target)
+
+
 def start(mode: str, target: str = 'ALL') -> tuple[bool, str]:
-    """启动一次执行（后台）。返回 (是否已启动, 说明)。"""
+    """启动一次执行（后台）。返回 (是否已启动, 说明)。
+
+    **阻塞**（见 `available()`）。事件循环里请用 `start_async()`。
+    """
     ok, why = available()
     if not ok:
         return False, why
@@ -327,7 +387,10 @@ async def _run(argv: list[str], mode: str, target: str) -> None:
     # （脚本将来若自己拉起子进程，环境变量也能继承下去）。
     env['PYTHONUNBUFFERED'] = '1'
     # 上游目录作为 cwd：脚本以 __file__ 自定位，但仍按上游惯例从仓库根运行。
-    cwd = str(_script_path().parent.parent)
+    # 丢进线程池：`_script_path()` 在脚本缺失时会触发 docker 提取（阻塞），
+    # 而本函数跑在事件循环里。
+    script_path = await asyncio.to_thread(_script_path)
+    cwd = str(script_path.parent.parent)
 
     proc = None
     try:
@@ -524,7 +587,10 @@ async def _claim_loop() -> None:
                         _last_claim_day = stamp
                         if not _state['running']:
                             logger.info('定时领奖触发（%s 点档）', now.tm_hour)
-                            start('claim', 'ALL')
+                            # 必须 await 线程池版本：start() 里的 available()
+                            # 可能 fork docker（脚本缺失时），在事件循环里同步跑
+                            # 会冻住整个服务连同对外网关。
+                            await start_async('claim', 'ALL')
         except Exception as exc:  # noqa: BLE001
             logger.warning('定时领奖检查失败: %s', exc)
         await asyncio.sleep(_CLAIM_TICK_SECONDS)
