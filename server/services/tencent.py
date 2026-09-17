@@ -159,7 +159,18 @@ async def poll_login(state: str, realm: Realm | None = None) -> dict:
     if not uid:
         return {'status': 'waiting'}
 
-    drop_state(state)
+    # 这里**不** drop_state —— 刻意留给调用方在账号真正落盘之后再丢。
+    #
+    # 早先是先丢再返回，看起来更整洁，实际制造了一个很难查的故障（issue #26）：
+    # 轮询拿到 ready 后，路由还要落盘（写 auths/）并记签到日志；若其中任何一步抛错
+    # （宝塔/1Panel 部署下 auths 目录属主不对 → PermissionError 很常见），
+    # 前端那次请求拿到 500、它的 catch 静默吞掉，下一轮再轮询时 state 已不在缓存里
+    # → 返回 invalid → 界面显示「二维码已失效」。而**腾讯侧其实已经授权成功**，
+    # 用户被引导去重新扫码，重扫还是一样 —— 因为真正的毛病是目录权限，
+    # 报错信息却指向二维码。
+    #
+    # 语义上也不对：state 的有效期是「发码起 5 分钟」，不是「拿到 token 就走完一生」。
+    # 留给路由 drop，超时兜底仍由上面的 TTL 分支负责（那才是它该管的范围）。
     return {
         'status': 'ready',
         'uid': str(uid),

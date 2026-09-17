@@ -54,6 +54,22 @@ def _norm_realm(value: object) -> str:
     return v if v in ('cn', 'global') else ''
 
 
+def _norm_credit_quota(value: object) -> float:
+    """归一化积分额度。0 = 不限（与 token 额度同口径）。
+
+    脏数据一律吃掉成 0 而不是抛错：这个值来自管理端表单，格式问题不该让
+    保存整个失败；而**钳到 0 是安全的**——0 表示「不限」，不会把一把设了
+    负数的密钥悄悄放行成「已超限」（那会让线上调用突然全 429）。
+    """
+    try:
+        v = float(value if value not in (None, '') else 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if v != v or v in (float('inf'), float('-inf')):  # NaN / inf
+        return 0.0
+    return max(0.0, v)
+
+
 def _bare_model(model: object) -> str:
     """模型名归一化：去 `cn:` 前缀（`global:` 保留），用于白名单比对。
 
@@ -141,6 +157,8 @@ def _parse(row) -> dict:
         'realm': _norm_realm(row['realm']),
         'quota': row['quota'],
         'used_tokens': row['used_tokens'],
+        'quota_credit': row['quota_credit'],
+        'used_credit': row['used_credit'],
         'created_at': row['created_at'],
         'last_used_at': row['last_used_at'],
     }
@@ -159,11 +177,12 @@ def create_key(
     models: list[str] | None = None,
     quota: int = 0,
     realm: str = '',
+    quota_credit: float = 0,
 ) -> dict:
     token = TOKEN_PREFIX + secrets.token_urlsafe(32)
     key_id = db.execute(
-        'INSERT INTO api_keys(name, key_hash, prefix, enabled, expires_at, max_ips, ip_allowlist, models, realm, quota, used_tokens, created_at) '
-        'VALUES(?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 0, ?)',
+        'INSERT INTO api_keys(name, key_hash, prefix, enabled, expires_at, max_ips, ip_allowlist, models, realm, quota, used_tokens, quota_credit, used_credit, created_at) '
+        'VALUES(?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?)',
         (
             name,
             _hash(token),
@@ -174,6 +193,7 @@ def create_key(
             json.dumps(models or []),
             _norm_realm(realm),
             quota,
+            _norm_credit_quota(quota_credit),
             int(time.time()),
         ),
     )
@@ -207,6 +227,8 @@ def update_key(key_id: int, patch: dict) -> dict | None:
         fields['realm'] = _norm_realm(patch['realm'])
     if 'quota' in patch:
         fields['quota'] = int(patch['quota'] or 0)
+    if 'quota_credit' in patch:
+        fields['quota_credit'] = _norm_credit_quota(patch['quota_credit'])
     if fields:
         assignments = ', '.join(f'{k} = ?' for k in fields)
         db.execute(f'UPDATE api_keys SET {assignments} WHERE id = ?', (*fields.values(), key_id))
@@ -222,14 +244,19 @@ def delete_key(key_id: int) -> bool:
 
 
 def reset_usage(key_id: int) -> bool:
-    """把已用 Token 归零。返回是否真的命中了密钥。
+    """把已用 Token 与已用积分一起归零。返回是否真的命中了密钥。
 
     返回布尔值是为了让路由能对「不存在的 id」报 404 —— 原来静默成功会让
     前端提示「已重置」，而实际什么都没发生。
+
+    两个量一起归零是刻意的：界面上它们是同一个「重置用量」按钮，只清 token
+    不清积分会留下一个看不见的残留额度，下次超额时用户会莫名其妙（「我明明
+    重置过」）。若只想放开其中一项，正确做法是把对应的**额度**调大，而不是
+    靠重置。
     """
     if not db.query_one('SELECT id FROM api_keys WHERE id = ?', (key_id,)):
         return False
-    db.execute('UPDATE api_keys SET used_tokens = 0 WHERE id = ?', (key_id,))
+    db.execute('UPDATE api_keys SET used_tokens = 0, used_credit = 0 WHERE id = ?', (key_id,))
     return True
 
 
@@ -261,6 +288,13 @@ def validate(key: dict, ip: str, model: str | None,
         # 配额用尽与认证无关，用 429 才对（403 会被客户端读成「密钥无效」：
         # 用户于是去查密钥、而不是去调额度，方向就被带偏了）。
         return Rejection('密钥配额已用尽', 429, 'insufficient_quota', 'quota_exhausted')
+    # 积分额度（issue #27）：与 token 额度**各自独立**，任一超限即拦。
+    # 文案里带上具体数字：这个额度是按真实扣费算的，用户需要知道「超了多少、
+    # 该充多少」，只说「已用尽」会让他去翻日志。
+    if key['quota_credit'] and key['used_credit'] >= key['quota_credit']:
+        return Rejection(
+            f'密钥积分额度已用尽（已用 {key["used_credit"]:g} / 上限 {key["quota_credit"]:g}）',
+            429, 'insufficient_quota', 'credit_quota_exhausted')
 
     allow = key['ip_allowlist']
     if allow and not any(ip_matches(ip, c) for c in allow):
@@ -323,7 +357,13 @@ def validate(key: dict, ip: str, model: str | None,
     return None
 
 
-def touch(key: dict, ip: str, tokens: int = 0) -> None:
+def touch(key: dict, ip: str, tokens: int = 0, credit: float | None = None) -> None:
+    """记账：来源 IP、最近使用、已用 token 与已用积分。
+
+    credit 为本次调用的**真实扣费**（上游 usage.credit）。None / 0 表示上游
+    没返回该字段（本版本之前的上游、或非计费端点）——**不计入而不是按 0 记**，
+    与 request_logs.credit、usage_daily.credit 的口径一致。
+    """
     db.execute(
         'INSERT OR IGNORE INTO api_key_ips(key_id, ip, first_seen) VALUES(?, ?, ?)',
         (key['id'], ip, int(time.time())),
@@ -331,3 +371,6 @@ def touch(key: dict, ip: str, tokens: int = 0) -> None:
     db.execute('UPDATE api_keys SET last_used_at = ? WHERE id = ?', (int(time.time()), key['id']))
     if tokens:
         db.execute('UPDATE api_keys SET used_tokens = used_tokens + ? WHERE id = ?', (tokens, key['id']))
+    if credit:
+        db.execute('UPDATE api_keys SET used_credit = used_credit + ? WHERE id = ?',
+                   (float(credit), key['id']))

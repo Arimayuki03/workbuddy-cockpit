@@ -146,8 +146,11 @@ class KeyWhitelistCompatTest(unittest.TestCase):
     """
 
     def _row(self, models: list[str]) -> dict:
+        # 字段要与 keysvc._parse 的产物一致：validate 直接按键取值（不是 .get），
+        # 缺列会 KeyError。往密钥行加字段时这里要跟着补（issue #27 就踩到过）。
         return {'id': 1, 'enabled': True, 'expires_at': 0, 'quota': 0,
-                'used_tokens': 0, 'ip_allowlist': [], 'max_ips': 0,
+                'used_tokens': 0, 'quota_credit': 0.0, 'used_credit': 0.0,
+                'ip_allowlist': [], 'max_ips': 0,
                 'realm': '', 'models': models}
 
     def test_both_spellings_accepted(self) -> None:

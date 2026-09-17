@@ -8,8 +8,9 @@
 #      docker compose logs workbuddy-manager | grep -A2 密码
 #
 # 与宿主机安装（deploy/install.sh + systemd）的区别，见 Dockerfile 顶部说明。
-# 简述：容器版**不支持在界面上更新上游**（那需要挂 docker.sock，等于把宿主 root
-# 交给容器）；上游请用它自己的 compose 单独升级。
+# 简述：容器版**能**在界面上更新上游 —— 镜像内置了 docker CLI 与 compose 插件，
+# 挂上 docker.sock 后即可在容器内重建上游容器（见下方 volumes 的说明）。
+# 不挂 docker.sock 时那几项会降级为「请到宿主机操作」，界面如实提示。
 
 services:
   workbuddy-manager:

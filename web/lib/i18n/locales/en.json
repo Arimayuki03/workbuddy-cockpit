@@ -377,7 +377,10 @@
     "keyUpdated": "Key updated",
     "keyCreated": "Key created",
     "enabled": "Enabled",
-    "disabled": "Disabled"
+    "disabled": "Disabled",
+    "quotaCredit": "Credit quota",
+    "quotaCreditHint": "Accumulated from the real charge reported by the upstream (not estimated from tokens). Independent of the token quota above — exceeding either one blocks calls. Leave 0 for unlimited",
+    "creditUsed": "{used} / {quota} credits"
   },
   "logs": {
     "title": "Request logs",
@@ -726,7 +729,9 @@
     "copyLink": "Copy link",
     "shareTitle": "Add Tencent account",
     "shareText": "Open this link to authorize by QR code; check-in and onboarding then happen automatically",
-    "retry": "Get a new code"
+    "retry": "Get a new code",
+    "stateLost": "The QR code is no longer valid (the server restarted while waiting). Please request a new one",
+    "realmMismatch": "This QR code belongs to the other edition (CN / Global). Please request a new one"
   },
   "region": {
     "HK": "Hong Kong SAR China",

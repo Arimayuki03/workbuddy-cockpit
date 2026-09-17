@@ -236,6 +236,15 @@ export interface ApiKey {
   realm: 'cn' | 'global' | '';
   quota: number | null;
   used_tokens: number;
+  /**
+   * 积分额度与已用量（issue #27）：按上游返回的**真实扣费**（usage.credit）累计。
+   *
+   * 与 token 额度各自独立，任一超限即拒绝调用；0 = 不限。
+   * 为什么不只按 token 限额：同样 1M token，便宜模型与贵模型的扣费能差几十倍，
+   * 按 token 估不出实际花了多少积分（提需求的人遇到的正是这个问题）。
+   */
+  quota_credit: number;
+  used_credit: number;
   created_at: number;
   last_used_at: number | null;
   /** 仅在创建时返回一次 */

@@ -242,7 +242,9 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
     if key:
         try:
             total = pt + ct
-            keysvc.touch(key, ip, total)
+            # credit 一并传入：密钥的**积分额度**（issue #27）靠它累计。
+            # 原先只记 token，积分用量就永远是 0，超限判定无从谈起。
+            keysvc.touch(key, ip, total, credit)
             if total or credit:
                 db.bump_usage(key['id'], model_clean, pt, ct, credit, realm=realm)
         except Exception as exc:  # noqa: BLE001

@@ -362,7 +362,10 @@
     "keyUpdated": "金鑰已更新",
     "keyCreated": "金鑰已建立",
     "enabled": "已啟用",
-    "disabled": "已停用"
+    "disabled": "已停用",
+    "quotaCredit": "積分額度",
+    "quotaCreditHint": "按上游回傳的真實扣費累計（不是按 token 估算）。與上面的 token 額度互不影響，任一超限即拒絕呼叫；留 0 = 不限",
+    "creditUsed": "積分 {used} / {quota}"
   },
   "logs": {
     "title": "請求日誌",
@@ -711,7 +714,9 @@
     "copyLink": "複製連結",
     "shareTitle": "新增騰訊帳號",
     "shareText": "開啟這個連結完成掃碼授權，之後會自動簽到並納入帳號池",
-    "retry": "重新取得"
+    "retry": "重新取得",
+    "stateLost": "二維碼已失效（伺服端在等待期間重啟過），請重新取得",
+    "realmMismatch": "這個二維碼是另一個版本（國內 / 國際）的，請重新取得"
   },
   "region": {
     "HK": "中國香港",

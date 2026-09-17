@@ -27,6 +27,15 @@ import {
 type Phase = 'loading' | 'waiting' | 'success' | 'error';
 
 /**
+ * 连续失败几次才打断轮询。
+ *
+ * 取 3（约 6 秒）：单次抖动/超时不该打断用户扫码，而持续失败（例如账号目录
+ * 无权写入）必须让用户看到原因 —— 否则界面会一直转圈到 5 分钟后再报
+ * 「二维码已失效」，把真正的故障藏起来（issue #26）。
+ */
+const POLL_FAIL_LIMIT = 3;
+
+/**
  * 国际版可选地区（与后端 INTERNATIONAL_REGIONS 保持一致）。
  * 取自国际版官网的短名单；不预选，因为地区属于账号归属信息。
  * label 为 i18n 键：地区名要跟着界面语言走（代码本身是固定的 ISO 码）。
@@ -62,6 +71,8 @@ export function AddAccountDialog({
   const timerRef = useRef<number | null>(null);
   /** 上一次 poll 是否还在飞：单次超过 2 秒时避免请求叠加 */
   const pollingRef = useRef(false);
+  /** 连续轮询失败次数：偶发抖动不该打断用户，持续失败才报出来 */
+  const failsRef = useRef(0);
 
   const stopPoll = useCallback(() => {
     if (timerRef.current !== null) {
@@ -73,6 +84,7 @@ export function AddAccountDialog({
 
   const start = useCallback(async () => {
     stopPoll();
+    failsRef.current = 0;
     setPhase('loading');
     setMessage(t('addAccount.requesting'));
     setAuthUrl('');
@@ -108,13 +120,33 @@ export function AddAccountDialog({
             window.dispatchEvent(new Event('workbuddy-manager:accounts-changed'));
             onSuccess?.();
             window.setTimeout(() => onOpenChange(false), 1600);
-          } else if (res.status === 'expired' || res.status === 'invalid') {
+          } else if (res.status === 'expired') {
+            // 真过了有效期（5 分钟）：重新取一张码才是对的
             stopPoll();
             setPhase('error');
             setMessage(t('addAccount.qrExpired'));
+          } else if (res.status === 'invalid') {
+            // 与「过期」分开报：state 不在缓存里意味着**服务端重启过**
+            // （或部署成多进程），二维码本身没问题。以前两者共用一句
+            // 「二维码已失效」，用户会一直重扫却怎么都不成功（issue #26）。
+            stopPoll();
+            setPhase('error');
+            setMessage(t('addAccount.stateLost'));
+          } else if (res.status === 'realm_mismatch') {
+            stopPoll();
+            setPhase('error');
+            setMessage(t('addAccount.realmMismatch'));
           }
-        } catch {
-          /* 忽略单次轮询错误，等待下次 */
+        } catch (e) {
+          // 不再静默吞掉：轮询出错（落盘失败 / 网络抖动 / 上游超时）以前会被
+          // 丢弃并继续轮询，最后必然走到「二维码已失效」——把真实原因藏了起来。
+          // 现在连续失败到阈值就报出来，并保留重试入口。
+          failsRef.current += 1;
+          if (failsRef.current >= POLL_FAIL_LIMIT) {
+            stopPoll();
+            setPhase('error');
+            setMessage(errText(e));
+          }
         } finally {
           pollingRef.current = false;
         }

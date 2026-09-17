@@ -54,6 +54,11 @@ CREATE TABLE IF NOT EXISTS api_keys (
   realm         TEXT    NOT NULL DEFAULT '',
   quota         INTEGER NOT NULL DEFAULT 0,
   used_tokens   INTEGER NOT NULL DEFAULT 0,
+  -- 积分额度与已用量（issue #27）：与 token 限额**各自独立**，0 = 不限。
+  -- 两者可以同时设，任一超限即拒绝；用 REAL 是因为上游 credit 是小数
+  -- （如 0.05 表示一次调用的倍率扣费）。
+  quota_credit  REAL    NOT NULL DEFAULT 0,
+  used_credit   REAL    NOT NULL DEFAULT 0,
   created_at    INTEGER NOT NULL,
   last_used_at  INTEGER
 );
@@ -237,6 +242,14 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # 人家正在用的密钥悄悄限死（那会让线上调用突然 403）。管理员在界面上
     # 看到「未限定」标记后可按需补填。
     ('api_keys', 'realm', "TEXT NOT NULL DEFAULT ''"),
+    # 积分额度与已用量（issue #27）。存量密钥为 0/0 = **不限积分**，行为不变。
+    #
+    # 为什么要在 token 之外单独记一笔：两者**不成比例** —— 同样 1M token，
+    # 便宜模型与贵模型的实际扣费能差几十倍，按 token 限额估不出花了多少积分
+    # （提需求的人遇到的正是这个问题）。上游从 2026-09-13 起在末帧 usage 里
+    # 带回真实 credit，我们已按请求存进 request_logs.credit，所以这里算得准。
+    ('api_keys', 'quota_credit', 'REAL NOT NULL DEFAULT 0'),
+    ('api_keys', 'used_credit', 'REAL NOT NULL DEFAULT 0'),
 )
 
 

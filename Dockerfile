@@ -123,6 +123,32 @@ RUN set -eux; \
     rm -rf /tmp/docker /tmp/docker.tgz; \
     docker --version
 
+# compose 插件：**必须单独装**，官方 docker 静态包里没有它（实测 tar 清单里
+# 只有 docker / dockerd / ctr / containerd*，没有 compose）。
+#
+# 为什么需要（issue #28）：容器版的「一键更新上游」要在本容器内重建上游容器，
+# 而重建靠的就是 compose。原先 update.py 的判据是「docker compose 不可用就退回
+# docker-compose」，但这个镜像里**两个都没有** —— 于是必然走进退回分支，
+# 报 `FileNotFoundError: 'docker-compose'`（exit 127），更新做到一半失败，
+# 而用户看到的只是「重建失败」。
+#
+# 装在 /usr/local/lib/docker/cli-plugins（官方约定的插件目录），文件名必须是
+# `docker-compose`（连字符），`docker compose` 子命令才认得它。
+ARG COMPOSE_VERSION=v5.5.1
+RUN set -eux; \
+    case "${TARGETARCH:-$(uname -m)}" in \
+        amd64 | x86_64)  COMPOSE_ARCH=x86_64 ;; \
+        arm64 | aarch64) COMPOSE_ARCH=aarch64 ;; \
+        arm | armv7l)    COMPOSE_ARCH=armv7 ;; \
+        *) echo "compose 插件不支持的架构：${TARGETARCH:-$(uname -m)}" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /usr/local/lib/docker/cli-plugins; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+        "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${COMPOSE_ARCH}" \
+        -o /usr/local/lib/docker/cli-plugins/docker-compose; \
+    chmod +x /usr/local/lib/docker/cli-plugins/docker-compose; \
+    docker compose version
+
 WORKDIR /app
 
 # 先装依赖（利用层缓存：代码改动不必重装依赖）

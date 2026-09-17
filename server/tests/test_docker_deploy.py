@@ -23,6 +23,7 @@ import importlib.util
 import os
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -30,6 +31,39 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 _ROOT = Path(__file__).resolve().parents[2]
+
+
+class _Rep:
+    """轻量 Reporter：只收集日志，不写状态文件。
+
+    真正更新流程里用 deploy/update.py 的 Reporter（会往 DATA_DIR 落盘）；
+    这些测试只关心「过程里记了什么、文件最终是什么样」，用这个更干净。
+    """
+
+    def __init__(self) -> None:
+        self.lines: list[tuple[str, str]] = []
+        self.state: dict = {}
+
+    def log(self, msg: str, level: str = 'info') -> None:
+        self.lines.append((level, msg))
+
+    def step(self, name: str) -> None:
+        self.lines.append(('info', f'== {name} =='))
+
+    def set_target_version(self, tag: str) -> None:
+        self.state['target_version'] = tag
+
+    def set_signature(self, status: str, detail: str = '') -> None:
+        self.state['signature'] = {'status': status, 'detail': detail}
+
+    def finish(self, ok: bool) -> None:
+        self.state['ok'] = ok
+
+    def text(self) -> str:
+        return '\n'.join(m for _, m in self.lines)
+
+    def errors(self) -> list[str]:
+        return [m for lvl, m in self.lines if lvl == 'error']
 
 
 def _load_update_mod(**env):
@@ -198,6 +232,191 @@ class UpstreamUpdateGuardTest(unittest.TestCase):
                / 'UpdatePanel.tsx').read_text(encoding='utf-8')
         self.assertIn('can_update_upstream', src,
                       '更新面板没读能力标志 —— 用户会点到不支持的操作')
+
+
+class ComposeCommandTest(unittest.TestCase):
+    """issue #28-1：容器内必须真的能调起 compose。
+
+    报障现象：一键更新上游时 `[Errno 2] No such file or directory: 'docker-compose'`
+    （exit 127），更新做到一半失败。
+
+    根因是**两条独立的错**叠在一起：
+      1. 镜像里的 docker CLI 来自官方静态包，而那个包**不含 compose 插件**
+         （实测 `tar -tzf docker-27.3.1.tgz` 只有 docker/dockerd/ctr/containerd*）；
+      2. update.py 的判据是「docker compose 不可用就退回 docker-compose」，
+         但容器里两个都没有 —— 于是必然走进退回分支、必然报错。
+    """
+
+    def setUp(self) -> None:
+        self.mod = _load_update_mod()
+
+    def test_dockerfile_installs_compose_plugin(self) -> None:
+        """镜像必须自己装 compose 插件（静态包里没有）。"""
+        df = (_ROOT / 'Dockerfile').read_text(encoding='utf-8')
+        self.assertIn('cli-plugins', df,
+                      'Dockerfile 没装 compose 插件 —— 容器内一键更新上游必然 exit 127')
+        self.assertIn('docker compose version', df,
+                      '装完没有自检 —— 装错了要到运行时才暴露')
+        # 文件名必须是连字符形式，`docker compose` 子命令才认
+        self.assertIn('cli-plugins/docker-compose', df,
+                      '插件文件名不对（必须是 docker-compose），docker 不会把它当子命令')
+
+    def test_compose_plugin_arch_mapping(self) -> None:
+        """compose 的架构名与 Docker 的不完全一样（arm 是 armv7 而非 armhf）。"""
+        df = (_ROOT / 'Dockerfile').read_text(encoding='utf-8')
+        block = df[df.find('COMPOSE_VERSION'):]
+        block = block[:block.find('docker compose version')]
+        self.assertIn('armv7', block, 'armv7l 应映射到 armv7（compose 的命名）')
+        self.assertIn('aarch64', block, 'arm64 应映射到 aarch64')
+
+    def test_resolver_tries_both_forms(self) -> None:
+        """解析顺序：宿主已有的 v2 → v1 → 都没有返回 None。"""
+        m = self.mod
+        with mock.patch.object(m, '_has_compose_v2', return_value=True), \
+             mock.patch.object(m, '_has_compose_v1', return_value=True):
+            self.assertEqual(m._compose_cmd(), ['docker', 'compose'])
+        with mock.patch.object(m, '_has_compose_v2', return_value=False), \
+             mock.patch.object(m, '_has_compose_v1', return_value=True):
+            self.assertEqual(m._compose_cmd(), ['docker-compose'])
+        with mock.patch.object(m, '_has_compose_v2', return_value=False), \
+             mock.patch.object(m, '_has_compose_v1', return_value=False):
+            self.assertIsNone(m._compose_cmd(),
+                              '两个都没有时应返回 None，由调用方给出可执行的修法')
+
+    def test_missing_compose_raises_actionable_error(self) -> None:
+        """都没有时要报「怎么修」，而不是让用户对着 No such file 发呆。"""
+        m = self.mod
+        with mock.patch.object(m, '_has_compose_v2', return_value=False), \
+             mock.patch.object(m, '_has_compose_v1', return_value=False), \
+             mock.patch.object(m, '_read_upstream_ref', return_value=''), \
+             mock.patch.object(m, '_compose_looks_customized', return_value=False), \
+             mock.patch.object(m, '_missing_copy_sources', return_value=[]):
+            (m.UPSTREAM_DIR / '.git').mkdir(parents=True, exist_ok=True)
+            rep = _Rep()
+            try:
+                with self.assertRaises(RuntimeError) as ctx:
+                    m.update_upstream(rep)
+                msg = str(ctx.exception)
+                self.assertIn('compose', msg)
+                self.assertIn('Dockerfile', msg, '应给出可执行的修法')
+            finally:
+                import shutil as _sh
+                _sh.rmtree(m.UPSTREAM_DIR / '.git', ignore_errors=True)
+
+
+class ComposeLocalCustomizationTest(unittest.TestCase):
+    """issue #28-2：更新上游不能抹掉用户对 docker-compose.yml 的定制。
+
+    报障现象：1Panel 用户给上游 compose 加了 `networks: 1panel-network`
+    （external），一键更新后该文件被 `git reset --hard` 覆盖，容器重建时
+    网络配置丢失、直接失联。
+
+    原有的 `.patch` 备份**只是给人看的**，不会自动还原 —— 所以等于配置真的丢了。
+    """
+
+    def setUp(self) -> None:
+        self.mod = _load_update_mod()
+        self.rep = _Rep()
+
+    def test_port_convergence_preserves_other_customizations(self) -> None:
+        """端口收敛是纯文本替换，不能顺手动用户加的网络 / 卷。"""
+        sample = (
+            'services:\n'
+            '  wb2api:\n'
+            '    ports:\n'
+            '      - "7863:7863"\n'
+            '    networks:\n'
+            '      - 1panel-network\n'
+            'networks:\n'
+            '  1panel-network:\n'
+            '    external: true\n'
+        )
+        out = self.mod._port_converged(sample)
+        self.assertIn('"127.0.0.1:7863:7863"', out, '端口应收敛')
+        self.assertNotIn('"7863:7863"', out, '公网绑定不应残留')
+        self.assertIn('1panel-network', out, '用户的网络配置被改了')
+        self.assertIn('external: true', out, '用户的 external 声明被改了')
+
+    def test_customization_detected_ignoring_our_port_change(self) -> None:
+        """只有**用户的**改动才算定制；我们自己做的端口收敛不算。
+
+        否则每次更新都会把旧 compose 原样写回，上游新增的 compose 字段
+        永远进不来（把「保护定制」变成「冻结配置」）。
+        """
+        m = self.mod
+        head = 'services:\n  wb2api:\n    ports:\n      - "7863:7863"\n'
+        with tempfile.TemporaryDirectory() as td:
+            up = Path(td)
+            (up / 'docker-compose.yml').write_text(
+                m._port_converged(head), encoding='utf-8')
+            with mock.patch.object(m, 'UPSTREAM_DIR', up), \
+                 mock.patch.object(m, 'run', return_value=(0, head)):
+                self.assertFalse(m._compose_looks_customized(self.rep),
+                                 '把我们的端口收敛当成了用户定制 —— 会冻结上游 compose 更新')
+
+            # 用户真的改了 → 应识别为定制
+            (up / 'docker-compose.yml').write_text(
+                m._port_converged(head) + 'networks:\n  x:\n    external: true\n',
+                encoding='utf-8')
+            with mock.patch.object(m, 'UPSTREAM_DIR', up), \
+                 mock.patch.object(m, 'run', return_value=(0, head)):
+                self.assertTrue(m._compose_looks_customized(self.rep),
+                                '用户的网络定制没被识别出来 —— 更新后会被抹掉')
+
+    def test_customization_restored_after_pull(self) -> None:
+        """端到端：更新流程里先留存、后被 git reset 抹掉、最后原样写回。"""
+        m = self.mod
+        custom = (
+            'services:\n'
+            '  wb2api:\n'
+            '    ports:\n'
+            '      - "127.0.0.1:7863:7863"\n'
+            '    networks:\n'
+            '      - 1panel-network\n'
+            'networks:\n'
+            '  1panel-network:\n'
+            '    external: true\n'
+        )
+        with tempfile.TemporaryDirectory() as td:
+            up = Path(td)
+            (up / '.git').mkdir()
+            compose = up / 'docker-compose.yml'
+            compose.write_text(custom, encoding='utf-8')
+            rep = _Rep()
+
+            def fake_run(cmd, cwd=None, rep=None, check=True, **kw):
+                if cmd[:2] == ['git', 'status']:
+                    return 0, ' M docker-compose.yml\n'
+                if cmd[:2] == ['git', 'diff']:
+                    return 0, 'diff...'
+                if cmd[:2] == ['git', 'rev-parse']:
+                    return 0, 'abc12345'
+                if cmd[:3] == ['git', 'checkout', '--']:
+                    # 模拟丢弃本地改动
+                    compose.write_text('services:\n  wb2api:\n    ports:\n      - "7863:7863"\n',
+                                       encoding='utf-8')
+                    return 0, ''
+                if cmd[:2] == ['git', 'fetch'] or cmd[:2] == ['git', 'pull'] or cmd[:2] == ['git', 'reset']:
+                    return 0, ''
+                if cmd[:2] == ['docker', 'compose']:
+                    return 0, 'ok'
+                return 0, ''
+
+            with mock.patch.object(m, 'UPSTREAM_DIR', up), \
+                 mock.patch.object(m, 'DATA_DIR', up), \
+                 mock.patch.object(m, 'run', side_effect=fake_run), \
+                 mock.patch.object(m, '_compose_looks_customized', return_value=True), \
+                 mock.patch.object(m, '_missing_copy_sources', return_value=[]), \
+                 mock.patch.object(m, '_has_compose_v2', return_value=True), \
+                 mock.patch.object(m, 'wait_health', return_value=True), \
+                 mock.patch.object(m, '_clear_version_cache'):
+                m.update_upstream(rep)
+
+            text = compose.read_text(encoding='utf-8')
+            self.assertIn('1panel-network', text, '用户的网络定制在更新后丢了')
+            self.assertIn('external: true', text, 'external 声明在更新后丢了')
+            self.assertIn('127.0.0.1:7863:7863', text, '端口收敛没重新施加')
+            self.assertNotIn('"7863:7863"', text, '公网绑定残留')
 
 
 class DockerAssetsTest(unittest.TestCase):

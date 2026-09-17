@@ -296,6 +296,20 @@ def verify_release_signature(archive: Path, sig_url: str, rep: Reporter) -> None
 
 
 # ── 上游更新 ─────────────────────────────────────────────
+# 上游 compose 里与我们安全基线不同的那行端口绑定（见 enforce_local_bind）。
+def _compose_wide_bind() -> str:
+    return f'"{UPSTREAM_PORT}:{UPSTREAM_PORT}"'
+
+
+def _compose_bound_bind() -> str:
+    return f'"127.0.0.1:{UPSTREAM_PORT}:{UPSTREAM_PORT}"'
+
+
+def _port_converged(text: str) -> str:
+    """把 compose 文本里的公网端口绑定收敛为仅本机（纯文本替换，不落盘）。"""
+    return text.replace(_compose_wide_bind(), _compose_bound_bind())
+
+
 def enforce_local_bind(rep: Reporter) -> None:
     """把 compose 的端口绑定收敛为仅本机。
 
@@ -307,16 +321,41 @@ def enforce_local_bind(rep: Reporter) -> None:
         rep.log('未找到 docker-compose.yml，跳过端口收敛', 'warn')
         return
     text = compose.read_text(encoding='utf-8')
-    wide = f'"{UPSTREAM_PORT}:{UPSTREAM_PORT}"'
-    bound = f'"127.0.0.1:{UPSTREAM_PORT}:{UPSTREAM_PORT}"'
+    bound = _compose_bound_bind()
     if bound in text:
         rep.log('端口绑定已是仅本机（127.0.0.1）')
         return
-    if wide in text:
-        compose.write_text(text.replace(wide, bound), encoding='utf-8')
+    if _compose_wide_bind() in text:
+        compose.write_text(_port_converged(text), encoding='utf-8')
         rep.log(f'已将端口绑定收敛为 {bound}（安全基线）')
     else:
         rep.log('未匹配到端口绑定行，请人工确认 compose 配置', 'warn')
+
+
+def _compose_looks_customized(rep: Reporter) -> bool:
+    """compose 文件里是否存在**除我们端口收敛之外**的用户改动。
+
+    判据：把本地文件反向还原端口收敛后，与 git HEAD 里的版本比对——
+    不相同就说明用户自己改过（加网络、改卷、加环境变量…）。
+
+    为什么要单独判断：端口收敛是我们**故意**制造的本地改动，每次更新都会
+    重新施加，不该被当成「用户定制」而一直保留旧文件。只有真正的用户定制
+    才需要保住（issue #28：1Panel 用户加了 external 网络，被 git reset 抹掉后
+    容器重建连不上网络）。
+    """
+    compose = UPSTREAM_DIR / 'docker-compose.yml'
+    if not compose.is_file():
+        return False
+    try:
+        local = compose.read_text(encoding='utf-8')
+        rc, head = run(['git', 'show', 'HEAD:docker-compose.yml'],
+                       cwd=UPSTREAM_DIR, rep=rep, check=False)
+        if rc != 0:
+            return False  # 取不到 HEAD 版本就不下结论，按「没定制」处理（维持旧行为）
+        # 两边都归一化到「收敛后」再比，排除掉端口这一处已知差异
+        return _port_converged(local).strip() != _port_converged(head).strip()
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def update_upstream(rep: Reporter) -> None:
@@ -333,6 +372,20 @@ def update_upstream(rep: Reporter) -> None:
     # 1) 若存在本地改动，先备份再暂存，避免 pull 冲突
     rc, status = run(['git', 'status', '--porcelain'], cwd=UPSTREAM_DIR, rep=rep, check=False)
     dirty = [l for l in status.splitlines() if l.strip()]
+    # compose 的用户定制要**单独留存**：更新会用 git reset --hard 抹掉工作区，
+    # 而 patch 备份（下面那个 .patch 文件）只是给人看的，不会自动还原。
+    # 见 issue #28：1Panel 用户给上游 compose 加了 external 网络，
+    # 更新后被抹掉 → 容器重建时网络配置丢失、连不上。
+    custom_compose = _compose_looks_customized(rep)
+    saved_compose = ''
+    if custom_compose:
+        try:
+            saved_compose = (UPSTREAM_DIR / 'docker-compose.yml').read_text(encoding='utf-8')
+            rep.log('检测到 docker-compose.yml 有本地定制，更新后会原样恢复'
+                    '（网络 / 卷 / 端口等配置不会丢）')
+        except OSError as exc:
+            rep.log(f'读取本地 docker-compose.yml 失败，无法保留定制：{exc}', 'warn')
+            custom_compose = False
     if dirty:
         rep.log(f'检测到 {len(dirty)} 处本地改动，先备份')
         backup = DATA_DIR / 'upstream-local-changes.patch'
@@ -340,7 +393,8 @@ def update_upstream(rep: Reporter) -> None:
         if diff.strip():
             backup.write_text(diff, encoding='utf-8')
             rep.log(f'  已备份到 {backup}')
-        # 丢弃本地改动：其中包含我们的端口收敛，稍后会重新施加
+        # 丢弃本地改动：其中包含我们的端口收敛与（已单独留存的）compose 定制，
+        # 前者稍后重新施加，后者在更新完成后原样写回
         run(['git', 'checkout', '--', '.'], cwd=UPSTREAM_DIR, rep=rep, check=False)
 
     # 2) 拉取（或检出被固定的版本）
@@ -393,10 +447,22 @@ def update_upstream(rep: Reporter) -> None:
     else:
         rep.log(f'上游代码更新：{before or "?"} → {after or "?"}')
 
-    # 3) 恢复安全基线
+    # 3) 恢复用户对 compose 的本地定制（issue #28）
+    #
+    # 必须在 enforce_local_bind **之前**：那份定制里可能也有端口行，
+    # 先恢复再统一收敛，才不会漏掉它。
+    if custom_compose and saved_compose:
+        try:
+            (UPSTREAM_DIR / 'docker-compose.yml').write_text(saved_compose, encoding='utf-8')
+            rep.log('已恢复本地定制的 docker-compose.yml')
+        except OSError as exc:
+            rep.log(f'恢复 docker-compose.yml 失败：{exc}', 'warn')
+            rep.log('  你的定制仍保存在本次更新的备份 patch 里，可手动恢复', 'warn')
+
+    # 4) 恢复安全基线
     enforce_local_bind(rep)
 
-    # 4) 构建前预检：上游偶尔会漏改 Dockerfile（删了文件却仍在 COPY），
+    # 5) 构建前预检：上游偶尔会漏改 Dockerfile（删了文件却仍在 COPY），
     #    提前查出来，避免只看到 docker 那串难懂的报错
     missing = _missing_copy_sources()
     if missing:
@@ -407,9 +473,19 @@ def update_upstream(rep: Reporter) -> None:
                 '可在「设置 → 系统更新」把上游固定到上一个可用提交，或等待上游修复。', 'error')
         raise RuntimeError('上游 Dockerfile 引用了不存在的文件：' + ', '.join(missing))
 
-    # 5) 重建并启动
+    # 6) 重建并启动
     rep.log('重建并启动上游容器（首次可能需数分钟）…')
-    compose_cmd = ['docker', 'compose'] if _has_compose_v2() else ['docker-compose']
+    compose_cmd = _compose_cmd()
+    if compose_cmd is None:
+        # 容器镜像已内置 compose 插件（见 Dockerfile）；真走到这里说明用户
+        # 用的是旧镜像或**自建的**管理端镜像。给出可执行的修法，而不是
+        # 让他对着 'docker-compose': No such file 发呆。
+        raise RuntimeError(
+            '找不到可用的 compose 命令（docker compose / docker-compose 都没有）。\n'
+            '  容器部署请更新到最新版管理端镜像（已内置 compose 插件）；\n'
+            '  自建镜像请在 Dockerfile 里安装 compose；\n'
+            '  宿主机部署请安装 docker compose 插件或 docker-compose。'
+        )
     rc, out = run(compose_cmd + ['up', '-d', '--build'], cwd=UPSTREAM_DIR, rep=rep, check=False)
     if rc != 0:
         hint = _diagnose_build_failure(out)
@@ -567,11 +643,48 @@ def _report_service_state(rep: Reporter) -> None:
 
 
 def _has_compose_v2() -> bool:
+    """`docker compose`（无连字符）是否可用。
+
+    只是**候选之一**，不要把它当作「能不能用 compose」的判据——见
+    `_compose_cmd()`：容器形态下 docker CLI 插件目录里往往没有 compose，
+    但用户本机装了旧的 `docker-compose`，两条路都得试。
+    """
     try:
         return subprocess.run(['docker', 'compose', 'version'],
                               capture_output=True, timeout=15).returncode == 0
     except Exception:  # noqa: BLE001
         return False
+
+
+def _has_compose_v1() -> bool:
+    """旧的 `docker-compose`（连字符）是否可用。"""
+    if not shutil.which('docker-compose'):
+        return False
+    try:
+        return subprocess.run(['docker-compose', 'version'],
+                              capture_output=True, timeout=15).returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _compose_cmd() -> list[str] | None:
+    """解析出可用的 compose 命令；都不可用返回 None。
+
+    为什么不能像原先那样「有 v2 就用 v2，否则退回 v1」：容器形态下
+    **两个都不可用** —— 镜像里的 docker CLI 来自官方静态包，而那个包里
+    只有 `docker` 一个二进制，**不含 compose 插件**
+    （实测 `tar -tzf docker-27.3.1.tgz` 只有 docker/dockerd/ctr/containerd*）。
+    于是原先的写法在容器里必然走进 `['docker-compose']` 分支，
+    报 `FileNotFoundError: 'docker-compose'`（issue #28 的 exit 127）。
+
+    顺序：先用宿主机已有的（v2 优先，它是官方推荐形态），
+    实在没有再用我们自带的回退实现（见 `_fallback_compose_up`）。
+    """
+    if _has_compose_v2():
+        return ['docker', 'compose']
+    if _has_compose_v1():
+        return ['docker-compose']
+    return None
 
 
 def wait_health(url: str, tries: int, rep: Reporter) -> bool:

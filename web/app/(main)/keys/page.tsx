@@ -55,6 +55,8 @@ interface FormState {
   ipAllowlist: string;
   models: string;
   quota: string;
+  /** 积分额度（issue #27）：0 = 不限。按上游返回的**真实扣费**累计 */
+  quotaCredit: string;
   /** 版本归属：'cn' | 'global' | ''（不限制，仅存量密钥） */
   realm: Realm | '';
 }
@@ -67,6 +69,7 @@ const emptyForm: FormState = {
   ipAllowlist: '',
   models: '',
   quota: '0',
+  quotaCredit: '0',
   realm: 'cn',
 };
 
@@ -147,6 +150,7 @@ export default function KeysPage() {
       ipAllowlist: (k.ip_allowlist || []).join('\n'),
       models: (k.models || []).join(', '),
       quota: String(k.quota ?? 0),
+      quotaCredit: String(k.quota_credit ?? 0),
       realm: k.realm || '',
     });
     setFormOpen(true);
@@ -170,6 +174,7 @@ export default function KeysPage() {
         ip_allowlist: toLines(form.ipAllowlist),
         models: toLines(form.models),
         quota: Number(form.quota) || 0,
+        quota_credit: Number(form.quotaCredit) || 0,
         // '' 是有意义的取值（不限制版本），必须照传——后端以它区分
         // 「存量密钥，两版都能调」与「限定了某一版」
         //
@@ -268,7 +273,11 @@ export default function KeysPage() {
           <TableBody>
             {keys.map((k) => {
               const expired = !!k.expires_at && k.expires_at * 1000 < Date.now();
-              const overQuota = !!k.quota && k.used_tokens >= k.quota;
+              // 两种额度任一超限都算「超额」——界面上必须与网关的拒绝口径**一致**，
+              // 否则会出现「列表显示正常、调用却被 429」，用户会以为是网关坏了。
+              const overQuota =
+                (!!k.quota && k.used_tokens >= k.quota) ||
+                (!!k.quota_credit && k.used_credit >= k.quota_credit);
               return (
                 <TableRow key={k.id} className="border-b border-border/40">
                   <TableCell className="pl-4 text-sm font-medium">{k.name}</TableCell>
@@ -319,10 +328,31 @@ export default function KeysPage() {
                           : ratio >= 0.8
                             ? 'text-amber-600 dark:text-amber-400 font-medium'
                             : 'text-foreground';
+                      // 积分额度设了才显示积分那一行：没设的密钥（绝大多数）
+                      // 保持原来的单行 token 展示，不让默认视图变吵。
+                      const cRatio = k.quota_credit ? k.used_credit / k.quota_credit : 0;
+                      const cTone = cRatio >= 1
+                        ? 'text-red-600 dark:text-red-400 font-medium'
+                        : cRatio >= 0.8
+                          ? 'text-amber-600 dark:text-amber-400 font-medium'
+                          : 'text-muted-foreground';
                       return (
-                        <span className={tone}>
-                          {fmtNumber(k.used_tokens)}
-                          {k.quota ? ` / ${fmtNumber(k.quota)}` : ''}
+                        <span className="flex flex-col">
+                          <span className={tone}>
+                            {fmtNumber(k.used_tokens)}
+                            {k.quota ? ` / ${fmtNumber(k.quota)}` : ''}
+                          </span>
+                          {!!k.quota_credit && (
+                            <span
+                              className={`text-[10px] ${cTone}`}
+                              title={t('keys.quotaCredit')}
+                            >
+                              {t('keys.creditUsed', {
+                                used: String(k.used_credit),
+                                quota: String(k.quota_credit),
+                              })}
+                            </span>
+                          )}
                         </span>
                       );
                     })()}
@@ -483,6 +513,22 @@ export default function KeysPage() {
                     value={form.quota}
                     onChange={(e) => setForm({...form, quota: e.target.value})}
                   />
+                </div>
+                <div className="space-y-1.5">
+                  {/* 积分额度：与 token 额度各自独立，任一超限即拒绝，两个都留 0 = 不限。
+                      step=any 是必要的——上游按倍率扣费，值本身可能是小数（如 0.05），
+                      限成整数会让小额预算根本没法设。 */}
+                  <Label className="text-[11px] text-muted-foreground">{t('keys.quotaCredit')}</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    step="any"
+                    value={form.quotaCredit}
+                    onChange={(e) => setForm({...form, quotaCredit: e.target.value})}
+                  />
+                  <p className="text-[10px] leading-4 text-muted-foreground">
+                    {t('keys.quotaCreditHint')}
+                  </p>
                 </div>
               </div>
               <div className="space-y-1.5">
