@@ -23,6 +23,8 @@ import type {Account, UpstreamStatus} from './types';
 /** 账号当前的可用性分档 */
 export type AvailabilityTier =
   | 'disabled'
+  /** 本面板主动临时禁用（issue #21）：文件名带 .disabled，上游不加载它 */
+  | 'disabledByPanel'
   | 'expired'
   /** 本次读不到上游状态，运行时字段全部未知（`upstream.connected !== true`） */
   | 'unknown'
@@ -79,6 +81,10 @@ export function mergePoolStatus(
 
 /** 该账号的可用性分档（顺序即优先级，见模块注释）。 */
 export function availabilityOf(a: Account): AvailabilityTier {
+  // 面板主动禁用要**先于**其它判定：这类账号必然不在池里（上游不加载它），
+  // 若不先判就会落到 notLoaded，显示成「未加载 / 账号文件可能有问题」——
+  // 而它其实是用户自己刚点的「禁用」，看着像故障（实测会在界面上造成这种误导）。
+  if (a.disabled_by_panel) return 'disabledByPanel';
   if (a.disabled === true) return 'disabled';
   if (a.is_expired) return 'expired';
   // 「看不到上游」必须早于「不在池里」：否则会把正常账号说成文件损坏
@@ -107,6 +113,8 @@ export function availabilityLabelKey(tier: AvailabilityTier, a?: Account): strin
       return /11140|request illegal/i.test(String(a?.disabled_reason || ''))
         ? 'accounts.badgeDisabledRelogin'
         : 'accounts.badgeDisabled';
+    case 'disabledByPanel':
+      return 'accounts.badgeDisabledByPanel';
     case 'expired':
       return 'accounts.badgeExpired';
     case 'unknown':
@@ -142,6 +150,10 @@ export function availabilityClass(tier: AvailabilityTier): string {
     case 'disabled':
     case 'expired':
       return 'text-red-600 dark:text-red-400';
+    // 主动禁用是**用户自己的选择**，用中性灰而不是告警红——
+    // 它不是故障，标红会让人以为出了问题。
+    case 'disabledByPanel':
+      return 'text-muted-foreground';
     case 'unknown':
       return 'text-muted-foreground';
     case 'cooling':

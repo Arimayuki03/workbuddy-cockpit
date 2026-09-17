@@ -103,6 +103,11 @@ export const accountApi = {
       got?: Realm;
     }>('/api/auth/poll', {state, realm, region}),
   remove: (file: string) => del<{success: boolean}>(`/api/accounts/${encodeURIComponent(file)}`),
+  /** 临时禁用 / 启用账号（issue #21）：改文件名 + 触发上游重载。 */
+  setDisabled: (file: string, disabled: boolean) =>
+    post<{ok: boolean; file: string; disabled: boolean; changed: boolean;
+          reload_triggered: boolean; message: string}>(
+      `/api/accounts/${encodeURIComponent(file)}/disabled`, {disabled}),
   checkin: (file: string) =>
     post<{code: number; message: string; credits?: number | null}>(
       `/api/accounts/${encodeURIComponent(file)}/checkin`,

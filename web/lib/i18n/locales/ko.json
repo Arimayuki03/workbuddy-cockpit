@@ -44,7 +44,8 @@
     "password": "비밀번호",
     "passwordPlaceholder": "비밀번호를 입력하세요",
     "submit": "로그인",
-    "legal": "로그인하면 이 시스템에 대한 접근 권한이 있음을 확인하는 것으로 간주되며, 모든 작업이 기록됩니다."
+    "legal": "로그인하면 이 시스템에 대한 접근 권한이 있음을 확인하는 것으로 간주되며, 모든 작업이 기록됩니다.",
+    "emptySubmit": "사용자 이름 또는 비밀번호가 비어 있습니다. 브라우저 자동 완성을 사용했다면 비밀번호를 직접 다시 입력해 주세요."
   },
   "notFound": {
     "line1": "페이지를",
@@ -240,6 +241,12 @@
     "restarted": "업스트림을 재시작했습니다",
     "disabledReason": "비활성화 사유: {reason}",
     "badgeDisabled": "● 비활성화됨",
+    "badgeDisabledByPanel": "● 일시중지",
+    "badgeDisabledByPanelTitle": "이 화면에서 일시중지했습니다: 업스트림이 로드하지 않으므로 선택되지 않습니다. 오른쪽 \"사용\"으로 언제든 복구할 수 있습니다(자격 증명은 유지).",
+    "disableTitle": "이 계정 일시중지 (업스트림에서 선택되지 않음, 복구 가능)",
+    "enableTitle": "이 계정 사용 (업스트림에서 다시 선택됨)",
+    "disabled": "계정을 일시중지했습니다",
+    "enabled": "계정을 사용하도록 했습니다",
     "badgeDisabledRelogin": "● 비활성화됨 (재로그인 필요)",
     "badgeExpired": "● 만료됨",
     "badgeCooling": "● 쿨다운 중",

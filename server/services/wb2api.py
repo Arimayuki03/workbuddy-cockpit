@@ -33,11 +33,14 @@ def _safe_file(filename: str) -> Path:
         raise ValueError('非法的文件名')
     if '\x00' in filename:
         raise ValueError('非法的文件名')
-    # 白名单形态：账号文件是 workbuddy<后缀>.json（后缀可为空，同上游 glob）
-    if not re.fullmatch(r'workbuddy[0-9A-Za-z_-]{0,80}\.json', filename):
+    # 白名单形态：账号文件是 workbuddy<后缀>.json（后缀可为空，同上游 glob）；
+    # 末尾可带 `.disabled` —— 那是本面板的「临时禁用」标记（改名的产物，
+    # 不再匹配上游的 `workbuddy*.json` glob，于是上游不会加载它）。
+    if not re.fullmatch(r'workbuddy[0-9A-Za-z_-]{0,80}\.json(\.disabled)?', filename):
         raise ValueError('非法的文件名')
     target = config.AUTH_DIR / filename
-    if target.suffix != '.json':
+    # 结尾必须是 .json 或 .json.disabled（上面正则已保证，这里再兜一层）
+    if not (target.name.endswith('.json') or target.name.endswith('.json.disabled')):
         raise ValueError('非法的文件名')
     return target
 
@@ -98,12 +101,21 @@ def token_issued_at(access_token: str) -> int | None:
 
 
 def list_auth_accounts() -> list[dict]:
-    """读取 auths/ 目录下的本地账号（与 /status 的运行时状态互补）。"""
+    """读取 auths/ 目录下的本地账号（与 /status 的运行时状态互补）。
+
+    同时收上游**加载不到**的两类文件，否则它们会在面板上「凭空消失」：
+      · `workbuddy*.json.disabled` —— 本面板「临时禁用」改名的产物（见
+        `set_account_disabled`）。用户禁用的账号必须仍然看得见、并且能再启用，
+        否则「禁用」在使用体验上等同于「删除」。
+    """
     out: list[dict] = []
     if not config.AUTH_DIR.is_dir():
         return out
     now = time.time()
-    for path in sorted(config.AUTH_DIR.glob('workbuddy*.json')):
+    # 上游只加载 workbuddy*.json；我们额外收 .disabled，以便展示与恢复
+    files = sorted(config.AUTH_DIR.glob('workbuddy*.json'))
+    files += sorted(config.AUTH_DIR.glob('workbuddy*.json.disabled'))
+    for path in files:
         try:
             raw = json.loads(path.read_text(encoding='utf-8'))
         except Exception:
@@ -167,6 +179,10 @@ def list_auth_accounts() -> list[dict]:
                 # 明确拒绝、且我们能在本地确定判据的情形；其余情况（例如文件
                 # 能读但我们没解析出 uid）不臆测原因，交给 in_pool 如实反映。
                 'invalid_reason': invalid_reason,
+                # 本面板的「临时禁用」标记（文件名带 .disabled 后缀）。
+                # 与上游的 disabled 是两回事：那个是上游按错误分类自动禁的，
+                # 这个是运维手动停用的，解除方式也不同（见 set_account_disabled）。
+                'disabled_by_panel': path.name.endswith('.disabled'),
             }
         )
     return out
@@ -202,6 +218,12 @@ def merge_pool_status(accounts: list[dict], status: dict) -> list[dict]:
             # 上游未返回该账号：可能刚添加尚未重载，也可能上游根本没加载成功。
             # 保持其余字段为 None（前端据此单独展示，而不是当成「在线」）。
             a.setdefault('credits', None)
+            # 本面板**主动禁用**的账号必然不在池里（改名后上游不再加载它）——
+            # 这是预期行为，不是故障。把原因写清楚，否则界面会按「上游没加载它」
+            # 报成「账号文件可能有问题」，用户看到自己刚禁用的账号被标成疑似损坏，
+            # 反而要去查文件（实测会在界面上产生这种误导）。
+            if a.get('disabled_by_panel') and not a.get('invalid_reason'):
+                a['invalid_reason'] = '已在本面板临时禁用（不会被上游加载）'
             continue
         credits = p.get('credits')
         a['credits'] = int(credits) if isinstance(credits, (int, float)) else None
@@ -242,6 +264,62 @@ def delete_auth_account(filename: str) -> bool:
         target.unlink()
         return True
     return False
+
+
+# 「临时禁用」的文件名标记：加在 `.json` 之后，于是**不再匹配上游的
+# `workbuddy*.json` glob**，上游重启后就不会加载它——这是不修改上游代码
+# 就能真正停用某个账号的唯一办法（见 set_account_disabled 的说明）。
+_DISABLED_SUFFIX = '.disabled'
+
+
+def set_account_disabled(filename: str, disabled: bool) -> dict:
+    """临时禁用 / 启用一个账号（改名实现）。返回 {file, disabled, ...}。
+
+    实现原理
+    --------
+    上游 `auth.LoadAuthFiles` 用 glob `workbuddy*.json` 收集账号文件，所以把文件
+    改名成 `workbuddy-xxx.json.disabled` 之后它就不再被加载——账号随即从池里消失、
+    不会被选中。启用就是改回原名。上游**没有**任何禁用/启用的 HTTP 接口
+    （它内部有 `Disable`/`ReviveDisabled`，但只被自身的错误处理调用，未对外暴露），
+    而且 `state.json` 每 5 秒被上位机覆盖、改它没有意义，所以改名是唯一可行路径。
+
+    必须伴随一次上游重载
+    --------------------
+    上游**不监听文件变化**（没有 inotify/Watch），改名后必须重启容器才生效。
+    调用方负责触发重载（`reload.request_restart()`）——这里只做文件操作，
+    保持本函数纯粹、可测。
+
+    为什么不用「删掉文件再恢复」
+    --------------------------
+    删除会丢 token（那份文件里存着 accessToken / refreshToken，删了就再也恢复不了，
+    只能重新扫码）。改名是可逆的：启用时原样改回，凭证一个字节都不动。
+
+    边界
+    ----
+    · 重复禁用/启用是**幂等**的（已是目标状态就直接返回），不报错；
+    · 只接受 `workbuddy*.json(.disabled)` 形态（走 `_safe_file` 的校验）；
+    · 文件不存在时报错，避免「禁用成功」的假象。
+    """
+    target = _safe_file(filename)
+    # 规范化成「原始账号名」与「禁用名」两种形态
+    base = target.name[:-len(_DISABLED_SUFFIX)] if target.name.endswith(_DISABLED_SUFFIX) else target.name
+    base_path = _safe_file(base)
+    disabled_path = config.AUTH_DIR / (base + _DISABLED_SUFFIX)
+
+    if disabled:
+        if disabled_path.exists():
+            return {'file': disabled_path.name, 'disabled': True, 'changed': False}
+        if not base_path.exists():
+            raise ValueError(f'账号文件不存在：{base}')
+        base_path.rename(disabled_path)
+        return {'file': disabled_path.name, 'disabled': True, 'changed': True}
+
+    if base_path.exists():
+        return {'file': base_path.name, 'disabled': False, 'changed': False}
+    if not disabled_path.exists():
+        raise ValueError(f'账号文件不存在：{base}')
+    disabled_path.rename(base_path)
+    return {'file': base_path.name, 'disabled': False, 'changed': True}
 
 
 ASYNC_HEADERS = {'Content-Type': 'application/json'}

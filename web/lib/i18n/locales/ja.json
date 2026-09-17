@@ -44,7 +44,8 @@
     "password": "パスワード",
     "passwordPlaceholder": "パスワードを入力",
     "submit": "ログイン",
-    "legal": "ログインすると、このシステムへのアクセス権限があることを確認したものとみなされ、すべての操作が記録されます。"
+    "legal": "ログインすると、このシステムへのアクセス権限があることを確認したものとみなされ、すべての操作が記録されます。",
+    "emptySubmit": "ユーザー名またはパスワードが空です。ブラウザの自動入力を使った場合は、パスワードを手動で入力し直してください。"
   },
   "notFound": {
     "line1": "ページが",
@@ -240,6 +241,12 @@
     "restarted": "上流を再起動しました",
     "disabledReason": "無効化の理由: {reason}",
     "badgeDisabled": "● 無効",
+    "badgeDisabledByPanel": "● 停止中",
+    "badgeDisabledByPanelTitle": "この画面で一時停止しています：上流は読み込まないため選択されません。右の「有効化」でいつでも復元できます（資格情報は保持されます）。",
+    "disableTitle": "このアカウントを一時停止（上流で選択されない・復元可能）",
+    "enableTitle": "このアカウントを有効化（上流で選択されるように戻す）",
+    "disabled": "アカウントを停止しました",
+    "enabled": "アカウントを有効化しました",
     "badgeDisabledRelogin": "● 無効（再ログインが必要）",
     "badgeExpired": "● 期限切れ",
     "badgeCooling": "● クールダウン中",

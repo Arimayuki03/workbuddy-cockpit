@@ -44,7 +44,8 @@
     "password": "Password",
     "passwordPlaceholder": "Enter your password",
     "submit": "Sign in",
-    "legal": "Signing in confirms you are authorized to access this system; all actions are logged."
+    "legal": "Signing in confirms you are authorized to access this system; all actions are logged.",
+    "emptySubmit": "Username or password is empty. If your browser auto-filled them, please type the password again manually."
   },
   "notFound": {
     "line1": "Page",
@@ -255,6 +256,12 @@
     "restarted": "Upstream restarted",
     "disabledReason": "Disabled reason: {reason}",
     "badgeDisabled": "● Disabled",
+    "badgeDisabledByPanel": "● Paused",
+    "badgeDisabledByPanelTitle": "You paused this account here: the upstream will not load it, so it is never selected. Press \"Enable\" to restore it anytime (credentials are kept).",
+    "disableTitle": "Pause this account (never selected upstream; reversible)",
+    "enableTitle": "Enable this account (selected upstream again)",
+    "disabled": "Account paused",
+    "enabled": "Account enabled",
     "badgeDisabledRelogin": "● Disabled (re-login required)",
     "badgeExpired": "● Expired",
     "badgeCooling": "● Cooling down",

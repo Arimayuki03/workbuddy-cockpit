@@ -747,3 +747,44 @@ async def account_delete(filename: str, user: dict = Depends(security.require_ad
 async def restart(user: dict = Depends(security.require_admin)) -> dict:
     ok, message = await reload.restart_now()
     return {'ok': ok, 'message': message}
+
+
+@router.post('/accounts/{filename}/disabled')
+async def account_set_disabled(
+    filename: str,
+    body: dict = Body(...),
+    user: dict = Depends(security.require_admin),
+) -> dict:
+    """临时禁用 / 启用一个账号（issue #21）。
+
+    实现是**改文件名**（加/去 `.disabled` 后缀）——上游只加载 `workbuddy*.json`，
+    所以改名后它就不再被加载、从池里消失（详见 `wb2api.set_account_disabled`
+    的说明：上游没有对外暴露禁用接口，改 state.json 也会被 5 秒一次的上位机覆盖）。
+
+    body: {disabled: bool, reload: bool}。`reload` 默认 true ——
+    上游不监听文件变化，不重载的话改名不会生效，而用户点「禁用」时期待的是
+    **立即生效**。要批量操作时可以先传 false，最后一次统一重载。
+    """
+    if not isinstance(body.get('disabled'), bool):
+        raise HTTPException(status_code=400, detail='disabled 必须是布尔值')
+    disabled = bool(body['disabled'])
+    try:
+        result = wb2api.set_account_disabled(filename, disabled)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    reloaded = False
+    if result['changed'] and body.get('reload', True) is not False:
+        reloaded = reload.request_restart()
+
+    return {
+        'ok': True,
+        **result,
+        # 是否已触发上游重载。未触发时调用方要自己重启，否则改名不生效。
+        'reload_triggered': reloaded,
+        'message': (
+            f"已{'禁用' if disabled else '启用'}该账号"
+            + ('，正在重载上游使其生效' if reloaded
+               else ('；请手动重启上游以生效' if result['changed'] else ''))
+        ),
+    }

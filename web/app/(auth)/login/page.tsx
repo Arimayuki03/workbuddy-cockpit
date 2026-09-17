@@ -29,9 +29,34 @@ export default function LoginPage() {
     e.preventDefault();
     if (busy) return;
     setError('');
+
+    // 提交值以**表单元素的实际值**为准，而不是 React state。
+    //
+    // 为什么必须这样：浏览器自动填充是**直接改写 DOM 的 value、不派发 `input`
+    // 事件**，而受控组件的 `onChange` 依赖 `input` 事件——于是 state 始终是空串，
+    // 提交出去的就是空密码。界面显示有值（来自 DOM）、服务端收到的却是空值，
+    // 用户只看到「用户名或密码错误」，会以为是自己记错了密码，反复重试直到
+    // 触发登录锁定（实测复现：DOM 里 13 位密码，请求体是
+    // `{"username":"","password":""}`）。
+    //
+    // 从 DOM 读值同时覆盖三种情况：手输（state 与 DOM 一致）、自动填充（只有
+    // DOM 有值）、密码管理器注入——都不依赖事件是否派发。
+    const form = e.currentTarget as HTMLFormElement;
+    const domUser = (form.elements.namedItem('username') as HTMLInputElement | null)?.value ?? '';
+    const domPass = (form.elements.namedItem('password') as HTMLInputElement | null)?.value ?? '';
+    const finalUser = (domUser || username).trim();
+    const finalPass = domPass || password;
+
+    // 读不到值：给一条**指向真正原因**的提示。落到后端只会得到
+    // 「用户名或密码错误」，把「填充没被识别」误报成「密码错」，用户无从下手。
+    if (!finalUser || !finalPass) {
+      setError(t('login.emptySubmit'));
+      return;
+    }
+
     setBusy(true);
     try {
-      await login(username.trim(), password);
+      await login(finalUser, finalPass);
       router.replace('/dashboard');
     } catch (err) {
       setError(errText(err));
@@ -72,6 +97,7 @@ export default function LoginPage() {
               </Label>
               <Input
                 id="username"
+                name="username"
                 autoComplete="username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
@@ -85,6 +111,7 @@ export default function LoginPage() {
               </Label>
               <Input
                 id="password"
+                name="password"
                 type="password"
                 autoComplete="current-password"
                 value={password}

@@ -6,6 +6,8 @@ import {
   Gift,
   Zap,
   KeyRound,
+  Pause,
+  Play,
   Trash2,
   Plus,
   Users,
@@ -228,6 +230,18 @@ export default function AccountsPage() {
         </Badge>
       );
     }
+    if (tier === 'disabledByPanel') {
+      // 面板主动禁用：中性灰而不是告警红——这是用户自己的选择，不是故障。
+      return (
+        <Badge
+          variant="secondary"
+          className="rounded-full text-muted-foreground"
+          title={t('accounts.badgeDisabledByPanelTitle')}
+        >
+          {label}
+        </Badge>
+      );
+    }
     if (tier === 'expired') {
       return <Badge variant="destructive" className="rounded-full">{label}</Badge>;
     }
@@ -409,21 +423,47 @@ export default function AccountsPage() {
     // 国际版没有签到体系（上游对 global 账号直接过滤，不发请求）。
     // 这一行的「签到」按钮对国际版账号只会返回「已跳过」，属误导，故不显示。
     const canCheckin = (a.realm ?? 'cn') === 'cn';
+    const paused = a.disabled_by_panel === true;
     return (
       <div className="flex justify-end gap-1">
-        {canCheckin && (
+        {/* 临时禁用 / 启用（issue #21）。放在最前：它是最轻的「止血」动作——
+            某个号在拖后腿（一直失败、触发风控）时，先停用它比删掉更合适
+            （删除会丢凭证、只能重新扫码；禁用是可逆的）。
+            禁用后签到也要停掉，所以禁用时不显示其它操作。 */}
+        {!paused && canCheckin && (
           <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('accounts.checkin')} disabled={busy}
             onClick={() => run(a.file, () => accountApi.checkin(a.file), t('accounts.opDone'))}>
             <Gift className="h-3.5 w-3.5" />
           </Button>
         )}
-        <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('accounts.test')} disabled={busy}
-          onClick={() => run(a.file, () => accountApi.test(a.file), t('accounts.testDone'))}>
-          <Zap className="h-3.5 w-3.5" />
-        </Button>
-        <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('accounts.refreshToken')} disabled={busy}
-          onClick={() => run(a.file, () => accountApi.refresh(a.file), t('accounts.refreshDone'))}>
-          <KeyRound className="h-3.5 w-3.5" />
+        {!paused && (
+          <>
+            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('accounts.test')} disabled={busy}
+              onClick={() => run(a.file, () => accountApi.test(a.file), t('accounts.testDone'))}>
+              <Zap className="h-3.5 w-3.5" />
+            </Button>
+            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('accounts.refreshToken')} disabled={busy}
+              onClick={() => run(a.file, () => accountApi.refresh(a.file), t('accounts.refreshDone'))}>
+              <KeyRound className="h-3.5 w-3.5" />
+            </Button>
+          </>
+        )}
+        <Button
+          variant="ghost"
+          size="icon"
+          className={
+            'h-7 w-7 rounded-md ' +
+            (paused ? 'text-emerald-600 hover:text-emerald-600' : 'text-amber-600 hover:text-amber-600')
+          }
+          title={paused ? t('accounts.enableTitle') : t('accounts.disableTitle')}
+          disabled={busy}
+          onClick={() => run(
+            a.file,
+            () => accountApi.setDisabled(a.file, !paused),
+            paused ? t('accounts.enabled') : t('accounts.disabled'),
+          )}
+        >
+          {paused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
         </Button>
         <ConfirmDialog
           title={t('accounts.deleteTitle', {name: a.nickname || a.uid})}
