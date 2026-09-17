@@ -7,7 +7,7 @@
 
 ---
 
-## [未发布]
+## [1.0.46] - 2026-09-17
 
 ### 新增
 - **临时停用账号（issue #21）**：账号页每行新增「停用 / 启用」按钮。停用后该账号
@@ -38,6 +38,35 @@
 
   已按报告者的取证方式复现并验证：修复前请求体是空串、修复后为
   `{"username":"admin","password":"lgpass"}` 且成功进入面板。
+
+### 适配上游
+- **`prompt.mode` 新增 `append` 取值（上游 `ff64ecd` / `51bc469`，其 issue #129）**：
+  上游把该枚举从两值扩成三值 —— `passthrough`（透传客户端 system，默认）/ `custom`
+  （替换为网关提示词）/ **`append`**（在开头连续的 system/developer 块之后插入网关
+  system，**既有消息逐字不动**）。
+
+  我们的设置页有一份**独立于上游**的白名单校验，此前只认前两个，于是用户填上游
+  支持的新值会被面板拒掉（「上游支持、面板说不合法」）。这不是小事：那份校验若与
+  上游漂移，另一个方向更危险 —— 放行上游不认的值会写进一份让上游**启动即失败**的
+  配置（上游 `normalizePrompt` 对非法值是 fail fast），表现为「保存成功然后上游
+  挂了」，比当场报错难查得多。现在三值对齐，并加了断言把两边的取值集钉在一起。
+
+  上游这次另外两处变化**不受影响**（已逐项核对）：`config.json` 新增
+  `cost_explore_interval`、`/status` 新增 `cost_explore`/`events_total`/`per_model`
+  三个键（上游注释明确「零回归只增键」）；`internal/upstream/sse.go` 的多次改动都在
+  上游自己的 Aggregate（统计与 tool_calls 归并）里，不改变我们代理的 SSE 分帧。
+
+### 上游核对（截至 `5deb3c6`，32 个提交）
+
+除上面那项外逐项核对完毕，**其余无需适配**：
+
+- `Status` 结构体、端点注册**无变化**；任务日志文案**无变化**（`tasklog` 不受影响）。
+- `config.json` 仅**新增**一个键（`cost_explore_interval`）；`/status` 仅**新增**三个
+  键 —— 均为只增不改，我们按需读取，不读也不受影响。
+- 其余提交集中在 `internal/pool`（选号权重、成本台账、竞态修复）、`internal/upstream`
+  （Aggregate 边界、models.dev 负缓存）、`internal/auth`（并行访问 token 的数据竞争）、
+  `internal/session`、`internal/scheduler` 及各自测试 —— 都是上游内部实现与其自身
+  日志/统计口径的修复，不涉及我们的转发路径或直连路径。
 
 ## [1.0.45] - 2026-09-17
 

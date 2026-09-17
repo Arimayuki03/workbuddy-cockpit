@@ -144,16 +144,39 @@ class UpstreamConfigRoundTrip(unittest.TestCase):
             wb2api.save_upstream_config({'prompt': {'file': '/a\nb'}})
 
     def test_both_prompt_modes_still_accepted(self) -> None:
-        """两种模式都必须能写入 —— 上游只是改了**缺省值**，没有删掉 custom。
+        """三种模式都必须能写入 —— 上游两次扩过这个枚举，我们都跟上了。
 
-        上游 2026-09-14 把 prompt.mode 缺省从 custom 改成 passthrough（透传
-        客户端原始 system），显式配 custom 仍受支持。管理端不该因为默认值
-        变了就拒绝其中任何一个。
+        上游 2026-09-14 把缺省从 custom 改成 passthrough（透传客户端 system），
+        显式配 custom 仍受支持；2026-09-17 又新增 `append`（开头连续
+        system/developer 块之后插网关 system，既有消息逐字不动，其 issue #129）。
+
+        为什么这条重要：管理端的白名单是**独立于上游**的一份校验，上游加了新取值
+        而这里没跟，用户填合法值会被面板拒掉（「上游支持、面板说不合法」）；反过来
+        若面板放行了上游不认的值，用户会存进一份让上游**启动即失败**的配置
+        （上游 normalizePrompt 对非法值是 fail fast），表现为「保存成功然后上游挂了」。
         """
-        for mode in ('passthrough', 'custom'):
+        for mode in ('passthrough', 'custom', 'append'):
             write_cfg(self.cfg_path, {'prompt': {'mode': 'passthrough'}})
             wb2api.save_upstream_config({'prompt': {'mode': mode}})
             self.assertEqual(read_cfg(self.cfg_path)['prompt']['mode'], mode)
+        # 大小写/空白仍归一化
+        write_cfg(self.cfg_path, {'prompt': {'mode': 'passthrough'}})
+        wb2api.save_upstream_config({'prompt': {'mode': ' Append '}})
+        self.assertEqual(read_cfg(self.cfg_path)['prompt']['mode'], 'append')
+
+    def test_prompt_mode_whitelist_matches_upstream(self) -> None:
+        """白名单必须与上游 `normalizePrompt` 的取值集**逐项一致**。
+
+        上游源码（cmd/server/config.go）的 switch 只认这三个；多一个或少一个
+        都会造成上面说的两种故障。写成显式断言，便于上游再扩时一眼看到要改哪里。
+        """
+        upstream_values = {'', 'passthrough', 'custom', 'append'}  # 空串 = 缺省 passthrough
+        for value in sorted(upstream_values - {''}):
+            write_cfg(self.cfg_path, {'prompt': {'mode': 'passthrough'}})
+            wb2api.save_upstream_config({'prompt': {'mode': value}})  # 不抛错即通过
+        for bogus in ('replace', 'degraded', 'none', 'appendx'):
+            with self.assertRaises(ValueError, msg=bogus):
+                wb2api.save_upstream_config({'prompt': {'mode': bogus}})
 
     def test_empty_prompt_section_is_not_invented(self) -> None:
         """配置里没有 prompt 段时，不该被管理端凭空造出来。
