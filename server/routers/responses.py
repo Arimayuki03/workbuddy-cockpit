@@ -243,11 +243,22 @@ def to_chat_request(body: dict) -> dict:
             flush_calls()
 
             if kind == 'function_call_output':
+                # 与 Anthropic 层同一个坑（那个 PR #25 报了）：tool 消息的 content
+                # 在 OpenAI 协议里只能是字符串，**放不下结构化图片**。
+                # 只取文字会让工具输出的图片**静默丢失**（模型看不到图）；
+                # 而把整段内容 repr 成字符串更糟 —— 图片 base64 会被当文本分词，
+                # 一张几 MB 的图就能算出上百万 token，直接撑爆上下文。
+                # 所以：文字留在 tool 消息里，图片提取出来并入紧随其后的 user 消息。
+                output = item.get('output')
+                out_text, out_images = _split_tool_output(output)
                 messages.append({
                     'role': 'tool',
                     'tool_call_id': str(item.get('call_id') or ''),
-                    'content': _tool_output_text(item.get('output')),
+                    'content': out_text,
                 })
+                # 图片必须紧跟其后（顺序即语义：它们属于这次工具调用）
+                for chunk in _images_as_user_messages(out_images):
+                    messages.append(chunk)
                 continue
             if kind == 'reasoning':
                 # 上游不回放推理内容：reasoning item 只对 OpenAI 自家有效，
@@ -296,6 +307,29 @@ def _tool_output_text(output: object) -> str:
     if output is None:
         return ''
     return str(output)
+
+
+def _split_tool_output(output: object) -> tuple[str, list[dict]]:
+    """拆出工具输出的 (文字, 图片块)。
+
+    与 Anthropic 层同口径（见 `to_chat_request` 里 tool_result 那段）：
+    tool 消息的 content 只能是字符串，图片要提升为后续 user 消息的图像块，
+    否则就会「静默丢图」（只取文字）或「撑爆上下文」（repr 整段含 base64）。
+    """
+    if isinstance(output, list):
+        text, blocks = _text_of_parts(output)
+        images = [b for b in blocks if b.get('type') == 'image_url']
+        if not text and images:
+            text = '[图片]'   # 上游要求 tool content 非空
+        return text, images
+    return _tool_output_text(output), []
+
+
+def _images_as_user_messages(images: list[dict]) -> list[dict]:
+    """把提升出来的图片包成 user 消息（放进 content 块数组）。"""
+    if not images:
+        return []
+    return [{'role': 'user', 'content': images}]
 
 
 # ── 响应：Chat Completions → Responses ───────────────────────
