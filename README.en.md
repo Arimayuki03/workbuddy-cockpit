@@ -842,8 +842,7 @@ release notes, and creates a Release with the archives attached.
   200G mitigation
 - **Residential IPs** — native US residential broadband IPs available
 - **Elastic billing** — create and release on demand, resize freely
-- **Credentials & support** — licensed IDC / ISP / CDN operator, 10+ years in business,
-  24×7 engineer support
+- **Credentials** — licensed IDC / ISP / CDN operator (B1-20263321, 苏B2-20263329)
 
 ---
 
