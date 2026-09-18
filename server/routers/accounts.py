@@ -668,15 +668,23 @@ def task_logs(
         row['message_cn'] = tasklog.translate_message(row.get('message', ''))
         row['nickname'] = resolve_nick(str(row.get('uid') or ''))
 
-    # 统计也要按同一口径：不过滤时用数据库聚合（快），过滤时按筛后的行算，
-    # 否则会出现「徽标说 62 条、列表只有 3 条」的矛盾
+    # `total` 是**当前筛选下**的条数（列表分页要用），而 `stats` 是**各类型**的
+    # 汇总（筛选栏要用它显示每个类型的条数与总条数）。
+    #
+    # 两者口径必须分开，不能一起按 kind 过滤 —— 这里踩过坑（issue #35）：
+    # 原先 realm 分支用 `list_task_logs(kind=kind, ...)` 重算 stats，于是
+    # `stats.total` 变成了「当前筛选下」的条数。界面用 `stats.total > 0` 决定
+    # 筛选栏是否渲染，点进一个没有记录的类型时它就变成 0 → **整条筛选栏消失**，
+    # 用户再也切不回「全部」，只能刷新页面。
+    # 也就是说：筛选栏的可见性绝不能依赖筛选结果本身。
     stats = db.task_log_stats(days=days)
     total = db.count_task_logs(uid=uid, kind=kind, days=days)
     if realm_map is not None:
-        all_rows = db.list_task_logs(limit=2000, uid=uid, kind=kind, offset=0, days=days)
+        # 版本过滤只能按行做（日志表没有 realm 列）。注意这里**不带 kind**：
+        # 要的就是「该版本下所有类型」的分布。
+        all_rows = db.list_task_logs(limit=2000, uid=uid, kind=None, offset=0, days=days)
         kept = [r for r in all_rows
                 if _uid_matches_realm(str(r.get('uid') or ''), realm_map, realm)]
-        total = len(kept)
         by_kind: dict[str, dict] = {}
         for r in kept:
             k = str(r.get('kind') or '')
@@ -688,6 +696,10 @@ def task_logs(
             'total': len(kept),
             'total_credits': sum(v['credits'] for v in by_kind.values()),
         }
+        # total 同样要按版本口径重算（带 kind），与列表一致
+        scoped = ([r for r in kept if str(r.get('kind') or '') == kind]
+                  if kind else kept)
+        total = len(scoped)
 
     return {
         'logs': logs,

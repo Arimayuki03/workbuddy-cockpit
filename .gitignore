@@ -50,6 +50,9 @@ dev/.credit-shots
 # 入站日志原因验收脚本（verify_access_log_reason_ui.py）的临时数据与截图
 dev/.access-log
 dev/.access-shots
+# 任务筛选栏验收脚本（verify_task_filter_ui.py）的临时数据与截图
+dev/.task-filter
+dev/.task-shots
 
 # 安全测试脚本（临时）
 .sec*.py
