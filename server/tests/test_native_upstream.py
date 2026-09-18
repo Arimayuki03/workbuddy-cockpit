@@ -119,6 +119,58 @@ class NativeUpstreamRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(updater._upstream_dir(), Path('/fake/upstream/from-config'),
                              'updater 没有复用 config.UPSTREAM_DIR —— 又变成两套口径了')
 
+    def test_shipped_script_templates_exist(self) -> None:
+        """文档让用户指向的启停脚本，仓库里必须真的提供模板（评审发现）。
+
+        评审发现：README 与 .env.example 都让用户把 WB2API_START_SCRIPT /
+        WB2API_STOP_SCRIPT 指向 `start-workbuddy2api.cmd` / `stop-workbuddy2api.cmd`，
+        但**上游只发布 Docker 部署、没有这两个脚本**，我们此前也没提供 ——
+        用户照着文档配置会直接得到「未找到原生启停脚本」，而且不知道该写什么。
+
+        现在 deploy/windows-native/ 提供了一对可直接改用的模板。这条测试钉住
+        「模板还在 + 文档仍然指向它们」，避免哪天被当成无用文件删掉。
+        """
+        root = Path(__file__).resolve().parents[2]
+        tpl = root / 'deploy' / 'windows-native'
+        for name in ('start-workbuddy2api.cmd', 'stop-workbuddy2api.cmd', 'README.md'):
+            with self.subTest(name=name):
+                self.assertTrue((tpl / name).is_file(),
+                                f'缺少 {name} —— 文档让用户指向它，却没有模板可用')
+
+        # 文档仍要指向那个目录，否则模板等于没提供
+        for doc in ('README.md', 'README.en.md'):
+            with self.subTest(doc=doc):
+                text = (root / doc).read_text(encoding='utf-8')
+                self.assertIn('deploy/windows-native', text,
+                              f'{doc} 没有指向模板目录')
+
+    def test_start_template_returns_immediately(self) -> None:
+        """启动脚本模板必须用 `start /b` 那种后台方式 —— 前台运行会让重启超时。
+
+        管理端的语义是「调用脚本 → 等它结束 → 认为重启完成」。模板若在前台一直跑
+        `wb2api.exe`，管理端会等到 60 秒超时才报失败，而上游其实已经起来了 ——
+        这种「功能其实正常、界面报错」的形态最容易让人误判。
+        """
+        root = Path(__file__).resolve().parents[2]
+        text = (root / 'deploy' / 'windows-native' / 'start-workbuddy2api.cmd').read_text(
+            encoding='utf-8')
+        self.assertIn('start ', text, '启动模板没有用 start 后台拉起')
+        self.assertIn('/b', text, '启动模板没有用 /b（后台，不新开窗口）')
+        # 日志要落到文件，否则「任务记录」采集不到
+        self.assertIn('server.err.log', text, '启动模板没有把日志重定向到文件')
+
+    def test_stop_template_tolerates_not_running(self) -> None:
+        """停止模板在「进程本来就没跑」时要返回成功。
+
+        否则管理端重启流程会卡在这个前置步骤上整体失败 —— 而上游没在跑
+        正是重启前的正常状态。
+        """
+        root = Path(__file__).resolve().parents[2]
+        text = (root / 'deploy' / 'windows-native' / 'stop-workbuddy2api.cmd').read_text(
+            encoding='utf-8')
+        self.assertIn('未在运行', text, '停止模板没有处理「本来就没跑」的情况')
+        self.assertIn('exit /b 0', text, '停止模板在未运行时没有返回成功')
+
     def test_native_restart_reports_missing_scripts(self) -> None:
         """脚本不存在时要明确报出缺哪个（而不是等到执行才报个含糊错误）。"""
         async def main():

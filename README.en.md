@@ -446,6 +446,11 @@ supports restarting the upstream after configuration changes and reading its fil
 The web one-click updater depends on Linux/Docker and is rejected with an explicit message;
 update the code manually and restart the service instead.
 
+> **You need to supply the upstream start/stop scripts yourself**: the upstream project
+> ships Docker deployment only, with no native Windows scripts. `deploy/windows-native/`
+> contains a ready-to-adapt pair of templates (plus the two rules they must follow: the
+> start script has to return immediately, and logs must go to `WB2API_LOG_FILE`).
+
 ### 3. Docker
 
 The repo ships a `Dockerfile` and `docker-compose.yml` for users already running the
