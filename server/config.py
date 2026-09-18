@@ -28,10 +28,21 @@ HOST = _env('WB_MANAGER_HOST', '0.0.0.0')
 WB2API_BASE = _env('WB2API_BASE', 'http://127.0.0.1:7863').rstrip('/')
 WB2API_KEY = _env('WB2API_KEY', '')
 WB2API_CONTAINER = _env('WB2API_CONTAINER', 'workbuddy2api')
+WB2API_MODE = _env('WB2API_MODE', 'docker').lower()  # docker | native
 
 # 上游数据文件（与 workbuddy2api 共享）
 AUTH_DIR = Path(_env('WB_AUTH_DIR', '/opt/workbuddy2api/auths'))
 UPSTREAM_CONFIG = Path(_env('WB_UPSTREAM_CONFIG', '/opt/workbuddy2api/config.json'))
+UPSTREAM_DIR = Path(_env('WB_UPSTREAM_DIR', str(UPSTREAM_CONFIG.parent)))
+WB2API_START_SCRIPT = Path(_env(
+    'WB2API_START_SCRIPT', str(UPSTREAM_DIR / 'start-workbuddy2api.cmd'),
+))
+WB2API_STOP_SCRIPT = Path(_env(
+    'WB2API_STOP_SCRIPT', str(UPSTREAM_DIR / 'stop-workbuddy2api.cmd'),
+))
+WB2API_LOG_FILE = Path(_env(
+    'WB2API_LOG_FILE', str(UPSTREAM_DIR / 'data' / 'server.err.log'),
+))
 
 # 本管理端数据
 DATA_DIR = Path(_env('WB_DATA_DIR', str(ROOT / 'data')))

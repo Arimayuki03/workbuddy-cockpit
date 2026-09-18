@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import deque
 import ipaddress
 import json
+import os
 import re
 import socket
 import time
@@ -406,6 +408,33 @@ def models_source(items: list) -> str:
 
 
 async def restart_container() -> tuple[bool, str]:
+    """重启上游；native 模式走启停脚本，其余部署保持 Docker 行为。"""
+    if config.WB2API_MODE == 'native':
+        scripts = (config.WB2API_STOP_SCRIPT, config.WB2API_START_SCRIPT)
+        missing = [str(path) for path in scripts if not path.is_file()]
+        if missing:
+            return False, f'未找到原生启停脚本：{"、".join(missing)}'
+        for script in scripts:
+            cmd = (
+                ('cmd.exe', '/d', '/c', str(script))
+                if os.name == 'nt'
+                else (str(script),)
+            )
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(script.parent),
+                    # 后台服务可能继承 PIPE，导致 communicate() 永远等不到 EOF。
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.communicate()
+            except Exception as exc:  # noqa: BLE001
+                return False, f'执行 {script.name} 失败：{exc}'
+            if proc.returncode != 0:
+                return False, f'{script.name} 退出码 {proc.returncode}'
+        return True, '原生 workbuddy2api 已重启'
+
     name = config.WB2API_CONTAINER
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -424,11 +453,19 @@ async def restart_container() -> tuple[bool, str]:
 
 
 def read_container_logs(limit: int = 200, timestamps: bool = True) -> list[str]:
-    """读取上游容器日志（同步、失败返回空列表）。
+    """读取上游日志（原生日志文件或 Docker，失败返回空列表）。
 
     默认带 `--timestamps`：docker 会在每行前面加上精确到纳秒的 RFC3339 时间，
     自动任务日志据此获得准确时间并据此去重（上游自己的 log 前缀精度只到秒）。
     """
+    if config.WB2API_MODE == 'native':
+        try:
+            count = max(1, min(5000, limit))
+            with config.WB2API_LOG_FILE.open('r', encoding='utf-8', errors='replace') as fh:
+                return [ln.rstrip('\r\n') for ln in deque(fh, maxlen=count) if ln.strip()]
+        except Exception:  # noqa: BLE001
+            return []
+
     import subprocess
 
     cmd = ['docker', 'logs', '--tail', str(max(1, min(5000, limit)))]

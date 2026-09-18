@@ -288,6 +288,11 @@ def start_update(target: str) -> tuple[bool, str]:
     """启动更新（后台脱离运行）。返回 (是否已启动, 说明)。"""
     if target not in ('manager', 'upstream', 'both'):
         return False, '参数不合法'
+    if os.name == 'nt' and config.WB2API_MODE == 'native':
+        return False, (
+            'Windows 原生部署暂不支持网页一键更新；'
+            '请手动替换代码、重新构建前端，然后运行 service-tools.ps1 restart。'
+        )
     if target in ('upstream', 'both') and not can_control_docker():
         # 重建上游容器需要操作宿主 docker。判定按**实际能力**（能否跑通
         # docker info），而不是"是否在容器里"：容器挂了 docker.sock 就完全
@@ -611,4 +616,3 @@ def check_updates(force: bool = False) -> dict:
         },
         'has_any': manager_has or upstream_has,
     }
-
