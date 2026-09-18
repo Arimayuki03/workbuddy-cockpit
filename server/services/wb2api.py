@@ -248,6 +248,24 @@ def merge_pool_status(accounts: list[dict], status: dict) -> list[dict]:
         a['success_count'] = p.get('success_count')
         a['in_flight'] = p.get('in_flight')
         a['breaker_fails'] = p.get('breaker_fails')
+        # 连败降权（上游 issue #114）：连续 N 次「不罚号的失败」后把账号临时移出池
+        # （默认阈值 5、降权 10 分钟）。**上游把它计入 cooling**（其 entry.healthy()
+        # 的三个截止是或门），所以我们这边必须单独透出，否则「冷却中」里混着两类
+        # 原因完全不同的情况：限流退避（等一会儿就好）与连败降权（说明这个号在
+        # 持续失败）。只显示「冷却中」时用户无从判断该等还是该处理（实测反馈：
+        # 「降权统计这里根本不统计」）。
+        #
+        # degrade_until 是 Go 的 *time.Time + omitempty：未降权时**整个键都不出现**
+        # （指针 nil 才真能被省略，非指针 time.Time 会序列化成 0001-01-01 假真值，
+        # 见下面 last_success 的注释），故缺省值按 None 处理即可。
+        #
+        # 用 isinstance 而不是 `or None`：后者只挡假值，`123` 这类非字符串会被原样
+        # 送到前端，而前端要 Date.parse 它。类型不符一律归 None（前端据此当「未降权」
+        # 处理，最坏是少显示一个徽章，不会把整页弄崩）。
+        _du = p.get('degrade_until')
+        a['degrade_until'] = _du if isinstance(_du, str) and _du else None
+        _cf = p.get('consecutive_fails')
+        a['consecutive_fails'] = _cf if isinstance(_cf, int) and not isinstance(_cf, bool) else None
         a['last_success'] = p.get('last_success')
         # 累计错误数与最后一次错误时刻。为什么要透出：上游对**未命中它那几条
         # 规则**的 4xx（例如被 WAF 拦下的 403）只「换号不罚」——不冷却、不熔断、

@@ -44,6 +44,16 @@ export interface Account {
   success_count?: number | null;
   err_total?: number | null;
   breaker_fails?: number | null;
+  /**
+   * 连败降权截止（上游 issue #114，RFC3339 字符串）。在未来 = 正被降权。
+   *
+   * 为什么要有：上游把降权**计入 cooling**，所以「冷却中」里混着两类原因完全不同
+   * 的情况——限流退避（等一会儿就好）与连败降权（这个号在持续失败）。不区分时
+   * 用户看到「冷却中」无从判断该等还是该处理。
+   */
+  degrade_until?: string | null;
+  /** 连续失败计数（降权进度：达阈值即降权，成功后清零） */
+  consecutive_fails?: number | null;
   last_success?: string | null;
   last_used?: number | null;
   source: 'file' | 'pool';

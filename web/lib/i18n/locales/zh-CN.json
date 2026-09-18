@@ -168,7 +168,8 @@
     "noAccounts": "暂无账号",
     "noAccountsHint": "点击底栏「快速添加」扫码授权腾讯账号",
     "partialLoadFailed": "部分数据加载失败",
-    "unusable": "{n} 个不可用"
+    "unusable": "{n} 个不可用",
+    "degraded": "连败降权"
   },
   "stats": {
     "title": "用量统计",
@@ -286,7 +287,9 @@
     "testDone": "测试完成",
     "refreshDone": "刷新完成",
     "deleted": "已删除",
-    "movedTo": "签到结果与上游自动任务记录已移至"
+    "movedTo": "签到结果与上游自动任务记录已移至",
+    "badgeDegraded": "● 连败降权",
+    "degradedReason": "连续 {n} 次失败后已被临时移出账号池，稍后会自动恢复。若反复出现，请检查该账号的令牌是否失效（需要重新登录）"
   },
   "keys": {
     "title": "API 密钥",
