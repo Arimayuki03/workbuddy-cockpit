@@ -190,6 +190,87 @@ class AtomicAuthWriteTest(unittest.TestCase):
             'realm': 'cn', 'nickname': 'N', 'enterprise_id': '',
         }
 
+    def test_unique_temp_names_allow_concurrent_writes(self) -> None:
+        """并发写同一账号不能互相踩（固定临时名会让彼此删掉对方的内容）。
+
+        发版前自审发现：起初用固定的 `.{name}.tmp` 作临时文件名，两个线程同时写
+        同一账号时共用该文件 —— 先完成者 replace 成功后临时文件已不在，后完成者
+        replace 失败并触发清理，把对方刚写好的内容一并删掉。实测 4 个并发线程
+        全部报错、且原账号文件消失。
+
+        注：Windows 上「替换被打开的文件」本身受限（POSIX rename 无此限制），
+        所以这里只断言**临时文件名彼此不同**这一必要条件，不依赖平台替换语义。
+        """
+        acct = self._acct()
+        names: list[str] = []
+        real_replace = os.replace
+
+        def spy(src, dst, *a, **kw):
+            names.append(Path(src).name)
+            return real_replace(src, dst, *a, **kw)
+
+        with unittest.mock.patch('os.replace', side_effect=spy):
+            tencent.write_auth_file(acct)
+            tencent.write_auth_file(dict(acct, access_token='AT2'))
+        self.assertEqual(len(names), 2)
+        self.assertNotEqual(names[0], names[1],
+                            '两次写用了同一个临时文件名 —— 并发时会互相覆盖/删除')
+
+    def test_file_mode_is_group_and_other_readable(self) -> None:
+        """写出来的账号文件必须**可被其他 uid 读**（宿主部署的关键前提）。
+
+        自审发现：改成 mkstemp 后权限从 umask 的 0644 变成固定的 0600 ——
+        宿主部署下本面板以 root 写、上游容器以 uid 10001 读，0600 会让上游读不到
+        该账号（表现为账号加进去了但池里没有，且没有任何报错）。
+
+        上游自己的 SaveAtomic 用 0o600，但那是「同进程既写又读」；我们跨 uid，
+        前提不同。Windows 权限位语义不完整，故在 POSIX 上才有意义。
+        """
+        tencent.write_auth_file(self._acct())
+        mode = (config.AUTH_DIR / 'workbuddy-u1.json').stat().st_mode
+        self.assertTrue(mode & 0o044,
+                        f'文件权限 {oct(mode)} —— 其他 uid 读不到，宿主部署会失败')
+
+    def test_explicitly_chmods_to_world_readable(self) -> None:
+        """必须**显式** chmod 到可被其他 uid 读 —— 不能依赖 mkstemp 的默认权限。
+
+        上一条断言的是「结果」，但它在 Windows 上会空转（那边 mkstemp 给 0666，
+        权限位语义不完整，去掉 chmod 也照样通过）。所以这里直接钉住**行为**：
+        写入过程里必须对临时文件调过 chmod 且目标模式含 group/other 读位。
+
+        POSIX 上 mkstemp 固定 0600，不显式 chmod 就会破坏跨 uid 读取（宿主部署
+        下本面板以 root 写、上游容器以 10001 读）。
+        """
+        calls: list[tuple] = []
+
+        with unittest.mock.patch('os.chmod', side_effect=lambda *a, **k: calls.append(a)):
+            tencent.write_auth_file(self._acct())
+
+        self.assertTrue(calls, '写入过程没有 chmod —— POSIX 上会留下 0600')
+        mode = calls[0][1]
+        self.assertTrue(mode & 0o044,
+                        f'chmod 到 {oct(mode)}：其他 uid 仍读不到（宿主部署会失败）')
+
+    def test_rejects_uid_that_would_escape_auth_dir(self) -> None:
+        """uid 来自腾讯响应，是外部输入；异常形态必须拒绝，不能拼进文件名。
+
+        自审发现：uid 未经校验就拼成 `workbuddy-{uid}.json`。`../x` 这类值会让
+        路径拐出 auths 目录（`workbuddy-` 前缀只挡住了一部分形态）。真实 uid 是
+        uuid，但把它当可信输入是错的 —— 读路径（`wb2api._safe_file`）早有同样的
+        白名单，写路径此前漏了。
+        """
+        bad_uids = ['../evil', 'a/b', 'x.json', '', 'a b', 'a' * 81, 'a\\x']
+        for bad in bad_uids:
+            with self.subTest(uid=bad):
+                with self.assertRaises(ValueError):
+                    tencent.write_auth_file(dict(self._acct(), uid=bad))
+
+    def test_accepts_real_uuid_shape(self) -> None:
+        """真实 uid（带连字符的 uuid）必须照常接受 —— 校验不能误伤正常账号。"""
+        uid = '9b212d8c-f5f7-4ad6-aa20-1d576508c8c1'
+        name, _ = tencent.write_auth_file(dict(self._acct(), uid=uid))
+        self.assertEqual(name, f'workbuddy-{uid}.json')
+
     def test_write_leaves_no_temp_file(self) -> None:
         """写完不能留下临时文件（它在 auths 目录里会让人以为是垃圾或半个账号）。"""
         tencent.write_auth_file(self._acct())
@@ -244,12 +325,16 @@ class AtomicAuthWriteTest(unittest.TestCase):
         self.assertEqual(seen[1]['auth']['accessToken'], 'NEW')
 
     def test_failure_cleans_temp_and_keeps_old_file(self) -> None:
-        """写失败时：不留临时文件，且**原文件保持完好**（凭证不能丢）。"""
+        """写失败时：不留临时文件，且**原文件保持完好**（凭证不能丢）。
+
+        让 `os.replace` 失败（而不是让写入失败）：写入现在走 `os.fdopen`，
+        替换才是「生效那一刻」——在那里失败最能代表真实故障（磁盘满、权限变化），
+        也验证了「失败时原文件没被碰过」这一关键性质。
+        """
         tencent.write_auth_file(self._acct(token='GOOD'))
         target = config.AUTH_DIR / 'workbuddy-u1.json'
 
-        with unittest.mock.patch.object(Path, 'write_text',
-                                        side_effect=OSError('disk full')):
+        with unittest.mock.patch('os.replace', side_effect=OSError('disk full')):
             with self.assertRaises(OSError):
                 tencent.write_auth_file(self._acct(token='BROKEN'))
 

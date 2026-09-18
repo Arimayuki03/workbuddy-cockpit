@@ -20,7 +20,6 @@ workbuddy2api 只在进程启动时读取 config.json 与扫描 auths/ 目录
 
 多次连续改动会合并为一次重启，避免并发重启互相干扰。
 """
-
 from __future__ import annotations
 
 import asyncio
