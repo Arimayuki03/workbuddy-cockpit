@@ -317,14 +317,20 @@ async def account_checkin(filename: str, user: dict = Depends(security.require_a
     # 签到后顺带查实时积分：上游只在它自己的定时任务里刷新 credits，
     # 手动签到不会带动它更新，所以这里主动查一次返回给前端。
     credits: int | float | None = None
+    expiries: list[dict] = []
     if ok:
         # 签到会改变余额，先失效缓存再查实时值
         creditsvc.invalidate(uid)
-        _, credits, _, _, _ = await creditsvc.get_credits(
+        _, credits, _, _, _, expiries = await creditsvc.get_credits(
             _auth_dict(raw), nickname=str(acct.get('nickname') or ''),
         )
 
-    return {'code': code, 'message': message, 'credits': credits}
+    return {
+        'code': code,
+        'message': message,
+        'credits': credits,
+        'expiries': expiries,
+    }
 
 
 @router.get('/accounts/{filename}/credits')
@@ -333,16 +339,24 @@ async def account_credits(
     force: bool = False,
     user: dict = Depends(security.require_admin),
 ) -> dict:
-    """查询单个账号的实时积分余额（直接向腾讯查询，带 60s 缓存）。
+    """查询单个账号的实时积分余额与套餐到期时间（直接向腾讯查询，带 60s 缓存）。
 
     force=true 可绕过缓存强制查询。
+    expiries: [{'at': epoch 秒, 'amount': 额度}]，按到期时间升序，只含仍有余额的套餐。
     """
     raw = _load(filename)
     acct = raw.get('account') or {}
-    ok, value, message, cached, age = await creditsvc.get_credits(
+    ok, value, message, cached, age, expiries = await creditsvc.get_credits(
         _auth_dict(raw), force=force, nickname=str(acct.get('nickname') or ''),
     )
-    return {'ok': ok, 'credits': value, 'message': message, 'cached': cached, 'cache_age': age}
+    return {
+        'ok': ok,
+        'credits': value,
+        'message': message,
+        'cached': cached,
+        'cache_age': age,
+        'expiries': expiries,
+    }
 
 
 @router.post('/accounts/refresh-credits')
@@ -359,24 +373,31 @@ async def refresh_all_credits(
     """
     accounts = wb2api.list_auth_accounts()
 
-    async def one(acc: dict) -> tuple[str, int | float | None, str, bool, int | None]:
+    async def one(
+        acc: dict,
+    ) -> tuple[str, int | float | None, str, bool, int | None, list[dict]]:
         try:
             raw = wb2api.read_account_file(acc['file'])
         except Exception as exc:  # noqa: BLE001
-            return acc['uid'], None, f'读取失败: {exc}', False, None
-        ok, value, message, cached, age = await creditsvc.get_credits(
+            return acc['uid'], None, f'读取失败: {exc}', False, None, []
+        ok, value, message, cached, age, expiries = await creditsvc.get_credits(
             _auth_dict(raw), force=force, nickname=str(acc.get('nickname') or ''),
         )
-        return acc['uid'], value if ok else None, message, cached, age
+        return acc['uid'], value if ok else None, message, cached, age, expiries
 
     results = await asyncio.gather(*(one(a) for a in accounts)) if accounts else []
 
     credits_map: dict[str, int | float | None] = {}
     meta: dict[str, dict] = {}
     failed: list[str] = []
-    for uid, credits, message, cached, age in results:
+    for uid, credits, message, cached, age, expiries in results:
         credits_map[uid] = credits
-        meta[uid] = {'cached': cached, 'cache_age': age, 'message': message}
+        meta[uid] = {
+            'cached': cached,
+            'cache_age': age,
+            'message': message,
+            'expiries': expiries,
+        }
         if credits is None:
             failed.append(f'{uid[:12]}: {message}')
 

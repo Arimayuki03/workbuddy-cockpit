@@ -126,6 +126,15 @@
     "soon": "촉박",
     "valid": "유효"
   },
+  "credit": {
+    "expired": "만료됨",
+    "expiring": "곧 만료",
+    "expiresInMinutes": "{n}분 후 만료",
+    "expiresInHours": "{n}시간 후 만료",
+    "expiresInDays": "{n}일 후 만료",
+    "expiryTipTitle": "크레딧 만료 (합계 {total})",
+    "expiryTipNote": "만료가 빠른 순서로 표시됩니다. 카운트다운은 가장 가까운 항목만 보여줍니다. 만료 후 남은 크레딧은 소멸됩니다."
+  },
   "metric": {
     "credits": "크레딧 잔액",
     "creditAmount": "{n} 크레딧",
@@ -169,7 +178,8 @@
     "noAccountsHint": "하단 바의 '빠른 추가'로 Tencent 계정을 QR 인증하세요",
     "partialLoadFailed": "일부 데이터를 불러오지 못했습니다",
     "unusable": "{n}개 사용 불가",
-    "degraded": "연속 실패 제외"
+    "degraded": "연속 실패 제외",
+    "creditsExpiry": "가장 가까운 만료: {amount} 크레딧 ({time})"
   },
   "stats": {
     "title": "사용량",

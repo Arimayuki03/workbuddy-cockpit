@@ -135,6 +135,24 @@
     "soon": "Tight",
     "valid": "Valid"
   },
+  "credit": {
+    "expired": "expired",
+    "expiring": "expiring now",
+    "expiresInMinutes": {
+      "one": "expires in {n} minute",
+      "other": "expires in {n} minutes"
+    },
+    "expiresInHours": {
+      "one": "expires in {n} hour",
+      "other": "expires in {n} hours"
+    },
+    "expiresInDays": {
+      "one": "expires in {n} day",
+      "other": "expires in {n} days"
+    },
+    "expiryTipTitle": "Credit expiry (total {total})",
+    "expiryTipNote": "Listed by expiry time; the countdown shows only the nearest one. Unused credits are forfeited at expiry."
+  },
   "metric": {
     "credits": "Credit balance",
     "creditAmount": {
@@ -184,7 +202,8 @@
     "noAccountsHint": "Use Quick add in the bottom bar to sign in a Tencent account by QR code",
     "partialLoadFailed": "Some data failed to load",
     "unusable": "{n} unusable",
-    "degraded": "Degraded"
+    "degraded": "Degraded",
+    "creditsExpiry": "Nearest expiry: {amount} credits on {time}"
   },
   "stats": {
     "title": "Usage",

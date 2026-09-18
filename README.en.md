@@ -87,6 +87,11 @@ ideas belong in [this repository](https://github.com/ithtelab/workbuddy-manager/
   **queried live from Tencent** (the upstream `/status` value can lag by hours). Fetched on
   page load, updated right after check-in, plus a "Refresh credits" button. Each number is
   labelled **`live`** or **`cached Ns ago`** so you can tell how fresh it is
+- **Credit expiry countdown** — credits expire per package and are forfeited once they do,
+  each package on its own schedule. The balance shows the nearest package's amount and
+  countdown (e.g. `300 · expires in 8 days`, colour-coded by urgency); hover for every
+  package's amount, exact expiry time and the total. The dashboard credit card also flags
+  the nearest expiry and its amount, so credits don't quietly go to waste
 - **Credit change ledger** — every channel that increases the balance is recorded. The
   upstream only logs travel rewards; check-in and activity reports log nothing, so we
   compare balances after each credit query and record any increase

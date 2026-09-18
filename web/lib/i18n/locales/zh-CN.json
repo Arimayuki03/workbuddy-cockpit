@@ -126,6 +126,15 @@
     "soon": "偏紧",
     "valid": "有效"
   },
+  "credit": {
+    "expired": "已到期",
+    "expiring": "即将到期",
+    "expiresInMinutes": "{n} 分钟后到期",
+    "expiresInHours": "{n} 小时后到期",
+    "expiresInDays": "{n} 天后到期",
+    "expiryTipTitle": "积分到期时间（合计 {total}）",
+    "expiryTipNote": "按到期时间排列，倒计时只显示最近一笔；到期后未用完的积分会作废。"
+  },
   "metric": {
     "credits": "积分余额",
     "creditAmount": "{n} 积分",
@@ -169,7 +178,8 @@
     "noAccountsHint": "点击底栏「快速添加」扫码授权腾讯账号",
     "partialLoadFailed": "部分数据加载失败",
     "unusable": "{n} 个不可用",
-    "degraded": "连败降权"
+    "degraded": "连败降权",
+    "creditsExpiry": "最近一笔 {amount} 积分将于 {time} 到期"
   },
   "stats": {
     "title": "用量统计",

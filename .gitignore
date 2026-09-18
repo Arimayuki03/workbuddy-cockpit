@@ -44,6 +44,9 @@ dev/.pick-*
 dev/.ab-*
 # 复现脚本（repro_pool_mismatch.py）的临时数据目录
 dev/.repro
+# 积分到期界面验收脚本（verify_credit_expiry_ui.py）的临时数据与截图
+dev/.credit-expiry
+dev/.credit-shots
 
 # 安全测试脚本（临时）
 .sec*.py

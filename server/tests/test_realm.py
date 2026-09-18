@@ -68,9 +68,24 @@ class EndpointTest(unittest.TestCase):
         self.assertEqual(realm.billing_base('global'), 'https://www.workbuddy.ai')
 
     def test_chat_paths(self) -> None:
+        """两个版本都固定 `/v2`（上游 #119）。
+
+        国际版曾以 `/console` 优先，但那个端点上挂了腾讯云 WAF 的请求体内容规则：
+        正文里出现反引号 `printf` / `whoami` 等命令执行特征会被确定性拦成 403
+        ——用户只是问一句 shell 命令就中招。`/v2` 是同一 base 下的等价端点，不挂
+        该规则。
+
+        这条断言的意义不是「路径长什么样」，而是**我们的探测打的端点必须与上游
+        转发用的端点一致**：否则某天 `/console` 真被 WAF 封死时，我们的「测活」
+        会告诉用户账号不可用，而实际上游转发一切正常。
+        """
         self.assertEqual(realm.chat_paths('cn'), ['/v2/chat/completions'])
-        self.assertEqual(realm.chat_paths('global'),
-                         ['/console/chat/completions', '/v2/chat/completions'])
+        self.assertEqual(realm.chat_paths('global'), ['/v2/chat/completions'])
+        for r in ('cn', 'global'):
+            self.assertNotIn(
+                '/console/chat/completions', realm.chat_paths(r),
+                '不得再走 /console：该端点挂 WAF 内容规则，含命令特征的消息会被 403',
+            )
 
     def test_billing_path_order_is_reversed(self) -> None:
         """国际版无 /v2 前缀优先，国内版只有 /v2——两者顺序相反，照上游实现。"""

@@ -12,6 +12,7 @@ import os
 import re
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -326,38 +327,34 @@ async def checkin(access_token: str | dict, realm: Realm = CN) -> tuple[int, str
         return -1, f'签到异常: {exc}'
 
 
-def _pick_accounts(data: object) -> list | None:
-    """从 billing 响应里取套餐数组（兼容多层信封）。"""
-    return _extract_resource_accounts(data)
-
-
-def _credits_of(accounts: list) -> float:
-    total = 0.0
-    for item in accounts:
-        if not isinstance(item, dict):
-            continue
-        total += _package_remain(item)
-    return max(0.0, total)
-
-
-async def fetch_credits(auth: dict) -> tuple[bool, int | float | None, str]:
-    """查询账号**实时**积分余额。
+async def fetch_credits(auth: dict) -> tuple[bool, int | float | None, str, list[dict]]:
+    """查询账号**实时**积分余额与各套餐到期时间。
 
     为什么必须由管理端自己查：workbuddy2api 只在它的定时任务
     （签到 / 保活时刻）刷新 credits，之后 /status 里一直是旧值；
     手动签到也不会触发它刷新。因此要拿到当前余额只能直接调腾讯接口。
 
     口径与上游保持一致：优先取套餐的 CycleCapacityRemain，
-    无 Cycle 字段时退回 CapacityRemain（见 upstream.UserResource）。
+    无 Cycle 字段时退回 CapacityRemain（见 upstream.packageRemainUsed）。
     billing 路径按版本分派（国际版无 /v2 前缀优先，与国内版相反）。
-    返回 (ok, credits, message)。
+    返回 (ok, credits, message, expiries)。
+
+    expiries 是 [{'at': epoch 秒, 'amount': 额度}]，按到期时间升序，**只含仍有
+    余额的套餐**（余额为 0 的套餐到期与否不影响任何决策）。上游只用它算一个
+    「快过期总额」的数字、不下发到期时刻，所以倒计时只能我们自己在这里取。
     """
     access_token = str(auth.get('access_token') or '')
     if not access_token:
-        return False, None, '该账号无有效 accessToken'
+        return False, None, '该账号无有效 accessToken', []
     realm = realm_of(auth)
 
     now = time.time()
+    # 时间窗用本机时区格式化，**照抄上游**（其 getUserResourceBody 用 now.Format）。
+    # 这与下面解析 CycleEndTime 时固定 UTC+8 不一致，看着像 bug，其实是上游原样：
+    # 这个窗口只是「往后 101 年、从今天起」的粗过滤，8 小时偏移不会漏掉任何套餐
+    # （窗口边界离真实到期时间有 101 年的余量）。而解析出来的到期时刻要展示给
+    # 用户、还要跟腾讯官网对账，那里的 8 小时偏移是看得见的错误 —— 两处要求不同，
+    # 因此口径也就不同。不要「顺手统一」，那会偏离上游行为。
     body = {
         'PageNumber': 1,
         'PageSize': 100,
@@ -383,22 +380,30 @@ async def fetch_credits(auth: dict) -> tuple[bool, int | float | None, str]:
         assert resp is not None
         code, data = _envelope(resp)
         if code != 0 or not data:
-            return False, None, f'查询失败 code={code}'
+            return False, None, f'查询失败 code={code}', []
 
         accounts = _extract_resource_accounts(data)
         if accounts is None:
-            return False, None, '响应结构无法识别'
+            return False, None, '响应结构无法识别', []
 
         total = 0.0
+        expiries: list[dict] = []
         for item in accounts:
             if not isinstance(item, dict):
                 continue
-            total += _package_remain(item)
-        # 上游会把负值钳为 0；保留小数以贴近官方展示
-        total = max(0.0, total)
-        return True, (int(total) if total.is_integer() else round(total, 2)), '查询成功'
+            # 逐个套餐钳负值**再**累加，与上游同序（其 `if r < 0 { r = 0 }` 在
+            # `remain += r` 之前）。顺序不能换：先求和再钳的话，一个 -100 的坏
+            # 套餐会从合计里扣掉 100，而上游只把它当 0 —— 同一个账号我们显示的
+            # 余额会比上游少，用户对不上账。
+            remain = max(0.0, _package_remain(item))
+            total += remain
+            at = _package_expiry(item) if remain > 0 else None
+            if at is not None:
+                expiries.append({'at': at, 'amount': _round_credits(remain)})
+        expiries.sort(key=lambda e: e['at'])
+        return True, _round_credits(total), '查询成功', expiries
     except Exception as exc:  # noqa: BLE001
-        return False, None, f'查询异常: {exc}'
+        return False, None, f'查询异常: {exc}', []
 
 
 async def fetch_models(auth: dict) -> tuple[bool, list | str]:
@@ -631,18 +636,64 @@ def _extract_resource_accounts(data: object) -> list | None:
     return None
 
 
-def _package_remain(item: dict) -> float:
-    """单个套餐的剩余额度，口径与上游 UserResource 一致。"""
-    def num(key: str) -> float:
-        v = item.get(key)
-        return float(v) if isinstance(v, (int, float)) else 0.0
+def _num(item: dict, key: str) -> float:
+    """取数值字段，非数值（含 null / 布尔 / 字符串）一律按 0。"""
+    v = item.get(key)
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return 0.0
+    return float(v)
 
-    cycle_size = num('CycleCapacitySize')
-    cycle_remain = num('CycleCapacityRemain')
-    cycle_used = num('CycleCapacityUsed')
-    if cycle_size > 0 or cycle_remain > 0 or cycle_used > 0:
-        return cycle_remain
-    return num('CapacityRemain')
+
+def _round_credits(v: float) -> int | float:
+    """积分的对外形态：整数去掉小数尾（1000.0 → 1000），否则保留两位。"""
+    return int(v) if float(v).is_integer() else round(float(v), 2)
+
+
+def _package_remain(item: dict) -> float:
+    """单个套餐的剩余额度，口径与上游 packageRemainUsed 逐条对齐。
+
+    两段：有周期额度（CycleCapacitySize>0）时只看 Cycle 三字段，且把 remain 钳进
+    [0, size]、再用 used 反修正一次；没有周期额度时回退 Capacity 三字段。
+
+    钳位不是洁癖：腾讯偶发 `CycleCapacityRemain > CycleCapacitySize` 的脏数据，
+    只钳负值会**高估**余额（上游为此把双份逻辑合并到了这一个函数）。
+    """
+    size = _num(item, 'CycleCapacitySize')
+    if size > 0:
+        remain = min(max(_num(item, 'CycleCapacityRemain'), 0.0), size)
+        used = size - remain
+        cycle_used = _num(item, 'CycleCapacityUsed')
+        if cycle_used > used:
+            used = cycle_used
+            if size >= used:
+                remain = size - used
+        return remain
+    return _num(item, 'CapacityRemain')
+
+
+# 套餐到期时刻：布局与时区都取上游同款（packageEndLayout / softRateResetLoc）。
+# 腾讯给的是 **UTC+8 墙钟**，与容器时区无关——必须显式带 +08:00 解析；若按本机
+# 时区解析（mktime / fromtimestamp），西半球或 UTC 容器上算出的到期时刻会整体
+# 偏移数小时，倒计时跟着错。上游用 time.ParseInLocation(layout, s, UTC+8)，
+# 这里等价。
+_PACKAGE_END_LAYOUT = '%Y-%m-%d %H:%M:%S'
+_PACKAGE_END_TZ = timezone(timedelta(hours=8))
+
+
+def _package_expiry(item: dict) -> int | None:
+    """套餐到期时刻（epoch 秒，绝对时刻）。字段缺失/空/解析失败 → None。
+
+    解析失败返回 None 而不是抛错：到期时间是锦上添花的展示字段，不能因为它
+    让整次积分查询失败（上游对解析失败也是保守忽略）。
+    """
+    raw = item.get('CycleEndTime')
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        naive = datetime.strptime(raw.strip(), _PACKAGE_END_LAYOUT)
+    except ValueError:
+        return None
+    return int(naive.replace(tzinfo=_PACKAGE_END_TZ).timestamp())
 
 
 async def probe_account(auth: dict, model: str = 'glm-5.2') -> tuple[bool, str]:
@@ -712,14 +763,16 @@ async def probe_account(auth: dict, model: str = 'glm-5.2') -> tuple[bool, str]:
     }
 
     started = _time.time()
+    # 两个版本的路径现在都是恒定的 `/v2/chat/completions`（上游 #119 统一，见
+    # chat_paths 注释）。这里仍按「候选路径」逐个尝试，是因为 chat_paths 返回的
+    # 就是列表、且将来可能再加候选；但**不能**因此以为现在有回落保护 ——
+    # 列表只有一个元素时，404/405 会直接走下面的报错分支。
     try:
         async with config.http_client(config.TENCENT_TIMEOUT, connect=5) as client:
             for path in chat_paths(realm):
                 async with client.stream(
                     'POST', f'{base}{path}', json=payload, headers=headers,
                 ) as resp:
-                    if resp.status_code in (404, 405) and path != chat_paths(realm)[-1]:
-                        continue  # 换下一条候选路径（上游同此回落逻辑）
                     if resp.status_code >= 400:
                         raw = (await resp.aread()).decode('utf-8', errors='replace')
                         code, msg = _parse_error_body(raw, resp.status_code)

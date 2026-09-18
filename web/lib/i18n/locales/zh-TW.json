@@ -126,6 +126,15 @@
     "soon": "偏緊",
     "valid": "有效"
   },
+  "credit": {
+    "expired": "已到期",
+    "expiring": "即將到期",
+    "expiresInMinutes": "{n} 分鐘後到期",
+    "expiresInHours": "{n} 小時後到期",
+    "expiresInDays": "{n} 天後到期",
+    "expiryTipTitle": "積分到期時間（合計 {total}）",
+    "expiryTipNote": "按到期時間排列，倒數只顯示最近一筆；到期後未用完的積分會作廢。"
+  },
   "metric": {
     "credits": "積分餘額",
     "creditAmount": "{n} 積分",
@@ -169,7 +178,8 @@
     "noAccountsHint": "點擊底欄「快速新增」掃碼授權騰訊帳號",
     "partialLoadFailed": "部分資料載入失敗",
     "unusable": "{n} 個無法使用",
-    "degraded": "連敗降權"
+    "degraded": "連敗降權",
+    "creditsExpiry": "最近一筆 {amount} 積分將於 {time} 到期"
   },
   "stats": {
     "title": "用量統計",
