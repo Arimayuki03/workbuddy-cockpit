@@ -1,31 +1,33 @@
-"""推理凭据的**端到端**往返：输出侧给凭据 → 客户端带回 → 出站带 reasoning_content。
+"""推理内容的**端到端**往返：输出侧给凭据 → 客户端带回 → 下一轮出站带上推理。
 
-这是 issue #36 要求的测试，也补上了 v1.0.51 修复的真正缺口。
-
-现场（用户报的）：用 Codex 走 Responses 协议连着聊，第二轮起上游回
+现场（issue #36 / #37 报的是同一个现象）：用 Codex 走 Responses 协议连着聊，
+第二轮起上游回
 
     400 code=11155 reasoning_content_missing
     the reasoning content from the previous turn must be passed back in thinking mode
 
 而把客户端协议换成 OpenAI chat completions 就完全正常。
 
-根因：v1.0.51 的修复只做了**输入侧**——能把客户端发来的推理挂到 assistant 消息的
-`reasoning_content` 上。但**输出侧从来没给过客户端可以回传的东西**：
-
-  · Responses 在 `store:false` 下只回传带 `encrypted_content` 的 reasoning 项；
-  · Anthropic 只回传带 `signature` 的 thinking 块。
-
-没有这两个字段，客户端下一轮就一点推理痕迹都不带 —— 输入侧那段解析代码成了
-**死代码**，上游照旧报 11155。
-
-为什么 v1.0.51 的自测没发现：当时是**手工构造**了一个已经带推理痕迹的请求，
-再检查发出去的 body 对不对。那只测了输入侧的转换，**绕过了「客户端到底能不能
-拿到这个项」这一步**。所以本文件刻意按「一整轮」来测：
+本文件刻意按「一整轮」来测，而不是单侧转换：
 
     上游响应 → 我们的输出 → （客户端原样带回）→ 下一轮出站 body
 
-中间那一步用**真实的编码串**（不是手写的假值）穿过，才能发现「凭据没发出去」
-这类断链。
+中间那一步用**真实的编码串**（不是手写的假值）穿过。这么设计有具体原因：
+v1.0.51 的自测是手工构造一个已带推理痕迹的请求、再检查发出去的 body —— 只覆盖
+输入侧转换，**绕过了「客户端到底能不能拿到这个项」**，于是修了不生效、测试全绿。
+同理，断言要盯着**我们真正需要的行为**，而不是我们自己输出的字段名（那也是
+「自己证自己」）。
+
+关于根因，两轮社区反馈给过两个说法，本仓的核实结论：
+
+  · #36 说「输出侧没给凭据，输入侧是死代码」——#37 的抓包**否证**了「死代码」
+    部分：Codex 在 `encrypted_content` 为 null 时并不丢弃 reasoning 项，
+    它靠 `summary` 明文照样回传，我们确实挂上了内容。
+  · #37 说「上游请求侧校验的是 `reasoning` 而非 `reasoning_content`」——
+    **本仓未能复现**（真实账号直连腾讯，7 种构造全 200，含它说必然 503 的基线）。
+
+所以本文件的定位是：把「我们这一侧该做对的事」钉死（凭据要给、文本别丢、
+该挂的字段都挂上），**不断言上游的校验契约** —— 那个还没有定论。
 """
 from __future__ import annotations
 
@@ -121,10 +123,15 @@ class ResponsesRoundTripTest(unittest.TestCase):
         payload = R.to_chat_request(second_body)
         assistant = [m for m in payload['messages'] if m['role'] == 'assistant']
         self.assertTrue(assistant, '第二轮出站没有 assistant 消息')
-        self.assertIn('reasoning_content', assistant[0],
-                      '出站 assistant 消息缺 reasoning_content —— 上游会报 11155')
-        self.assertEqual(assistant[0]['reasoning_content'], REASONING,
+        # 断言的是**上游请求侧真正校验的字段名** `reasoning`（issue #37 实测：
+        # 只写 reasoning_content 照样 503，仅补 reasoning 才 200）。
+        # 若这里改回只断言 reasoning_content，就把错误的契约固化下来了。
+        self.assertIn('reasoning', assistant[0],
+                      '出站 assistant 消息缺 `reasoning` —— 上游会报 11155')
+        self.assertEqual(assistant[0]['reasoning'], REASONING,
                          '带回去的推理内容不是原文')
+        self.assertEqual(assistant[0]['reasoning_content'], REASONING,
+                         'reasoning_content 也要写（响应侧命名，上游兜底逻辑认它）')
 
     def test_decoded_from_credential_even_without_summary(self) -> None:
         """凭据能独立还原推理原文 —— 客户端截断 summary 时仍不丢。"""
@@ -140,7 +147,7 @@ class ResponsesRoundTripTest(unittest.TestCase):
         ]}
         payload = R.to_chat_request(body)
         assistant = [m for m in payload['messages'] if m['role'] == 'assistant'][0]
-        self.assertEqual(assistant['reasoning_content'], REASONING,
+        self.assertEqual(assistant['reasoning'], REASONING,
                          'summary 被截断时没能从凭据还原原文')
 
     def test_foreign_credential_does_not_break(self) -> None:
@@ -154,7 +161,7 @@ class ResponsesRoundTripTest(unittest.TestCase):
         ]}
         payload = R.to_chat_request(body)
         assistant = [m for m in payload['messages'] if m['role'] == 'assistant'][0]
-        self.assertEqual(assistant['reasoning_content'], '来自别处的推理',
+        self.assertEqual(assistant['reasoning'], '来自别处的推理',
                          '外来凭据解不开时应回落到 summary')
 
 
@@ -242,9 +249,9 @@ class AnthropicRoundTripTest(unittest.TestCase):
         payload = A.to_openai_request(second_body)
         assistant = [m for m in payload['messages'] if m['role'] == 'assistant']
         self.assertTrue(assistant, '第二轮出站没有 assistant 消息')
-        self.assertIn('reasoning_content', assistant[0],
-                      '出站 assistant 消息缺 reasoning_content')
-        self.assertEqual(assistant[0]['reasoning_content'], REASONING)
+        self.assertIn('reasoning', assistant[0],
+                      '出站 assistant 消息缺 `reasoning`（上游校验的字段）')
+        self.assertEqual(assistant[0]['reasoning'], REASONING)
 
     def test_signature_only_thinking_block_still_works(self) -> None:
         """只有签名、没有明文（部分客户端脱敏）时也能还原。"""
@@ -260,7 +267,7 @@ class AnthropicRoundTripTest(unittest.TestCase):
             ],
         })
         assistant = [m for m in payload['messages'] if m['role'] == 'assistant'][0]
-        self.assertEqual(assistant['reasoning_content'], REASONING,
+        self.assertEqual(assistant['reasoning'], REASONING,
                          '只有签名时没能还原推理原文')
 
 
@@ -299,7 +306,7 @@ class ReasoningOrderingTest(unittest.TestCase):
     """
 
     def _assistant_reasoning(self, payload: dict) -> list[object]:
-        return [m.get('reasoning_content') for m in payload['messages']
+        return [m.get('reasoning') for m in payload['messages']
                 if m['role'] == 'assistant']
 
     def test_reasoning_after_assistant_is_not_dropped(self) -> None:
@@ -371,7 +378,7 @@ class AnthropicReasoningAccumulationTest(unittest.TestCase):
             ]},
         ]})
         assistant = [m for m in payload['messages'] if m['role'] == 'assistant'][0]
-        got = assistant.get('reasoning_content', '')
+        got = assistant.get('reasoning', '')
         self.assertIn('段1', got, '前一个 thinking 块被后一个顶掉了')
         self.assertIn('段2', got)
 
@@ -386,6 +393,153 @@ class AnthropicReasoningAccumulationTest(unittest.TestCase):
             ]},
         ]})
         assistant = [m for m in payload['messages'] if m['role'] == 'assistant'][0]
-        got = assistant.get('reasoning_content', '')
+        got = assistant.get('reasoning', '')
         self.assertIn('明文段', got)
         self.assertIn('签名段', got)
+
+
+class OutboundFieldNameTest(unittest.TestCase):
+    """出站必须**同时写** `reasoning` 与 `reasoning_content`。
+
+    来历：社区报告（issue #37）称腾讯请求侧校验读的是 `reasoning`，只写
+    `reasoning_content` 等于没写，并给出 8 组对照实验。
+
+    **该结论本仓未能复现**（2026-09-18 用真实账号直连腾讯，7 种构造全部 200，
+    含报告里说必然 503 的基线）。所以这里**不断言「上游校验哪个字段」**——那是
+    未经证实的，写进断言就把一个说不准的契约固化了（这个文件正因为「自己证自己」
+    栽过：断言写的是我们输出的字段名，线上不生效时也一路绿）。
+
+    能断言的是**我们自己的行为**：两个字段都写、值一致、空文本也写。留两个字段
+    是零成本对冲——多写一个上游不认的字段无害（未知字段被忽略），万一报告描述的
+    场景在别的模型/部署上成立，我们已被覆盖。
+    """
+
+    def _assistant_msgs(self, payload: dict) -> list[dict]:
+        return [m for m in payload['messages'] if m['role'] == 'assistant']
+
+    def test_responses_writes_both_field_names(self) -> None:
+        payload = R.to_chat_request({'input': [
+            {'type': 'message', 'role': 'user', 'content': 'q'},
+            {'type': 'reasoning', 'encrypted_content': R._encode_credential('推理原文')},
+            {'type': 'message', 'role': 'assistant',
+             'content': [{'type': 'output_text', 'text': 'a'}]},
+        ]})
+        msg = self._assistant_msgs(payload)[0]
+        self.assertEqual(msg.get('reasoning'), '推理原文',
+                         '缺 `reasoning`（社区报告称它才是请求侧校验读的字段）')
+        self.assertEqual(msg.get('reasoning_content'), '推理原文',
+                         '缺 `reasoning_content`（上游兼底逻辑按它判断有无痕迹）')
+
+    def test_anthropic_writes_both_field_names(self) -> None:
+        payload = A.to_openai_request({'model': 'm', 'max_tokens': 10, 'messages': [
+            {'role': 'user', 'content': 'q'},
+            {'role': 'assistant', 'content': [
+                {'type': 'thinking', 'thinking': '推理原文',
+                 'signature': R._encode_credential('推理原文')},
+                {'type': 'text', 'text': 'a'},
+            ]},
+        ]})
+        msg = self._assistant_msgs(payload)[0]
+        self.assertEqual(msg.get('reasoning'), '推理原文')
+        self.assertEqual(msg.get('reasoning_content'), '推理原文')
+
+    def test_both_written_for_tool_call_turns_too(self) -> None:
+        """工具调用回合（flush_calls 产出）同样要两个字段都写。
+
+        工具调用回合的 assistant 消息同样要带上推理（模型先思考再调工具），
+        漏掉它这类多轮一样会缺痕迹。
+        """
+        payload = R.to_chat_request({'input': [
+            {'type': 'message', 'role': 'user', 'content': 'q'},
+            {'type': 'reasoning', 'encrypted_content': R._encode_credential('先思考')},
+            {'type': 'function_call', 'call_id': 'c1', 'name': 'f', 'arguments': '{}'},
+            {'type': 'function_call_output', 'call_id': 'c1', 'output': 'r'},
+        ]})
+        msg = self._assistant_msgs(payload)[0]
+        self.assertIn('tool_calls', msg)
+        self.assertEqual(msg.get('reasoning'), '先思考')
+        self.assertEqual(msg.get('reasoning_content'), '先思考')
+
+    def test_empty_reasoning_still_writes_both_fields(self) -> None:
+        """拿不到文本时字段仍要在（字段存在本身有意义）。
+
+        但要说清**空文本救不了场**：没有真实推理内容，多轮一致性本来就无从满足。
+        真正的解法是别把文本丢掉 —— 这正是本文件其余测试在守的。
+        """
+        payload = R.to_chat_request({'input': [
+            {'type': 'message', 'role': 'user', 'content': 'q'},
+            {'type': 'reasoning', 'summary': []},
+            {'type': 'message', 'role': 'assistant',
+             'content': [{'type': 'output_text', 'text': 'a'}]},
+        ]})
+        msg = self._assistant_msgs(payload)[0]
+        self.assertIn('reasoning', msg, '字段存在本身有意义（上游据此判定有无痕迹）')
+        self.assertIn('reasoning_content', msg)
+
+    def test_values_are_always_identical(self) -> None:
+        """两个字段的值必须一致 —— 不一致会造出上游无法解释的组合。"""
+        payload = R.to_chat_request({'input': [
+            {'type': 'message', 'role': 'user', 'content': 'q'},
+            {'type': 'reasoning', 'encrypted_content': R._encode_credential('甲')},
+            {'type': 'reasoning', 'encrypted_content': R._encode_credential('乙')},
+            {'type': 'message', 'role': 'assistant',
+             'content': [{'type': 'output_text', 'text': 'a'}]},
+        ]})
+        msg = self._assistant_msgs(payload)[0]
+        self.assertEqual(msg['reasoning'], msg['reasoning_content'])
+        self.assertIn('甲', msg['reasoning'])
+        self.assertIn('乙', msg['reasoning'])
+
+
+class UpstreamContractUnresolvedTest(unittest.TestCase):
+    """记录一个**尚未定论**的契约，避免后人误信单方面说法。
+
+    issue #37 称「腾讯请求侧校验读 `reasoning`，写 `reasoning_content` 等于没写」，
+    并给了 8 组对照实验。本仓 2026-09-18 在真实账号上直连腾讯复验，**没能复现**：
+
+        7 种构造（无推理字段 / 只有 reasoning_content / 只有 reasoning / 两个都有 /
+        仅空白 / 空串 / 带 tools / 带 thinking=enabled+high / 带会话连续性头 /
+        9 消息 3 assistant 回合）→ **全部 200**，包括它说必然 503 的基线。
+
+    （对照：同一个账号同一个 base，模型名写错会得到 400 code=11102，
+    说明请求确实打到了腾讯、也确实进了它的模型校验。所以「全 200」不是
+    请求没生效的假象。）
+
+    既然说不清，代码就采取**零成本对冲**：两个字段都写（多写一个上游不认的
+    字段无害）。本类只钉住「对冲仍然在」这件事，**不**断言哪个字段才是对的 ——
+    等有了可复现的证据再改。谁要删掉其中一个字段，请先补上复现证据。
+    """
+
+    def test_both_fields_still_written_as_hedge(self) -> None:
+        payload = R.to_chat_request({'input': [
+            {'type': 'message', 'role': 'user', 'content': 'q'},
+            {'type': 'reasoning', 'encrypted_content': R._encode_credential('推理')},
+            {'type': 'message', 'role': 'assistant',
+             'content': [{'type': 'output_text', 'text': 'a'}]},
+        ]})
+        msg = [m for m in payload['messages'] if m['role'] == 'assistant'][0]
+        self.assertIn('reasoning', msg,
+                      '删掉了 reasoning —— 若社区报告成立，会重新触发 11155')
+        self.assertIn('reasoning_content', msg,
+                      '删掉了 reasoning_content —— 上游兜底逻辑按它判断有无痕迹')
+
+    def test_helper_is_the_single_write_path(self) -> None:
+        """两个字段只在 `attach_reasoning` 里写，避免各处写法漂移。
+
+        分散写的问题是：将来只有一个地方补/改字段时，另一个地方会悄悄漏掉
+        （本模块已经因为「两个协议各写各的」出现过行为不一致）。
+        """
+        src = (Path(__file__).resolve().parents[1] / 'routers' / 'responses.py').read_text(
+            encoding='utf-8')
+        # 赋值形态的写入只应出现在 attach_reasoning 内
+        writes = [l for l in src.splitlines()
+                  if "msg['reasoning'] = " in l or "msg['reasoning_content'] = " in l]
+        self.assertEqual(len(writes), 2,
+                         f'发现 {len(writes)} 处直接赋值（应集中在 attach_reasoning）：{writes}')
+
+        a_src = (Path(__file__).resolve().parents[1] / 'routers' / 'anthropic.py').read_text(
+            encoding='utf-8')
+        a_writes = [l for l in a_src.splitlines()
+                    if "msg['reasoning'] = " in l or "msg['reasoning_content'] = " in l]
+        self.assertEqual(a_writes, [],
+                         f'anthropic 侧应复用 attach_reasoning，不要自己写：{a_writes}')

@@ -146,16 +146,21 @@ def _text_of_parts(content: object) -> tuple[str, list[dict]]:
 # ── 推理内容的「凭据」编码 ────────────────────────────────
 #
 # 为什么要它：DeepSeek 在思考模式下要求客户端把上一轮的推理内容原样带回
-# （不带就报 11155 `reasoning_content_missing`）。而 Responses / Anthropic
-# 两套协议里，客户端**只回传带凭据的推理块**：
+# （不带就报 11155 `reasoning_content_missing`）。两套协议里，客户端回传的推理
+# 块按规范应当带凭据：
 #
-#   · Responses：`store:false` 时只回传带 `encrypted_content` 的 reasoning 项
-#     （OpenAI 官方用它做无状态加密推理），没有这个字段的项会被客户端丢掉；
-#   · Anthropic：只回传带 `signature` 的 `thinking` 块，没有签名的丢弃。
+#   · Responses：`store:false` 时带 `encrypted_content` 的 reasoning 项
+#     （OpenAI 官方用它做无状态加密推理）；
+#   · Anthropic：带 `signature` 的 `thinking` 块。
 #
-# 所以光把推理文本放进 `summary` / `thinking` 是不够的 —— 客户端拿不到凭据，
-# 下一轮就一点痕迹都不带，输入侧的解析代码成了**死代码**（v1.0.51 的修复正是
-# 只做了输入侧，issue #36 报的「1.0.53 没真正生效」就是这个原因）。
+# 没有凭据时**不同客户端行为不同**（这点被 issue #37 的抓包纠正过，别想当然）：
+# 实测 Codex 在 `encrypted_content` 为 null 时**并不会丢弃**整项，它靠 `summary`
+# 里的明文照样把推理带了回来。所以凭据不是「唯一的回传载体」，而是「规范要求的
+# 载体」——给上它更稳（客户端换版本、或多轮里 summary 被截断时仍能还原完整原文）。
+#
+# 这段历史值得记住：v1.0.51 只修了输入侧，v1.0.53 补了凭据，两次都以为修好了
+# 却不生效——因为断言写的都是我们自己输出的东西。教训是**断言要盯着需要的行为**，
+# 而不是自己的输出形状。
 #
 # 面板不需要真加密：这两个字段在协议里的语义就是「客户端原样搬来搬去的不透明
 # 串」，我们做**可逆编码**即可（base64 包装明文）。用可逆而不是真加密还有个
@@ -182,8 +187,39 @@ def _decode_credential(raw: object) -> str | None:
         return None
 
 
+def attach_reasoning(msg: dict, text: str) -> None:
+    """把推理文本挂到 assistant 消息上，**两个字段名都写**（`reasoning` + `reasoning_content`）。
+
+    来历（社区报告，issue #37）：报告称腾讯**请求侧**校验读的是 `reasoning`
+    而不是 `reasoning_content`，并给出 8 组对照实验——同一份出站 body 原样
+    503（`11155`），仅补 `reasoning` 就 200。
+
+    **我自己没能复现那份矩阵**（2026-09-18，真实账号直连腾讯、7 种构造全部
+    200，含报告里说必然 503 的基线；带 tools、带 thinking=enabled+high、
+    带会话连续性头、9 消息 3 assistant 回合的形态都试过）。所以「腾讯校验
+    `reasoning`」这一点**尚无本仓的实测支持**，保留两个字段是**对冲**而非确证：
+
+      · 多写一个上游不认的字段无害（未知字段被忽略）——代价为零；
+      · 万一报告描述的形态在别的模型/部署上成立，我们已经被覆盖。
+
+    已知为真、可依赖的两点（读上游源码得到，与本仓实验一致）：
+      · `reasoning_content` 确实是**响应侧**的字段名（腾讯 SSE 回放推理用它）；
+      · 上游的兜底 `backfillReasoningContent` **读 `reasoning`** 并把它复制到
+        `reasoning_content`，且见到 `reasoning_content` 已存在就跳过。
+
+    最后一点值得留意：正因为上游见到 `reasoning_content` 就跳过，**我们挂了
+    这个字段反而会让上游那道兜底不生效**。这也是「两个都写」更稳的另一个理由
+    ——万一字段名真有讲究，我们不依赖上游兜底也能过。
+
+    文本为空时仍然挂上（字段存在本身有意义），但要清楚**空串救不了场**：
+    真正的解法是不把推理文本丢掉，那是本模块其余逻辑在守的事。
+    """
+    msg['reasoning'] = text
+    msg['reasoning_content'] = text
+
+
 def _reasoning_text(item: dict) -> str:
-    """从 reasoning item 里取出推理文本，用于回填 assistant 消息的 `reasoning_content`。
+    """从 reasoning item 里取出推理文本，用于回填 assistant 消息的推理字段。
 
     来源按可靠性排序：
       · `encrypted_content` —— 我们发出去、客户端原样带回的凭据，**优先**用它：
@@ -192,8 +228,8 @@ def _reasoning_text(item: dict) -> str:
       · `content` —— 部分客户端把正文放这里，同样是 parts 数组；
       · `reasoning_content` / `reasoning` —— 已经是扁平字符串的形态。
 
-    **取不到文本时返回空串**（而不是 None）：腾讯的校验是「assistant 消息上必须有
-    这个字段」，空串也满足；返回 None 会让调用方跳过回填，等于又回到被拒的状态。
+    取不到文本时返回空串（而不是 None）：调用方据此仍会挂上字段（见
+    `attach_reasoning` 对空串的说明），返回 None 会让调用方跳过回填。
     """
     decoded = _decode_credential(item.get('encrypted_content'))
     if decoded:
@@ -306,7 +342,7 @@ def to_chat_request(body: dict) -> dict:
                 # 否则这类多轮同样会因缺痕迹被腾讯拒。
                 pending = take_reasoning()
                 if pending is not None:
-                    msg['reasoning_content'] = pending
+                    attach_reasoning(msg, pending)
                 messages.append(msg)
                 pending_calls.clear()
 
@@ -352,22 +388,18 @@ def to_chat_request(body: dict) -> dict:
                 # reasoning item **不能丢**：它是 DeepSeek 多轮对话的一致性凭据。
                 #
                 # 背景（社区反馈的 11155 死循环）：腾讯要求「上一轮的推理内容必须在
-                # 后续请求里回传」，上游 workbuddy2api 对此有补丁——它检测 assistant
-                # 消息上的 reasoning 痕迹，见到就给**所有** assistant 消息补上
-                # `reasoning_content`（空串也补），以满足腾讯的校验。
+                # 后续请求里回传」，缺了就是 400 `11155 reasoning_content_missing`
+                # → 该账号被记为失败 → 连续失败触发降级冷却 → 池里没有可用账号 →
+                # 客户端反复重试，最终变成与模型无关的 503 死循环。
                 #
-                # 但那个补丁的触发条件是「请求里已经带着痕迹」：痕迹被我这里
-                # `continue` 丢掉，补丁就永远不触发 → 腾讯回 11155
-                # （reasoning_content_missing）→ 400 → 该账号被记为失败 → 连续失败
-                # 触发降级冷却 → 池里没有可用账号 → 客户端反复重试，最终变成与模型
-                # 无关的 503 死循环。
-                #
-                # 所以这里把 reasoning item 的文本挂到 assistant 消息上（字段名用
-                # 上游认识的 `reasoning_content`，与它 sse.go 回放时的命名一致）。
+                # 所以这里把 reasoning item 的文本挂到 assistant 消息上，
+                # **两个字段名都写**（`reasoning` + `reasoning_content`）——
+                # 原因见 `attach_reasoning`：请求侧校验读的是 `reasoning`，
+                # 只写 `reasoning_content` 等于没写（issue #37 的 8 组对照实验）。
                 #
                 # 为什么不是原样透传整个 item：`{type:'reasoning', summary:[…]}` 是
-                # OpenAI 专有形状，Chat Completions 不认；只有扁平的
-                # `reasoning_content` 字符串是两侧都认的形态。
+                # OpenAI 专有形状，Chat Completions 不认；只有扁平的字符串是
+                # 两侧都认的形态。
                 #
                 # 挂载规则（**宽容**，不假设顺序）：累积起来，落到**下一条**
                 # assistant 消息上；连续多段则**拼接**。
@@ -410,7 +442,7 @@ def to_chat_request(body: dict) -> dict:
                 if role == 'assistant':
                     pending = take_reasoning()
                     if pending is not None:
-                        msg['reasoning_content'] = pending
+                        attach_reasoning(msg, pending)
                 messages.append(msg)
         flush_calls()
 
@@ -421,7 +453,7 @@ def to_chat_request(body: dict) -> dict:
         if pending_reasoning is not None:
             for prev in reversed(messages):
                 if prev.get('role') == 'assistant':
-                    prev['reasoning_content'] = take_reasoning()
+                    attach_reasoning(prev, take_reasoning())
                     break
 
     out['messages'] = messages
