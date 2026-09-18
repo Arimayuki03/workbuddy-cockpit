@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from typing import Any
 
@@ -228,7 +229,33 @@ def write_auth_file(account: dict) -> tuple[str, bool]:
     }
     if old_device_token:
         payload['device_token'] = old_device_token
-    target.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding='utf-8')
+
+    # **原子替换**（临时文件 + os.replace），不能直接 write_text。
+    #
+    # 为什么必须这样：上游 2026-09-18 起新增了 auths 目录热加载——每 5 秒轮询
+    # 目录指纹（文件名 + mtime + 大小），一有变化就重新全量加载。而 `write_text`
+    # 是「先截断再写」，中间存在**长度为 0 的窗口**；轮询若正好落在那里，读到空文件
+    # → `Parse` 失败 → 该账号被判定为「已删除」而从池里剔除，随后才被写回。
+    # 表现是账号偶发地短时间掉线，且日志里看不出原因（大概率碰不上，但轮询是永久的，
+    # 迟早会碰上）。
+    #
+    # 上游自己也依赖这个前提：其 watch.go 注释写明「半写入的临时文件
+    # （login.sh 用 tempfile + os.replace 原子替换）不会造成误判」—— 我们的写入
+    # 路径必须符合同一个约定。
+    #
+    # 临时文件名以 `.` 开头且不以 `.json` 结尾：既不会被上游的 `workbuddy*.json`
+    # glob 收到，也不会被它的目录指纹计入（指纹只统计 `.json`）。
+    tmp = target.with_name(f'.{target.name}.tmp')
+    try:
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding='utf-8')
+        os.replace(tmp, target)
+    except Exception:
+        # 失败时清掉临时文件，避免在 auths 目录里留垃圾（它不会被加载，但会让人困惑）
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return target.name, existed
 
 

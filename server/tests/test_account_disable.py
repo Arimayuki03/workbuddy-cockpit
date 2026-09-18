@@ -8,6 +8,10 @@
 （`internal/auth/auth.go` 的 `AuthFileGlob`），所以把文件改名成
 `workbuddy-xxx.json.disabled` 之后它就不再被加载、从池里消失；启用就是改回原名。
 
+新上游（2026-09-18 起）额外要求：那边加了 **auths 目录热加载**——每 5 秒轮询目录
+指纹并全量重扫。于是改名**不再需要重启容器**，5 秒内自动生效（我们仍会触发一次
+重载：对新版上游是让它立即生效而不等轮询，对旧版上游则是唯一生效途径）。
+
 这里钉住的几条，每条都对应一个真实风险：
 
   1. **可逆**：凭证一个字节都不能动 —— 删除会丢 token（只能重新扫码），改名不会。
@@ -17,18 +21,23 @@
      界面会按「上游没加载它」报成「账号文件可能有问题」——把用户自己的操作说成故障。
   4. **幂等**：重复禁用/启用不报错（界面可能重试、连点）。
   5. **文件名校验不放水**：新增的 `.disabled` 形态不能成为目录穿越的新入口。
+  6. **写入是原子的**（见 `AtomicAuthWriteTest`）：热加载会让「写了一半的账号文件」
+     真的被读到。
 """
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from server import config  # noqa: E402
+from server.services import tencent  # noqa: E402
 from server.services import wb2api  # noqa: E402
 
 UID = '99a07e71deadbeef'
@@ -150,6 +159,105 @@ class PoolMergeReasonTest(unittest.TestCase):
                      'disabled_by_panel': True, 'invalid_reason': '缺少 accessToken'}]
         wb2api.merge_pool_status(accounts, {'accounts': []})
         self.assertEqual(accounts[0]['invalid_reason'], '缺少 accessToken')
+
+
+class AtomicAuthWriteTest(unittest.TestCase):
+    """账号文件必须**原子替换**写入（上游热加载依赖这个前提）。
+
+    背景：上游 2026-09-18 起对 auths 目录做 5 秒一次的轮询热加载，一有变化就全量
+    重扫。而「先截断再写」的写入方式存在**长度为 0 的窗口**——轮询若正落在那里，
+    读到空文件 → 解析失败 → 账号被判为「已删除」而从池里剔除，随后才被写回。
+    表现是账号偶发短暂掉线，日志里却看不出原因。
+
+    上游自己也依赖同一约定：其 `watch.go` 注释写明「半写入的临时文件
+    （login.sh 用 tempfile + os.replace 原子替换）不会造成误判」。我们的写入路径
+    必须符合同一个前提。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = config.AUTH_DIR
+        config.AUTH_DIR = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        config.AUTH_DIR = self._orig
+        self._tmp.cleanup()
+
+    def _acct(self, **kw) -> dict:
+        return {
+            'uid': kw.get('uid', 'u1'), 'access_token': kw.get('token', 'AT'),
+            'refresh_token': 'RT', 'expires_at': 4102444800, 'domain': '',
+            'realm': 'cn', 'nickname': 'N', 'enterprise_id': '',
+        }
+
+    def test_write_leaves_no_temp_file(self) -> None:
+        """写完不能留下临时文件（它在 auths 目录里会让人以为是垃圾或半个账号）。"""
+        tencent.write_auth_file(self._acct())
+        leftovers = [p.name for p in config.AUTH_DIR.iterdir()
+                     if p.name != 'workbuddy-u1.json']
+        self.assertEqual(leftovers, [], f'留下了多余文件：{leftovers}')
+
+    def test_temp_file_is_not_matched_by_upstream_glob(self) -> None:
+        """临时文件名既不能匹配上游的 `workbuddy*.json`，也不能进目录指纹。
+
+        上游热加载的指纹只统计 `.json` 结尾的文件；若临时文件叫
+        `workbuddy-u1.json.tmp` 之类，虽然 glob 不收，但可能被指纹计入而产生
+        无意义的重扫。以 `.` 开头 + 非 `.json` 结尾两头都避开。
+        """
+        written: list[str] = []
+        real_replace = os.replace
+
+        def spy(src, dst, *a, **kw):
+            written.append(Path(src).name)
+            return real_replace(src, dst, *a, **kw)
+
+        with unittest.mock.patch('os.replace', side_effect=spy):
+            tencent.write_auth_file(self._acct())
+        self.assertTrue(written, '没有走 os.replace（那就不是原子替换）')
+        for name in written:
+            self.assertFalse(name.startswith('workbuddy') and name.endswith('.json'),
+                             f'临时文件名会被上游当成账号文件：{name}')
+
+    def test_target_never_observed_empty(self) -> None:
+        """目标文件在读到的每一刻都必须是完整可解析的 JSON。
+
+        这是热加载场景的核心不变量：模拟「写入过程中被读取」，读取点只能在
+        os.replace 之后发生（替换前目标文件还是旧内容）。
+        """
+        tencent.write_auth_file(self._acct(token='OLD'))
+        seen: list[object] = []
+        real_replace = os.replace
+
+        def spy(src, dst, *a, **kw):
+            # 替换**之前**读一次目标（此时应还是旧内容，不能是空）
+            seen.append(json.loads(Path(dst).read_text(encoding='utf-8')))
+            out = real_replace(src, dst, *a, **kw)
+            # 替换之后读（应是新内容）
+            seen.append(json.loads(Path(dst).read_text(encoding='utf-8')))
+            return out
+
+        with unittest.mock.patch('os.replace', side_effect=spy):
+            tencent.write_auth_file(self._acct(token='NEW'))
+
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[0]['auth']['accessToken'], 'OLD', '替换前被读到半截内容')
+        self.assertEqual(seen[1]['auth']['accessToken'], 'NEW')
+
+    def test_failure_cleans_temp_and_keeps_old_file(self) -> None:
+        """写失败时：不留临时文件，且**原文件保持完好**（凭证不能丢）。"""
+        tencent.write_auth_file(self._acct(token='GOOD'))
+        target = config.AUTH_DIR / 'workbuddy-u1.json'
+
+        with unittest.mock.patch.object(Path, 'write_text',
+                                        side_effect=OSError('disk full')):
+            with self.assertRaises(OSError):
+                tencent.write_auth_file(self._acct(token='BROKEN'))
+
+        self.assertEqual(json.loads(target.read_text(encoding='utf-8'))['auth']['accessToken'],
+                         'GOOD', '写失败把原凭证弄坏了')
+        leftovers = [p.name for p in config.AUTH_DIR.iterdir()
+                     if p.name != 'workbuddy-u1.json']
+        self.assertEqual(leftovers, [], f'失败后留下临时文件：{leftovers}')
 
 
 if __name__ == '__main__':

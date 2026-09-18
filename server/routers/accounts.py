@@ -832,8 +832,9 @@ async def account_set_disabled(
     的说明：上游没有对外暴露禁用接口，改 state.json 也会被 5 秒一次的上位机覆盖）。
 
     body: {disabled: bool, reload: bool}。`reload` 默认 true ——
-    上游不监听文件变化，不重载的话改名不会生效，而用户点「禁用」时期待的是
-    **立即生效**。要批量操作时可以先传 false，最后一次统一重载。
+    旧上游不监听文件变化，不重载就不会生效，而用户点「禁用」时期待的是
+    **立即生效**；新上游（2026-09-18 起）有 5 秒热加载，重载只是为了不等那 5 秒。
+    要批量操作时可以先传 false，最后一次统一重载。
     """
     if not isinstance(body.get('disabled'), bool):
         raise HTTPException(status_code=400, detail='disabled 必须是布尔值')
