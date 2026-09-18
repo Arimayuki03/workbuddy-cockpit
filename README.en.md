@@ -404,7 +404,49 @@ python -m unittest discover -s server/tests -t . -v
 > They guard two bugs that once corrupted configs: treating an hour array as a numeric
 > interval, and treating a duration string as seconds.
 
-### 2. Docker
+### 2. Native Windows deployment (without Docker)
+
+Prerequisite: `workbuddy2api` is already running locally and has working start/stop
+scripts plus a file log.
+
+```powershell
+git clone https://github.com/ithtelab/workbuddy-manager.git
+cd workbuddy-manager
+Copy-Item .env.example .env
+```
+
+Set at least these values in `.env` (forward slashes are recommended in Windows paths):
+
+```dotenv
+WB_MANAGER_HOST=127.0.0.1
+WB_SECURE_COOKIE=false
+WB2API_MODE=native
+WB_UPSTREAM_DIR=C:/path/to/workbuddy2api
+WB_AUTH_DIR=C:/path/to/workbuddy2api/auths
+WB_UPSTREAM_CONFIG=C:/path/to/workbuddy2api/config.json
+WB2API_START_SCRIPT=C:/path/to/workbuddy2api/start-workbuddy2api.cmd
+WB2API_STOP_SCRIPT=C:/path/to/workbuddy2api/stop-workbuddy2api.cmd
+WB2API_LOG_FILE=C:/path/to/workbuddy2api/data/server.err.log
+```
+
+Install dependencies, export the frontend, and start the background process:
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r server\requirements.txt
+Set-Location web
+npm ci
+npm run build:export
+Set-Location ..
+powershell -ExecutionPolicy Bypass -File .\service-tools.ps1 start
+```
+
+Use `service-tools.ps1 status|restart|stop` to manage the process. Native Windows mode
+supports restarting the upstream after configuration changes and reading its file log.
+The web one-click updater depends on Linux/Docker and is rejected with an explicit message;
+update the code manually and restart the service instead.
+
+### 3. Docker
 
 The repo ships a `Dockerfile` and `docker-compose.yml` for users already running the
 upstream in Docker:
@@ -456,7 +498,7 @@ Two other differences from a host install (both surfaced in the UI):
 > image itself is outside that signature (a separate trust chain based on the GHCR digest
 > and GitHub account security).
 
-### 3. Server deployment (one-click script)
+### 4. Server deployment (one-click script)
 
 This project depends on the upstream [`workbuddy2api`](https://github.com/Sliverkiss/workbuddy2api)
 (account pool and OpenAI-compatible API) — **cloning this repo alone will not run**.
@@ -503,9 +545,13 @@ Full deployment notes (Nginx config, hardening, FAQ) are in [deploy/README.md](d
 | `WB_MANAGER_PORT` | `7864` | Listen port |
 | `WB2API_BASE` | `http://127.0.0.1:7863` | workbuddy2api address |
 | `WB2API_KEY` | from config.json | Upstream API key |
+| `WB2API_MODE` | `docker` | Upstream runtime: `docker` or `native` |
 | `WB2API_CONTAINER` | `workbuddy2api` | Container name used for reloads |
 | `WB_AUTH_DIR` | `/opt/workbuddy2api/auths` | Account auth directory |
 | `WB_UPSTREAM_CONFIG` | `/opt/workbuddy2api/config.json` | Upstream config file |
+| `WB2API_START_SCRIPT` | `.cmd` under upstream dir | Native-mode start script |
+| `WB2API_STOP_SCRIPT` | `.cmd` under upstream dir | Native-mode stop script |
+| `WB2API_LOG_FILE` | `data/server.err.log` | Native-mode upstream log |
 | `WB_DATA_DIR` | `./data` | This service's data directory |
 | `WB_STATIC_DIR` | `./web/out` | Static export directory |
 | `WB_ADMIN_PASSWORD` | random | Initial admin password |
