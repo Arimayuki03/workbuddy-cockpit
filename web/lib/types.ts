@@ -294,6 +294,16 @@ export interface UsagePoint {
   completion_tokens: number;
   /** 当日实际扣费合计 */
   credit: number;
+  /**
+   * 当日失败请求数（4xx + 5xx 合计）。
+   *
+   * 单独来自 `request_logs` 而非用量汇总——后者只含有 token 或扣费的请求，
+   * 被拒绝的调用与全池不可用（503，零 token）在里面根本不存在。所以这一项
+   * 补上了「用量表天然看不到失败」的盲区。
+   *
+   * 可选：老版本后端不返回该字段，界面按 0 处理（不显示失败）。
+   */
+  failed?: number;
 }
 
 export interface UsageBreakdown {
@@ -331,6 +341,22 @@ export interface StatsSummary {
    * 那样改文案会让译文静默失效（曾经如此）。
    */
   usage_health?: {ok: boolean; detail: string; logs_today?: number};
+  /**
+   * 失败请求数（4xx / 5xx 分档，今天与近 7 天）。
+   *
+   * 为什么不在 `today_requests` 里体现：那个数来自用量汇总，只含**成功**
+   * 请求（有 token 或有扣费）。失败请求在汇总里完全不存在，于是界面上的
+   * 「请求数」与趋势图都只反映成功量——全池中断那天看起来像「没有请求」。
+   * 这一项把失败显式补出来。
+   *
+   * 可选：老版本后端不返回，界面按全 0 处理（不显示失败相关提示）。
+   */
+  failures?: {
+    today_4xx: number;
+    today_5xx: number;
+    week_4xx: number;
+    week_5xx: number;
+  };
 }
 
 export interface IpRule {

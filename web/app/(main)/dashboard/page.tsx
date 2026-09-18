@@ -211,7 +211,17 @@ export default function DashboardPage() {
     day: d.day.slice(5),
     requests: d.requests,
     tokens: d.prompt_tokens + d.completion_tokens,
+    // 失败数与请求数是**两条独立的数据来源**（前者取自请求日志，后者取自用量
+    // 汇总），所以曲线不会互相覆盖：某天「requests=0 但 failed=31」是完全
+    // 可能的形态（全池中断），图上看得出「那天出过事」而不是「没有请求」。
+    failed: d.failed ?? 0,
   }));
+
+  /** 今日失败总数（4xx + 5xx）。用于今天那张卡片的提示与色调。 */
+  const todayFailed =
+    (summary?.failures?.today_4xx ?? 0) + (summary?.failures?.today_5xx ?? 0);
+  const weekFailed =
+    (summary?.failures?.week_4xx ?? 0) + (summary?.failures?.week_5xx ?? 0);
 
   return (
     <div className="flex flex-col gap-4 md:gap-6">
@@ -296,12 +306,19 @@ export default function DashboardPage() {
         <StatCard
           label={t('dashboard.todayTokens')}
           value={fmtCompact(summary?.today_tokens)}
-          hint={t('dashboard.todayRequests', {
-            n: fmtNumber(summary?.today_requests),
-            realm: realmName,
-          })}
+          hint={
+            // 有失败时**优先说失败**：这个数字是用户排查问题的入口，而
+            // 「今天 N 次请求」是背景信息。没失败才显示请求数。
+            todayFailed > 0
+              ? t('dashboard.todayFailed', {n: fmtNumber(todayFailed)})
+              : t('dashboard.todayRequests', {
+                  n: fmtNumber(summary?.today_requests),
+                  realm: realmName,
+                })
+          }
           icon={Activity}
-          tone="info"
+          tone={todayFailed > 0 ? 'warning' : 'info'}
+          hintTone={todayFailed > 0 ? 'warning' : undefined}
           delay={0.2}
         />
       </section>
@@ -310,9 +327,13 @@ export default function DashboardPage() {
         <div className="rounded-[20px] bg-muted p-4 lg:col-span-2">
           <div className="mb-3 flex items-center justify-between">
             <div className="text-sm font-medium">{t('dashboard.trend14')}</div>
-            {/* 按当前版本过滤（与统计页同一口径），不再混两个版本 */}
+            {/* 按当前版本过滤（与统计页同一口径），不再混两个版本。
+                近 7 天有失败时在这里点出总数——用户看曲线只能看出"某天有虚线"，
+                具体多少次要悬停；给个总数省这一步。 */}
             <div className="text-[11px] text-muted-foreground">
-              {t('dashboard.requestsByRealm', {realm: realmName})}
+              {weekFailed > 0
+                ? t('dashboard.weekFailed', {n: fmtNumber(weekFailed), realm: realmName})
+                : t('dashboard.requestsByRealm', {realm: realmName})}
             </div>
           </div>
           <div className="h-[220px] w-full">
@@ -343,6 +364,18 @@ export default function DashboardPage() {
                     stroke="var(--chart-1)"
                     fill="url(#gReq)"
                     strokeWidth={2}
+                  />
+                  {/* 失败曲线单独画（虚线、不发散填充）：它来自另一份数据源，
+                      与请求数不是「同一条曲线的两个部分」，不该堆叠。
+                      没有失败时这条线贴着 0，不干扰读数。 */}
+                  <Area
+                    type="monotone"
+                    dataKey="failed"
+                    name={t('dashboard.failedRequests')}
+                    stroke="var(--destructive)"
+                    fill="none"
+                    strokeWidth={1.5}
+                    strokeDasharray="4 3"
                   />
                 </AreaChart>
               </ResponsiveContainer>
