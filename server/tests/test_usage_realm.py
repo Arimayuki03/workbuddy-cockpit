@@ -225,6 +225,154 @@ class StatsRealmFilterTest(unittest.TestCase):
         self.assertEqual(all_['total'], 4)
 
 
+class RebuildWithDirtyDataTest(unittest.TestCase):
+    """重建 / 回填统计必须能处理**脏数据**（线上 bug 的回归测试）。
+
+    报障现象：用量页点「重建统计」→ `Internal Server Error`（500）。
+
+    两个独立原因，都在 SQL 的分组与归一化上：
+
+      1. **GROUP BY 复用别名会绑定到源列**。SQLite 解析 `GROUP BY realm` 时，
+         因为 FROM 的表里也有名为 realm 的列，该名字优先绑定**源列**，而不是
+         输出别名 `COALESCE(realm,'cn')`。于是 `realm IS NULL` 与 `realm='cn'`
+         被分成两组，但两组的输出值都是 'cn' —— 写回 usage_daily 时撞主键
+         `(day,key_id,model,realm)`。model 列同理。
+
+      2. **空串的归一化两处不一致**：SQL 的 `COALESCE(realm,'cn')` 只处理 NULL，
+         而 Python 的 `row['realm'] or 'cn'` 连空串一起兜住。于是 SQL 把它分成
+         独立一组、写库时却折成 'cn'，第二次撞键。
+
+    历史日志里 realm 为 NULL 是**常态**（该列是后加的，旧记录全是 NULL），
+    所以这不是理论边界 —— 任何有升级历史的部署点这个按钮都会 500。
+    """
+
+    def setUp(self) -> None:
+        self._dir = Path(tempfile.mkdtemp())
+        self._orig = (db.config.DB_PATH, db._conn)
+        db.config.DB_PATH = self._dir / 'dirty.db'
+        db._conn = None
+        db.connect()
+        self.addCleanup(self._restore)
+        self._key = db.execute(
+            "INSERT INTO api_keys(name,key_hash,prefix,enabled,models,realm,created_at) "
+            "VALUES('t','h','p',1,'[]','cn',?)", (int(time.time()),))
+
+    def _restore(self) -> None:
+        if db._conn is not None:
+            db._conn.close()
+        db._conn = self._orig[1]
+        db.config.DB_PATH = self._orig[0]
+
+    def _log(self, model, realm, pt=10, ct=5, credit=1.0) -> None:
+        db.execute(
+            'INSERT INTO request_logs(ts, key_id, ip, model, mapped_model, status, '
+            'prompt_tokens, completion_tokens, latency_ms, first_token_ms, ua, error, '
+            'stream, credit, realm) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            (int(time.time()), self._key, '127.0.0.1', model, model, 200, pt, ct,
+             100, None, 'ua', None, 1, credit, realm),
+        )
+
+    def test_rebuild_tolerates_null_and_empty_realm(self) -> None:
+        """realm 为 NULL / 空串时必须能重建（旧记录全是 NULL）。"""
+        self._log('glm-5.2', 'cn')
+        self._log('glm-5.2', None)      # 历史记录：该列是后加的
+        self._log('glm-5.2', '')
+        out = db.rebuild_usage_from_logs()   # 修复前在这里抛 IntegrityError
+        self.assertEqual(out['rows_after'], 1, '三种形态应归并成同一行')
+        row = db.query_one('SELECT realm, requests FROM usage_daily')
+        self.assertEqual(row['realm'], 'cn')
+        self.assertEqual(int(row['requests']), 3)
+
+    def test_rebuild_tolerates_null_and_empty_model(self) -> None:
+        """model 为 NULL / 空串时同理（两者归一后是同一行）。"""
+        self._log(None, 'cn')
+        self._log('', 'cn')
+        db.rebuild_usage_from_logs()
+        self.assertEqual(db.query_one('SELECT COUNT(*) c FROM usage_daily')['c'], 1)
+        self.assertEqual(int(db.query_one('SELECT requests FROM usage_daily')['requests']), 2)
+
+    def test_rebuild_keeps_realms_separate(self) -> None:
+        """归一化不能把两个版本合并 —— 它们本来就是不同的行。"""
+        self._log('glm-5.2', 'cn')
+        self._log('glm-5.2', 'global')
+        db.rebuild_usage_from_logs()
+        realms = {r['realm'] for r in db.query('SELECT realm FROM usage_daily')}
+        self.assertEqual(realms, {'cn', 'global'})
+
+    def test_rebuild_total_matches_logs(self) -> None:
+        """重建后的请求数必须与日志条数一致（不重不漏）。"""
+        for realm in ('cn', None, '', 'global', None, 'cn'):
+            self._log('m', realm)
+        out = db.rebuild_usage_from_logs()
+        total = db.query_one('SELECT SUM(requests) r FROM usage_daily')['r']
+        logs = db.query_one('SELECT COUNT(*) c FROM request_logs')['c']
+        self.assertEqual(int(total), int(logs))
+        self.assertEqual(out['requests_delta'], logs)
+
+    def test_backfill_tolerates_dirty_data_and_is_idempotent(self) -> None:
+        """「修复统计」走的是回填路径，同样必须扛住脏数据且可重复执行。"""
+        self._log('glm-5.2', 'cn')
+        self._log('glm-5.2', None)
+        self._log('glm-5.2', '')
+        first = db.backfill_usage_from_logs()    # 修复前同样会抛
+        self.assertEqual(db.query_one('SELECT COUNT(*) c FROM usage_daily')['c'], 1)
+        second = db.backfill_usage_from_logs()
+        self.assertEqual(second['requests'], 0, '重复执行不应重复计数')
+        # 回填结果与直接重建应当一致
+        self.assertEqual(first['requests'], 3)
+
+    def test_rebuild_is_atomic_on_failure(self) -> None:
+        """重建失败时必须**整体回滚**，不能留下被清空的统计表。
+
+        这是线上现象的另一半：此前是「先 DELETE（已提交）再逐条 INSERT」，
+        插入中途失败就把 usage_daily 清空/半写，而 request_logs 完好 ——
+        用户看到「今天有 77 次调用、统计却是 0」，而且每点一次重建就再破坏一次。
+        原子化之后，失败即回滚，原有统计原样保留。
+        """
+        self._log('glm-5.2', 'cn')
+        self._log('glm-5.2', 'global')
+        db.rebuild_usage_from_logs()
+        n_before = db.query_one('SELECT COUNT(*) c FROM usage_daily')['c']
+        self.assertEqual(n_before, 2)
+
+        # 把表换成只接受 realm='cn' 的版本 → 插 global 那行必然失败
+        db._conn.execute('DROP TABLE usage_daily')
+        db._conn.execute(
+            'CREATE TABLE usage_daily(day TEXT NOT NULL, key_id INTEGER NOT NULL, '
+            'model TEXT NOT NULL, requests INTEGER, prompt_tokens INTEGER, '
+            'completion_tokens INTEGER, credit REAL, realm TEXT, '
+            "CHECK (realm = 'cn'))")
+        db._conn.execute(
+            "INSERT INTO usage_daily VALUES('2026-01-01',1,'keep',99,0,0,0,'cn')")
+        db._conn.commit()
+
+        with self.assertRaises(Exception):
+            db.rebuild_usage_from_logs()
+
+        row = db.query_one('SELECT model, requests FROM usage_daily')
+        self.assertEqual(row['model'], 'keep', '失败后原有数据被清掉了（没有回滚）')
+        self.assertEqual(int(row['requests']), 99)
+
+    def test_group_by_binds_to_expression_not_column(self) -> None:
+        """直接钉住那个 SQLite 行为，免得后人又把 GROUP BY 写回别名。
+
+        `GROUP BY realm`（别名与源列同名）会绑定源列，把 NULL 与 'cn' 分成两组；
+        `GROUP BY COALESCE(NULLIF(realm,''),'cn')` 才与投影一致。
+        """
+        c = db._conn
+        c.execute('CREATE TEMP TABLE _probe(realm TEXT)')
+        c.executemany('INSERT INTO _probe VALUES(?)', [('cn',), (None,), ('',)])
+        bad = c.execute(
+            "SELECT COALESCE(NULLIF(realm,''),'cn') AS realm, COUNT(*) n "
+            "FROM _probe GROUP BY realm").fetchall()
+        good = c.execute(
+            "SELECT COALESCE(NULLIF(realm,''),'cn') AS realm, COUNT(*) n "
+            "FROM _probe GROUP BY COALESCE(NULLIF(realm,''),'cn')").fetchall()
+        self.assertEqual(len(bad), 3, '别名分组会切成三组（NULL/空串/cn 各一组）')
+        self.assertEqual(len(good), 1, '按表达式分组才是正确的一组')
+        self.assertEqual(good[0][1], 3)
+
+
 class RealmColumnMigrationTest(unittest.TestCase):
     """老库升级：加列必须成功，且历史行有合理的默认归类。"""
 
