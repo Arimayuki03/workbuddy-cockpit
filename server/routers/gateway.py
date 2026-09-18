@@ -160,22 +160,28 @@ def _rate_limited(key: dict) -> tuple[bool, int]:
     return len(hits) > RATE_MAX_PER_MIN, len(hits)
 
 
-def _log_ip(ip: str, path: str, blocked: bool, ua: str | None) -> None:
+def _log_ip(ip: str, path: str, blocked: bool, ua: str | None,
+            reason: str | None = None) -> None:
     """记录一次入站访问（含被拒绝的）。
+
+    reason 是**被拦的原因**（issue #33）。此前只有一个 blocked 布尔，界面上
+    显示「已拦截」却看不出是哪一关拦的：没带密钥 / 密钥不认识 / IP 规则拦的，
+    三者的处置方式完全不同（改客户端配置 / 重新发密钥 / 改 IP 规则）。用户
+    只能靠猜——实测有用户因此提了 issue 也说不清属于哪一种。
 
     **这条路径在校验密钥之前执行**，所以它是**未鉴权可达**的写库入口：
     「没有 token」「token 无效」都会先写一行。因此这里必须自我约束，
     否则任何匿名者都能用它膨胀数据库（实测：带 2KB UA 的请求每条约 1.3KB，
     而 ip_access_logs 此前既无清洗也无上限、更没有清理机制）：
 
-      * `ua` / `path` 都过 `db._clean`（去换行等控制字符 + 截断）——
-        文档一直声称「日志写入前统一 `_clean()`」，但实际上只有 audit_logs
+      * `ua` / `path` / `reason` 都过 `db._clean`（去换行等控制字符 + 截断）
+        ——文档一直声称「日志写入前统一 `_clean()`」，但实际上只有 audit_logs
         这么做了，网关这两张表被漏掉：带换行的 UA 能伪造出额外日志行，
         污染事后排查（实测确认）。
       * 写入走 `db.add_ip_access_log`，由它负责行数上限（超出就丢最旧的），
         避免表无限增长直到磁盘写满。
     """
-    db.add_ip_access_log(ip, path, blocked, ua)
+    db.add_ip_access_log(ip, path, blocked, ua, reason)
 
 
 def _error_hint(data: object) -> str | None:
@@ -277,14 +283,16 @@ def _authorize(request: Request, model: str | None,
     ua = request.headers.get('user-agent')
     path = request.url.path
 
+    # 拦截原因写成**稳定的短码**而不是散文：界面按码翻译（5 种语言都能准确
+    # 对应），改文案不必迁移历史数据，也不会因为中英混排让日志列宽失控。
     token = _bearer(request)
     if not token:
-        _log_ip(ip, path, True, ua)
+        _log_ip(ip, path, True, ua, 'missing_key')
         return None, ip, _oai_error('缺少 API Key，请在 Authorization 头中提供 Bearer 令牌', 401, 'authentication_error', 'missing_api_key')
 
     key = keysvc.resolve(token)
     if not key:
-        _log_ip(ip, path, True, ua)
+        _log_ip(ip, path, True, ua, 'invalid_key')
         return None, ip, _oai_error('API Key 无效', 401, 'authentication_error', 'invalid_api_key')
 
     # 全局入站 IP 规则
@@ -295,18 +303,21 @@ def _authorize(request: Request, model: str | None,
             for r in db.query('SELECT kind, cidr FROM ip_rules')
         ]
         if not iputil.evaluate(ip, rules, sec.get('mode', 'blacklist')):
-            _log_ip(ip, path, True, ua)
+            _log_ip(ip, path, True, ua, 'ip_blocked')
             _record(key, ip, model or '', '', 403, 0, 0, 0, ua, 'IP 被拦截', False)
             return None, ip, _oai_error(f'来源 IP {ip} 被安全策略拦截', 403, 'permission_error', 'ip_blocked')
 
-    _log_ip(ip, path, False, ua)
-
+    # 注意这一行**在密钥校验之前**：密钥层面的拒绝（停用 / 过期 / 配额用尽 /
+    # 模型与版本不符 / IP 白名单）发生在这之后，若就这样返回，日志里会显示
+    # 「已放行」而请求其实失败了 —— 用户对着「已放行」找问题，方向直接跑偏。
+    # 因此校验失败时改写这一行为拦截（见下），放行时才落「已放行」。
     reason = keysvc.validate(key, ip, model, is_model_list=is_model_list)
     if reason:
         # 状态码由 keysvc 决定，不再一律 403：一批客户端（DeepSeek Harness 等）
         # 把 401/403 统一显示成「API 密钥无效」，一律 403 会把「密钥版本不匹配」
         # 这种配置问题说成密钥坏了，用户便反复重建密钥（issue #18）。
         _record(key, ip, model or '', '', getattr(reason, 'status', 403), 0, 0, 0, ua, reason, False)
+        _log_ip(ip, path, True, ua, _key_reject_code(reason, is_model_list))
         return None, ip, _oai_error(
             reason,
             getattr(reason, 'status', 403),
@@ -318,9 +329,24 @@ def _authorize(request: Request, model: str | None,
     if limited:
         msg = f'请求过于频繁（{RATE_WINDOW}s 内超过 {RATE_MAX_PER_MIN} 次）'
         _record(key, ip, model or '', '', 429, 0, 0, 0, ua, msg, False)
+        _log_ip(ip, path, True, ua, 'rate_limited')
         return None, ip, _oai_error(msg, 429, 'rate_limit_error', 'rate_limit_exceeded')
 
+    _log_ip(ip, path, False, ua)
     return key, ip, None
+
+
+def _key_reject_code(reason: object, is_model_list: bool) -> str:
+    """把密钥层的拒绝原因归成一个稳定的短码，供入站日志显示。
+
+    为什么不用 keysvc 的原话：那是**给调用方客户端看的完整句子**（含具体数字，
+    如「已用 1200 / 上限 1000」），直接塞进日志列表会撑爆列宽；而且它是中文的，
+    界面切成英文时那一列会中英混排。这里只归**类别**，展示侧按语言翻译。
+
+    取不到 code 时回落到 'key_rejected'（宁可说得笼统，也不要漏记成「已放行」）。
+    """
+    code = getattr(reason, 'code', '') or ''
+    return code if isinstance(code, str) and code else 'key_rejected'
 
 
 def _map_model(model: str | None) -> str | None:

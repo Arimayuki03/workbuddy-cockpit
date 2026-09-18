@@ -305,6 +305,14 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # 带回真实 credit，我们已按请求存进 request_logs.credit，所以这里算得准。
     ('api_keys', 'quota_credit', 'REAL NOT NULL DEFAULT 0'),
     ('api_keys', 'used_credit', 'REAL NOT NULL DEFAULT 0'),
+    # 入站请求被拦的**原因**（issue #33）。
+    #
+    # 此前这张表只有一个 blocked 布尔：界面显示「已拦截」，但看不出是「没带
+    # 密钥」「密钥不认识」还是「IP 规则拦的」。三者的处置方式完全不同（改客户端
+    # 配置 / 重新发密钥 / 改 IP 规则），只报「已拦截」等于把排查成本全推给用户
+    # ——实测有用户发了 issue 也说不清是哪一种。
+    # 存量记录为 NULL（那时没记原因），界面按「未记录」展示。
+    ('ip_access_logs', 'reason', 'TEXT'),
 )
 
 
@@ -672,19 +680,28 @@ _IP_ACCESS_LOG_CHECK_EVERY = 500
 _ip_log_writes = 0
 
 
-def add_ip_access_log(ip: object, path: object, blocked: bool, ua: object) -> None:
+def add_ip_access_log(ip: object, path: object, blocked: bool, ua: object,
+                      reason: object = None) -> None:
     """写入一条入站访问日志：清洗 + 截断 + 行数上限。
 
-    清洗与截断是**硬要求**（不只是节省空间）：`ua` / `path` 来自外部输入，
-    含换行就能在日志界面上伪造出额外行，污染事后排查。审计表一直这么做
-    （见 `add_audit_log`），但网关这张表此前漏了 —— 文档里「日志写入前统一
-    `_clean()`」的说法与实际不符，这里补齐。
+    清洗与截断是**硬要求**（不只是节省空间）：`ua` / `path` / `reason` 来自
+    外部输入，含换行就能在日志界面上伪造出额外行，污染事后排查。审计表一直
+    这么做（见 `add_audit_log`），但网关这张表此前漏了 —— 文档里「日志写入前
+    统一 `_clean()`」的说法与实际不符，这里补齐。
+
+    reason 是**被拦的原因**（issue #33）：只有 blocked 布尔时，界面上的
+    「已拦截」无法区分「没带密钥」「密钥不认识」「IP 规则拦的」——三者的处置
+    方式完全不同，用户只能靠猜或来提 issue。
     """
     global _ip_log_writes
+    # 空原因存 NULL 而不是空串：读的那一侧要区分「没记原因」（升级前的历史
+    # 记录 / 放行）与「记了一个空字符串」，两者在库里的语义不同。
+    cleaned_reason = _clean(reason, 200) or None
     execute(
-        'INSERT INTO ip_access_logs(ts, ip, path, blocked, ua) VALUES(?, ?, ?, ?, ?)',
+        'INSERT INTO ip_access_logs(ts, ip, path, blocked, ua, reason) '
+        'VALUES(?, ?, ?, ?, ?, ?)',
         (int(time.time()), _clean(ip, 64), _clean(path, 256),
-         1 if blocked else 0, _clean(ua, 512)),
+         1 if blocked else 0, _clean(ua, 512), cleaned_reason),
     )
     _ip_log_writes += 1
     if _ip_log_writes < _IP_ACCESS_LOG_CHECK_EVERY:

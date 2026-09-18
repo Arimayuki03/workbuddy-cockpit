@@ -47,6 +47,9 @@ dev/.repro
 # 积分到期界面验收脚本（verify_credit_expiry_ui.py）的临时数据与截图
 dev/.credit-expiry
 dev/.credit-shots
+# 入站日志原因验收脚本（verify_access_log_reason_ui.py）的临时数据与截图
+dev/.access-log
+dev/.access-shots
 
 # 安全测试脚本（临时）
 .sec*.py
