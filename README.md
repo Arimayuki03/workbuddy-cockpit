@@ -383,6 +383,10 @@ powershell -ExecutionPolicy Bypass -File .\service-tools.ps1 start
 保存配置后重启上游及读取上游日志；网页一键更新依赖 Linux/Docker，当前会明确拒绝，
 请手动更新代码后重启服务。
 
+> **上游的启停脚本要自备**：上游官方只提供 Docker 部署，没有 Windows 原生的启停
+> 脚本。`deploy/windows-native/` 下有一对可直接改用的模板（含两个必须遵守的约定：
+> 启动脚本要立即返回、日志要写到 `WB2API_LOG_FILE`），照里面的 TODO 改路径即可。
+
 ### 三、Docker 部署
 
 仓库自带 `Dockerfile` 与 `docker-compose.yml`，适合已经用 Docker 跑上游的用户：
