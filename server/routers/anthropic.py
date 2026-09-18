@@ -37,7 +37,11 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import config, db, iputil, keysvc
 from ..routers.security import get_config as get_security_config
-from . import gateway
+# responses 只为复用推理凭据的编解码（`_encode_credential` / `_decode_credential`）：
+# Anthropic 的 `signature` 与 Responses 的 `encrypted_content` 语义完全相同——
+# 都是「客户端原样搬来搬去的不透明串」，两边编解码必须一致，否则同一轮对话在
+# 两套协议间切换时凭据解不开。
+from . import gateway, responses
 
 logger = logging.getLogger('workbuddy.anthropic')
 
@@ -291,6 +295,13 @@ def to_openai_request(body: dict) -> dict:
                 # 触发降级冷却 → 池里无可用账号 → 客户端重试变成与模型无关的 503
                 # 死循环。详见 responses.py 里同类处理的说明。
                 #
+                # 解析按可靠性排序：`signature` 是我们发出去、客户端原样带回的凭据，
+                # **优先**解它——它是唯一能还原完整推理原文的载体（`thinking` 明文
+                # 可能被客户端截断）。解不开再回落明文。
+                decoded = responses._decode_credential(block.get('signature'))
+                if decoded:
+                    thinking_text = decoded
+                    continue
                 # `redacted_thinking` 只有加密串（`data`），拿不到明文；但**字段存在**
                 # 就是上游补丁的触发条件，所以带上密文比丢掉安全（它是密文，不含
                 # 可识别的自然语言指纹）。
@@ -419,13 +430,54 @@ def to_openai_request(body: dict) -> dict:
     return out
 
 
-def to_anthropic_response(data: dict, model: str) -> dict:
-    """OpenAI 非流式响应 → Anthropic 响应体。"""
+def _thinking_enabled(body: dict) -> bool:
+    """请求是否启用了扩展思考。
+
+    Anthropic 的形状是 `thinking: {'type': 'enabled', 'budget_tokens': N}`；
+    关闭时客户端会写 `{'type': 'disabled'}` 或干脆不带这个字段。两种都算没启用。
+
+    宽容处理**畸形值**：不是 dict、或缺 type，都按「没启用」—— 宁可少回一个
+    thinking 块（客户端拿不到凭据时只是多花点 token 重新思考），也不要对着
+    一个不认这种块的客户端硬塞。
+    """
+    think = body.get('thinking')
+    if not isinstance(think, dict):
+        return False
+    return str(think.get('type') or '').lower() == 'enabled'
+
+
+def _thinking_block(text: str) -> dict:
+    """Anthropic 的 thinking 块：`thinking` 给人看，`signature` 供客户端回传。
+
+    两个字段缺一不可（见 responses.py 里 `_encode_credential` 的完整说明）：
+      · 只有 `thinking` → 客户端没有可回传的签名，**整个块被丢弃**，下一轮不带
+        推理痕迹，DeepSeek 报 11155（issue #36 报的正是这个）；
+      · 只有 `signature` → 界面上看不到思考过程。
+
+    `signature` 用与 Responses `encrypted_content` 相同的编解码——同一轮对话在
+    两套协议间切换时凭据仍能解开。
+    """
+    return {
+        'type': 'thinking',
+        'thinking': text,
+        'signature': responses._encode_credential(text),
+    }
+
+
+def to_anthropic_response(data: dict, model: str, *, thinking: bool = False) -> dict:
+    """OpenAI 非流式响应 → Anthropic 响应体。
+
+    thinking=True 时在最前面加一个带 `signature` 的 thinking 块（推理原文 +
+    可回传凭据）。见 `_thinking_block` 的说明。
+    """
     choice = (data.get('choices') or [{}])[0] if isinstance(data.get('choices'), list) else {}
     message = choice.get('message') or {}
     usage = data.get('usage') or {}
 
     content: list[dict] = []
+    reasoning = message.get('reasoning_content')
+    if thinking and isinstance(reasoning, str) and reasoning:
+        content.append(_thinking_block(reasoning))
     text = message.get('content')
     if isinstance(text, str) and text:
         content.append({'type': 'text', 'text': text})
@@ -483,13 +535,19 @@ class _StreamTranslator:
         （`{"loc` + `ation": ...}`），必须原样透传片段、由客户端拼接。
     """
 
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, *, thinking: bool = False) -> None:
         self.model = model
+        # 请求里是否启用了思考（`thinking.type == 'enabled'`）。只有启用时才回
+        # thinking 块：没启用的客户端不会处理这种块，多出来反而可能被当成异常
+        # （issue #36 的建议，也是 Anthropic 官方行为——不开思考就没有该块）。
+        self.thinking = thinking
         self.msg_id = 'msg_' + uuid.uuid4().hex[:20]
         self.started = False
         self.finished = False
         self.text_index: int | None = None       # 当前打开的文本块
         self.tool_index: int | None = None       # 当前打开的工具块
+        self.think_index: int | None = None      # 当前打开的思考块
+        self.think_buf = ''                      # 思考全文（用于算签名）
         self.next_index = 0
         self.tool_seen = False
         # 是否见过正文增量：首字延迟据此判定（用「第一个含正文的 delta」，而不是
@@ -519,6 +577,36 @@ class _StreamTranslator:
             return []
         return [_event('content_block_stop', {'type': 'content_block_stop', 'index': index})]
 
+    def _close_think(self) -> list[bytes]:
+        """关掉思考块。**先把签名发完，再 stop**。
+
+        顺序不能反：`content_block_stop` 之后到达的 delta 会被客户端丢弃
+        （块已经关闭），签名就白发了 —— 而签名正是客户端回传推理的唯一凭据，
+        丢了它等于整个修复失效（issue #36）。
+        """
+        if self.think_index is None:
+            return []
+        index, self.think_index = self.think_index, None
+        out = [_event('content_block_delta', {
+            'type': 'content_block_delta',
+            'index': index,
+            'delta': {
+                'type': 'signature_delta',
+                'signature': responses._encode_credential(self.think_buf),
+            },
+        })]
+        out += self._close(index)
+        return out
+
+    def _open_think(self) -> list[bytes]:
+        self.think_index = self.next_index
+        self.next_index += 1
+        return [_event('content_block_start', {
+            'type': 'content_block_start',
+            'index': self.think_index,
+            'content_block': {'type': 'thinking', 'thinking': ''},
+        })]
+
     def feed(self, obj: dict) -> list[bytes]:
         """喂一个 OpenAI SSE 的 data 对象，返回要下发的事件。"""
         out: list[bytes] = []
@@ -544,9 +632,26 @@ class _StreamTranslator:
         if not isinstance(delta, dict):
             delta = {}
 
+        # 推理增量（上游的 `reasoning_content`）→ thinking 块。
+        # 只有请求里启用了思考才回：没启用的客户端不处理这种块。
+        # 位置在文本之前——与上游给增量的顺序一致（先思考后正文）。
+        reasoning = delta.get('reasoning_content')
+        if self.thinking and isinstance(reasoning, str) and reasoning:
+            if self.think_index is None:
+                out += self._open_think()
+            self.think_buf += reasoning
+            out.append(_event('content_block_delta', {
+                'type': 'content_block_delta',
+                'index': self.think_index,
+                'delta': {'type': 'thinking_delta', 'thinking': reasoning},
+            }))
+
         text = delta.get('content')
         if isinstance(text, str) and text:
             self.saw_content = True
+            # 切到正文前先把思考块关掉（含发签名）——思考与正文是两个块，
+            # 顺序保证签名在对应的正文之前送达。
+            out += self._close_think()
             # 从工具块切回文本时，先把工具块关掉
             if self.tool_index is not None:
                 out += self._close(self.tool_index)
@@ -569,7 +674,9 @@ class _StreamTranslator:
             if not isinstance(call, dict):
                 continue
             fn = call.get('function') or {}
-            # 文本块与工具块不能并存：切到工具前先关文本
+            # 文本块与工具块不能并存：切到工具前先关文本；
+            # 思考块同理（它的签名要在关闭前发完）
+            out += self._close_think()
             if self.text_index is not None:
                 out += self._close(self.text_index)
                 self.text_index = None
@@ -615,6 +722,8 @@ class _StreamTranslator:
         out: list[bytes] = []
         if not self.started:
             out += self._start_message()
+        # 思考块先关（含发签名）：顺序与开块顺序一致，也让签名一定落在 stop 之前
+        out += self._close_think()
         out += self._close(self.text_index)
         out += self._close(self.tool_index)
         self.text_index = self.tool_index = None
@@ -666,6 +775,10 @@ async def messages(request: Request):
 
     ua = request.headers.get('user-agent')
     stream = bool(body.get('stream'))
+    # 客户端是否启用了扩展思考（Anthropic 的 `thinking: {type:'enabled'}`）。
+    # 只有启用时才在响应里回 thinking 块——没启用的客户端不处理这种块，
+    # 多出来可能被当成协议异常（issue #36 的建议，也与官方行为一致）。
+    want_thinking = _thinking_enabled(body)
 
     try:
         payload = to_openai_request(body)
@@ -710,7 +823,8 @@ async def messages(request: Request):
                     msg = resp.text[:300]
                 return _err(msg, resp.status_code, 'api_error',
                             hint=gateway._error_hint(data))
-            return JSONResponse(to_anthropic_response(data if isinstance(data, dict) else {}, model))
+            return JSONResponse(to_anthropic_response(
+                data if isinstance(data, dict) else {}, model, thinking=want_thinking))
         except Exception as exc:  # noqa: BLE001
             latency = int((time.time() - started) * 1000)
             gateway._record(key, ip, model, mapped or '', 502, 0, 0, latency, ua, str(exc), False)
@@ -732,7 +846,7 @@ async def messages(request: Request):
     async def gen():
         usage: dict = {}
         pending = ''
-        translator = _StreamTranslator(model)
+        translator = _StreamTranslator(model, thinking=want_thinking)
         error_text: str | None = None
         first_token_ms: int | None = None
         abort = False   # 中途出错需中止转发（缓冲超限 / 上游回 error 帧）

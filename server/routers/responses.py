@@ -33,6 +33,7 @@ Harness 的 `openai-responses` 协议、部分 OpenAI 官方 SDK 用法）只发
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import time
@@ -142,10 +143,51 @@ def _text_of_parts(content: object) -> tuple[str, list[dict]]:
     return '\n'.join(texts), blocks
 
 
+# ── 推理内容的「凭据」编码 ────────────────────────────────
+#
+# 为什么要它：DeepSeek 在思考模式下要求客户端把上一轮的推理内容原样带回
+# （不带就报 11155 `reasoning_content_missing`）。而 Responses / Anthropic
+# 两套协议里，客户端**只回传带凭据的推理块**：
+#
+#   · Responses：`store:false` 时只回传带 `encrypted_content` 的 reasoning 项
+#     （OpenAI 官方用它做无状态加密推理），没有这个字段的项会被客户端丢掉；
+#   · Anthropic：只回传带 `signature` 的 `thinking` 块，没有签名的丢弃。
+#
+# 所以光把推理文本放进 `summary` / `thinking` 是不够的 —— 客户端拿不到凭据，
+# 下一轮就一点痕迹都不带，输入侧的解析代码成了**死代码**（v1.0.51 的修复正是
+# 只做了输入侧，issue #36 报的「1.0.53 没真正生效」就是这个原因）。
+#
+# 面板不需要真加密：这两个字段在协议里的语义就是「客户端原样搬来搬去的不透明
+# 串」，我们做**可逆编码**即可（base64 包装明文）。用可逆而不是真加密还有个
+# 好处：客户端把它们回传回来时，我们能直接还原出推理原文去满足腾讯的校验。
+_CRED_PREFIX = 'wbm1:'
+
+
+def _encode_credential(text: str) -> str:
+    """把推理原文编码成可回传的凭据串。"""
+    return _CRED_PREFIX + base64.urlsafe_b64encode(text.encode('utf-8')).decode('ascii')
+
+
+def _decode_credential(raw: object) -> str | None:
+    """解回推理原文；不是本面板编出来的（前缀不符 / 解码失败）返回 None。
+
+    不能对任意串盲解：客户端可能回传**真·OpenAI** 的加密串（我们从没生成过），
+    那种解不开也不该报错，交给调用方回落其它来源。
+    """
+    if not isinstance(raw, str) or not raw.startswith(_CRED_PREFIX):
+        return None
+    try:
+        return base64.urlsafe_b64decode(raw[len(_CRED_PREFIX):].encode('ascii')).decode('utf-8')
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _reasoning_text(item: dict) -> str:
     """从 reasoning item 里取出推理文本，用于回填 assistant 消息的 `reasoning_content`。
 
-    三种来源都收（不同客户端的形状不完全一致）：
+    来源按可靠性排序：
+      · `encrypted_content` —— 我们发出去、客户端原样带回的凭据，**优先**用它：
+        它是唯一能还原出**完整**推理原文的载体（`summary` 可能被客户端截断）；
       · `summary` —— Responses 规范形态，`[{type:'summary_text', text:…}]`；
       · `content` —— 部分客户端把正文放这里，同样是 parts 数组；
       · `reasoning_content` / `reasoning` —— 已经是扁平字符串的形态。
@@ -153,6 +195,9 @@ def _reasoning_text(item: dict) -> str:
     **取不到文本时返回空串**（而不是 None）：腾讯的校验是「assistant 消息上必须有
     这个字段」，空串也满足；返回 None 会让调用方跳过回填，等于又回到被拒的状态。
     """
+    decoded = _decode_credential(item.get('encrypted_content'))
+    if decoded:
+        return decoded
     for key in ('summary', 'content'):
         text, _ = _text_of_parts(item.get(key))
         if text:
@@ -443,6 +488,21 @@ def _function_call_item(call_id: str, item_id: str, name: str, arguments: str) -
     }
 
 
+def _reasoning_item(text: str, item_id: str) -> dict:
+    """推理输出项：`summary` 给人看，`encrypted_content` 供客户端回传。
+
+    两个字段都要有，少任何一个都会出问题（见 `_encode_credential` 的说明）：
+      · 只有 `summary` → 客户端在 `store:false` 下没有可回传的凭据，丢掉整项；
+      · 只有 `encrypted_content` → 界面上看不到思考过程。
+    """
+    return {
+        'type': 'reasoning',
+        'id': item_id,
+        'summary': [{'type': 'summary_text', 'text': text}],
+        'encrypted_content': _encode_credential(text),
+    }
+
+
 def _normalize_tool_arguments(raw: object) -> str:
     """工具参数统一成字符串（Responses 里就是字符串）。
 
@@ -463,6 +523,12 @@ def to_responses_object(data: dict, model: str, resp_id: str) -> dict:
     finish = str(choice.get('finish_reason') or 'stop')
 
     output: list[dict] = []
+    # 推理项放在最前（与流式的顺序一致：思考在正文之前）。它**必须带上凭据**
+    # `encrypted_content`，否则客户端在 `store:false` 下会把它整个丢掉，
+    # 下一轮请求就不带推理痕迹 → DeepSeek 报 11155（issue #36）。
+    reasoning = message.get('reasoning_content')
+    if isinstance(reasoning, str) and reasoning:
+        output.append(_reasoning_item(reasoning, 'rs_' + uuid.uuid4().hex[:20]))
     for call in message.get('tool_calls') or []:
         if not isinstance(call, dict):
             continue
@@ -566,11 +632,11 @@ class _StreamTranslator:
         if self.reason_index is None:
             return []
         index, self.reason_index = self.reason_index, None
-        item = {
-            'type': 'reasoning',
-            'id': self.reason_id,
-            'summary': [{'type': 'summary_text', 'text': self.reason_buf}],
-        }
+        # 收尾时的 item 与 `output_item.added` 的那个**不是同一个形状**：
+        # 凭据 `encrypted_content` 只能在这里补上——它要等推理全文到齐才能算出。
+        # 客户端在 `output_item.done` 上取这个字段（issue #36：此前从没发过，
+        # 于是客户端拿不到凭据，下一轮不带推理痕迹，上游报 11155）。
+        item = _reasoning_item(self.reason_buf, self.reason_id)
         self.items.append(item)
         return [_event('response.output_item.done', {
             'type': 'response.output_item.done',
