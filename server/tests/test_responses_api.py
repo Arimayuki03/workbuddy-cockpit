@@ -226,13 +226,86 @@ class RequestConversionTest(unittest.TestCase):
         self.assertEqual(out['messages'][1],
                          {'role': 'tool', 'tool_call_id': 'c1', 'content': 'result'})
 
-    def test_reasoning_items_dropped(self) -> None:
-        """reasoning item 是 OpenAI 专有形状，透给 Chat Completions 只会被拒。"""
+    def test_reasoning_trace_kept_on_assistant_message(self) -> None:
+        """reasoning item 的推理文本必须**带回** assistant 消息（社区反馈的 11155 死循环）。
+
+        曾经的错误做法是直接丢掉 reasoning item，理由是「OpenAI 专有形状，透给
+        Chat Completions 会被拒」。那个理由只对**形状**成立、对**内容**不成立：
+        腾讯要求 DeepSeek 多轮回传推理内容，上游 workbuddy2api 见到 assistant 上的
+        reasoning 痕迹就会给所有 assistant 补 `reasoning_content` —— 痕迹被我们丢掉，
+        那道补丁就永远不触发，于是 400 → 账号连败 → 降级冷却 → 池空 → 503 死循环。
+
+        正确做法：把推理文本挂到紧随其后的 assistant 消息上，字段名用上游认识的
+        `reasoning_content`（扁平字符串，两侧都认）。
+        """
         out = R.to_chat_request({'model': 'm', 'input': [
-            {'type': 'reasoning', 'id': 'rs_1', 'summary': [{'type': 'summary_text', 'text': 'x'}]},
-            {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'q'}]},
+            {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'q1'}]},
+            {'type': 'reasoning', 'id': 'rs_1',
+             'summary': [{'type': 'summary_text', 'text': '我先想一想'}]},
+            {'type': 'message', 'role': 'assistant',
+             'content': [{'type': 'output_text', 'text': 'a1'}]},
+            {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'q2'}]},
         ]})
-        self.assertEqual(out['messages'], [{'role': 'user', 'content': 'q'}])
+        self.assertEqual(out['messages'], [
+            {'role': 'user', 'content': 'q1'},
+            {'role': 'assistant', 'content': 'a1', 'reasoning_content': '我先想一想'},
+            {'role': 'user', 'content': 'q2'},
+        ])
+
+    def test_reasoning_without_text_still_sets_field(self) -> None:
+        """推理文本取不到时**字段仍要在** —— 上游是按「字段存在」判断有无痕迹的。"""
+        out = R.to_chat_request({'model': 'm', 'input': [
+            {'type': 'reasoning', 'id': 'rs_2', 'summary': []},
+            {'type': 'message', 'role': 'assistant',
+             'content': [{'type': 'output_text', 'text': 'a'}]},
+        ]})
+        self.assertIn('reasoning_content', out['messages'][0])
+        self.assertEqual(out['messages'][0]['reasoning_content'], '')
+
+    def test_reasoning_attached_to_tool_call_message(self) -> None:
+        """工具调用回合的推理同样要保留（模型先思考再调工具）。"""
+        out = R.to_chat_request({'model': 'm', 'input': [
+            {'type': 'reasoning', 'id': 'rs_3',
+             'summary': [{'type': 'summary_text', 'text': '需要查工具'}]},
+            {'type': 'function_call', 'call_id': 'c1', 'name': 'f', 'arguments': '{}'},
+            {'type': 'function_call_output', 'call_id': 'c1', 'output': 'ok'},
+        ]})
+        asst = out['messages'][0]
+        self.assertEqual(asst['role'], 'assistant')
+        self.assertEqual(asst['reasoning_content'], '需要查工具')
+
+    def test_no_reasoning_item_means_no_field(self) -> None:
+        """普通对话**不能**凭空多出 reasoning_content —— 那会改变发给上游的形状。"""
+        out = R.to_chat_request({'model': 'm', 'input': [
+            {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'q'}]},
+            {'type': 'message', 'role': 'assistant',
+             'content': [{'type': 'output_text', 'text': 'a'}]},
+        ]})
+        for m in out['messages']:
+            self.assertNotIn('reasoning_content', m)
+
+    def test_orphan_reasoning_not_attached_to_later_message(self) -> None:
+        """孤立的 reasoning（后面不是 assistant）宁可丢掉，也不能挂到不相关的回合上。"""
+        out = R.to_chat_request({'model': 'm', 'input': [
+            {'type': 'reasoning', 'id': 'rs_x',
+             'summary': [{'type': 'summary_text', 'text': '孤立'}]},
+            {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'q'}]},
+            {'type': 'message', 'role': 'assistant',
+             'content': [{'type': 'output_text', 'text': 'a'}]},
+        ]})
+        for m in out['messages']:
+            self.assertNotIn('reasoning_content', m)
+
+    def test_reasoning_flat_string_forms(self) -> None:
+        """客户端把推理写成扁平字符串时同样认（各客户端形状不一）。"""
+        for key in ('reasoning_content', 'reasoning'):
+            with self.subTest(key=key):
+                out = R.to_chat_request({'model': 'm', 'input': [
+                    {'type': 'reasoning', key: '想法'},
+                    {'type': 'message', 'role': 'assistant',
+                     'content': [{'type': 'output_text', 'text': 'a'}]},
+                ]})
+                self.assertEqual(out['messages'][0]['reasoning_content'], '想法')
 
     def test_image_keeps_block_structure(self) -> None:
         out = R.to_chat_request({'model': 'm', 'input': [

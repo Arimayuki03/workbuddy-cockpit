@@ -142,6 +142,28 @@ def _text_of_parts(content: object) -> tuple[str, list[dict]]:
     return '\n'.join(texts), blocks
 
 
+def _reasoning_text(item: dict) -> str:
+    """从 reasoning item 里取出推理文本，用于回填 assistant 消息的 `reasoning_content`。
+
+    三种来源都收（不同客户端的形状不完全一致）：
+      · `summary` —— Responses 规范形态，`[{type:'summary_text', text:…}]`；
+      · `content` —— 部分客户端把正文放这里，同样是 parts 数组；
+      · `reasoning_content` / `reasoning` —— 已经是扁平字符串的形态。
+
+    **取不到文本时返回空串**（而不是 None）：腾讯的校验是「assistant 消息上必须有
+    这个字段」，空串也满足；返回 None 会让调用方跳过回填，等于又回到被拒的状态。
+    """
+    for key in ('summary', 'content'):
+        text, _ = _text_of_parts(item.get(key))
+        if text:
+            return text
+    for key in ('reasoning_content', 'reasoning'):
+        raw = item.get(key)
+        if isinstance(raw, str) and raw:
+            return raw
+    return ''
+
+
 def _convert_tools(tools: object) -> list[dict] | None:
     """Responses 的扁平工具定义 → Chat Completions 的嵌套形状。
 
@@ -212,14 +234,25 @@ def to_chat_request(body: dict) -> dict:
         # 一次 assistant 回合里的多个工具调用同属一条消息，拆成多条会让上游
         # 在「上一个工具结果还没回」的校验上直接 400。
         pending_calls: list[dict] = []
+        # 待挂到 assistant 消息上的推理文本（见下面 `kind == 'reasoning'` 的说明）。
+        # 用 None 表示「没见到 reasoning item」，空串表示「见到了但没文本」——
+        # 两者必须区分：上游的触发条件是**字段存在**，空串一样能触发它的回填。
+        pending_reasoning: str | None = None
 
         def flush_calls() -> None:
+            nonlocal pending_reasoning
             if pending_calls:
-                messages.append({
+                msg: dict = {
                     'role': 'assistant',
                     'content': None,
                     'tool_calls': list(pending_calls),
-                })
+                }
+                # 工具调用回合也可能带推理（模型先思考再调工具），一并保留，
+                # 否则这类多轮同样会因缺痕迹被腾讯拒。
+                if pending_reasoning is not None:
+                    msg['reasoning_content'] = pending_reasoning
+                    pending_reasoning = None
+                messages.append(msg)
                 pending_calls.clear()
 
         for item in raw_input:
@@ -261,8 +294,27 @@ def to_chat_request(body: dict) -> dict:
                     messages.append(chunk)
                 continue
             if kind == 'reasoning':
-                # 上游不回放推理内容：reasoning item 只对 OpenAI 自家有效，
-                # 原样塞给 Chat Completions 只会被拒。
+                # reasoning item **不能丢**：它是 DeepSeek 多轮对话的一致性凭据。
+                #
+                # 背景（社区反馈的 11155 死循环）：腾讯要求「上一轮的推理内容必须在
+                # 后续请求里回传」，上游 workbuddy2api 对此有补丁——它检测 assistant
+                # 消息上的 reasoning 痕迹，见到就给**所有** assistant 消息补上
+                # `reasoning_content`（空串也补），以满足腾讯的校验。
+                #
+                # 但那个补丁的触发条件是「请求里已经带着痕迹」：痕迹被我这里
+                # `continue` 丢掉，补丁就永远不触发 → 腾讯回 11155
+                # （reasoning_content_missing）→ 400 → 该账号被记为失败 → 连续失败
+                # 触发降级冷却 → 池里没有可用账号 → 客户端反复重试，最终变成与模型
+                # 无关的 503 死循环。
+                #
+                # 所以这里把 reasoning item 的文本**挂到紧随其后的 assistant 消息**
+                # 上（字段名用上游认识的 `reasoning_content`，与它 sse.go 回放时的
+                # 命名一致）。顺序上 reasoning 总是紧接在它对应的 assistant 回复之前。
+                #
+                # 为什么不是原样透传整个 item：`{type:'reasoning', summary:[…]}` 是
+                # OpenAI 专有形状，Chat Completions 不认；只有扁平的
+                # `reasoning_content` 字符串是两侧都认的形态。
+                pending_reasoning = _reasoning_text(item)
                 continue
 
             # message（或没写 type 的 {role, content} —— 宽容处理）
@@ -271,9 +323,23 @@ def to_chat_request(body: dict) -> dict:
                 role = 'system'
             text, blocks = _text_of_parts(item.get('content'))
             if blocks and any(b.get('type') == 'image_url' for b in blocks):
-                messages.append({'role': role, 'content': blocks})
+                msg: dict | None = {'role': role, 'content': blocks}
             elif text:
-                messages.append({'role': role, 'content': text})
+                msg = {'role': role, 'content': text}
+            else:
+                msg = None
+            if msg is not None:
+                # 只在 assistant 消息上挂推理 —— 腾讯的校验针对 assistant 回合。
+                # 客户端把 reasoning 放在别处（少见）时不硬塞，免得造出上游不认的组合。
+                if pending_reasoning is not None and role == 'assistant':
+                    msg['reasoning_content'] = pending_reasoning
+                    pending_reasoning = None
+                elif pending_reasoning is not None and role != 'assistant':
+                    # reasoning 后面跟的不是 assistant（协议上不该出现，但客户端可能
+                    # 塞入异常顺序）：**丢弃**这段孤立的推理，而不是留给后面的某条
+                    # assistant —— 那会把上一轮的推理挂到不相关的回合上，比丢掉更糟。
+                    pending_reasoning = None
+                messages.append(msg)
         flush_calls()
 
     out['messages'] = messages

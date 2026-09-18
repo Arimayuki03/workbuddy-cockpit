@@ -205,6 +205,54 @@ class StateRealmTest(unittest.TestCase):
         out = asyncio.run(tencent.poll_login('nope', 'cn'))
         self.assertEqual(out['status'], 'invalid')
 
+    def test_ttl_is_generous_enough_for_phone_login(self) -> None:
+        """state 有效期要够手机号登录用（社区反馈：手机号登录「返回登录有问题」）。
+
+        腾讯授权页除了扫码，也支持**手机号 + 短信验证码**登录：短信有运营商延迟、
+        用户还可能中途去翻手机，全程超过 5 分钟很常见。此前 TTL 写 300 秒，
+        超时后前端报「二维码已失效」，而用户觉得自己刚授权成功 —— 现象对不上。
+
+        上游 workbuddy2api 对这个 state **没有任何超时**（它的 login.sh 是手动按 y
+        才 poll）。我们保留 TTL 只为清理内存，放宽的开销可以忽略（人工低频操作、
+        每条几十字节）。
+        """
+        self.assertGreaterEqual(
+            tencent.STATE_TTL, 900,
+            f'STATE_TTL={tencent.STATE_TTL}s 对手机号登录偏紧，用户会被误报过期')
+
+    def test_state_survives_a_realistic_phone_login(self) -> None:
+        """手机号登录耗时 8 分钟时**不能**判过期（拿真实 poll_login 走一遍）。
+
+        poll_login 的过期判定发生在出站请求**之前**，所以这里不需要打网络：
+        只要不返回 expired 就说明判定通过了（后续会因拿不到 token 而 waiting）。
+        """
+        import asyncio
+        import time as _t
+
+        tencent._state_cache['phone'] = (_t.time() - 8 * 60, 'cn')
+
+        class _Resp:
+            def json(self) -> dict:
+                return {'code': 0, 'data': {}}
+
+        class _Ctx:
+            async def __aenter__(self):
+                class _C:
+                    async def get(self, *a, **kw):
+                        return _Resp()
+                return _C()
+
+            async def __aexit__(self, *a):
+                return False
+
+        with mock.patch.object(config, 'http_client', lambda *a, **k: _Ctx()):
+            out = asyncio.run(tencent.poll_login('phone', 'cn'))
+        self.assertNotEqual(out['status'], 'expired',
+                            '8 分钟就判过期 —— 手机号登录很容易踩到')
+        self.assertEqual(out['status'], 'waiting')
+        tencent._state_cache.clear()
+        _ = asyncio  # 保持导入一致性
+
 
 class PollDoesNotDropStateTest(unittest.TestCase):
     """issue #26：`poll_login` 拿到 ready 后**不能**自己丢 state。

@@ -23,6 +23,74 @@ from server.routers.anthropic import (  # noqa: E402
 class RequestTranslationTest(unittest.TestCase):
     """Anthropic 请求 → OpenAI 请求。"""
 
+    def test_thinking_block_kept_as_reasoning_content(self) -> None:
+        """thinking 块的推理文本必须**带回** assistant 消息（社区反馈的 11155 死循环）。
+
+        与 Responses 层的 reasoning item 是同一个坑：丢掉推理痕迹 → 上游
+        workbuddy2api 的补丁（见到痕迹才给所有 assistant 补 reasoning_content）
+        永远不触发 → 腾讯回 11155 → 400 → 账号连败 → 降级冷却 → 池空 → 503 死循环。
+
+        Claude Code 这类客户端会原样回传上一轮的 thinking 块，所以这条路径同样会中招。
+        """
+        out = to_openai_request({'model': 'x', 'max_tokens': 10, 'messages': [
+            {'role': 'assistant', 'content': [
+                {'type': 'thinking', 'thinking': '我的推理过程', 'signature': 'sig'},
+                {'type': 'text', 'text': '答复'},
+            ]},
+        ]})
+        msg = out['messages'][0]
+        self.assertEqual(msg['role'], 'assistant')
+        self.assertEqual(msg['content'], '答复')
+        self.assertEqual(msg['reasoning_content'], '我的推理过程')
+
+    def test_thinking_attached_to_tool_use_message(self) -> None:
+        """带工具调用的回合也要带上推理（模型先思考再调工具）。"""
+        out = to_openai_request({'model': 'x', 'max_tokens': 10, 'messages': [
+            {'role': 'assistant', 'content': [
+                {'type': 'thinking', 'thinking': '需要查工具'},
+                {'type': 'tool_use', 'id': 't1', 'name': 'f', 'input': {}},
+            ]},
+        ]})
+        msg = out['messages'][0]
+        self.assertEqual(msg['tool_calls'][0]['id'], 't1')
+        self.assertEqual(msg['reasoning_content'], '需要查工具')
+
+    def test_thinking_only_message_still_emitted(self) -> None:
+        """只有 thinking、没有正文时也要落一条 assistant 消息 —— 否则痕迹无处安放。"""
+        out = to_openai_request({'model': 'x', 'max_tokens': 10, 'messages': [
+            {'role': 'assistant', 'content': [{'type': 'thinking', 'thinking': '只有思考'}]},
+        ]})
+        self.assertEqual(out['messages'][0]['role'], 'assistant')
+        self.assertEqual(out['messages'][0]['reasoning_content'], '只有思考')
+
+    def test_empty_thinking_still_sets_field(self) -> None:
+        """拿不到明文（空串）时字段仍要在 —— 上游按字段存在判断有无痕迹。"""
+        out = to_openai_request({'model': 'x', 'max_tokens': 10, 'messages': [
+            {'role': 'assistant',
+             'content': [{'type': 'thinking', 'thinking': ''}, {'type': 'text', 'text': '答'}]},
+        ]})
+        self.assertIn('reasoning_content', out['messages'][0])
+        self.assertEqual(out['messages'][0]['reasoning_content'], '')
+
+    def test_redacted_thinking_carries_ciphertext(self) -> None:
+        """`redacted_thinking` 只有密文：带上它（字段存在即触发补丁），不能丢。"""
+        out = to_openai_request({'model': 'x', 'max_tokens': 10, 'messages': [
+            {'role': 'assistant', 'content': [
+                {'type': 'redacted_thinking', 'data': 'ENCRYPTED'},
+                {'type': 'text', 'text': '答'},
+            ]},
+        ]})
+        self.assertEqual(out['messages'][0]['reasoning_content'], 'ENCRYPTED')
+
+    def test_no_thinking_block_means_no_field(self) -> None:
+        """普通对话不得凭空多出 reasoning_content。"""
+        out = to_openai_request({'model': 'x', 'max_tokens': 10, 'messages': [
+            {'role': 'user', 'content': [{'type': 'text', 'text': '问'}]},
+            {'role': 'assistant', 'content': [{'type': 'text', 'text': '答'}]},
+        ]})
+        for m in out['messages']:
+            self.assertNotIn('reasoning_content', m)
+
     def test_system_goes_to_first_message(self) -> None:
         """system 是顶层字段，OpenAI 必须是 messages 里的第一条。"""
         out = to_openai_request({

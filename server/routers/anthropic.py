@@ -268,6 +268,11 @@ def to_openai_request(body: dict) -> dict:
         tool_calls: list[dict] = []  # assistant 发起的工具调用
         tool_results: list[dict] = []  # user 回传的工具结果 → 要拆成独立消息
         tool_images: list[dict] = []  # 工具结果里的图片 → 提升到后续 user 消息
+        # 本条的推理文本（thinking 块）→ 挂到本条的 assistant 消息上，作为
+        # `reasoning_content` 交给上游（它靠这个字段判断「本轮带推理痕迹」）。
+        # None = 没见到 thinking 块；空串 = 见到了但拿不到明文（两者必须区分：
+        # 上游要的是**字段存在**，空串同样能触发它的回填）。
+        thinking_text: str | None = None
 
         for block in content:
             if not isinstance(block, dict):
@@ -279,6 +284,20 @@ def to_openai_request(body: dict) -> dict:
                 url = _image_url(block.get('source'))
                 if url:
                     parts.append({'type': 'image_url', 'image_url': {'url': url}})
+            elif kind in ('thinking', 'redacted_thinking'):
+                # Anthropic 的推理块与 Responses 的 reasoning item 是同一个东西，
+                # **不能丢**：腾讯对 DeepSeek 要求多轮回传推理内容，丢了会被拒
+                # （11155 reasoning_content_missing）→ 该账号记一次失败 → 连续失败
+                # 触发降级冷却 → 池里无可用账号 → 客户端重试变成与模型无关的 503
+                # 死循环。详见 responses.py 里同类处理的说明。
+                #
+                # `redacted_thinking` 只有加密串（`data`），拿不到明文；但**字段存在**
+                # 就是上游补丁的触发条件，所以带上密文比丢掉安全（它是密文，不含
+                # 可识别的自然语言指纹）。
+                raw_think = block.get('thinking')
+                if not isinstance(raw_think, str) or not raw_think:
+                    raw_think = block.get('data')
+                thinking_text = raw_think if isinstance(raw_think, str) else ''
             elif kind == 'tool_use':
                 tool_calls.append({
                     'id': str(block.get('id') or f'call_{uuid.uuid4().hex[:12]}'),
@@ -329,13 +348,24 @@ def to_openai_request(body: dict) -> dict:
             text = '\n'.join(p['text'] for p in parts if p.get('type') == 'text')
             # 有工具调用时 content 通常是空的，但保留文本更稳（部分上游要求非 null）
             msg['content'] = text or None
+            if thinking_text is not None:
+                msg['reasoning_content'] = thinking_text
             messages.append(msg)
-        elif parts:
+        elif parts or thinking_text is not None:
             # 只有一个纯文本块时压平为字符串——多数上游对字符串更宽容
             if len(parts) == 1 and parts[0].get('type') == 'text':
-                messages.append({'role': role, 'content': parts[0]['text']})
+                msg = {'role': role, 'content': parts[0]['text']}
+            elif parts:
+                msg = {'role': role, 'content': parts}
             else:
-                messages.append({'role': role, 'content': parts})
+                # 本条只有 thinking 块、没有正文：仍要落一条 assistant 消息把痕迹
+                # 带上，否则这段推理无处安放、等于又丢掉了。
+                msg = {'role': role, 'content': None}
+            # 只在 assistant 消息上挂 —— 腾讯的校验针对 assistant 回合；
+            # 挂在别处会造成上游不认的组合，那比不挂更糟。
+            if thinking_text is not None and role == 'assistant':
+                msg['reasoning_content'] = thinking_text
+            messages.append(msg)
 
     out['messages'] = messages
 
