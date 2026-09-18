@@ -343,7 +343,47 @@ python -m unittest discover -s server/tests -t . -v
 > 这一组测试专门守住两个曾经写坏配置的坑：把整点数组当成数字间隔、
 > 把时长字符串当成秒数。
 
-### 二、Docker 部署
+### 二、Windows 原生部署（无需 Docker）
+
+前提：`workbuddy2api` 已在本机运行，并有可用的启停脚本与文件日志。
+
+```powershell
+git clone https://github.com/ithtelab/workbuddy-manager.git
+cd workbuddy-manager
+Copy-Item .env.example .env
+```
+
+在 `.env` 中至少设置以下项目（Windows 路径建议使用 `/`）：
+
+```dotenv
+WB_MANAGER_HOST=127.0.0.1
+WB_SECURE_COOKIE=false
+WB2API_MODE=native
+WB_UPSTREAM_DIR=C:/path/to/workbuddy2api
+WB_AUTH_DIR=C:/path/to/workbuddy2api/auths
+WB_UPSTREAM_CONFIG=C:/path/to/workbuddy2api/config.json
+WB2API_START_SCRIPT=C:/path/to/workbuddy2api/start-workbuddy2api.cmd
+WB2API_STOP_SCRIPT=C:/path/to/workbuddy2api/stop-workbuddy2api.cmd
+WB2API_LOG_FILE=C:/path/to/workbuddy2api/data/server.err.log
+```
+
+安装依赖、构建前端并后台启动：
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r server\requirements.txt
+Set-Location web
+npm ci
+npm run build:export
+Set-Location ..
+powershell -ExecutionPolicy Bypass -File .\service-tools.ps1 start
+```
+
+用 `service-tools.ps1 status|restart|stop` 管理后台进程。Windows 原生模式支持
+保存配置后重启上游及读取上游日志；网页一键更新依赖 Linux/Docker，当前会明确拒绝，
+请手动更新代码后重启服务。
+
+### 三、Docker 部署
 
 仓库自带 `Dockerfile` 与 `docker-compose.yml`，适合已经用 Docker 跑上游的用户：
 
@@ -383,7 +423,7 @@ docker pull ghcr.io/ithtelab/workbuddy-manager:latest
 > 与宿主机安装一样，一键更新**强制验签**发布包。镜像本身不参与这套签名
 > （那是另一条信任链，依赖 GHCR 的 digest 与 GitHub 账号安全）。
 
-### 三、部署到服务器（一键脚本）
+### 四、部署到服务器（一键脚本）
 
 本项目依赖上游 [`workbuddy2api`](https://github.com/Sliverkiss/workbuddy2api)
 （账号池与 OpenAI 兼容接口），**单独 clone 本仓库无法运行**。
@@ -431,9 +471,13 @@ journalctl -u workbuddy-web | grep -A3 '初始管理员'
 | `WB_MANAGER_PORT` | `7864` | 监听端口 |
 | `WB2API_BASE` | `http://127.0.0.1:7863` | workbuddy2api 地址 |
 | `WB2API_KEY` | 读 config.json | 上游 API Key |
+| `WB2API_MODE` | `docker` | 上游运行方式：`docker` 或 `native` |
 | `WB2API_CONTAINER` | `workbuddy2api` | 重载用的容器名 |
 | `WB_AUTH_DIR` | `/opt/workbuddy2api/auths` | 账号授权目录 |
 | `WB_UPSTREAM_CONFIG` | `/opt/workbuddy2api/config.json` | 上游配置文件 |
+| `WB2API_START_SCRIPT` | 上游目录下的 `.cmd` | native 模式启动脚本 |
+| `WB2API_STOP_SCRIPT` | 上游目录下的 `.cmd` | native 模式停止脚本 |
+| `WB2API_LOG_FILE` | `data/server.err.log` | native 模式上游日志 |
 | `WB_DATA_DIR` | `./data` | 本服务数据目录 |
 | `WB_STATIC_DIR` | `./web/out` | 静态导出目录 |
 | `WB_ADMIN_PASSWORD` | 随机生成 | 首次启动的 admin 密码 |
