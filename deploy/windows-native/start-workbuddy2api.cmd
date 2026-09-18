@@ -1,48 +1,59 @@
 @echo off
-REM WorkBuddy Manager —— 上游 workbuddy2api 的**原生**启动脚本模板（Windows）
+REM WorkBuddy Manager - native start script for upstream workbuddy2api (Windows).
 REM
-REM 用途：当上游不以 Docker 运行、而是作为本机进程运行时，管理端需要一对启停脚本
-REM （在 .env 里用 WB2API_START_SCRIPT / WB2API_STOP_SCRIPT 指向它们）。
+REM WHEN THIS IS NEEDED: when the upstream runs as a local process instead of a
+REM Docker container, the manager needs a start/stop script pair, pointed at by
+REM WB2API_START_SCRIPT / WB2API_STOP_SCRIPT in .env.
 REM
-REM **先看上游自带的**：上游 workbuddy2api 2026-09-18 起已自带
-REM start/stop/status-workbuddy2api.cmd，功能更全（PID 文件 + 进程路径校验，不会误杀
-REM 同名进程；另有 status 脚本会打一次 /healthz）。上游目录里有那三个文件就别用本模板。
-REM 本文件是给**旧版上游**（那时官方只提供 Docker 部署）用的。
+REM PREFER THE UPSTREAM ONE: workbuddy2api has shipped its own
+REM start/stop/status-workbuddy2api.cmd since 2026-09-18. Those are better (they
+REM track a PID file and verify the process path, so they never kill a same-named
+REM process by mistake; the status script also probes /healthz). Use them if your
+REM upstream directory has them - this file is only for OLDER upstream releases.
 REM
-REM 用法：
-REM   1) 复制到你的上游目录，按下面两处 TODO 改成实际路径
-REM   2) .env 里设置：
+REM WHY THIS FILE IS ASCII-ONLY: cmd.exe parses batch files using the system ANSI
+REM codepage (936/GBK on Chinese Windows, 437 on US Windows). Non-ASCII bytes
+REM (e.g. UTF-8 Chinese comments) get mangled, the REM lines stop being treated
+REM as comments, and the fragments are executed as commands. The script then
+REM breaks on exactly the machines it is meant for. Keep this file ASCII.
+REM
+REM USAGE:
+REM   1) Copy next to your upstream build, fix the two TODOs below.
+REM   2) In .env:
 REM        WB2API_MODE=native
 REM        WB2API_START_SCRIPT=C:/path/to/workbuddy2api/start-workbuddy2api.cmd
 REM        WB2API_STOP_SCRIPT=C:/path/to/workbuddy2api/stop-workbuddy2api.cmd
 REM        WB2API_LOG_FILE=C:/path/to/workbuddy2api/data/server.err.log
-REM   3) 管理端「设置」页保存后会调用它们重启上游
+REM   3) Saving settings in the manager will now restart the upstream via these.
 REM
-REM 要求：
-REM   · 必须**立即返回**（脚本会等待它结束）：用 start /b 或后台方式拉起，
-REM     不要在前台一直运行 —— 前台运行会让「重启」卡住直到超时。
-REM   · 上游的 stdout/stderr 建议重定向到 WB2API_LOG_FILE 指向的文件，
-REM     管理端的「任务记录」就是从那里读日志的。
+REM REQUIREMENTS:
+REM   - Must return IMMEDIATELY (the manager waits for the script to exit).
+REM     Launch in the background; never run the server in the foreground here,
+REM     or "restart" will hang until it times out.
+REM   - Upstream stdout/stderr should go to WB2API_LOG_FILE - the manager's
+REM     task log page reads its automatic-task output from that file.
 
 setlocal
 cd /d "%~dp0"
 
-REM TODO 1：上游可执行文件（由上游源码 `go build -o wb2api.exe ./cmd/server` 得到）
+REM TODO 1: path to the upstream binary
+REM   (build it from upstream source with: go build -o wb2api.exe ./cmd/server)
 set WB2API_EXE=%~dp0wb2api.exe
 
-REM TODO 2：上游配置文件与数据目录
+REM TODO 2: upstream config file and data directory
 set WB2API_CONFIG=%~dp0config.json
 set WB2API_DATADIR=%~dp0data
 
 if not exist "%WB2API_EXE%" (
-    echo [start] 未找到上游可执行文件：%WB2API_EXE% >&2
-    echo [start] 请先在上游目录执行：go build -o wb2api.exe ./cmd/server >&2
+    echo [start] upstream binary not found: %WB2API_EXE% 1>&2
+    echo [start] build it first: go build -o wb2api.exe ./cmd/server 1>&2
     exit /b 1
 )
 if not exist "%WB2API_DATADIR%" mkdir "%WB2API_DATADIR%"
 
-REM `start /b` = 后台启动并**立即返回**；日志重定向到文件供管理端读取
+REM `start /b` launches in the background and returns immediately.
+REM Logs are redirected to files for the manager to read.
 start "workbuddy2api" /b "%WB2API_EXE%" -config "%WB2API_CONFIG%" >> "%WB2API_DATADIR%\server.out.log" 2>> "%WB2API_DATADIR%\server.err.log"
 
-echo [start] 已启动 workbuddy2api
+echo [start] workbuddy2api launched
 exit /b 0
