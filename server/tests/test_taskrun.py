@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
 import tempfile
 import time
@@ -476,6 +477,33 @@ class EventLoopResponsivenessTest(unittest.TestCase):
             return R()
         return _run
 
+    @contextlib.contextmanager
+    def _script_available(self):
+        """把「脚本在位」造出来，让 `available()` 返回 True。
+
+        为什么需要：`start()` 会先查 `available()`，脚本缺失时它在到达
+        `get_running_loop()` 之前就返回了 —— 那种情况下「启动失败」是**预期的**，
+        测不出「事件循环缺失」这类真问题（issue #31 正是这样漏掉的）。
+        """
+        dest = taskrun._extract_dir()
+        dest.mkdir(parents=True, exist_ok=True)
+        created: list[Path] = []
+        for name in ('task_runner.py', 'task_common.py', 'school_open_day_2026.py'):
+            p = dest / name
+            if not p.exists():
+                p.write_text('# stub\n', encoding='utf-8')
+                created.append(p)
+        taskrun._last_extract_failure.update({'at': 0.0, 'reason': ''})
+        taskrun._state['running'] = False
+        try:
+            with mock.patch.object(taskrun, '_host_script', return_value=None), \
+                 mock.patch.object(taskrun, '_cache_is_fresh', return_value=True):
+                yield dest
+        finally:
+            taskrun._state['running'] = False
+            for p in created:
+                p.unlink(missing_ok=True)
+
     def _heartbeat_during(self, coro_factory, delay: float) -> int:
         """跑 coro_factory() 期间统计心跳次数（事件循环没被冻住就会有几十次）。"""
         async def main() -> int:
@@ -507,6 +535,51 @@ class EventLoopResponsivenessTest(unittest.TestCase):
         ticks = self._heartbeat_during(lambda: taskrun.start_async('claim', 'ALL'), 1.0)
         self.assertGreater(ticks, 5,
                            f'启动期间事件循环只跳了 {ticks} 次 —— 会连带卡住对外网关')
+
+    def test_start_async_actually_starts(self) -> None:
+        """`start_async()` 必须**真的把任务启动起来**，而不只是不阻塞。
+
+        这是 issue #31 的回归测试。那个 bug 之所以能发出去，正是因为上一条测试
+        **只数了心跳、丢掉了返回值**，而且当时 `available()` 恰好是失败的 ——
+        `start()` 在到达 `get_running_loop()` 之前就提前返回了，于是「不阻塞」
+        这条断言以**错误的原因**通过。真正的问题出在下一行：
+        `start_async` 把整个 `start()` 丢进线程池，而线程池的工作线程没有运行中
+        的事件循环，`get_running_loop()` 必然抛 RuntimeError →
+        100% 报「当前环境没有事件循环，无法后台执行」。
+
+        所以这里把 available() 造成功（脚本在位），并断言启动**成功**。
+        """
+        async def main() -> tuple[bool, str]:
+            with mock.patch.object(taskrun, '_run', new=mock.AsyncMock()):
+                return await taskrun.start_async('preview', 'ALL')
+
+        with self._script_available():
+            ok, msg = asyncio.run(main())
+        self.assertTrue(ok, f'启动失败了：{msg}')
+        self.assertIn('已开始执行', msg)
+        # 断言「登记过运行态」，而不是要求此刻仍是 running：asyncio.run 收尾会取消
+        # 未完成的 _run，其 finally 会把 running 复位 —— 那是正常收尾，与「根本
+        # 没启动」是两回事。用 started_at / mode / target 判断有没有真的登记。
+        self.assertGreater(taskrun._state['started_at'], 0, '没有登记启动时间')
+        self.assertEqual(taskrun._state['mode'], 'preview')
+        self.assertEqual(taskrun._state['target'], 'ALL')
+
+    def test_sync_start_works_inside_loop(self) -> None:
+        """同步版在事件循环线程里也要能启动（命令行/测试路径）。"""
+        async def main() -> tuple[bool, str]:
+            with mock.patch.object(taskrun, '_run', new=mock.AsyncMock()):
+                return taskrun.start('claim', 'ALL')
+
+        with self._script_available():
+            ok, msg = asyncio.run(main())
+        self.assertTrue(ok, f'同步版启动失败：{msg}')
+
+    def test_sync_start_without_loop_reports_clearly(self) -> None:
+        """没有事件循环时，同步版应保留原来的可读提示（而不是抛异常）。"""
+        with self._script_available():
+            ok, msg = taskrun.start('claim', 'ALL')   # 主线程无 loop
+        self.assertFalse(ok)
+        self.assertIn('事件循环', msg)
 
     def test_sync_call_still_blocks_by_design(self) -> None:
         """反证：同步版**确实**会阻塞 —— 证明上面两条测的是真问题。
@@ -645,14 +718,20 @@ class EndpointTest(unittest.TestCase):
         self.assertEqual(r.status_code, 400, r.text)
         self.assertIn('风控', r.json()['detail'])
         # 传了 confirm 才进入执行流程（脚本不存在时是 409，而非 400）
-        with mock.patch.object(taskrun, 'start', lambda m, t: (True, '已开始')):
+        # 路由调的是 start_async（避免阻塞事件循环），patch 目标要一致
+        with mock.patch.object(taskrun, 'start_async',
+                               new=mock.AsyncMock(return_value=(True, '已开始'))):
             r2 = self.client.post('/api/task-run',
                                   json={'mode': 'full', 'target': 'ALL', 'confirm': True})
         self.assertEqual(r2.status_code, 200, r2.text)
 
     def test_claim_and_preview_need_no_confirm(self) -> None:
         self._login('admin')
-        with mock.patch.object(taskrun, 'start', lambda m, t: (True, '已开始')):
+        # 路由调的是 start_async（避免阻塞事件循环），patch 目标要一致 ——
+        # 早先这里还 patch 同步的 start，patch 因此无效、测试实际走到真实路径，
+        # 却又因为「脚本不存在」返回 409 而失败得莫名其妙（或反之被误当成通过）。
+        with mock.patch.object(taskrun, 'start_async',
+                               new=mock.AsyncMock(return_value=(True, '已开始'))):
             for mode in ('preview', 'claim'):
                 r = self.client.post('/api/task-run', json={'mode': mode, 'target': 'ALL'})
                 self.assertEqual(r.status_code, 200, f'{mode}: {r.text}')
@@ -660,7 +739,8 @@ class EndpointTest(unittest.TestCase):
     def test_conflict_returns_409(self) -> None:
         """已在跑 → 409（状态冲突），与「请求有错」400 区分开。"""
         self._login('admin')
-        with mock.patch.object(taskrun, 'start', lambda m, t: (False, '已有任务正在执行')):
+        with mock.patch.object(taskrun, 'start_async',
+                               new=mock.AsyncMock(return_value=(False, '已有任务正在执行'))):
             r = self.client.post('/api/task-run', json={'mode': 'claim', 'target': 'ALL'})
         self.assertEqual(r.status_code, 409, r.text)
 
@@ -681,13 +761,13 @@ class SchedulerOnlyClaimsTest(unittest.TestCase):
     def test_scheduler_invokes_claim_only(self) -> None:
         calls: list[tuple[str, str]] = []
 
-        def fake_start(mode: str, target: str):
+        async def fake_start(mode: str, target: str):
             calls.append((mode, target))
             return True, 'ok'
 
         # 固定"当前时间"落在配置的整点档内
         with mock.patch.object(taskrun, 'get_schedule', lambda: {'enabled': True, 'hours': [3]}), \
-             mock.patch.object(taskrun, 'start', fake_start), \
+             mock.patch.object(taskrun, 'start_async', fake_start), \
              mock.patch.object(taskrun, '_last_claim_day', ''), \
              mock.patch('time.localtime',
                         lambda *a: __import__('time').struct_time(
@@ -720,8 +800,9 @@ class SchedulerOnlyClaimsTest(unittest.TestCase):
     def test_disabled_schedule_does_not_run(self) -> None:
         calls: list[tuple[str, str]] = []
         with mock.patch.object(taskrun, 'get_schedule', lambda: {'enabled': False, 'hours': [3]}), \
-             mock.patch.object(taskrun, 'start',
-                               lambda m, t: (calls.append((m, t)), (True, 'ok'))[1]):
+             mock.patch.object(taskrun, 'start_async',
+                               new=mock.AsyncMock(
+                                   side_effect=lambda m, t: (calls.append((m, t)), (True, 'ok'))[1])):
             asyncio.run(self._one_tick())
         self.assertEqual(calls, [], '未启用时不该触发')
 
