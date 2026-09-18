@@ -445,7 +445,7 @@
     "blocked": "已拦截",
     "allowed": "已放行",
     "noAccessLogs": "暂无访问记录",
-    "noAccessLogsDesc": "网关收到请求后会在此留痕",
+    "noAccessLogsDesc": "还没有拦截记录。被拒绝的请求会在此留痕。",
     "auditLog": "管理端审计日志",
     "auditLogHint": "登录 / 改密码 / 增删用户等敏感操作",
     "auditCount": "共 {n} 条",
@@ -484,7 +484,8 @@
     "reasonIpNotAllowed": "来源 IP 不在密钥白名单内",
     "reasonTooManyIps": "密钥绑定的 IP 数超出上限",
     "reasonRealmMismatch": "模型版本与密钥限定不符",
-    "reasonModelNotAllowed": "模型不在密钥白名单内"
+    "reasonModelNotAllowed": "模型不在密钥白名单内",
+    "accessLogScope": "仅记录被拦截的请求；放行的调用见「请求日志」页"
   },
   "models": {
     "title": "模型中心",

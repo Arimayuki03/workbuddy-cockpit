@@ -680,6 +680,66 @@ _IP_ACCESS_LOG_CHECK_EVERY = 500
 _ip_log_writes = 0
 
 
+# 请求日志（request_logs）的保留期（天）。
+#
+# 为什么需要：这张表**每笔请求都写一行**（无条件，区别于用量汇总），线上实测
+# 每天 1400+ 行。此前没有任何清理机制——`ip_access_logs` 有行数上限，它没有。
+# 按当前速率一年约 50 万行、上百 MB，`/api/logs` 的查询与页面都会越来越慢。
+#
+# 取 90 天：统计页最长的展示窗口是 30 天（`_DAYS_MAX` 之外的实际用法），
+# 「修复统计 / 重建统计」也只需覆盖到用量表还有意义的时段；再久的明细对用户
+# 没有用途，而按月归档属于另一件事（真要长期留存应导出，不是留在大表里）。
+#
+# 注意与 `rebuild_usage_from_logs` 的关系：重建以 request_logs 为唯一依据，
+# 删掉 90 天前的日志后，那段时期的用量统计**不能再重建**（现有数据不受影响，
+# 只是无法重算）。这是刻意的：90 天前的用量早已定稿，不值得为它永久保留明细。
+_REQUEST_LOG_RETAIN_DAYS = 90
+
+# 清理间隔：按行数触发（每 2000 次写入检查一次），与 ip 日志同款思路——
+# 不必每次写入都查一次。检查本身用索引列 ts，成本可忽略。
+_REQUEST_LOG_CHECK_EVERY = 2000
+_request_log_writes = 0
+
+
+def _prune_request_logs() -> None:
+    """按保留期清理请求日志（滚动删除最旧的）。
+
+    旁路操作：任何失败都不能影响写入本身（更不能影响转发）。
+    """
+    cutoff = int(time.time()) - _REQUEST_LOG_RETAIN_DAYS * 86400
+    try:
+        execute('DELETE FROM request_logs WHERE ts < ?', (cutoff,))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def add_request_log(**fields: object) -> None:
+    """写一条请求日志，并按保留期做滚动清理。
+
+    参数用 kwargs（调用方能按名字传，列多时不易错位），但**传给 SQLite 时必须
+    展开成位置元组**：`execute()` 内部做 `tuple(args)`，直接塞 dict 会把它当成
+    单个参数，于是键名被当值写进库（实测：`credit` 列存进了字符串 `'credit'`，
+    `rebuild` 随即因 `NOT NULL constraint failed` 崩掉）。这里显式按列序展开。
+    """
+    global _request_log_writes
+    execute(
+        'INSERT INTO request_logs(ts, key_id, ip, model, mapped_model, status, '
+        'prompt_tokens, completion_tokens, latency_ms, first_token_ms, ua, error, '
+        'stream, credit, realm) '
+        'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        (fields.get('ts'), fields.get('key_id'), fields.get('ip'),
+         fields.get('model'), fields.get('mapped_model'), fields.get('status'),
+         fields.get('prompt_tokens'), fields.get('completion_tokens'),
+         fields.get('latency_ms'), fields.get('first_token_ms'), fields.get('ua'),
+         fields.get('error'), fields.get('stream'), fields.get('credit'),
+         fields.get('realm')),
+    )
+    _request_log_writes += 1
+    if _request_log_writes >= _REQUEST_LOG_CHECK_EVERY:
+        _request_log_writes = 0
+        _prune_request_logs()
+
+
 def add_ip_access_log(ip: object, path: object, blocked: bool, ua: object,
                       reason: object = None) -> None:
     """写入一条入站访问日志：清洗 + 截断 + 行数上限。

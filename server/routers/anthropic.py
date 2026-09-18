@@ -174,10 +174,13 @@ def _authorize(request: Request, model: str | None) -> tuple[dict | None, str, J
             for r in db.query('SELECT kind, cidr FROM ip_rules')
         ]
         if not iputil.evaluate(ip, rules, sec.get('mode', 'blacklist')):
-            gateway._log_ip(ip, path, True, ua)
+            gateway._log_ip(ip, path, True, ua, 'ip_blocked')
             gateway._record(key, ip, model or '', '', 403, 0, 0, 0, ua, 'IP 被拦截', False)
             return None, ip, _err(f'来源 IP {ip} 被安全策略拦截', 403, 'permission_error')
 
+    # 注意：`blocked=False` 的这一行现在默认**不写库**（审计日志只留拦截，
+    # 见 gateway._log_ip 的说明）——保留调用是为了 WB_AUDIT_ALL_ACCESS=1 时
+    # 与 gateway 行为一致，不多一条分叉。
     gateway._log_ip(ip, path, False, ua)
 
     # model 为 None 时按「模型发现类请求」处理：跳过版本与模型白名单
@@ -188,12 +191,17 @@ def _authorize(request: Request, model: str | None) -> tuple[dict | None, str, J
         # （403 会被客户端显示成「API 密钥无效」，掩盖真实原因）。
         status = getattr(reason, 'status', 403)
         gateway._record(key, ip, model or '', '', status, 0, 0, 0, ua, reason, False)
+        # 也记进安全页的入站日志：走 /v1/messages 的客户端被拒时，此前在
+        # 「IP 访问日志」里**完全看不到**（只有 gateway 那条路记），两套协议
+        # 的审计口径不一致。原因码复用 gateway 的归类，避免两处写法漂移。
+        gateway._log_ip(ip, path, True, ua, gateway._key_reject_code(reason, model is None))
         return None, ip, _err(reason, status, getattr(reason, 'err_type', 'permission_error'))
 
     limited, _count = gateway._rate_limited(key)
     if limited:
         msg = f'请求过于频繁（{gateway.RATE_WINDOW}s 内超过 {gateway.RATE_MAX_PER_MIN} 次）'
         gateway._record(key, ip, model or '', '', 429, 0, 0, 0, ua, msg, False)
+        gateway._log_ip(ip, path, True, ua, 'rate_limited')
         return None, ip, _err(msg, 429, 'rate_limit_error')
 
     return key, ip, None

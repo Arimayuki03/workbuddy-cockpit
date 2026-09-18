@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -222,3 +224,133 @@ class FrontendReasonMappingTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AuditLogOnlyBlockedTest(unittest.TestCase):
+    """入站访问日志默认**只记拦截**（服务器审计的结论）。
+
+    现场：线上 7877 行里只有 17 行是拦截记录（0.2%），其余全是正常请求
+    （`_log_ip(..., False, ...)` 给每个成功请求也写一行）。那张表在安全页叫
+    「IP 访问日志」，用途是回答「谁在扫我、谁被挡了」——被正常流量淹没后，
+    真正的信号要翻 7800 行才找得到；而它的 2 万行滚动上限（注释写明「按每次
+    拒绝一行估算足够回溯近期攻击」）被成功请求占满后，保留窗口从数月压到
+    约 17 天，真出事时记录可能已被挤掉。
+
+    放行的明细在「请求日志」页有完整记录，这里不重复记不丢信息。
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.src = (Path(__file__).resolve().parents[1] / 'routers' / 'gateway.py').read_text(
+            encoding='utf-8')
+
+    def test_allowed_not_written_by_default(self) -> None:
+        """`_log_ip` 必须在放行且未开全量开关时直接返回。"""
+        self.assertIn('if not blocked and not config.AUDIT_ALL_ACCESS:', self.src,
+                      '_log_ip 没有默认不记放行的过滤，正常流量会继续淹没安全日志')
+
+    def test_switch_exists_and_defaults_off(self) -> None:
+        from server import config
+        self.assertFalse(config.AUDIT_ALL_ACCESS, '全量记录开关应默认关闭（会淹没信号）')
+        cfg_src = (Path(__file__).resolve().parents[1] / 'config.py').read_text(encoding='utf-8')
+        self.assertIn('WB_AUDIT_ALL_ACCESS', cfg_src, '开关没有对应的环境变量')
+
+    def test_blocked_branches_still_log(self) -> None:
+        """所有拦截分支照旧记录（过滤只针对放行）。"""
+        for code in ('missing_key', 'invalid_key', 'ip_blocked', 'rate_limited'):
+            with self.subTest(code=code):
+                self.assertIn(f"_log_ip(ip, path, True, ua, '{code}')", self.src)
+
+    def test_reason_filter_is_order_independent(self) -> None:
+        """反证用：确认过滤条件不会把所有写入都挡掉。
+
+        断言里必须出现 `not blocked`（而不是写成 `blocked`）——写反就会
+        「只记放行、不记拦截」，与意图完全相反且同样静默。
+        """
+        idx = self.src.index('def _log_ip')
+        seg = self.src[idx:idx + 3000]
+        self.assertIn('if not blocked and not config.AUDIT_ALL_ACCESS', seg)
+        self.assertNotIn('if blocked and not config.AUDIT_ALL_ACCESS', seg,
+                         '条件写反了：变成只记放行、不记拦截')
+
+
+class RequestLogRetentionTest(unittest.TestCase):
+    """请求日志按保留期滚动清理（此前完全没有清理机制）。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = config.DB_PATH
+        config.DB_PATH = Path(self._tmp.name) / 'r.db'
+        db._conn = None
+        db.connect()
+
+    def tearDown(self) -> None:
+        try:
+            if db._conn is not None:
+                db._conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        db._conn = None
+        config.DB_PATH = self._orig
+        self._tmp.cleanup()
+
+    def _add(self, ts: int) -> None:
+        db.add_request_log(ts=ts, key_id=None, ip='1.1.1.1', model='m',
+                           mapped_model='m', status=200, prompt_tokens=1,
+                           completion_tokens=1, latency_ms=1, first_token_ms=None,
+                           ua='UA', error=None, stream=1, credit=None, realm='cn')
+
+    def test_old_rows_pruned(self) -> None:
+        now = int(time.time())
+        keep = db._REQUEST_LOG_RETAIN_DAYS
+        self._add(now - (keep + 10) * 86400)   # 超出保留期
+        self._add(now - 5 * 86400)             # 保留期内
+        db._prune_request_logs()
+        rows = db.query('SELECT ts FROM request_logs')
+        self.assertEqual(len(rows), 1, f'清理没生效或删多了：{rows}')
+        self.assertGreater(rows[0]['ts'], now - (keep + 1) * 86400)
+
+    def test_boundary_row_kept(self) -> None:
+        """正好在保留期边界的记录不该被删（边界差一天）。"""
+        now = int(time.time())
+        keep = db._REQUEST_LOG_RETAIN_DAYS
+        self._add(now - (keep - 1) * 86400)
+        db._prune_request_logs()
+        self.assertEqual(len(db.query('SELECT ts FROM request_logs')), 1)
+
+    def test_add_request_log_writes_values_not_column_names(self) -> None:
+        """**回归**：kwargs 必须展开成位置参数。
+
+        `execute()` 内部是 `tuple(args)`，直接传 dict 会把它当成单个参数，
+        于是**列名被当值**写进库（实测 `credit` 列存进了字符串 `'credit'`，
+        紧接着 rebuild 因 `NOT NULL constraint failed: usage_daily.day` 崩掉）。
+        这类损坏是静默的：写入不报错，只有下游查询才炸。
+        """
+        now = int(time.time())
+        self._add(now)
+        row = db.query_one('SELECT ts, key_id, ip, model, status, credit, realm '
+                           'FROM request_logs')
+        self.assertEqual(row['ip'], '1.1.1.1')
+        self.assertEqual(row['model'], 'm')
+        self.assertEqual(int(row['status']), 200)
+        self.assertIsNone(row['credit'], 'credit 应为 NULL，不是字符串 "credit"')
+        self.assertIn(row['realm'], ('cn', 'global'), f'realm 异常：{row["realm"]!r}')
+        self.assertGreater(int(row['ts']), 0)
+
+    def test_prune_failure_is_swallowed(self) -> None:
+        """清理失败必须被吞掉（旁路操作，不能影响写入，更不能影响转发）。
+
+        做法：让 DELETE 真的失败（表名写坏），确认 `_prune_request_logs`
+        仍然正常返回 —— 若它把异常抛出去，网关的写入路径会连带出错。
+        """
+        with mock.patch.object(db, 'execute', side_effect=RuntimeError('boom')):
+            db._prune_request_logs()   # 不该抛
+
+    def test_check_counter_triggers_prune(self) -> None:
+        """按写入次数触发清理（而非每次写入都查一次，那是一趟全表扫描）。"""
+        with mock.patch.object(db, '_prune_request_logs') as prune:
+            db._request_log_writes = 0
+            for _ in range(db._REQUEST_LOG_CHECK_EVERY):
+                self._add(int(time.time()))
+            self.assertEqual(prune.call_count, 1, '写入达到间隔后没有触发清理')
+            self.assertEqual(db._request_log_writes, 0, '计数器没有重置')
