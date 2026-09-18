@@ -336,38 +336,35 @@ def build_command(mode: str, target: str) -> list[str]:
     return [_python(), '-u', str(_script_path()), target, *_MODE_ARGS[mode]]
 
 
-async def start_async(mode: str, target: str = 'ALL') -> tuple[bool, str]:
-    """`start()` 的**线程池**版本，供事件循环内的调用方使用。
+def _prepare(mode: str, target: str) -> tuple[bool, object]:
+    """启动前的**阻塞**准备：校验可用性 + 构造 argv。
 
-    定时领奖循环与启动任务的 async 接口都走这里 —— `start()` 里的
-    `available()`（可能 fork docker）与 `build_command()`（要解析脚本路径）
-    都是阻塞的，直接在事件循环里跑会冻住整个服务（含对外网关）。
-    """
-    return await asyncio.to_thread(start, mode, target)
+    返回 (ok, payload)：ok 为 False 时 payload 是给用户的原因说明，否则是 argv。
 
+    单独拆出来是这次修 bug 的关键（issue #31）：启动这件事有两半，性质完全不同——
+      · **这一半是阻塞的**：`available()` 可能 fork `docker inspect` / `docker cp`
+        （最长 60 秒），`build_command()` 要解析脚本路径（可能触发同一件事）；
+      · 另一半**必须在事件循环线程里做**：`loop.create_task()` 调度后台任务。
 
-def start(mode: str, target: str = 'ALL') -> tuple[bool, str]:
-    """启动一次执行（后台）。返回 (是否已启动, 说明)。
-
-    **阻塞**（见 `available()`）。事件循环里请用 `start_async()`。
+    早先把两半写在同一个 `start()` 里，再让 `start_async()` 把整个函数丢进线程池
+    → 线程池的工作线程没有运行中的事件循环，`get_running_loop()` 必然抛
+    RuntimeError，于是「一键执行」100% 报「当前环境没有事件循环，无法后台执行」。
     """
     ok, why = available()
     if not ok:
         return False, why
     if _state['running']:
         return False, f'已有任务正在执行（{_state["mode"]} / {_state["target"]}），请等它结束'
-
     try:
         argv = build_command(mode, target)
     except ValueError as exc:
         return False, str(exc)
+    return True, argv
 
+
+def _launch(argv: list[str], mode: str, target: str, loop) -> tuple[bool, str]:
+    """登记状态并调度后台任务。**必须在事件循环线程里调用**（要 create_task）。"""
     global _task
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return False, '当前环境没有事件循环，无法后台执行'
-
     _state.update({
         'running': True, 'mode': mode, 'target': target,
         'started_at': int(time.time()), 'finished_at': 0,
@@ -375,6 +372,35 @@ def start(mode: str, target: str = 'ALL') -> tuple[bool, str]:
     })
     _task = loop.create_task(_run(argv, mode, target))
     return True, f'已开始执行（{mode}）'
+
+
+async def start_async(mode: str, target: str = 'ALL') -> tuple[bool, str]:
+    """启动一次执行（**不阻塞事件循环**的版本）。
+
+    定时领奖循环与启动任务的 async 接口都走这里：把阻塞的准备丢进线程池，
+    再回到事件循环线程里调度任务。两半的运行位置不能混（见 `_prepare`）。
+    """
+    ok, payload = await asyncio.to_thread(_prepare, mode, target)
+    if not ok:
+        return False, payload  # type: ignore[return-value]
+    return _launch(list(payload), mode, target, asyncio.get_running_loop())  # type: ignore[arg-type]
+
+
+def start(mode: str, target: str = 'ALL') -> tuple[bool, str]:
+    """启动一次执行（同步版）。返回 (是否已启动, 说明)。
+
+    要求**当前线程有运行中的事件循环**（要 create_task），且会阻塞它 ——
+    所以事件循环里的调用方请用 `start_async()`。保留同步版是为了命令行/测试
+    这类「本来就在 loop 线程里、且不在意短暂阻塞」的场景。
+    """
+    ok, payload = _prepare(mode, target)
+    if not ok:
+        return False, payload  # type: ignore[return-value]
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False, '当前环境没有事件循环，无法后台执行'
+    return _launch(list(payload), mode, target, loop)  # type: ignore[arg-type]
 
 
 async def _run(argv: list[str], mode: str, target: str) -> None:
