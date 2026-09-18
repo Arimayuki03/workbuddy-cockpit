@@ -4,8 +4,9 @@ import {useCallback, useEffect, useState} from 'react';
 import {Activity, TrendingUp, KeyRound, Cpu, Wrench, RotateCcw, Coins, AlertTriangle} from 'lucide-react';
 import {
   Bar,
-  BarChart,
   CartesianGrid,
+  ComposedChart,
+  Line,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -108,7 +109,13 @@ export default function StatsPage() {
     day: d.day.slice(5),
     tokens: d.prompt_tokens + d.completion_tokens,
     requests: d.requests,
+    // 失败曲线来自另一份数据源（请求日志），与用量汇总不构成堆叠关系
+    failed: d.failed ?? 0,
   }));
+
+  /** 今日失败总数（4xx + 5xx）。单独来自请求日志——用量汇总只含成功请求。 */
+  const todayFailed =
+    (summary?.failures?.today_4xx ?? 0) + (summary?.failures?.today_5xx ?? 0);
 
   return (
     <div className="flex flex-col gap-4 md:gap-6">
@@ -218,9 +225,20 @@ export default function StatsPage() {
         <StatCard
           label={t('stats.todayRequests')}
           value={fmtNumber(summary?.today_requests)}
-          hint={t('stats.tokenHint', {v: fmtCompact(summary?.today_tokens)})}
+          hint={
+            // 有失败时把失败数说在前面：这个卡片是用户查「今天出了什么事」的
+            // 第一站，而「用量 N token」是次要信息。
+            //
+            // 也要说清**失败不计入上面的数字**：请求数来自用量汇总（只含成功
+            // 请求），所以「今天 0 次请求 + 31 次失败」是可能的——那正是全池
+            // 中断的形态。不说清的话用户会以为卡片坏了。
+            todayFailed > 0
+              ? t('stats.failedHint', {n: fmtNumber(todayFailed)})
+              : t('stats.tokenHint', {v: fmtCompact(summary?.today_tokens)})
+          }
           icon={Activity}
-          tone="info"
+          tone={todayFailed > 0 ? 'warning' : 'info'}
+          hintTone={todayFailed > 0 ? 'warning' : undefined}
           delay={0}
         />
         <StatCard
@@ -261,7 +279,9 @@ export default function StatsPage() {
         <div className="h-[260px] w-full">
           {chartData.length ? (
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData} margin={{top: 4, right: 8, bottom: 0, left: -8}} barCategoryGap="20%">
+              {/* 用 ComposedChart 而不是 BarChart：BarChart 会忽略非 Bar 子组件，
+                  失败曲线（Line）根本不会被渲染 —— 实测踩过，图上一条线都没有。 */}
+              <ComposedChart data={chartData} margin={{top: 4, right: 8, bottom: 0, left: -8}} barCategoryGap="20%">
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
                 <XAxis dataKey="day" tickLine={false} axisLine={false} fontSize={11} stroke="var(--muted-foreground)" />
                 <YAxis tickLine={false} axisLine={false} fontSize={11} stroke="var(--muted-foreground)" tickFormatter={(v) => fmtCompact(Number(v))} />
@@ -273,10 +293,14 @@ export default function StatsPage() {
                     borderRadius: 12,
                     fontSize: 12,
                   }}
-                  formatter={(value, name) => [
-                    fmtNumber(Number(value)),
-                    String(name) === 'tokens' ? 'Token' : t('metric.requests'),
-                  ]}
+                  formatter={(value, name) => {
+                    const label = String(name);
+                    if (label === 'tokens') return [fmtNumber(Number(value)), 'Token'];
+                    if (label === 'failed') {
+                      return [fmtNumber(Number(value)), t('dashboard.failedRequests')];
+                    }
+                    return [fmtNumber(Number(value)), t('metric.requests')];
+                  }}
                 />
                 <Bar
                   dataKey="tokens"
@@ -286,7 +310,19 @@ export default function StatsPage() {
                   /* 限制柱宽：只有一两天数据时，柱子不会被拉伸占满整个图表 */
                   maxBarSize={48}
                 />
-              </BarChart>
+                {/* 失败数用一条线叠在同一张图上：它与 token 柱不同量级，做成柱子
+                    会把柱形压扁。线只作「那天出过事」的信号，具体数值看悬停。
+                    没有失败时贴着 0，不干扰读数。 */}
+                <Line
+                  type="monotone"
+                  dataKey="failed"
+                  name="failed"
+                  stroke="var(--destructive)"
+                  strokeWidth={1.5}
+                  strokeDasharray="4 3"
+                  dot={false}
+                />
+              </ComposedChart>
             </ResponsiveContainer>
           ) : (
             <div className="grid h-full place-items-center text-xs text-muted-foreground">{t('stats.noUsageData')}</div>

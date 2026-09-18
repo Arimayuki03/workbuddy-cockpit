@@ -41,6 +41,12 @@ def summary(realm: str | None = None,
     （issue #9）让存量库上一行都写不进 usage_daily，而表现是完全静默的
     （页面照常轮询、数字只是不动），拖了几个版本才被发现。判据是**今天的
     请求日志有内容但今天的统计为 0**——正常部署不该出现这种组合。
+
+    另外附带 `failures`（失败请求数，按 4xx / 5xx 分档）。**它单独取自
+    request_logs，不能从 usage_daily 算**——后者只累计有 token 或有扣费的请求，
+    被拒绝的调用与全池不可用（503，零 token）在里面**根本不存在**。实测线上
+    一次凌晨的全池中断：31 次请求全部失败，而趋势图上显示为「没有请求」，
+    用户只能去翻日志才知道出过事。详见 `_failures`。
     """
     today = time.strftime('%Y-%m-%d')
     week = _since(7)
@@ -90,7 +96,61 @@ def summary(realm: str | None = None,
         'active_keys': int(active_keys),
         'top_model': top['model'] if top else None,
         'usage_health': _usage_health(today, t_req, realm),
+        'failures': _failures(realm),
     }
+
+
+def _failures(realm: str | None = None) -> dict:
+    """今天 / 近 7 天的失败请求数，按 4xx 与 5xx 分档。
+
+    为什么必须单独算：`usage_daily` 只累计**有 token 或有扣费**的请求
+    （`bump_usage` 的调用条件是 `if total or credit`，刻意如此——否则「只有被
+    拒绝的调用」的部署会被 `_usage_health` 误报成「统计没在累计」）。代价是
+    失败请求在用量表里**完全不存在**：
+
+      · 403 / 429（密钥被拒、配额用尽、限流）→ 零 token，不累计；
+      · 503（池里没有可用账号）→ 零 token，不累计；
+      · 502（上游不可用）→ 同样。
+
+    于是界面上「请求数」只反映成功的量，趋势图里失败的那段是**空白**——用户
+    看不到"出过事"，只能去翻日志。实测线上凌晨一次全池中断：31 次请求全部
+    失败，趋势图上却显示为没有请求。
+
+    `request_logs` 是**无条件**记录每一笔的（见 `gateway._record`），所以它是
+    失败数的唯一可靠来源。这里不做任何「是否该累计」的过滤：凡是被拒或被
+    上游打回的都是失败，正是用户想看到的。
+
+    口径说明：只统计**带了密钥**的请求（`key_id IS NOT NULL`）。没有密钥的
+    401 是扫描器/配置错误打进来的噪声，混进来会让失败数失去信号价值。
+    """
+    out: dict = {
+        'today_4xx': 0, 'today_5xx': 0,
+        'week_4xx': 0, 'week_5xx': 0,
+    }
+    try:
+        today = time.strftime('%Y-%m-%d')
+        week = _since(7)
+        # realm 过滤：日志表的 realm 列可能是历史 NULL（该列是后加的），按 cn 归类
+        # ——**必须写成 `COALESCE(realm,'cn') = ?`，不能写成 `COALESCE(realm,?) = ?`**：
+        # 后者会把 NULL 兜成「当前查询的那个版本」，于是看国际版时历史 NULL 行
+        # 也被算进来（实测：只看 global 却统计到 cn 的历史记录）。
+        rf = " AND COALESCE(realm, 'cn') = ?" if realm in ('cn', 'global') else ''
+        for label, since in (('today', today), ('week', week)):
+            args = (since,) + ((realm,) if rf else ())
+            row = db.query_one(
+                f"SELECT SUM(CASE WHEN status >= 400 AND status < 500 THEN 1 ELSE 0 END) AS c4, "
+                f"SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) AS c5 "
+                f"FROM request_logs WHERE {db.day_sql('ts')} >= ? AND key_id IS NOT NULL{rf}",
+                args,
+            )
+            if row:
+                out[f'{label}_4xx'] = int(row['c4'] or 0)
+                out[f'{label}_5xx'] = int(row['c5'] or 0)
+    except Exception:  # noqa: BLE001
+        # 统计属旁路：任何一个数算不出来都不该让总览接口失败（失败计数只是
+        # 锦上添花，总览本身有更多关键数字）。返回全 0，前端按「无失败」显示。
+        pass
+    return out
 
 
 def _usage_health(today: str, today_requests: int, realm: str | None = None) -> dict:
@@ -167,7 +227,13 @@ def rebuild_usage(user: dict = Depends(security.require_admin)) -> dict:
 @router.get('/daily')
 def daily(days: int = 30, realm: str | None = None,
           user: dict = Depends(security.current_user)) -> list[dict]:
-    """按天聚合。realm 非空时只统计该版本。"""
+    """按天聚合。realm 非空时只统计该版本。
+
+    `failed` 是当天的失败请求数（4xx / 5xx 合计），**来自 request_logs 而不是
+    usage_daily**：后者不含被拒绝与零 token 的失败请求，失败数在其中恒为 0
+    （详见 `_failures`）。趋势图用它把「失败」画出来——否则全池中断那天的
+    曲线是空的，看不出出过事。
+    """
     rf = ' AND realm = ?' if realm in ('cn', 'global') else ''
     args = (_since(max(1, days)),) + ((realm,) if rf else ())
     rows = db.query(
@@ -177,16 +243,47 @@ def daily(days: int = 30, realm: str | None = None,
         f'FROM usage_daily WHERE day >= ?{rf} GROUP BY day ORDER BY day ASC',
         args,
     )
-    return [
+    failures = _daily_failures(days, realm)
+    days_seen = {r['day'] for r in rows}
+    out = [
         {
             'day': r['day'],
             'requests': int(r['requests'] or 0),
             'prompt_tokens': int(r['prompt_tokens'] or 0),
             'completion_tokens': int(r['completion_tokens'] or 0),
             'credit': float(r['credit'] or 0),
+            'failed': failures.get(r['day'], 0),
         }
         for r in rows
     ]
+    # **只有失败、没有成功**的日子也要出现：那一天正是最该被看到的。
+    # 只按 usage_daily 出行的话，全池中断日会整条缺失（它没有任何成功请求），
+    # 趋势图上等于那天不存在——比画成 0 更糟。
+    for day, n in sorted(failures.items()):
+        if day not in days_seen and n > 0:
+            out.append({
+                'day': day, 'requests': 0, 'prompt_tokens': 0,
+                'completion_tokens': 0, 'credit': 0.0, 'failed': n,
+            })
+    out.sort(key=lambda d: d['day'])
+    return out
+
+
+def _daily_failures(days: int, realm: str | None = None) -> dict[str, int]:
+    """按天统计失败请求数（4xx + 5xx）。口径与 `_failures` 一致。"""
+    try:
+        # 同 `_failures`：NULL 固定归 cn，不能把 NULL 兜成查询目标版本
+        rf = " AND COALESCE(realm, 'cn') = ?" if realm in ('cn', 'global') else ''
+        args = (_since(max(1, days)),) + ((realm,) if rf else ())
+        rows = db.query(
+            f"SELECT {db.day_sql('ts')} AS day, COUNT(*) AS n FROM request_logs "
+            f"WHERE {db.day_sql('ts')} >= ? AND status >= 400 AND key_id IS NOT NULL{rf} "
+            f'GROUP BY day',
+            args,
+        )
+        return {str(r['day']): int(r['n']) for r in rows if r['day']}
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 @router.get('/by-model')

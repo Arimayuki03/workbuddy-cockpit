@@ -203,7 +203,10 @@
     "partialLoadFailed": "Some data failed to load",
     "unusable": "{n} unusable",
     "degraded": "Degraded",
-    "creditsExpiry": "Nearest expiry: {amount} credits on {time}"
+    "creditsExpiry": "Nearest expiry: {amount} credits on {time}",
+    "failedRequests": "Failed requests",
+    "todayFailed": "{n} failed today",
+    "weekFailed": "{n} failed in 7 days · {realm}"
   },
   "stats": {
     "title": "Usage",
@@ -244,7 +247,8 @@
     "emptyDesc": "No calls for this dimension in the selected range",
     "tokenHint": "{v} tokens",
     "usageHealthTitle": "Usage statistics may not be accumulating",
-    "usageHealthDetail": "There are {n} requests logged today but usage statistics show 0 — the stats may not be written correctly. Try Repair stats; if it stays at 0, check the server logs."
+    "usageHealthDetail": "There are {n} requests logged today but usage statistics show 0 — the stats may not be written correctly. Try Repair stats; if it stays at 0, check the server logs.",
+    "failedHint": "{n} failed today (not counted in the requests above)"
   },
   "accounts": {
     "title": "Accounts",

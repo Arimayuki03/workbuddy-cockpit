@@ -179,7 +179,10 @@
     "partialLoadFailed": "部分資料載入失敗",
     "unusable": "{n} 個無法使用",
     "degraded": "連敗降權",
-    "creditsExpiry": "最近一筆 {amount} 積分將於 {time} 到期"
+    "creditsExpiry": "最近一筆 {amount} 積分將於 {time} 到期",
+    "failedRequests": "失敗請求",
+    "todayFailed": "今天 {n} 次失敗",
+    "weekFailed": "近 7 天 {n} 次失敗 · {realm}"
   },
   "stats": {
     "title": "用量統計",
@@ -220,7 +223,8 @@
     "emptyDesc": "該維度在所選時間範圍內沒有呼叫",
     "tokenHint": "{v} Token",
     "usageHealthTitle": "用量統計可能沒有正常累計",
-    "usageHealthDetail": "今天已有 {n} 次呼叫記錄，但用量統計為 0——統計可能沒有正常寫入。可嘗試「修復統計」；若仍為 0，請查看伺服器日誌。"
+    "usageHealthDetail": "今天已有 {n} 次呼叫記錄，但用量統計為 0——統計可能沒有正常寫入。可嘗試「修復統計」；若仍為 0，請查看伺服器日誌。",
+    "failedHint": "今日失敗 {n} 次（不計入上方請求數）"
   },
   "accounts": {
     "title": "帳號管理",

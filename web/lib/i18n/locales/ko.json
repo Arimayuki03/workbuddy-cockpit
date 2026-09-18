@@ -179,7 +179,10 @@
     "partialLoadFailed": "일부 데이터를 불러오지 못했습니다",
     "unusable": "{n}개 사용 불가",
     "degraded": "연속 실패 제외",
-    "creditsExpiry": "가장 가까운 만료: {amount} 크레딧 ({time})"
+    "creditsExpiry": "가장 가까운 만료: {amount} 크레딧 ({time})",
+    "failedRequests": "실패 요청",
+    "todayFailed": "오늘 {n}건 실패",
+    "weekFailed": "최근 7일 {n}건 실패 · {realm}"
   },
   "stats": {
     "title": "사용량",
@@ -220,7 +223,8 @@
     "emptyDesc": "선택한 기간에 이 항목의 호출이 없습니다",
     "tokenHint": "{v} Token",
     "usageHealthTitle": "사용량 통계가 정상적으로 누적되지 않았을 수 있습니다",
-    "usageHealthDetail": "오늘 이미 {n}건의 호출 기록이 있지만 사용량 통계는 0입니다. 통계가 정상적으로 기록되지 않았을 수 있습니다. '통계 복구'를 시도하고, 계속 0이면 서버 로그를 확인하세요."
+    "usageHealthDetail": "오늘 이미 {n}건의 호출 기록이 있지만 사용량 통계는 0입니다. 통계가 정상적으로 기록되지 않았을 수 있습니다. '통계 복구'를 시도하고, 계속 0이면 서버 로그를 확인하세요.",
+    "failedHint": "오늘 {n}건 실패 (위 요청 수에 포함되지 않음)"
   },
   "accounts": {
     "title": "계정 관리",
