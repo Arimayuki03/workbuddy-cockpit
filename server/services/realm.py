@@ -262,13 +262,17 @@ def billing_base(realm: Realm) -> str:
 
 
 def chat_paths(realm: Realm) -> list[str]:
-    """聊天补全的候选路径，按尝试顺序。
+    """聊天补全的候选路径，按尝试顺序。两个版本都只有 `/v2`。
 
-    国际版以 `/console/chat/completions` 优先、404/405 时回落 `/v2`；
-    国内版只有 `/v2`。（上游 chatPaths / chatPath）
+    国际版原先是 `/console` 优先、404/405 回落 `/v2`；上游 2026-09-18（#119）改为
+    **固定 `/v2`**：`/console` 挂腾讯云 WAF 的请求体内容规则——正文里出现反引号
+    `printf` / `whoami` 这类命令执行特征会被确定性拦成 403（用户问一句 shell 命令
+    就中招）。`/v2` 是同一 base 下不挂该规则的等价端点。
+
+    本函数返回列表是为了保留「多条候选」的形态，但**当前两边都只有一个元素**——
+    调用方的 404/405 回落分支因此实际不会触发，保留它只为将来要加回候选路径时
+    不必再改调用方。
     """
-    if realm == GLOBAL:
-        return ['/console/chat/completions', '/v2/chat/completions']
     return ['/v2/chat/completions']
 
 

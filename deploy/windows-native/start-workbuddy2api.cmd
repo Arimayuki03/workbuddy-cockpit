@@ -3,7 +3,11 @@ REM WorkBuddy Manager —— 上游 workbuddy2api 的**原生**启动脚本模�
 REM
 REM 用途：当上游不以 Docker 运行、而是作为本机进程运行时，管理端需要一对启停脚本
 REM （在 .env 里用 WB2API_START_SCRIPT / WB2API_STOP_SCRIPT 指向它们）。
-REM 上游官方只提供 Docker 部署，所以这对脚本需要你自己准备 —— 这是可直接改用的模板。
+REM
+REM **先看上游自带的**：上游 workbuddy2api 2026-09-18 起已自带
+REM start/stop/status-workbuddy2api.cmd，功能更全（PID 文件 + 进程路径校验，不会误杀
+REM 同名进程；另有 status 脚本会打一次 /healthz）。上游目录里有那三个文件就别用本模板。
+REM 本文件是给**旧版上游**（那时官方只提供 Docker 部署）用的。
 REM
 REM 用法：
 REM   1) 复制到你的上游目录，按下面两处 TODO 改成实际路径

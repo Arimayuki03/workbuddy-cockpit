@@ -126,6 +126,15 @@
     "soon": "残りわずか",
     "valid": "有効"
   },
+  "credit": {
+    "expired": "期限切れ",
+    "expiring": "まもなく期限",
+    "expiresInMinutes": "{n} 分後に期限切れ",
+    "expiresInHours": "{n} 時間後に期限切れ",
+    "expiresInDays": "{n} 日後に期限切れ",
+    "expiryTipTitle": "有効期限（合計 {total}）",
+    "expiryTipNote": "有効期限の早い順に表示。カウントダウンは直近の 1 件のみ。期限を過ぎた未使用分は失効します。"
+  },
   "metric": {
     "credits": "クレジット残高",
     "creditAmount": "{n} クレジット",
@@ -169,7 +178,8 @@
     "noAccountsHint": "画面下部の「クイック追加」から QR コードで Tencent アカウントを認証してください",
     "partialLoadFailed": "一部のデータを読み込めませんでした",
     "unusable": "{n} 件が使用不可",
-    "degraded": "連敗降格"
+    "degraded": "連敗降格",
+    "creditsExpiry": "直近の失効: {amount} クレジット（{time}）"
   },
   "stats": {
     "title": "使用量",

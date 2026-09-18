@@ -14,8 +14,22 @@ import {
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {accountApi, statsApi, upstreamApi} from '@/lib/api';
 import {useRealm} from '@/lib/realm-context';
-import type {Account, StatsSummary, UpstreamStatus, UsagePoint} from '@/lib/types';
-import {expiryBarPercent, expiryVisual, fmtCompact, fmtNumber, fmtRemain} from '@/lib/format';
+import type {
+  Account,
+  CreditExpiry,
+  CreditsMeta,
+  StatsSummary,
+  UpstreamStatus,
+  UsagePoint,
+} from '@/lib/types';
+import {
+  expiryBarPercent,
+  expiryVisual,
+  fmtCompact,
+  fmtDateTime,
+  fmtNumber,
+  fmtRemain,
+} from '@/lib/format';
 import {
   availabilityLabelKey,
   availabilityTitleKey,
@@ -27,6 +41,7 @@ import {
 } from '@/lib/account-status';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {StatCard} from '@/components/common/layout/StatCard';
+import {CreditCountdown} from '@/components/common/accounts/CreditCountdown';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {Badge} from '@/components/ui/badge';
 import {useT} from '@/lib/i18n/provider';
@@ -41,6 +56,8 @@ export default function DashboardPage() {
   const [upstream, setUpstream] = useState<UpstreamStatus | null>(null);
   /** 实时积分（按 uid），叠加到 accounts 上；上游 /status 的 credits 可能滞后数小时 */
   const [liveCredits, setLiveCredits] = useState<Record<string, number>>({});
+  /** 各账号的积分套餐到期时间（按 uid），与实时积分同一次查询返回 */
+  const [creditsMeta, setCreditsMeta] = useState<Record<string, CreditsMeta>>({});
 
   // 切换版本后要重新取实时积分：两个版本的账号池不同，credits 也不能混
   const load = useCallback(async () => {
@@ -63,6 +80,7 @@ export default function DashboardPage() {
           Object.entries(r.credits).filter(([, v]) => typeof v === 'number') as [string, number][],
         ),
       );
+      setCreditsMeta(r.meta ?? {});
     }
     if (results.slice(0, 4).some((r) => r.status === 'rejected')) notify.err(t('dashboard.partialLoadFailed'));
   }, [realm, t]);
@@ -134,6 +152,24 @@ export default function DashboardPage() {
   const creditsKnown = scoped.filter((a) => typeof credOf(a) === 'number');
   const totalCredits = creditsKnown.reduce((sum, a) => sum + (credOf(a) || 0), 0);
   const creditsLow = creditsKnown.filter((a) => (credOf(a) || 0) < 200).length;
+  /**
+   * 最近一笔积分到期（全体账号里最早的那个到期时刻）。
+   *
+   * 为什么值得占首页一行：积分过期即作废且不可恢复，用户能采取的行动
+   * （多跑点任务把它用掉）只在到期**之前**有效。汇总卡片此前只报总量，
+   * 看不出「总量虽多但大部分下周就没了」这种情况。
+   */
+  const nextExpiry = useMemo(() => {
+    let best: CreditExpiry | null = null;
+    for (const m of Object.values(creditsMeta)) {
+      const e = m.expiries?.[0];
+      if (e && (!best || e.at < best.at)) best = e;
+    }
+    return best;
+  }, [creditsMeta]);
+  // 7 天内的到期算紧急（与倒计时胶囊的琥珀/红分档同一条线）。取渲染时刻即可：
+  // 阈值是 7 天，而本页每 30 秒重渲染一次，几秒的偏差不影响分档。
+  const expiryUrgent = !!nextExpiry && nextExpiry.at - Date.now() / 1000 < 7 * 86400;
 
   /**
    * 「反代上游」面板的计数，取自上游 `/status` 的 `realm_totals`。
@@ -228,17 +264,33 @@ export default function DashboardPage() {
         />
         <StatCard
           label={t('metric.credits')}
-          value={creditsKnown.length ? fmtNumber(totalCredits) : '—'}
+          // 值里带上最近一笔到期：额度高但下周作废，比额度低更值得注意
+          value={
+            <span className="inline-flex items-baseline gap-1.5">
+              <span>{creditsKnown.length ? fmtNumber(totalCredits) : '—'}</span>
+              <CreditCountdown expiries={nextExpiry ? [nextExpiry] : []} />
+            </span>
+          }
           hint={
+            // 优先级：先报「余额快见底」（这是原有的告警，不能被新信息顶掉），
+            // 其次报最近一笔到期（具体日期与金额，只有这里能看到），
+            // 最后才是「N 个账号余额已知」这种平淡的状态说明。
             !creditsKnown.length
               ? t('dashboard.waitingUpstream')
               : creditsLow > 0
                 ? t('dashboard.creditsLow', {count: creditsLow, n: creditsLow})
-                : t('dashboard.creditsCovered', {count: creditsKnown.length, n: creditsKnown.length})
+                : nextExpiry
+                  ? t('dashboard.creditsExpiry', {
+                      time: fmtDateTime(nextExpiry.at),
+                      amount: fmtNumber(nextExpiry.amount),
+                    })
+                  : t('dashboard.creditsCovered', {count: creditsKnown.length, n: creditsKnown.length})
           }
           icon={Coins}
-          tone={!creditsKnown.length ? 'neutral' : creditsLow > 0 ? 'warning' : 'accent'}
-          hintTone={creditsLow > 0 ? 'warning' : undefined}
+          tone={
+            !creditsKnown.length ? 'neutral' : creditsLow > 0 || expiryUrgent ? 'warning' : 'accent'
+          }
+          hintTone={creditsLow > 0 || expiryUrgent ? 'warning' : undefined}
           delay={0.15}
         />
         <StatCard

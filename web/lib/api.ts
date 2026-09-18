@@ -4,6 +4,7 @@ import type {Realm} from './realm-context';
 import type {
   Account,
   CheckinLogPage,
+  CreditExpiry,
   CreditsMeta,
   AccountsResponse,
   ApiKey,
@@ -116,9 +117,14 @@ export const accountApi = {
     ),
   /** 单个账号的实时积分（直接向腾讯查询） */
   credits: (file: string) =>
-    get<{ok: boolean; credits: number | null; message: string; cached: boolean; cache_age: number | null}>(
-      `/api/accounts/${encodeURIComponent(file)}/credits`,
-    ),
+    get<{
+      ok: boolean;
+      credits: number | null;
+      message: string;
+      cached: boolean;
+      cache_age: number | null;
+      expiries?: CreditExpiry[];
+    }>(`/api/accounts/${encodeURIComponent(file)}/credits`),
   /** 并发刷新所有账号的实时积分 */
   /** 查询全部账号积分；force=false 时 60 秒内命中服务端缓存 */
   refreshCredits: (force = true) =>

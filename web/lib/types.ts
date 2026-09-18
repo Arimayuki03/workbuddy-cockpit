@@ -399,11 +399,21 @@ export interface UpstreamConfig {
   upstash?: UpstashConfig;
 }
 
+/** 一个套餐的到期时刻与它名下的可用额度 */
+export interface CreditExpiry {
+  /** 到期时刻（epoch 秒）。腾讯下发的是 UTC+8 墙钟，后端已换算成绝对时刻 */
+  at: number;
+  /** 该套餐当前的可用额度 */
+  amount: number;
+}
+
 /** 积分查询来源：实时查询 or 命中 60 秒缓存 */
 export interface CreditsMeta {
   cached: boolean;
   cache_age: number | null;
   message?: string;
+  /** 各套餐到期时间，按到期时刻升序；只含仍有余额的套餐 */
+  expiries?: CreditExpiry[];
 }
 
 export interface CheckinLog {

@@ -19,13 +19,14 @@ import {
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {accountApi, upstreamApi, errText} from '@/lib/api';
-import type {Account, CreditsMeta, UpstreamStatus} from '@/lib/types';
+import type {Account, CreditExpiry, CreditsMeta, UpstreamStatus} from '@/lib/types';
 import {expiryBarPercent, expiryVisual, fmtAgo, fmtDateTime, fmtNumber, fmtRemain} from '@/lib/format';
 import {availabilityLabelKey, availabilityOf, isDegraded, mergePoolStatus} from '@/lib/account-status';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {AddAccountDialog} from '@/components/common/accounts/AddAccountDialog';
+import {CreditCountdown} from '@/components/common/accounts/CreditCountdown';
 import {useAuth} from '@/lib/auth-context';
 import {realmLabel, useRealm} from '@/lib/realm-context';
 import {useT} from '@/lib/i18n/provider';
@@ -177,11 +178,23 @@ export default function AccountsPage() {
   async function run(file: string, fn: () => Promise<unknown>, okMsg: string) {
     setBusyFile(file);
     try {
-      const res = (await fn()) as {message?: string; ok?: boolean; credits?: number | null};
+      const res = (await fn()) as {
+        message?: string;
+        ok?: boolean;
+        credits?: number | null;
+        expiries?: CreditExpiry[];
+      };
       const ok = res.ok !== false;
-      // 签到会返回刷新后的实时积分，直接就地更新，省一次请求
+      // 签到会返回刷新后的实时积分与到期时间，直接就地更新，省一次请求
       if (typeof res.credits === 'number') {
         setAccounts((prev) => prev.map((a) => (a.file === file ? {...a, credits: res.credits} : a)));
+        const uid = accounts.find((a) => a.file === file)?.uid;
+        if (uid && res.expiries) {
+          setCreditsMeta((prev) => ({
+            ...prev,
+            [uid]: {...prev[uid], cached: false, cache_age: null, expiries: res.expiries},
+          }));
+        }
       }
       (ok ? notify.ok : notify.err)(res.message || okMsg);
       await load();
@@ -390,6 +403,7 @@ export default function AccountsPage() {
               {t('accounts.live')}
             </span>
           ))}
+        <CreditCountdown expiries={meta?.expiries} />
       </span>
     );
   }

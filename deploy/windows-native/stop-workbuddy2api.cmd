@@ -1,11 +1,15 @@
 @echo off
 REM WorkBuddy Manager —— 上游 workbuddy2api 的**原生**停止脚本模板（Windows）
 REM
-REM 与 start-workbuddy2api.cmd 配套（说明见那边）。停止方式是按进程名结束：
-REM 上游是单个 Go 进程，没有服务注册，所以用 taskkill 即可。
+REM 与 start-workbuddy2api.cmd 配套（说明见那边，包括「优先用上游自带脚本」）。
 REM
-REM 注意用 /IM wb2api.exe 按**镜像名**匹配，而不是按 PID 文件：
-REM 原生模式下上游可能被手动重启过，PID 文件会过期；按名字匹配更可靠。
+REM 停止方式是按**进程名**结束：上游是单个 Go 进程，没有服务注册，用 taskkill 即可。
+REM 这里刻意按 /IM wb2api.exe 匹配而不是按 PID 文件 —— 本模板没有维护 PID 文件，
+REM 而按名字匹配在同名进程只有一个时是可靠的。
+REM
+REM 已知取舍：如果机器上跑着**两个**同名的 wb2api.exe（例如从不同目录各起一个），
+REM 这条会把它们全杀掉。上游自带的 stop 脚本用 PID 文件 + 进程路径双重校验避开了
+REM 这个问题 —— 上游目录里有它就用它。
 REM 若你的可执行文件名不同，同步改下面这行与 start 脚本里的 WB2API_EXE。
 
 setlocal
