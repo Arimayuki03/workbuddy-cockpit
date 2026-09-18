@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/hex"
 	"runtime"
 	"strings"
 	"sync"
@@ -178,6 +179,121 @@ func TestUserIdNoLongerSticky(t *testing.T) {
 		if key := ExtractKey([]byte(body)); key != "c1" {
 			t.Errorf("conversation 变体应照常提取: %s got %q", body, key)
 		}
+	}
+}
+
+// TestExtractKeyPromptCacheKey 第 5 键 prompt_cache_key：pi-ai 驱动的客户端
+// （dsh 等）把会话 ID 放在该 OpenAI 前缀缓存字段里而非 conversation_id。
+// 必须置于最后：conversation 维度四键任一在场时，prompt_cache_key 不得抢占。
+func TestExtractKeyPromptCacheKey(t *testing.T) {
+	cases := []struct {
+		body string
+		want string
+	}{
+		// 只有 prompt_cache_key → 取它（本键存在的唯一目的）。
+		{`{"prompt_cache_key":"pck-1"}`, "pck-1"},
+		// 与 conversation 维度并存 → conversation 优先，prompt_cache_key 绝不抢占。
+		{`{"prompt_cache_key":"pck-1","conversation_id":"conv"}`, "conv"},
+		{`{"prompt_cache_key":"pck-1","conversationId":"conv"}`, "conv"},
+		{`{"prompt_cache_key":"pck-1","metadata":{"conversation_id":"mc"}}`, "mc"},
+		{`{"prompt_cache_key":"pck-1","metadata":{"conversationId":"mc"}}`, "mc"},
+		// 非字符串 / 空串 → 不生成键（strOrEmpty 口径）。
+		{`{"prompt_cache_key":123}`, ""},
+		{`{"prompt_cache_key":""}`, ""},
+	}
+	for _, c := range cases {
+		if got := ExtractKey([]byte(c.body)); got != c.want {
+			t.Errorf("ExtractKey(%s)=%q want %q", c.body, got, c.want)
+		}
+	}
+}
+
+// TestStickyFallbackKeyStable 同一条首条 user 消息 → 恒同键（会话级稳定）。
+// 这是"不动客户端也能命中粘性"的核心契约：会话内历史增长不影响本函数结果。
+func TestStickyFallbackKeyStable(t *testing.T) {
+	body := `{"model":"m","messages":[{"role":"user","content":"首条消息"}]}`
+	a := StickyFallbackKey([]byte(body))
+	b := StickyFallbackKey([]byte(body))
+	if a == "" {
+		t.Fatal("StickyFallbackKey 不应为空（有 user 消息）")
+	}
+	if a != b {
+		t.Fatalf("同 body 应派生同键: %q vs %q", a, b)
+	}
+	// 形态：前缀 fb: + 32 hex（与 ids.go 的 16 字节 hex 约定一致）。
+	if !strings.HasPrefix(a, "fb:") || len(a) != len("fb:")+32 {
+		t.Fatalf("键形态错误: %q", a)
+	}
+	if _, err := hex.DecodeString(a[len("fb:"):]); err != nil {
+		t.Fatalf("键体应为 hex: %q (%v)", a, err)
+	}
+}
+
+// TestStickyFallbackKeyIgnoresLaterHistory 追加历史后键不变——证明取的是
+// **首条**（会话级）而非**最后一条**（轮级，见 TurnKey）。若误取最后一条，
+// agent 每轮 tool result 回填都会换键 → 每轮换号，粘性名存实亡。
+func TestStickyFallbackKeyIgnoresLaterHistory(t *testing.T) {
+	first := `{"model":"m","messages":[{"role":"user","content":"开场白"}]}`
+	longer := `{"model":"m","messages":[` +
+		`{"role":"user","content":"开场白"},` +
+		`{"role":"assistant","content":"好的"},` +
+		`{"role":"user","content":"继续"},` +
+		`{"role":"assistant","content":"收到"},` +
+		`{"role":"user","content":"再继续"}]}`
+	if a, b := StickyFallbackKey([]byte(first)), StickyFallbackKey([]byte(longer)); a != b {
+		t.Fatalf("会话推进不应换键（应取首条 user）: %q vs %q", a, b)
+	}
+}
+
+// TestStickyFallbackKeyDiffersByFirstMessage 不同首条消息 → 不同键（新会话不混绑）。
+func TestStickyFallbackKeyDiffersByFirstMessage(t *testing.T) {
+	a := StickyFallbackKey([]byte(`{"messages":[{"role":"user","content":"会话甲"}]}`))
+	b := StickyFallbackKey([]byte(`{"messages":[{"role":"user","content":"会话乙"}]}`))
+	if a == "" || b == "" {
+		t.Fatal("两条都应派生非空键")
+	}
+	if a == b {
+		t.Fatalf("不同首条消息应得不同键，got %q", a)
+	}
+}
+
+// TestStickyFallbackKeyEmptyCases 无法派生时返回空串——调用方据此回落
+// 「无粘性」旧行为（不伪造会话，避免脏绑定）。
+func TestStickyFallbackKeyEmptyCases(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"空 body", ``},
+		{"无 messages", `{"model":"m"}`},
+		{"messages 为空", `{"messages":[]}`},
+		{"无 user 消息", `{"messages":[{"role":"system","content":"sys"},{"role":"assistant","content":"a"}]}`},
+		{"首条 user 无文本", `{"messages":[{"role":"user","content":null}]}`},
+		{"首条 user 空串", `{"messages":[{"role":"user","content":"   "}]}`},
+		{"非法 JSON", `not-json`},
+	}
+	for _, c := range cases {
+		if got := StickyFallbackKey([]byte(c.body)); got != "" {
+			t.Errorf("%s: 应返回空串, got %q", c.name, got)
+		}
+	}
+}
+
+// TestStickyFallbackKeyMultimodal 多模态 content 数组：拼接各 part 的 text
+// （复用 ids.go contentText 口径），有文本即派生键。
+func TestStickyFallbackKeyMultimodal(t *testing.T) {
+	body := `{"messages":[{"role":"user","content":[{"type":"text","text":"图片说明文字"}]}]}`
+	if got := StickyFallbackKey([]byte(body)); got == "" {
+		t.Fatal("多模态文本部分应能派生键")
+	}
+}
+
+// TestStickyFallbackKeyTrimsWhitespace 首尾空白归一：'hi' 与 '  hi  ' 同键。
+func TestStickyFallbackKeyTrimsWhitespace(t *testing.T) {
+	a := StickyFallbackKey([]byte(`{"messages":[{"role":"user","content":"hi"}]}`))
+	b := StickyFallbackKey([]byte(`{"messages":[{"role":"user","content":"  hi  "}]}`))
+	if a != b {
+		t.Fatalf("首尾空白应归一为同键: %q vs %q", a, b)
 	}
 }
 
