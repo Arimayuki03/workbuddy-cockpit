@@ -348,6 +348,16 @@ export interface IpAccessLog {
   path: string;
   blocked: boolean;
   ua: string | null;
+  /**
+   * 拦截原因短码（issue #33）：missing_key / invalid_key / ip_blocked /
+   * key_disabled / key_expired / quota_exhausted / credit_quota_exhausted /
+   * ip_not_allowed / too_many_ips / realm_mismatch / model_not_allowed /
+   * rate_limited 等。
+   *
+   * 稳定短码而非散文：展示侧按语言翻译，改文案不必迁移历史数据。
+   * 存量记录为 null（那时没记原因），界面显示「未记录」。
+   */
+  reason?: string | null;
 }
 
 export interface SecurityConfig {

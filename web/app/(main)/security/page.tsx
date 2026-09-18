@@ -80,6 +80,38 @@ function auditDetail(detail: string | null | undefined, t: (key: string, params?
     .join(t('security.detailSeparator'));
 }
 
+/**
+ * 拦截原因短码的**兜底映射**：后端已并入 keysvc 的 code，加上网关自己的三个。
+ *
+ * 为什么要在前端做一次映射而不是后端直接存译文：日志表存的是稳定短码，
+ * 界面切成英文时同一批记录要显示英文——存译文就做不到（要么历史记录永远是
+ * 中文，要么改文案得迁移数据）。
+ *
+ * 认不出的码**原样显示**：将来后端加了新原因，界面不会显示成空白或「未知」，
+ * 用户至少能看到那个码（拿它搜仓库能找到定义）。
+ */
+const REASON_KEYS: Record<string, string> = {
+  // 网关层
+  missing_key: 'security.reasonMissingKey',
+  invalid_key: 'security.reasonInvalidKey',
+  ip_blocked: 'security.reasonIpBlocked',
+  rate_limited: 'security.reasonRateLimited',
+  // 密钥层（keysvc 的 code）
+  key_disabled: 'security.reasonKeyDisabled',
+  key_expired: 'security.reasonKeyExpired',
+  quota_exhausted: 'security.reasonQuotaExhausted',
+  credit_quota_exhausted: 'security.reasonCreditQuota',
+  ip_not_allowed: 'security.reasonIpNotAllowed',
+  too_many_ips: 'security.reasonTooManyIps',
+  realm_mismatch: 'security.reasonRealmMismatch',
+  model_not_allowed: 'security.reasonModelNotAllowed',
+};
+
+function reasonText(t: (key: string, params?: Record<string, string>) => string, code: string): string {
+  const key = REASON_KEYS[code];
+  return key ? t(key) : code;
+}
+
 export default function SecurityPage() {
   const {isAdmin} = useAuth();
   const t = useT();
@@ -321,11 +353,20 @@ export default function SecurityPage() {
                 <TableCell className="font-mono text-xs">{l.ip}</TableCell>
                 <TableCell className="font-mono text-xs text-muted-foreground">{l.path}</TableCell>
                 <TableCell>
-                  {l.blocked ? (
-                    <Badge variant="destructive" className="rounded-full">{t('security.blocked')}</Badge>
-                  ) : (
-                    <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">{t('security.allowed')}</Badge>
-                  )}
+                  {/* 原因直接跟在「已拦截」后面：只有「已拦截」两个字时，用户
+                      不知道是没带密钥、密钥不认识还是 IP 规则拦的，而这三者的
+                      处置方式完全不同（改客户端配置 / 重新发密钥 / 改规则）。
+                      没有原因（放行，或升级前没记）时不占位。 */}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {l.blocked ? (
+                      <Badge variant="destructive" className="rounded-full">{t('security.blocked')}</Badge>
+                    ) : (
+                      <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">{t('security.allowed')}</Badge>
+                    )}
+                    {l.blocked && l.reason && (
+                      <span className="text-[11px] text-muted-foreground">{reasonText(t, l.reason)}</span>
+                    )}
+                  </div>
                 </TableCell>
                 <TableCell className="max-w-[280px] truncate pr-4 text-[11px] text-muted-foreground">
                   {l.ua || '—'}
