@@ -297,6 +297,60 @@ func TestStickyFallbackKeyTrimsWhitespace(t *testing.T) {
 	}
 }
 
+// TestStickyFallbackKeySuppressedByUserID P1-anti-monopoly 契约在 fallback 路径的
+// 延伸：携带 user_id 的请求恒不派生键。
+//
+// 为什么关键：ExtractKey 有意剔除 user_id 作粘性键（user 维度粒度过粗，一个 user
+// 的并行对话会被钉到同一账号）。若 fallback 不设闸，只发 user_id 的请求会借首条
+// prompt 重新获得粘性，使该契约在 handler 侧失效——正是 Copilot review 指出的回归。
+// 注意本测试与 TestUserIdNoLongerSticky 互补：后者只覆盖 ExtractKey 返回空，
+// 覆盖不到 handler 侧其后调用的 StickyFallbackKey。
+func TestStickyFallbackKeySuppressedByUserID(t *testing.T) {
+	bodies := []struct {
+		name string
+		body string
+	}{
+		{"metadata.user_id + 文本 user 消息",
+			`{"model":"m","metadata":{"user_id":"u-42"},"messages":[{"role":"user","content":"首条消息"}]}`},
+		{"顶层 user_id + 文本 user 消息",
+			`{"model":"m","user_id":"u-42","messages":[{"role":"user","content":"首条消息"}]}`},
+		{"metadata.user_id + prompt_cache_key 也没有",
+			`{"metadata":{"user_id":"u-42"},"messages":[{"role":"user","content":"x"}]}`},
+		// 非字符串 / 空串 user_id 不算标识（strOrEmpty 口径）。
+		{"user_id 非字符串不抑制",
+			`{"metadata":{"user_id":123},"messages":[{"role":"user","content":"首条消息"}]}`},
+		{"user_id 空串不抑制",
+			`{"metadata":{"user_id":""},"messages":[{"role":"user","content":"首条消息"}]}`},
+	}
+	for _, c := range bodies {
+		got := StickyFallbackKey([]byte(c.body))
+		switch c.name {
+		case "user_id 非字符串不抑制", "user_id 空串不抑制":
+			if got == "" {
+				t.Errorf("%s: 非字符串/空 user_id 不应抑制 fallback", c.name)
+			}
+		default:
+			if got != "" {
+				t.Errorf("%s: 带 user_id 应返回空串（回落加权轮换）, got %q", c.name, got)
+			}
+		}
+	}
+}
+
+// TestStickyFallbackKeyNoUserIDStillWorks 无 user_id 的请求不受抑制影响——
+// 确保上面的闸门没有误伤真正需要 fallback 的客户端（dsh / Codex 等）。
+func TestStickyFallbackKeyNoUserIDStillWorks(t *testing.T) {
+	bodies := []string{
+		`{"model":"m","messages":[{"role":"user","content":"首条消息"}]}`,
+		`{"model":"m","metadata":{"conversation":"c"},"messages":[{"role":"user","content":"首条消息"}]}`,
+	}
+	for _, body := range bodies {
+		if got := StickyFallbackKey([]byte(body)); got == "" {
+			t.Errorf("无 user_id 应正常派生键: %s", body)
+		}
+	}
+}
+
 func TestConcurrentSameKeyAssignsOnce(t *testing.T) {
 	avail := []string{"a1", "a2", "a3", "a4", "a5"}
 	r := routerWith(newCountingStore(), avail, time.Minute)

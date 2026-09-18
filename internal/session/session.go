@@ -365,15 +365,44 @@ func ExtractKey(body []byte) string {
 // 与 TurnKey 的区别（勿混用）：TurnKey 取**最后一条** user 消息，是**轮级**键，供上游
 // 会话头族按"对话轮"聚合；本函数取**首条**，是**会话级**键，供粘性绑定长期复用。
 //
+// 抑制条件（P1-anti-monopoly 契约在 fallback 路径的延伸）：body 携带
+// metadata.user_id 或顶层 user_id 时**恒返回 ""**。ExtractKey 有意剔除 user_id
+// 作粘性键（user 维度粒度过粗——一个 user 的全部并行对话会被钉到同一账号，远粗于
+// 上游对话级缓存边界），这类客户端按契约回落加权轮换。若 fallback 不设此闸，
+// 只发 user_id 的请求会借首条 prompt 重新获得粘性，使该契约在 handler 侧失效。
+//
 // 无 body / 无 messages / 无 user 消息 / 该消息无文本 → ""（调用方回落无粘性，
 // 保持旧行为；不伪造会话）。
 func StickyFallbackKey(body []byte) string {
+	if hasUserID(body) {
+		return ""
+	}
 	text := firstUserText(body)
 	if text == "" {
 		return ""
 	}
 	sum := sha256.Sum256([]byte(text))
 	return "fb:" + hex.EncodeToString(sum[:16])
+}
+
+// hasUserID 报告 body 是否携带 user 维度标识（metadata.user_id 或顶层 user_id）。
+// 只判"字段存在且为非空字符串"，与 ExtractKey 的 strOrEmpty 口径一致。
+// 解析失败按"无 user_id"处理（不因坏 body 抑制 fallback——坏 body 本就在
+// firstUserText 里返回 ""，两条路径都收敛到无粘性）。
+func hasUserID(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return false
+	}
+	if meta, ok := obj["metadata"].(map[string]any); ok {
+		if strOrEmpty(meta["user_id"]) != "" {
+			return true
+		}
+	}
+	return strOrEmpty(obj["user_id"]) != ""
 }
 
 // firstUserText 取 body 里**首条** role=="user" 消息的文本（去首尾空白）；无则 ""。
