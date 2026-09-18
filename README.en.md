@@ -824,6 +824,29 @@ release notes, and creates a Release with the archives attached.
 
 ---
 
+## Sponsor & Promotion
+
+> Disclosure: this is a partner promotion. Deploying this project needs a server that can
+> run Docker; the listing below is for reference. **This repository has no technical
+> dependency on it** — any other provider works just as well.
+
+### Aiwei Cloud (爱维云) — cloud servers, no ICP filing required
+
+[![Aiwei Cloud · lovevps.cn](docs/images/lovevps.png)](https://lovevps.cn/)
+
+**25% off, ongoing** — use promo code **`catfk`** at checkout ｜ <https://lovevps.cn/>
+
+- **No ICP filing, ready in minutes** — Hong Kong (5 zones), US, Japan, Singapore,
+  Malaysia, Germany and more; plus many mainland China locations
+- **Optimised routes** — CN2 / 9929 / BGP premium lines; DDoS-protected plans with
+  200G mitigation
+- **Residential IPs** — native US residential broadband IPs available
+- **Elastic billing** — create and release on demand, resize freely
+- **Credentials & support** — licensed IDC / ISP / CDN operator, 10+ years in business,
+  24×7 engineer support
+
+---
+
 ## Credits
 
 - [**LINUX DO**](https://linux.do) — the community where this project is published and discussed
