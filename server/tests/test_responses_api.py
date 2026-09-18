@@ -284,17 +284,42 @@ class RequestConversionTest(unittest.TestCase):
         for m in out['messages']:
             self.assertNotIn('reasoning_content', m)
 
-    def test_orphan_reasoning_not_attached_to_later_message(self) -> None:
-        """孤立的 reasoning（后面不是 assistant）宁可丢掉，也不能挂到不相关的回合上。"""
+    def test_reasoning_not_immediately_before_assistant_is_kept(self) -> None:
+        """推理项后面跟的不是 assistant 时，**保留**给后面那条 assistant。
+
+        这条断言原来写的是反过来的——「孤立的 reasoning 宁可丢掉，也不能挂到
+        不相关的回合上」。那个取舍是错的，代价证实很高：
+
+        腾讯要求 assistant 消息上**必须有** `reasoning_content`（缺了就 400
+        `11155 reasoning_content_missing`，issue #36 报的正是它）。把这段推理
+        丢掉，客户端辛苦带回来的凭据就白带了；而挂上去最多是多一段无害的文本
+        （腾讯只校验字段存在，不校验这段推理是否属于该回合）。
+
+        两害相权：**丢掉的代价是被拒（且连带账号被判失败），多挂的代价是多余文本。**
+        """
         out = R.to_chat_request({'model': 'm', 'input': [
             {'type': 'reasoning', 'id': 'rs_x',
-             'summary': [{'type': 'summary_text', 'text': '孤立'}]},
+             'summary': [{'type': 'summary_text', 'text': '推理'}]},
             {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'q'}]},
             {'type': 'message', 'role': 'assistant',
              'content': [{'type': 'output_text', 'text': 'a'}]},
         ]})
+        assistant = [m for m in out['messages'] if m['role'] == 'assistant']
+        self.assertEqual(len(assistant), 1)
+        self.assertEqual(assistant[0].get('reasoning_content'), '推理',
+                         '推理被丢掉了 —— 上游会因缺字段报 11155')
+
+    def test_reasoning_never_attached_to_user_messages(self) -> None:
+        """但绝不能挂到 user 消息上：腾讯的校验只针对 assistant 回合。"""
+        out = R.to_chat_request({'model': 'm', 'input': [
+            {'type': 'reasoning', 'id': 'rs_x',
+             'summary': [{'type': 'summary_text', 'text': '推理'}]},
+            {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'q'}]},
+        ]})
         for m in out['messages']:
-            self.assertNotIn('reasoning_content', m)
+            if m['role'] != 'assistant':
+                self.assertNotIn('reasoning_content', m,
+                                 f'{m["role"]} 消息上不该有 reasoning_content')
 
     def test_reasoning_flat_string_forms(self) -> None:
         """客户端把推理写成扁平字符串时同样认（各客户端形状不一）。"""

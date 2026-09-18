@@ -281,3 +281,111 @@ class ThinkingEnabledDetectionTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReasoningOrderingTest(unittest.TestCase):
+    """推理项**位置异常**时也不能丢（自审发现的边界）。
+
+    原实现假设「reasoning 总是紧接在它对应的 assistant 消息之前」，于是：
+
+      · 紧跟的不是 assistant 时**丢弃**这段推理（注释里写的是「孤立推理，
+        丢掉比挂到不相关的回合上更糟」）；
+      · 连续多个 reasoning item 时只保留**最后一个**。
+
+    两个假设在真实客户端上不成立。后果与 issue #36 完全一样：客户端明明带回了
+    凭据，我们却把内容丢在半路，assistant 消息上没有 `reasoning_content`，
+    上游照旧报 11155 —— 也就是这个文件存在的理由。既然这一类 bug 已经咬过两次，
+    这里就把「无论顺序如何，只要拿到了推理就必须落到某条 assistant 消息上」钉死。
+    """
+
+    def _assistant_reasoning(self, payload: dict) -> list[object]:
+        return [m.get('reasoning_content') for m in payload['messages']
+                if m['role'] == 'assistant']
+
+    def test_reasoning_after_assistant_is_not_dropped(self) -> None:
+        """推理项排在 assistant 消息**之后**时，仍要挂到那条消息上。"""
+        payload = R.to_chat_request({'input': [
+            {'type': 'message', 'role': 'user', 'content': 'q'},
+            {'type': 'message', 'role': 'assistant',
+             'content': [{'type': 'output_text', 'text': 'a'}]},
+            {'type': 'reasoning',
+             'encrypted_content': R._encode_credential('晚到的推理')},
+        ]})
+        self.assertEqual(self._assistant_reasoning(payload), ['晚到的推理'],
+                         '排查到 assistant 之后的推理被丢掉了 —— 又会触发 11155')
+
+    def test_multiple_reasoning_items_are_joined(self) -> None:
+        """连续多个推理项要**合并**，不能只留最后一个。"""
+        payload = R.to_chat_request({'input': [
+            {'type': 'message', 'role': 'user', 'content': 'q'},
+            {'type': 'reasoning', 'encrypted_content': R._encode_credential('第一段')},
+            {'type': 'reasoning', 'encrypted_content': R._encode_credential('第二段')},
+            {'type': 'message', 'role': 'assistant',
+             'content': [{'type': 'output_text', 'text': 'a'}]},
+        ]})
+        got = self._assistant_reasoning(payload)[0]
+        self.assertIn('第一段', got, '前一段推理被后一段顶掉了')
+        self.assertIn('第二段', got)
+
+    def test_reasoning_before_user_still_reaches_next_assistant(self) -> None:
+        """推理项后面跟的是 user（顺序异常）时，留给**后面**那条 assistant。"""
+        payload = R.to_chat_request({'input': [
+            {'type': 'message', 'role': 'user', 'content': 'q1'},
+            {'type': 'reasoning', 'encrypted_content': R._encode_credential('思考')},
+            {'type': 'message', 'role': 'user', 'content': 'q2'},
+            {'type': 'message', 'role': 'assistant',
+             'content': [{'type': 'output_text', 'text': 'a'}]},
+        ]})
+        self.assertEqual(self._assistant_reasoning(payload), ['思考'])
+
+    def test_orphan_reasoning_without_any_assistant_is_harmless(self) -> None:
+        """整段历史里没有 assistant 消息时，推理无处可挂 —— 不能报错。
+
+        这种请求本来也不合法（没有可回传的回合），只要不抛异常、消息序列正常即可。
+        """
+        payload = R.to_chat_request({'input': [
+            {'type': 'message', 'role': 'user', 'content': 'q'},
+            {'type': 'reasoning', 'encrypted_content': R._encode_credential('孤立的')},
+        ]})
+        self.assertEqual([m['role'] for m in payload['messages']], ['user'])
+
+
+class AnthropicReasoningAccumulationTest(unittest.TestCase):
+    """Anthropic 侧的多 thinking 块也要合并（与 Responses 侧对齐）。
+
+    一条 assistant 里可能有多个 thinking 块（分段推理、或 redacted 与明文并存）。
+    早先的实现每见到一块就**覆盖** `thinking_text`，只有最后一块活下来 ——
+    与 responses.py 的累积行为不一致。两套协议面对的是同一份推理内容，
+    行为不该因客户端选了哪个协议而不同。
+    """
+
+    def test_multiple_thinking_blocks_are_joined(self) -> None:
+        payload = A.to_openai_request({'model': 'm', 'max_tokens': 10, 'messages': [
+            {'role': 'user', 'content': 'q'},
+            {'role': 'assistant', 'content': [
+                {'type': 'thinking', 'thinking': '段1',
+                 'signature': R._encode_credential('段1')},
+                {'type': 'thinking', 'thinking': '段2',
+                 'signature': R._encode_credential('段2')},
+                {'type': 'text', 'text': 'a'},
+            ]},
+        ]})
+        assistant = [m for m in payload['messages'] if m['role'] == 'assistant'][0]
+        got = assistant.get('reasoning_content', '')
+        self.assertIn('段1', got, '前一个 thinking 块被后一个顶掉了')
+        self.assertIn('段2', got)
+
+    def test_plain_and_signed_blocks_are_both_kept(self) -> None:
+        """明文块 + 签名块并存时，两段都要保留。"""
+        payload = A.to_openai_request({'model': 'm', 'max_tokens': 10, 'messages': [
+            {'role': 'user', 'content': 'q'},
+            {'role': 'assistant', 'content': [
+                {'type': 'thinking', 'thinking': '明文段'},
+                {'type': 'thinking', 'thinking': '',
+                 'signature': R._encode_credential('签名段')},
+            ]},
+        ]})
+        assistant = [m for m in payload['messages'] if m['role'] == 'assistant'][0]
+        got = assistant.get('reasoning_content', '')
+        self.assertIn('明文段', got)
+        self.assertIn('签名段', got)
