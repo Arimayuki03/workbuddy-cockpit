@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import tempfile
 import time
 from typing import Any
 
@@ -196,7 +198,16 @@ def write_auth_file(account: dict) -> tuple[str, bool]:
     它是设备风控凭据，用户手动写入后若因换 token 重登而丢失，会静默降级风控
     形态——所以这里读旧文件保留，而不是当作字段缺失。
     """
-    uid = account['uid']
+    uid = str(account['uid'])
+    # uid 会被拼进文件名，写入 auths 目录，所以必须先校验字符集。
+    #
+    # 它来自腾讯 `/v2/plugin/login/account` 的响应（`acct.get('uid')`），
+    # 是**外部输入**：真实 uid 是 uuid（`9b212d8c-f5f7-...`），但没有校验时
+    # `../x` 这类值会让路径拐出 auths 目录（`workbuddy-` 前缀只挡住了大部分形态，
+    # 分隔符仍能生效）。同目录下 `wb2api._safe_file` 早已对**读**路径做了同样的
+    # 白名单，这里把**写**路径补齐，两边口径一致。
+    if not re.fullmatch(r'[0-9A-Za-z_-]{1,80}', uid):
+        raise ValueError(f'账号 uid 形态异常，已拒绝写入（{uid[:40]!r}）')
     config.AUTH_DIR.mkdir(parents=True, exist_ok=True)
     target = config.AUTH_DIR / f'workbuddy-{uid}.json'
     existed = target.exists()
@@ -245,14 +256,30 @@ def write_auth_file(account: dict) -> tuple[str, bool]:
     #
     # 临时文件名以 `.` 开头且不以 `.json` 结尾：既不会被上游的 `workbuddy*.json`
     # glob 收到，也不会被它的目录指纹计入（指纹只统计 `.json`）。
-    tmp = target.with_name(f'.{target.name}.tmp')
+    #
+    # **名字必须唯一**（mkstemp 的随机后缀），不能用固定的 `.workbuddy-x.json.tmp`：
+    # 同一账号被并发写入时（批量扫码、或用户连点重试），两次写会共用同一个临时
+    # 文件——先完成者 `os.replace` 成功后该临时文件已不存在，后完成者的 replace
+    # 失败并触发清理，把对方刚写好的内容一并删掉。实测 4 个并发线程全部报错、
+    # 且原账号文件消失。唯一名让每次写各自独立。
+    fd, tmp_name = tempfile.mkstemp(prefix=f'.{target.name}.', suffix='.tmp',
+                                    dir=str(target.parent))
     try:
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding='utf-8')
-        os.replace(tmp, target)
+        with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False, indent=1))
+        # **必须显式放宽权限**：mkstemp 在 Linux 上固定创建 0600，而这里写入的
+        # 文件是给**上游**读的 —— 宿主部署下本面板以 root 写、上游容器以 uid
+        # 10001 读，0600 会让上游读不到该账号（表现为账号加进去了但池里没有）。
+        # 原来的 `write_text` 走 umask（典型 0644），这里要保持同样的可读性。
+        #
+        # 为什么不照抄上游 SaveAtomic 的 0o600：上游是「同一个进程既写又读」，
+        # 0600 自洽；我们是跨 uid 写读，前提不同。
+        os.chmod(tmp_name, 0o644)
+        os.replace(tmp_name, target)
     except Exception:
         # 失败时清掉临时文件，避免在 auths 目录里留垃圾（它不会被加载，但会让人困惑）
         try:
-            tmp.unlink(missing_ok=True)
+            os.unlink(tmp_name)
         except OSError:
             pass
         raise

@@ -217,6 +217,17 @@ def _save_and_finish(result: dict, realm_of_result: str, region_msg: str,
     # 只有一行 PermissionError，用户看不出「该 chown 哪个目录」。
     try:
         filename, existed = tencent.write_auth_file(result)
+    except ValueError as exc:
+        # uid 形态异常（`write_auth_file` 会校验后才拼文件名）。这不是权限问题，
+        # 给「去 chown」的提示会把用户引到错方向 —— 如实说明是上游返回的数据异常。
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f'账号已授权成功，但返回的账号标识形态异常，已拒绝写入：{exc}。'
+                f'这通常是上游接口返回了非预期的数据；请重试一次，'
+                f'若持续出现请把本条信息反馈给我们。'
+            ),
+        ) from exc
     except OSError as exc:
         # 不 drop state：用户此刻重试（或前端再轮询一次）应当能成功，
         # 而不是拿到「二维码已失效」被引导去重新扫码（issue #26 的现象）。
