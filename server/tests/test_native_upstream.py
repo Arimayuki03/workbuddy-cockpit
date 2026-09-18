@@ -164,12 +164,21 @@ class NativeUpstreamRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         否则管理端重启流程会卡在这个前置步骤上整体失败 —— 而上游没在跑
         正是重启前的正常状态。
+
+        断言的是**行为**（先探测再退出 0、且有可读提示），不是某个具体的中文
+        字符串：批处理脚本必须保持纯 ASCII（cmd.exe 按系统 ANSI 代码页解析，
+        非 ASCII 注释会让脚本解析错乱，见 test_windows_scripts.py），因此提示
+        文案只能是英文。锚在 'is not running' 上，改文案时会一起提醒更新这里。
         """
         root = Path(__file__).resolve().parents[2]
         text = (root / 'deploy' / 'windows-native' / 'stop-workbuddy2api.cmd').read_text(
             encoding='utf-8')
-        self.assertIn('未在运行', text, '停止模板没有处理「本来就没跑」的情况')
+        self.assertIn('is not running', text, '停止模板没有处理「本来就没跑」的情况')
         self.assertIn('exit /b 0', text, '停止模板在未运行时没有返回成功')
+        # 「先探测、再决定」的结构：探测必须在退出之前，否则会把没在跑的当失败
+        probe = text.index('tasklist')
+        not_running = text.index('is not running')
+        self.assertLess(probe, not_running, '没有先探测进程就断言「没在运行」')
 
     def test_native_restart_reports_missing_scripts(self) -> None:
         """脚本不存在时要明确报出缺哪个（而不是等到执行才报个含糊错误）。"""
