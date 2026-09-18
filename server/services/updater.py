@@ -187,12 +187,20 @@ def _app_version() -> str:
 
 
 def _upstream_dir() -> Path:
-    """上游目录：优先显式配置，否则由 auths 目录推断（其父目录）。"""
-    explicit = os.environ.get('WB_UPSTREAM_DIR')
-    if explicit:
-        return Path(explicit)
-    # WB_AUTH_DIR 形如 /opt/workbuddy2api/auths
-    return config.AUTH_DIR.parent
+    """上游目录。**必须与 `config.UPSTREAM_DIR` 同一口径**。
+
+    这里此前是独立推导的（`WB_UPSTREAM_DIR` 优先，否则 `AUTH_DIR.parent`），而
+    native 模式又给 `config.UPSTREAM_DIR` 加了另一个回退（`UPSTREAM_CONFIG.parent`）。
+    两者在默认配置下巧合一致，但只要用户单独调整 `WB_AUTH_DIR` 或
+    `WB_UPSTREAM_CONFIG` 中的一个就会指向**不同目录**，而且没有任何报错：
+
+      · 原生启停脚本按 `config.UPSTREAM_DIR` 找（`WB2API_START_SCRIPT` 的默认值）；
+      · 任务脚本与「更新上游」按本函数找。
+
+    结果是一部分功能落在 A 目录、另一部分落在 B 目录，排查时极难定位。
+    现在只保留一份推导（config 里那份），本函数退化为引用它。
+    """
+    return config.UPSTREAM_DIR
 
 
 def _pid_alive(pid: object) -> bool:
@@ -288,6 +296,11 @@ def start_update(target: str) -> tuple[bool, str]:
     """启动更新（后台脱离运行）。返回 (是否已启动, 说明)。"""
     if target not in ('manager', 'upstream', 'both'):
         return False, '参数不合法'
+    if os.name == 'nt' and config.WB2API_MODE == 'native':
+        return False, (
+            'Windows 原生部署暂不支持网页一键更新；'
+            '请手动替换代码、重新构建前端，然后运行 service-tools.ps1 restart。'
+        )
     if target in ('upstream', 'both') and not can_control_docker():
         # 重建上游容器需要操作宿主 docker。判定按**实际能力**（能否跑通
         # docker info），而不是"是否在容器里"：容器挂了 docker.sock 就完全
@@ -611,4 +624,3 @@ def check_updates(force: bool = False) -> dict:
         },
         'has_any': manager_has or upstream_has,
     }
-

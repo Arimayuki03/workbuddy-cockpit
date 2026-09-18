@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import deque
 import ipaddress
 import json
+import os
 import re
 import socket
 import time
@@ -405,7 +407,64 @@ def models_source(items: list) -> str:
     return 'static'
 
 
+# 原生启停脚本的执行上限（秒）。
+#
+# 为什么要设：脚本可能挂住（等交互输入、端口被占用、启动时卡在依赖上）。没有超时
+# 的话这个协程永不返回，而 reload 的状态机会一直停在 running=True —— 后续所有
+# 「保存配置后自动重载」都**静默失效**（不报错、不重试），调用方也一直挂着。
+# 60 秒对启停一个本地进程足够宽裕（正常是秒级）。
+_NATIVE_RESTART_TIMEOUT = 60
+
+
+def _kill_quietly(proc) -> None:
+    """尽力结束子进程；失败也不抛（调用方已经在处理错误路径了）。"""
+    try:
+        proc.kill()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def restart_container() -> tuple[bool, str]:
+    """重启上游；native 模式走启停脚本，其余部署保持 Docker 行为。"""
+    if config.WB2API_MODE == 'native':
+        scripts = (config.WB2API_STOP_SCRIPT, config.WB2API_START_SCRIPT)
+        missing = [str(path) for path in scripts if not path.is_file()]
+        if missing:
+            return False, f'未找到原生启停脚本：{"、".join(missing)}'
+        for script in scripts:
+            cmd = (
+                ('cmd.exe', '/d', '/c', str(script))
+                if os.name == 'nt'
+                else (str(script),)
+            )
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(script.parent),
+                    # 后台服务可能继承 PIPE，导致 communicate() 永远等不到 EOF。
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                # **必须有超时**：脚本可能挂住（等交互输入、被占用的端口、
+                # 启动时卡在依赖上）。没有超时的话：
+                #   · 这个协程永不返回 → reload 的状态机一直停在 running=True，
+                #     后续所有「保存配置后自动重载」都会静默失效（不报错、不重试）；
+                #   · 调用方（保存设置接口）也一直挂着。
+                # 超时后杀掉进程并如实回报，用户至少知道「重启没成功」。
+                await asyncio.wait_for(proc.communicate(), timeout=_NATIVE_RESTART_TIMEOUT)
+            except asyncio.TimeoutError:
+                _kill_quietly(proc)
+                return False, (
+                    f'{script.name} 执行超过 {_NATIVE_RESTART_TIMEOUT} 秒未结束，已终止。'
+                    f'请手动确认上游状态，或把 WB2API_START_SCRIPT / WB2API_STOP_SCRIPT '
+                    f'指向不会挂住的脚本'
+                )
+            except Exception as exc:  # noqa: BLE001
+                return False, f'执行 {script.name} 失败：{exc}'
+            if proc.returncode != 0:
+                return False, f'{script.name} 退出码 {proc.returncode}'
+        return True, '原生 workbuddy2api 已重启'
+
     name = config.WB2API_CONTAINER
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -424,11 +483,19 @@ async def restart_container() -> tuple[bool, str]:
 
 
 def read_container_logs(limit: int = 200, timestamps: bool = True) -> list[str]:
-    """读取上游容器日志（同步、失败返回空列表）。
+    """读取上游日志（原生日志文件或 Docker，失败返回空列表）。
 
     默认带 `--timestamps`：docker 会在每行前面加上精确到纳秒的 RFC3339 时间，
     自动任务日志据此获得准确时间并据此去重（上游自己的 log 前缀精度只到秒）。
     """
+    if config.WB2API_MODE == 'native':
+        try:
+            count = max(1, min(5000, limit))
+            with config.WB2API_LOG_FILE.open('r', encoding='utf-8', errors='replace') as fh:
+                return [ln.rstrip('\r\n') for ln in deque(fh, maxlen=count) if ln.strip()]
+        except Exception:  # noqa: BLE001
+            return []
+
     import subprocess
 
     cmd = ['docker', 'logs', '--tail', str(max(1, min(5000, limit)))]
