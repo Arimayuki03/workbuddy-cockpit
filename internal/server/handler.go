@@ -101,6 +101,8 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
+	h.mux.HandleFunc("GET /v1/stats", h.withAuth(h.stats))
+	h.mux.HandleFunc("POST /v1/stats/reset", h.withAuth(h.statsReset))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	return h
 }
@@ -804,6 +806,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if hasUsage {
 				st.toks = toks
 			}
+			// metrics 采集：token 三段 + 缓存三段 + 真实扣费（供 /v1/stats）。
+			// 与成本账本同源同口径（都读末帧 usage），故此处一并带出，避免二次解析。
+			st.hasUsage = hasUsage
+			st.prompt = stats.PromptTokens()
+			st.cacheHit, st.cacheMiss, st.cacheWr = stats.CacheTokens()
+			if credit, ok := stats.Credit(); ok {
+				st.credit = credit
+				st.hasCredit = true
+			}
 			// 成本账本：末帧 usage 带 credit 与 token 总数时记录实测单价，
 			// 供下次选号把免费/便宜的号排在前面。
 			if credit, ok := stats.Credit(); ok {
@@ -831,6 +842,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if credit, total, ok := usageCreditTotal(resp); ok {
 			h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, total)
 		}
+		// metrics 采集（非流式）：与流式同口径，从同一份 usage 带出。
+		fillStatFromUsage(st, resp)
 		return
 	}
 	// 末端错误透传（error-passthrough）：上游返回的错误原样透传，不再规范化成固定文案。
