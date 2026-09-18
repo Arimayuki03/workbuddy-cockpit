@@ -246,9 +246,13 @@ class RequestConversionTest(unittest.TestCase):
              'content': [{'type': 'output_text', 'text': 'a1'}]},
             {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'q2'}]},
         ]})
+        # 两个字段名都要有：`reasoning` 是上游**请求侧**校验读的字段，
+        # `reasoning_content` 是响应侧命名（上游兜底逻辑按它判断有无痕迹）。
+        # 只写后者等于没写（issue #37 的 8 组对照实验）。
         self.assertEqual(out['messages'], [
             {'role': 'user', 'content': 'q1'},
-            {'role': 'assistant', 'content': 'a1', 'reasoning_content': '我先想一想'},
+            {'role': 'assistant', 'content': 'a1',
+             'reasoning': '我先想一想', 'reasoning_content': '我先想一想'},
             {'role': 'user', 'content': 'q2'},
         ])
 

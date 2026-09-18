@@ -272,10 +272,12 @@ def to_openai_request(body: dict) -> dict:
         tool_calls: list[dict] = []  # assistant 发起的工具调用
         tool_results: list[dict] = []  # user 回传的工具结果 → 要拆成独立消息
         tool_images: list[dict] = []  # 工具结果里的图片 → 提升到后续 user 消息
-        # 本条的推理文本（thinking 块）→ 挂到本条的 assistant 消息上，作为
-        # `reasoning_content` 交给上游（它靠这个字段判断「本轮带推理痕迹」）。
+        # 本条的推理文本（thinking 块）→ 挂到本条的 assistant 消息上，交给上游。
         # None = 没见到 thinking 块；空串 = 见到了但拿不到明文（两者必须区分：
-        # 上游要的是**字段存在**，空串同样能触发它的回填）。
+        # 上游的兜底逻辑按**字段存在与否**判断有无痕迹，空串也算存在）。
+        #
+        # 实际写哪些字段由 `responses.attach_reasoning` 决定 —— 请求侧校验读的是
+        # `reasoning`（不是 `reasoning_content`，见那里的说明）。
         thinking_text: str | None = None
 
         for block in content:
@@ -363,7 +365,7 @@ def to_openai_request(body: dict) -> dict:
             # 有工具调用时 content 通常是空的，但保留文本更稳（部分上游要求非 null）
             msg['content'] = text or None
             if thinking_text is not None:
-                msg['reasoning_content'] = thinking_text
+                responses.attach_reasoning(msg, thinking_text)
             messages.append(msg)
         elif parts or thinking_text is not None:
             # 只有一个纯文本块时压平为字符串——多数上游对字符串更宽容
@@ -378,7 +380,7 @@ def to_openai_request(body: dict) -> dict:
             # 只在 assistant 消息上挂 —— 腾讯的校验针对 assistant 回合；
             # 挂在别处会造成上游不认的组合，那比不挂更糟。
             if thinking_text is not None and role == 'assistant':
-                msg['reasoning_content'] = thinking_text
+                responses.attach_reasoning(msg, thinking_text)
             messages.append(msg)
 
     out['messages'] = messages
