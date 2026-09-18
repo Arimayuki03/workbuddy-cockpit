@@ -21,7 +21,7 @@ import {notify} from '@/lib/toast';
 import {accountApi, upstreamApi, errText} from '@/lib/api';
 import type {Account, CreditsMeta, UpstreamStatus} from '@/lib/types';
 import {expiryBarPercent, expiryVisual, fmtAgo, fmtDateTime, fmtNumber, fmtRemain} from '@/lib/format';
-import {availabilityLabelKey, availabilityOf, mergePoolStatus} from '@/lib/account-status';
+import {availabilityLabelKey, availabilityOf, isDegraded, mergePoolStatus} from '@/lib/account-status';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
@@ -276,6 +276,11 @@ export default function AccountsPage() {
         (r.startsWith('11102') ? missing : limited).push(m.model);
       }
       const tip = [
+        // 降权要**排在剩余时间前面**：它是「为什么在冷却」的答案，而剩余时间
+        // 只是「还要等多久」。先给原因，用户才知道该等还是该去查这个号。
+        isDegraded(a)
+          ? t('accounts.degradedReason', {n: a.consecutive_fails ?? 0})
+          : '',
         left ? t('accounts.etaRecovery', {left}) : '',
         limited.length ? t('accounts.limitedModels', {models: limited.join(sep)}) : '',
         missing.length

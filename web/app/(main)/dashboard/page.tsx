@@ -21,6 +21,7 @@ import {
   availabilityTitleKey,
   availabilityClass,
   availabilityOf,
+  isDegraded,
   mergePoolStatus,
   type AvailabilityTier,
 } from '@/lib/account-status';
@@ -115,6 +116,15 @@ export default function DashboardPage() {
    */
   const unusable = availability.notLoaded + availability.disabled
     + availability.neverSucceeded + availability.cooling;
+
+  /**
+   * 连败降权计数（上游 issue #114）。**上游把它并进 cooling**，所以 realm_totals
+   * 里的「冷却中」是个混数：既有等一会儿就好的限流退避，也有「这个号在持续失败」
+   * 的降权。面板只显示混数时，用户看不出降权的存在（反馈原话：
+   * 「降权统计这里根本不统计」）。这里从账号明细单独数一份，与上游口径不冲突
+   * ——它只是把 cooling 里的降权那一部分显式化。
+   */
+  const degraded = scoped.filter(isDegraded).length;
 
   const valid = scoped.filter((a) => !a.is_expired).length;
   const expiring = scoped.filter((a) => a.remain_seconds > 0 && a.remain_seconds < 3600).length;
@@ -314,6 +324,7 @@ export default function DashboardPage() {
                 // 无版本之分，保持全局
                 [t('dashboard.healthyAccounts'), pool.known ? pool.healthy : '—'],
                 [t('dashboard.cooling'), pool.known ? pool.cooling : '—'],
+                [t('dashboard.degraded'), pool.known ? degraded : '—'],
                 [t('dashboard.disabled'), pool.known ? pool.disabled : '—'],
                 [t('dashboard.stickySessions'), upstream.sticky_sessions ?? 0],
                 [t('dashboard.redisMode'), upstream.redis_mode ?? '—'],

@@ -183,7 +183,8 @@
     "noAccounts": "No accounts yet",
     "noAccountsHint": "Use Quick add in the bottom bar to sign in a Tencent account by QR code",
     "partialLoadFailed": "Some data failed to load",
-    "unusable": "{n} unusable"
+    "unusable": "{n} unusable",
+    "degraded": "Degraded"
   },
   "stats": {
     "title": "Usage",
@@ -301,7 +302,9 @@
     "testDone": "Test finished",
     "refreshDone": "Token refreshed",
     "deleted": "Deleted",
-    "movedTo": "Check-in results and upstream task logs moved to"
+    "movedTo": "Check-in results and upstream task logs moved to",
+    "badgeDegraded": "● Degraded (consecutive failures)",
+    "degradedReason": "Temporarily removed from the account pool after {n} consecutive failures; it recovers automatically. If this keeps happening, check whether the account's token has expired (re-login required)"
   },
   "keys": {
     "title": "API keys",

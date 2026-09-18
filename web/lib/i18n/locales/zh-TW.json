@@ -168,7 +168,8 @@
     "noAccounts": "暫無帳號",
     "noAccountsHint": "點擊底欄「快速新增」掃碼授權騰訊帳號",
     "partialLoadFailed": "部分資料載入失敗",
-    "unusable": "{n} 個無法使用"
+    "unusable": "{n} 個無法使用",
+    "degraded": "連敗降權"
   },
   "stats": {
     "title": "用量統計",
@@ -286,7 +287,9 @@
     "testDone": "測試完成",
     "refreshDone": "重新整理完成",
     "deleted": "已刪除",
-    "movedTo": "簽到結果與上游自動任務紀錄已移至"
+    "movedTo": "簽到結果與上游自動任務紀錄已移至",
+    "badgeDegraded": "● 連敗降權",
+    "degradedReason": "連續 {n} 次失敗後已被暫時移出帳號池，稍後會自動恢復。若反覆出現，請檢查該帳號的權杖是否失效（需要重新登入）"
   },
   "keys": {
     "title": "API 金鑰",

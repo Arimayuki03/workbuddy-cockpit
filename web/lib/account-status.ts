@@ -74,9 +74,30 @@ export function mergePoolStatus(
       disabled_reason: typeof p.disabled_reason === 'string' ? p.disabled_reason : '',
       in_flight: typeof p.in_flight === 'number' ? p.in_flight : null,
       cooling: typeof p.cooling === 'boolean' ? p.cooling : null,
+      degrade_until: typeof p.degrade_until === 'string' ? p.degrade_until : null,
+      consecutive_fails:
+        typeof p.consecutive_fails === 'number' ? p.consecutive_fails : null,
       last_used: typeof p.last_used === 'number' ? p.last_used : null,
     } satisfies Account;
   });
+}
+
+/**
+ * 该账号是否正被**连败降权**（上游 issue #114）。
+ *
+ * 为什么必须单独判：上游把降权计入 `cooling`（其 `entry.healthy()` 把 until /
+ * breakerUntil / degradeUntil 三个截止取或），所以只读 `cooling` 分不出两类原因
+ * 完全不同的情况 —— 限流退避（等一会儿就好）与连败降权（说明这个号在**持续失败**，
+ * 该去看它到底为什么失败）。用户看到「冷却中」无从判断是该等还是该处理。
+ *
+ * 判据是「截止时间在未来」而不是「字段存在」：上游落盘/恢复都按惰性过滤，但前端
+ * 拿到的可能是几十秒前的快照，字段还在、窗口已过。
+ */
+export function isDegraded(a: Account): boolean {
+  const until = a.degrade_until;
+  if (typeof until !== 'string' || !until) return false;
+  const at = Date.parse(until);
+  return Number.isFinite(at) && at > Date.now();
 }
 
 /** 该账号的可用性分档（顺序即优先级，见模块注释）。 */
@@ -120,7 +141,10 @@ export function availabilityLabelKey(tier: AvailabilityTier, a?: Account): strin
     case 'unknown':
       return 'accounts.badgeUnknown';
     case 'cooling':
-      return 'accounts.badgeCooling';
+      // 降权与限流退避在上游同属 cooling（口径如此），但含义差很多：前者是
+      // 「这个号连续失败已达阈值」，后者是「等一会儿就好」。分开说，用户才知道
+      // 该干等还是该去查这个号为什么一直失败。传了账号才分得出来。
+      return a && isDegraded(a) ? 'accounts.badgeDegraded' : 'accounts.badgeCooling';
     case 'neverSucceeded':
       return 'accounts.badgeNeverSucceeded';
     case 'notLoaded':

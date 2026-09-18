@@ -168,7 +168,8 @@
     "noAccounts": "계정이 없습니다",
     "noAccountsHint": "하단 바의 '빠른 추가'로 Tencent 계정을 QR 인증하세요",
     "partialLoadFailed": "일부 데이터를 불러오지 못했습니다",
-    "unusable": "{n}개 사용 불가"
+    "unusable": "{n}개 사용 불가",
+    "degraded": "연속 실패 제외"
   },
   "stats": {
     "title": "사용량",
@@ -286,7 +287,9 @@
     "testDone": "테스트 완료",
     "refreshDone": "갱신 완료",
     "deleted": "삭제됨",
-    "movedTo": "출석 결과와 업스트림 자동 작업 기록은 다음 위치로 이동했습니다:"
+    "movedTo": "출석 결과와 업스트림 자동 작업 기록은 다음 위치로 이동했습니다:",
+    "badgeDegraded": "● 연속 실패로 제외됨",
+    "degradedReason": "{n}회 연속 실패로 계정 풀에서 일시 제외되었습니다. 잠시 후 자동으로 복구됩니다. 반복된다면 토큰이 만료되지 않았는지 확인하세요(재로그인 필요)"
   },
   "keys": {
     "title": "API 키",
