@@ -279,13 +279,23 @@ def to_chat_request(body: dict) -> dict:
         # 一次 assistant 回合里的多个工具调用同属一条消息，拆成多条会让上游
         # 在「上一个工具结果还没回」的校验上直接 400。
         pending_calls: list[dict] = []
-        # 待挂到 assistant 消息上的推理文本（见下面 `kind == 'reasoning'` 的说明）。
+        # 待挂到下一条 assistant 消息上的推理文本（见下面 `kind == 'reasoning'`）。
         # 用 None 表示「没见到 reasoning item」，空串表示「见到了但没文本」——
         # 两者必须区分：上游的触发条件是**字段存在**，空串一样能触发它的回填。
+        #
+        # **累积**而不是覆盖：客户端可能把一段推理拆成多个 reasoning item 下发，
+        # 只留最后一个会把前文丢掉（自审发现的边界）。
         pending_reasoning: str | None = None
 
-        def flush_calls() -> None:
+        def take_reasoning() -> str | None:
+            """取走累积的推理文本并把状态清空。"""
             nonlocal pending_reasoning
+            if pending_reasoning is None:
+                return None
+            value, pending_reasoning = pending_reasoning, None
+            return value
+
+        def flush_calls() -> None:
             if pending_calls:
                 msg: dict = {
                     'role': 'assistant',
@@ -294,9 +304,9 @@ def to_chat_request(body: dict) -> dict:
                 }
                 # 工具调用回合也可能带推理（模型先思考再调工具），一并保留，
                 # 否则这类多轮同样会因缺痕迹被腾讯拒。
-                if pending_reasoning is not None:
-                    msg['reasoning_content'] = pending_reasoning
-                    pending_reasoning = None
+                pending = take_reasoning()
+                if pending is not None:
+                    msg['reasoning_content'] = pending
                 messages.append(msg)
                 pending_calls.clear()
 
@@ -352,14 +362,31 @@ def to_chat_request(body: dict) -> dict:
                 # 触发降级冷却 → 池里没有可用账号 → 客户端反复重试，最终变成与模型
                 # 无关的 503 死循环。
                 #
-                # 所以这里把 reasoning item 的文本**挂到紧随其后的 assistant 消息**
-                # 上（字段名用上游认识的 `reasoning_content`，与它 sse.go 回放时的
-                # 命名一致）。顺序上 reasoning 总是紧接在它对应的 assistant 回复之前。
+                # 所以这里把 reasoning item 的文本挂到 assistant 消息上（字段名用
+                # 上游认识的 `reasoning_content`，与它 sse.go 回放时的命名一致）。
                 #
                 # 为什么不是原样透传整个 item：`{type:'reasoning', summary:[…]}` 是
                 # OpenAI 专有形状，Chat Completions 不认；只有扁平的
                 # `reasoning_content` 字符串是两侧都认的形态。
-                pending_reasoning = _reasoning_text(item)
+                #
+                # 挂载规则（**宽容**，不假设顺序）：累积起来，落到**下一条**
+                # assistant 消息上；连续多段则**拼接**。
+                #
+                # 早先的写法是「只认紧随其后的 assistant，否则丢弃」，依据是「顺序上
+                # reasoning 总在它对应的回复之前」。这个假设没有任何东西保证，而且
+                # 一旦不成立，后果是这个文件专门在修的 11155 —— 客户端明明带回了
+                # 凭据，我们却把内容丢在半路。宁可挂到一条不相关的 assistant 上
+                # （腾讯只要求「assistant 消息上有这个字段」，多余内容无害），
+                # 也不要丢掉。
+                text = _reasoning_text(item)
+                if text:
+                    pending_reasoning = (
+                        text if pending_reasoning is None else pending_reasoning + text
+                    )
+                elif pending_reasoning is None:
+                    # 见到 item 但没文本：记一个空串，让下游知道「存在过」——
+                    # 上游的触发条件是字段存在，空串同样能满足。
+                    pending_reasoning = ''
                 continue
 
             # message（或没写 type 的 {role, content} —— 宽容处理）
@@ -376,16 +403,26 @@ def to_chat_request(body: dict) -> dict:
             if msg is not None:
                 # 只在 assistant 消息上挂推理 —— 腾讯的校验针对 assistant 回合。
                 # 客户端把 reasoning 放在别处（少见）时不硬塞，免得造出上游不认的组合。
-                if pending_reasoning is not None and role == 'assistant':
-                    msg['reasoning_content'] = pending_reasoning
-                    pending_reasoning = None
-                elif pending_reasoning is not None and role != 'assistant':
-                    # reasoning 后面跟的不是 assistant（协议上不该出现，但客户端可能
-                    # 塞入异常顺序）：**丢弃**这段孤立的推理，而不是留给后面的某条
-                    # assistant —— 那会把上一轮的推理挂到不相关的回合上，比丢掉更糟。
-                    pending_reasoning = None
+                #
+                # 不是 assistant 时**保留**待挂状态，留给后面那条 assistant：
+                # 中间隔着 user 的异常顺序（客户端消息穿插）也要能送到，
+                # 丢掉就又是一次 11155。
+                if role == 'assistant':
+                    pending = take_reasoning()
+                    if pending is not None:
+                        msg['reasoning_content'] = pending
                 messages.append(msg)
         flush_calls()
+
+        # 收尾：推理项排在**最后一条 assistant 之后**时，循环里没有「下一条
+        # assistant」可以挂，它仍是待挂状态。回填到已发出的最后一条 assistant 上
+        # ——它本来就是这一轮的推理（顺序异常不影响归属）。
+        # 这也是自审发现的边界：原实现直接丢弃，客户端带回了凭据却仍触发 11155。
+        if pending_reasoning is not None:
+            for prev in reversed(messages):
+                if prev.get('role') == 'assistant':
+                    prev['reasoning_content'] = take_reasoning()
+                    break
 
     out['messages'] = messages
 

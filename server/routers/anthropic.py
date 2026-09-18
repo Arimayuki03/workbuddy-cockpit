@@ -299,16 +299,19 @@ def to_openai_request(body: dict) -> dict:
                 # **优先**解它——它是唯一能还原完整推理原文的载体（`thinking` 明文
                 # 可能被客户端截断）。解不开再回落明文。
                 decoded = responses._decode_credential(block.get('signature'))
-                if decoded:
-                    thinking_text = decoded
-                    continue
-                # `redacted_thinking` 只有加密串（`data`），拿不到明文；但**字段存在**
-                # 就是上游补丁的触发条件，所以带上密文比丢掉安全（它是密文，不含
-                # 可识别的自然语言指纹）。
-                raw_think = block.get('thinking')
-                if not isinstance(raw_think, str) or not raw_think:
-                    raw_think = block.get('data')
-                thinking_text = raw_think if isinstance(raw_think, str) else ''
+                if not decoded:
+                    # `redacted_thinking` 只有加密串（`data`），拿不到明文；但**字段
+                    # 存在**就是上游补丁的触发条件，所以带上密文比丢掉安全（它是密文，
+                    # 不含可识别的自然语言指纹）。
+                    raw_think = block.get('thinking')
+                    if not isinstance(raw_think, str) or not raw_think:
+                        raw_think = block.get('data')
+                    decoded = raw_think if isinstance(raw_think, str) else ''
+                # **累积**而不是覆盖：一条 assistant 里可能有多个 thinking 块
+                # （分段推理 / redacted + 明文并存），只留最后一个会把前文丢掉。
+                # 与 responses.py 的处理保持一致——两套协议面对的是同一份推理内容，
+                # 行为不该因客户端选了哪个协议而不同。
+                thinking_text = decoded if thinking_text is None else thinking_text + decoded
             elif kind == 'tool_use':
                 tool_calls.append({
                     'id': str(block.get('id') or f'call_{uuid.uuid4().hex[:12]}'),
