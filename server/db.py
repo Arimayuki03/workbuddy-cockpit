@@ -814,12 +814,19 @@ def backfill_usage_from_logs() -> dict:
     """
     # 应有用量（按天 × 密钥 × 模型）
     # 必须与 bump_usage 用同一时区口径（本地），否则凌晨的调用会被算成两天
+    #
+    # 归一化表达式同样要**同时**用在 SELECT 与 GROUP BY，且空串也要折成默认值
+    # （原因见 rebuild_usage_from_logs 里的说明：GROUP BY 复用别名会绑定到源列；
+    #   SQL 的 COALESCE 不处理空串、Python 的 `or` 会 —— 两边规则必须一致）。
+    model_expr = "COALESCE(NULLIF(model,''),'')"
+    realm_expr = "COALESCE(NULLIF(realm,''),'cn')"
+    day_expr = day_sql('ts')
     expected = query(
-        f"SELECT {day_sql('ts')} AS day, key_id, COALESCE(model,'') AS model, "
-        "COALESCE(realm,'cn') AS realm, "
+        f"SELECT {day_expr} AS day, key_id, {model_expr} AS model, {realm_expr} AS realm, "
         "COUNT(*) AS requests, COALESCE(SUM(prompt_tokens),0) AS pt, "
         "COALESCE(SUM(completion_tokens),0) AS ct, COALESCE(SUM(credit),0) AS cr "
-        "FROM request_logs WHERE key_id IS NOT NULL GROUP BY day, key_id, model, realm"
+        f"FROM request_logs WHERE key_id IS NOT NULL "
+        f"GROUP BY {day_expr}, key_id, {model_expr}, {realm_expr}"
     )
     # 键含 realm：两个版本的同名模型是不同行，否则回填会把它们并成一条
     current = {
@@ -876,26 +883,55 @@ def rebuild_usage_from_logs() -> dict:
     注意：本操作以 request_logs 为唯一依据。若请求日志曾被清空，
     那部分历史汇总会随之丢失（接口上已明确标注）。
     """
-    # realm 一并重建：日志里存了它，重建时若丢掉，界面按版本切换就查不到了。
-    # 历史日志该列为 NULL → 按 cn 归类（与 realm_of_model 口径一致）。
+    # 归一化表达式必须**同时**用在 SELECT 与 GROUP BY 上，不能只在 SELECT 里写
+    # 别名、GROUP BY 里复用别名。
+    #
+    # 原因（线上 bug）：SQLite 解析 `GROUP BY realm` 时，因为 FROM 的表里**也有**
+    # 名为 realm 的列，该名字绑定到**源列**而不是输出别名 `COALESCE(realm,'cn')`。
+    # 于是 `realm IS NULL` 与 `realm='cn'` 被分成两组，但两组的输出值都是 'cn' ——
+    # 随后 INSERT 就撞上 usage_daily 的主键 (day,key_id,model,realm)，
+    # 报 `UNIQUE constraint failed`，接口 500（界面上是「Internal Server Error」）。
+    # model 列同理（`COALESCE(model,'')` vs 源列 model）。
+    #
+    # 历史日志里 realm 为 NULL 是常态（该列是后加的），所以这不是理论风险。
+    #
+    # 第二处必须对齐：**空串也要归一**。SQL 的 COALESCE 只处理 NULL，而 Python 的
+    # `x or 'cn'` 连空串一起兜住 —— 两边规则不同就会出现「SQL 分成两组、写库时
+    # 都变成 cn」的第二次撞键。所以 SQL 侧用 NULLIF 把空串也折成 NULL，
+    # 与 Python 的 `or 'cn'` 完全一致。
+    model_expr = "COALESCE(NULLIF(model,''),'')"
+    realm_expr = "COALESCE(NULLIF(realm,''),'cn')"
+    day_expr = day_sql('ts')
     expected = query(
-        f"SELECT {day_sql('ts')} AS day, key_id, COALESCE(model,'') AS model, "
-        "COALESCE(realm,'cn') AS realm, "
+        f"SELECT {day_expr} AS day, key_id, {model_expr} AS model, {realm_expr} AS realm, "
         "COUNT(*) AS requests, COALESCE(SUM(prompt_tokens),0) AS pt, "
         "COALESCE(SUM(completion_tokens),0) AS ct, COALESCE(SUM(credit),0) AS cr "
-        "FROM request_logs WHERE key_id IS NOT NULL GROUP BY day, key_id, model, realm"
+        f"FROM request_logs WHERE key_id IS NOT NULL "
+        f"GROUP BY {day_expr}, key_id, {model_expr}, {realm_expr}"
     )
     before = query_one('SELECT COUNT(*) AS c, COALESCE(SUM(requests),0) AS r, '
                        'COALESCE(SUM(prompt_tokens+completion_tokens),0) AS t FROM usage_daily')
-    execute('DELETE FROM usage_daily')
-    for row in expected:
-        execute(
-            'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, completion_tokens, credit, realm) '
-            'VALUES(?, ?, ?, ?, ?, ?, ?, ?)',
-            (row['day'], row['key_id'], row['model'], int(row['requests']),
-             int(row['pt']), int(row['ct']), float(row['cr'] or 0),
-             str(row['realm'] or 'cn')),
-        )
+    # 删除与重建必须在**同一个事务**里。此前是「先 DELETE（已提交）再逐条 INSERT」，
+    # 一旦插入中途失败（就是上面那个归一化 bug），统计表已经被清空、只剩半份数据，
+    # 而 request_logs 完好 —— 用户看到的就是「今天有 N 次调用、统计却是 0」，
+    # 且**每次点重建都在继续破坏数据**。原子化之后，失败就整体回滚，
+    # 原有的统计原样保留（宁可暂时不准，也不能把仅有的数据弄丢）。
+    conn = connect()
+    with _lock:
+        try:
+            conn.execute('BEGIN')
+            conn.execute('DELETE FROM usage_daily')
+            conn.executemany(
+                'INSERT INTO usage_daily(day, key_id, model, requests, prompt_tokens, '
+                'completion_tokens, credit, realm) VALUES(?, ?, ?, ?, ?, ?, ?, ?)',
+                [(row['day'], row['key_id'], row['model'], int(row['requests']),
+                  int(row['pt']), int(row['ct']), float(row['cr'] or 0),
+                  str(row['realm'] or 'cn')) for row in expected],
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
     after = query_one('SELECT COUNT(*) AS c, COALESCE(SUM(requests),0) AS r, '
                       'COALESCE(SUM(prompt_tokens+completion_tokens),0) AS t FROM usage_daily')
     return {
