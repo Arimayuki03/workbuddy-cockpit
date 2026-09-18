@@ -445,7 +445,7 @@
     "blocked": "차단됨",
     "allowed": "허용됨",
     "noAccessLogs": "접근 기록 없음",
-    "noAccessLogsDesc": "게이트웨이로 요청이 들어오면 여기에 기록됩니다",
+    "noAccessLogsDesc": "아직 차단 기록이 없습니다. 거부된 요청이 여기에 남습니다.",
     "auditLog": "관리 콘솔 감사 로그",
     "auditLogHint": "로그인, 비밀번호 변경, 사용자 추가·삭제 등 민감한 작업",
     "auditCount": "총 {n}건",
@@ -484,7 +484,8 @@
     "reasonIpNotAllowed": "소스 IP가 키 허용 목록에 없습니다",
     "reasonTooManyIps": "키의 IP 수가 상한에 도달했습니다",
     "reasonRealmMismatch": "모델 버전이 키 제한과 일치하지 않습니다",
-    "reasonModelNotAllowed": "모델이 키 허용 목록에 없습니다"
+    "reasonModelNotAllowed": "모델이 키 허용 목록에 없습니다",
+    "accessLogScope": "차단된 요청만 기록합니다. 허용된 호출은 요청 로그 페이지에서 볼 수 있습니다"
   },
   "models": {
     "title": "모델",

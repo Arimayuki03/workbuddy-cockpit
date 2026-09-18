@@ -315,7 +315,15 @@ export default function SecurityPage() {
 
       <section className="overflow-hidden rounded-[20px] bg-muted">
         <div className="flex items-center justify-between px-4 py-3">
-          <div className="text-sm font-medium">{t('security.accessLog')}</div>
+          <div className="flex flex-wrap items-baseline gap-2">
+            <span className="text-sm font-medium">{t('security.accessLog')}</span>
+            {/* 说明这张表**只记拦截**：用户看到记录变少时会以为是坏了，
+                而实际上是被刻意收窄到安全信号（放行的明细在「请求日志」页）。
+                不写这句，这个改动本身就是个新的困惑源。 */}
+            <span className="text-[11px] text-muted-foreground">
+              {t('security.accessLogScope')}
+            </span>
+          </div>
           {isAdmin && (
             <ConfirmDialog
               title={t('security.clearLogsTitle')}

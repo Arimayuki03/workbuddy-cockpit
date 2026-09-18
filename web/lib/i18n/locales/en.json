@@ -469,7 +469,7 @@
     "blocked": "Blocked",
     "allowed": "Allowed",
     "noAccessLogs": "No access records",
-    "noAccessLogsDesc": "Requests reaching the gateway are recorded here",
+    "noAccessLogsDesc": "No blocked requests yet. Rejected calls will show up here.",
     "auditLog": "Admin audit log",
     "auditLogHint": "Sensitive actions: sign-in, password changes, user add/remove",
     "auditCount": "{n} records",
@@ -508,7 +508,8 @@
     "reasonIpNotAllowed": "source IP not in the key's allowlist",
     "reasonTooManyIps": "key reached its IP count limit",
     "reasonRealmMismatch": "model edition conflicts with the key's restriction",
-    "reasonModelNotAllowed": "model not in the key's allowlist"
+    "reasonModelNotAllowed": "model not in the key's allowlist",
+    "accessLogScope": "Only blocked requests are recorded; allowed calls appear in Request logs"
   },
   "models": {
     "title": "Models",

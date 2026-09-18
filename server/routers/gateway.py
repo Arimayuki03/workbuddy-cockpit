@@ -162,12 +162,23 @@ def _rate_limited(key: dict) -> tuple[bool, int]:
 
 def _log_ip(ip: str, path: str, blocked: bool, ua: str | None,
             reason: str | None = None) -> None:
-    """记录一次入站访问（含被拒绝的）。
+    """记录一次入站访问。**默认只记拦截**，放行不记（见下）。
 
     reason 是**被拦的原因**（issue #33）。此前只有一个 blocked 布尔，界面上
     显示「已拦截」却看不出是哪一关拦的：没带密钥 / 密钥不认识 / IP 规则拦的，
     三者的处置方式完全不同（改客户端配置 / 重新发密钥 / 改 IP 规则）。用户
     只能靠猜——实测有用户因此提了 issue 也说不清属于哪一种。
+
+    为什么放行不记（服务器审计的结论）：这张表在安全页叫「IP 访问日志」，
+    用途是**安全审计**——回答「谁在扫我、谁被挡了」。此前每个成功请求也写一行，
+    实测线上 **7877 行里只有 17 行是拦截记录（0.2%）**，真正该看的信号被
+    7860 行正常流量淹没；而表有 2 万行滚动上限（其注释写明「按每次拒绝一行
+    估算足够回溯近期攻击」），被成功请求占满后保留窗口从数月压到约 17 天
+    —— 真出事时记录可能已经被挤掉了。正常流量在「请求日志」页有完整记录，
+    这里重复记一遍只制造噪声。
+
+    例外：`WB_AUDIT_ALL_ACCESS=1` 时恢复全量记录（需要核对"某 IP 到底来过
+    什么"时临时打开）。放行的明细始终能在请求日志里查到，所以默认不记不丢信息。
 
     **这条路径在校验密钥之前执行**，所以它是**未鉴权可达**的写库入口：
     「没有 token」「token 无效」都会先写一行。因此这里必须自我约束，
@@ -181,6 +192,8 @@ def _log_ip(ip: str, path: str, blocked: bool, ua: str | None,
       * 写入走 `db.add_ip_access_log`，由它负责行数上限（超出就丢最旧的），
         避免表无限增长直到磁盘写满。
     """
+    if not blocked and not config.AUDIT_ALL_ACCESS:
+        return
     db.add_ip_access_log(ip, path, blocked, ua, reason)
 
 
@@ -253,12 +266,22 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
         # 清洗只影响入库文本，**不影响转发给上游的内容**（body 早已发走）。
         model_clean = db._clean(model, 128)
         realm = db.realm_of_model(model_clean)
-        db.execute(
-            'INSERT INTO request_logs(ts, key_id, ip, model, mapped_model, status, prompt_tokens, completion_tokens, latency_ms, first_token_ms, ua, error, stream, credit, realm) '
-            'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (int(time.time()), key['id'] if key else None, db._clean(ip, 64),
-             model_clean, db._clean(mapped, 128), status, pt, ct, latency, first_token,
-             db._clean(ua, 512), db._clean(error, 500), 1 if stream else 0, credit, realm),
+        db.add_request_log(
+            ts=int(time.time()),
+            key_id=key['id'] if key else None,
+            ip=db._clean(ip, 64),
+            model=model_clean,
+            mapped_model=db._clean(mapped, 128),
+            status=status,
+            prompt_tokens=pt,
+            completion_tokens=ct,
+            latency_ms=latency,
+            first_token_ms=first_token,
+            ua=db._clean(ua, 512),
+            error=db._clean(error, 500),
+            stream=1 if stream else 0,
+            credit=credit,
+            realm=realm,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning('写入请求日志失败（不影响请求）: %s', exc)

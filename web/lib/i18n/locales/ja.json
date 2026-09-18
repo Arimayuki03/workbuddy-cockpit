@@ -445,7 +445,7 @@
     "blocked": "ブロック済み",
     "allowed": "許可済み",
     "noAccessLogs": "アクセス記録がありません",
-    "noAccessLogsDesc": "ゲートウェイにリクエストが届くとここに記録されます",
+    "noAccessLogsDesc": "まだ遮断記録はありません。拒否されたリクエストがここに残ります。",
     "auditLog": "管理端の監査ログ",
     "auditLogHint": "ログイン・パスワード変更・ユーザー追加/削除などの重要操作",
     "auditCount": "全 {n} 件",
@@ -484,7 +484,8 @@
     "reasonIpNotAllowed": "送信元 IP がキーの許可リストにありません",
     "reasonTooManyIps": "キーの IP 数が上限に達しました",
     "reasonRealmMismatch": "モデルの版とキーの制限が一致しません",
-    "reasonModelNotAllowed": "モデルがキーの許可リストにありません"
+    "reasonModelNotAllowed": "モデルがキーの許可リストにありません",
+    "accessLogScope": "遮断されたリクエストのみ記録します。通過した分は「リクエストログ」ページにあります"
   },
   "models": {
     "title": "モデル",
