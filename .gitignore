@@ -56,6 +56,9 @@ dev/.task-shots
 # 失败统计验收脚本（verify_failure_stats_ui.py）的临时数据与截图
 dev/.fail-stats
 dev/.fail-shots
+# 登录轮询可见性验收脚本（verify_login_poll_visibility.py）的临时数据与截图
+dev/.login-poll
+dev/.login-shots
 
 # 安全测试脚本（临时）
 .sec*.py
