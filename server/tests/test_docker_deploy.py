@@ -594,6 +594,24 @@ class DockerAssetsTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0,
                          'Dockerfile 结构自检失败：' + r.stdout + r.stderr)
 
+    def test_dockerfile_build_logic_branches(self) -> None:
+        """真跑一遍 Dockerfile 里前端阶段的分支判定（在等价目录上）。
+
+        比读代码可靠：那个 RUN 块是纯 shell，可以在临时目录上执行，确认三种
+        输入（有完整产物 / 产物不完整 / 无产物）各自走对分支 —— 这正是 issue #38
+        修复的核心。缺 bash 的环境跳过（Windows 上是 Git Bash，CI 上是原生 bash）。
+        """
+        import subprocess
+        import shutil
+        if not shutil.which('bash'):
+            self.skipTest('本环境没有 bash')
+        r = subprocess.run(
+            [sys.executable, str(_ROOT / 'dev' / 'check_dockerfile_build.py')],
+            capture_output=True, text=True, timeout=180,
+        )
+        self.assertEqual(r.returncode, 0,
+                         '前端阶段分支判定不正确：' + r.stdout + r.stderr)
+
     def test_compose_has_restart_policy(self) -> None:
         """restart 策略是容器版「一键更新」能生效的前提：
         更新进程结束容器后，靠它用新代码拉起。"""
