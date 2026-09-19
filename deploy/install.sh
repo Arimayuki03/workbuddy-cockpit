@@ -205,7 +205,7 @@ elif [ -f "${SRC_DIR}/web/package.json" ]; then
     die "需要 Node.js 构建前端；或下载 Release 包（内含已构建的 web/out）"
   fi
 else
-  die "缺少前端产物 web/out，请使用 Release 包或先执行 npm run build:export"
+  die "源码目录里既没有前端产物、也没有前端源码（${SRC_DIR}/web 不存在）——请确认源码完整，或改用 Release 包"
 fi
 
 # 写入版本标记（供界面显示当前版本）

@@ -408,6 +408,14 @@ docker compose up -d --build
 docker compose logs workbuddy-manager | grep -A2 密码   # 首启随机密码
 ```
 
+> **前端会在镜像里自动构建**：`web/out`（前端产物）不入库，所以 `git clone` 得到的
+> 工作区里没有它。构建时若发现没有，就自动在容器内 `npm ci && next build`
+> （约 1-2 分钟，首次会拉取 Node 镜像）；若已有（例如从 Release 包解压出来的），
+> 则直接复用、跳过这一步。两条路都不需要你事先装 Node 或手动构建。
+>
+> 国内网络下 npm 官方源可能很慢，可加镜像：
+> `docker compose build --build-arg NPM_REGISTRY=https://registry.npmmirror.com`
+
 也可以直接用构建好的镜像（每次发版会推到 GHCR）：
 
 ```bash
@@ -461,8 +469,9 @@ sudo bash deploy/install.sh
 **全程无需手工编辑配置。** 若已自备上游，加 `--skip-upstream` 即可跳过，
 脚本不会改动已有配置与账号。
 
-> 通过 `git clone` 部署时，需先在 `web/` 执行 `npm ci && npm run build:export`
-> （构建产物不入库），或改用 Release 包。
+> 通过 `git clone` 部署时**不需要**手动构建前端：安装脚本会发现缺少
+> `web/out`（前端产物不入库）并自动 `npm ci && npm run build:export`
+> （需机器上有 Node.js；没有则提示改用 Release 包 —— 那里面已含构建好的产物）。
 
 首次启动的管理员密码：
 

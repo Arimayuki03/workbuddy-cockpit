@@ -460,11 +460,13 @@ class OutboundFieldNameTest(unittest.TestCase):
         self.assertEqual(msg.get('reasoning'), '先思考')
         self.assertEqual(msg.get('reasoning_content'), '先思考')
 
-    def test_empty_reasoning_still_writes_both_fields(self) -> None:
-        """拿不到文本时字段仍要在（字段存在本身有意义）。
+    def test_empty_reasoning_writes_no_field(self) -> None:
+        """拿不到文本时**不挂字段**（而不是挂空串）。
 
-        但要说清**空文本救不了场**：没有真实推理内容，多轮一致性本来就无从满足。
-        真正的解法是别把文本丢掉 —— 这正是本文件其余测试在守的。
+        社区实测（issue #37）称 `reasoning` 为空串会被拒、非空才过；本仓
+        复现不出那个开关，但两种情况都指向同一结论：挂空串在"会被拒"时有害、
+        在"不会拒"时又无收益（上游兜底本就会补空串）—— 无收益的风险不值得留。
+        改挂为不挂，并记一条 WARN 让这种畸形输入可见。
         """
         payload = R.to_chat_request({'input': [
             {'type': 'message', 'role': 'user', 'content': 'q'},
@@ -473,8 +475,8 @@ class OutboundFieldNameTest(unittest.TestCase):
              'content': [{'type': 'output_text', 'text': 'a'}]},
         ]})
         msg = self._assistant_msgs(payload)[0]
-        self.assertIn('reasoning', msg, '字段存在本身有意义（上游据此判定有无痕迹）')
-        self.assertIn('reasoning_content', msg)
+        self.assertNotIn('reasoning', msg)
+        self.assertNotIn('reasoning_content', msg)
 
     def test_values_are_always_identical(self) -> None:
         """两个字段的值必须一致 —— 不一致会造出上游无法解释的组合。"""

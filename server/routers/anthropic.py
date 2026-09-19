@@ -367,6 +367,17 @@ def to_openai_request(body: dict) -> dict:
         # 同等对待，上游（workbuddy2api → CodeBuddy）实测能识别为视觉输入。
         parts = tool_images + parts
 
+        # 拿到了空的推理文本（客户端发了 thinking 块、但里面没有可用内容）时按
+        # 「无推理」处理，并记一条 WARN。理由与 responses.py 同名分支一致：
+        # 挂空串在「空串会被拒」的实测结论下有害、在结论不成立时又无收益，故不挂；
+        # 记日志是因为这条路径此前完全静默，真遇到 11155 时无从排查是哪个客户端。
+        if thinking_text == '':
+            logger.warning(
+                '客户端发来的 thinking 块无可提取内容 —— 该轮将不带推理内容，'
+                '若上游报 11155 请把此日志一并提供',
+            )
+            thinking_text = None
+
         if tool_calls:
             msg: dict = {'role': 'assistant', 'tool_calls': tool_calls}
             text = '\n'.join(p['text'] for p in parts if p.get('type') == 'text')

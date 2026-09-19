@@ -415,10 +415,25 @@ def to_chat_request(body: dict) -> dict:
                     pending_reasoning = (
                         text if pending_reasoning is None else pending_reasoning + text
                     )
-                elif pending_reasoning is None:
-                    # 见到 item 但没文本：记一个空串，让下游知道「存在过」——
-                    # 上游的触发条件是字段存在，空串同样能满足。
-                    pending_reasoning = ''
+                else:
+                    # 客户端发了 reasoning 项、但里面**没有可用文本**（空 summary /
+                    # 空 content / 只有空的 encrypted_content）。这种畸形输入下我们
+                    # 无从还原推理内容，于是**不挂字段**，并记一条 WARN。
+                    #
+                    # 早先这里挂空串，理由是「字段存在就能满足校验」。但社区实测
+                    # （issue #37 的取值矩阵）表明**空串仍会被拒**、非空才过 ——
+                    # 若该结论成立，挂空串让我们从「没痕迹」变成「有痕迹但内容为空」，
+                    # 反而更糟；若该结论不成立（本仓复现不出，见该 issue 的讨论），
+                    # 挂空串与不挂在结果上又没差别（上游兜底本就会补空串）。
+                    # 两种情况都指向同一结论：**挂空串是无收益的风险**，故不挂。
+                    #
+                    # 记 WARN 是因为这条路径此前完全静默：真遇到 11155 时，
+                    # 用户与我们都看不到「是哪个客户端发了空推理项」，只能猜。
+                    logger.warning(
+                        '客户端发来的 reasoning 项无可提取文本（type=%s keys=%s）——'
+                        '该轮将不带推理内容，若上游报 11155 请把此日志一并提供',
+                        item.get('type'), sorted(item.keys()),
+                    )
                 continue
 
             # message（或没写 type 的 {role, content} —— 宽容处理）
