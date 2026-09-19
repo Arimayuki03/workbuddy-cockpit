@@ -73,11 +73,24 @@ export function AddAccountDialog({
   const pollingRef = useRef(false);
   /** 连续轮询失败次数：偶发抖动不该打断用户，持续失败才报出来 */
   const failsRef = useRef(0);
+  /**
+   * 当前这轮轮询的 tick 函数。
+   *
+   * 存成 ref 是为了让 `visibilitychange` 监听器能拿到最新那份 —— 与 timer
+   * 同生共死，避免「切回来时调用了一个已被 stopPoll 作废的闭包」。
+   */
+  const tickRef = useRef<(() => void) | null>(null);
 
   const stopPoll = useCallback(() => {
     if (timerRef.current !== null) {
       window.clearInterval(timerRef.current);
       timerRef.current = null;
+    }
+    // 一并摘掉 visibilitychange 监听：否则弹窗关掉后，切标签页仍会去调用
+    // 已作废的 tick（轻则白发请求，重则对着已关闭的弹窗 setState）。
+    if (tickRef.current !== null) {
+      document.removeEventListener('visibilitychange', tickRef.current);
+      tickRef.current = null;
     }
     pollingRef.current = false;
   }, []);
@@ -95,7 +108,12 @@ export function AddAccountDialog({
       setPhase('waiting');
       setMessage(t('addAccount.waiting'));
 
-      timerRef.current = window.setInterval(async () => {
+      const tick = async () => {
+        // 标签页在后台就不查：浏览器本来也会把定时器节流到约 1 次/分钟，
+        // 与其让它零星触发，不如等用户切回来时补一次（与 useHeartbeat 同口径）。
+        // 判断放在 tick 内部而不是调用处 —— 因为 visibilitychange 在**隐藏与
+        // 显示时都会触发**，放外面的话「切走」那一下也会白发一次请求。
+        if (document.hidden) return;
         if (pollingRef.current) return;  // 上一次还没回来，跳过本轮
         pollingRef.current = true;
         try {
@@ -154,7 +172,16 @@ export function AddAccountDialog({
         } finally {
           pollingRef.current = false;
         }
-      }, 2000);
+      };
+
+      tickRef.current = tick;
+      timerRef.current = window.setInterval(tick, 2000);
+      // **切回标签页立即补一次**，这是「点链接登录后界面迟迟不更新」的关键：
+      // 用户点授权链接会跳到新标签（或新窗口）完成登录，原标签进入后台被节流；
+      // 没有这一句的话，他切回来看见的仍是切走前那一帧，要等最久一整分钟才刷新
+      // —— 表现就是「明明登录成功了，界面还卡在等待」。
+      // 项目里的 useHeartbeat 早就这么做了，这里当初漏了。
+      document.addEventListener('visibilitychange', tick);
     } catch (e) {
       setPhase('error');
       setMessage(errText(e));
