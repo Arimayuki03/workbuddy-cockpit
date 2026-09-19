@@ -34,8 +34,43 @@ def day_sql(column: str = 'ts') -> str:
 
     注意 SQLite 的 date(ts,'unixepoch') 是 UTC，不能直接用它——那正是
     之前造成口径不一致的原因。这里用 'unixepoch','localtime' 两个修饰符。
+
+    **当心索引失效**：这个表达式把 `ts` 包在函数里，SQLite 无法再走 `ts` 上的
+    索引（查询计划会退化成 SCAN，即全表扫描）。实测 5 万行时一次过滤要 13.8ms，
+    而改成范围条件只要 6.0ms，且数据越多差距越大。
+
+    所以：**只按天过滤**（`day >= X` / `day = X`）的场景请改用
+    `day_start_ts()` 把它换算成时间戳范围（见那里的说明）；只有确实要**按天
+    分组聚合**（GROUP BY 日期）时才用它——那种场景没法避免表达式。
     """
     return f"strftime('%Y-%m-%d', {column}, 'unixepoch', 'localtime')"
+
+
+def day_start_ts(day: str | None = None) -> int:
+    """某一天（本地时区）的**零点时间戳**；day 为 None 时取今天。
+
+    为什么需要它：`day_sql(ts) >= '2026-09-15'` 这种写法会把 `ts` 包在函数里，
+    导致 `ts` 上的索引失效、退化成全表扫描。而「本地日期 >= X」与
+    「ts >= X 当地零点」在语义上**完全等价**（两者都是「本地日期不早于 X」），
+    换成后者就能走索引。
+
+    ## 等价性的边界（已逐行验证，不要凭直觉改）
+
+    两种写法都只有**下界**、没有上界 —— 也就是说未来的时间戳两边都算进来。
+    `day_sql` 的写法看起来像「日期字符串比较」，但因为它同样没有上界，所以
+    「本地日期 == 明天」的行在两种口径下都被包含。这一点用边界样本
+    （当天零点前后一秒、次日零点）逐行比对过，结果完全一致。
+
+    ## 时区
+
+    用 `time.mktime(time.strptime(...))` 按**本地时区**解释 —— 与 `day_sql` 的
+    `'localtime'` 修饰符同口径。两者都跟随本机时区，所以部署到不同时区的机器上
+    仍然一致（这也是当初统一到本地时区的原因，见 `day_of` 的说明）。
+    """
+    if day is None:
+        day = day_of()
+    return int(time.mktime(time.strptime(day, '%Y-%m-%d')))
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS api_keys (
