@@ -256,15 +256,26 @@ class RequestConversionTest(unittest.TestCase):
             {'role': 'user', 'content': 'q2'},
         ])
 
-    def test_reasoning_without_text_still_sets_field(self) -> None:
-        """推理文本取不到时**字段仍要在** —— 上游是按「字段存在」判断有无痕迹的。"""
+    def test_reasoning_without_text_does_not_set_field(self) -> None:
+        """推理项里**没有可用文本**时不挂字段（而不是挂空串）。
+
+        这是判断修正。早先这里挂空串，理由是「上游按字段存在判断有无痕迹」。
+        但社区实测（issue #37 的取值矩阵）表明 `reasoning` **为空串会被拒**、
+        非空才过 —— 若成立，挂空串把「没痕迹」变成「有痕迹但内容为空」，更糟；
+        若不成立（本仓复现不出那个开关），挂空串与不挂又没差别（上游兜底本就会
+        补空串）。两种情况都指向：**挂空串是无收益的风险**，故不挂。
+
+        注意区分「没有文本」与「没有这个项」：后者本来就不挂任何字段，
+        本测试覆盖的是前者（客户端发了空的推理项 —— 畸形输入）。
+        """
         out = R.to_chat_request({'model': 'm', 'input': [
             {'type': 'reasoning', 'id': 'rs_2', 'summary': []},
             {'type': 'message', 'role': 'assistant',
              'content': [{'type': 'output_text', 'text': 'a'}]},
         ]})
-        self.assertIn('reasoning_content', out['messages'][0])
-        self.assertEqual(out['messages'][0]['reasoning_content'], '')
+        msg = out['messages'][0]
+        self.assertNotIn('reasoning', msg, '空推理不该挂 reasoning（会被上游拒）')
+        self.assertNotIn('reasoning_content', msg)
 
     def test_reasoning_attached_to_tool_call_message(self) -> None:
         """工具调用回合的推理同样要保留（模型先思考再调工具）。"""

@@ -519,8 +519,80 @@ class DockerAssetsTest(unittest.TestCase):
         self.assertIn('USER app', df, '不应以 root 运行容器')
         self.assertIn('WB_RUN_MODE=docker', df,
                       '镜像里没设运行形态 —— 容器内会误判成宿主、去调 systemctl')
-        # 前端产物必须来自静态导出（server 构建会产出 server 版，FastAPI 托管不了）
-        self.assertIn('COPY web/out', df)
+        # 前端产物必须来自静态导出（server 构建会产出 server 版，FastAPI 托管不了）。
+        #
+        # 断言的是**实际生效的 COPY 指令**（以 "COPY " 开头的那一行），不是
+        # 文本里出现过 "COPY web/out" —— 注释里提到它也算匹配，那样会变成
+        # 假绿（本文件此前正是如此：指令早改成 --from=，断言却还在看注释）。
+        self.assertRegex(
+            df, r'(?m)^COPY\s+--from=\S+\s+/\S*\s+/app/web/out\s*$',
+            '镜像里没有把前端产物拷到 /app/web/out 的 COPY 指令')
+
+    def test_frontend_built_in_container_when_missing(self) -> None:
+        """工作区没有 web/out 时，镜像必须能自己构建前端（issue #38）。
+
+        现场：`git clone && docker build .` 报
+
+            ERROR: failed to build: ... "/web/out": not found
+
+        因为 web/out 是构建产物、被 .gitignore 排除，clone 出来的工作区里没有它。
+        修法是加一个 Node 阶段在容器内构建 —— 本测试锁住该阶段的存在与关键细节。
+        """
+        df = (_ROOT / 'Dockerfile').read_text(encoding='utf-8')
+        self.assertRegex(df, r'(?m)^FROM\s+node:', '没有 Node 构建阶段，容器内无法构建前端')
+
+        # 构建前必须判断"已有产物就跳过"：否则发布包/CI 场景会白跑一遍 npm
+        self.assertRegex(df, r'if \[ -f /src/out/index\.html \]',
+                         '前端阶段没有判断已有产物，发布会重复构建')
+        # 静态导出开关：next.config.ts 靠它决定 output:'export'，
+        # 漏了会构建出 server 版产物（FastAPI 托管不了，页面 404）
+        self.assertIn('NEXT_OUTPUT_EXPORT=1', df,
+                      '没有设置 NEXT_OUTPUT_EXPORT —— 会构建出非静态导出产物')
+        # 构建完必须校验产物存在，否则失败会延后到运行时（页面白屏）
+        self.assertIn('out/index.html', df)
+
+    def test_dockerignore_keeps_frontend_source_and_drops_node_modules(self) -> None:
+        """.dockerignore 必须放行前端**源码**、排除 node_modules。
+
+        这一对容易配错且后果对立：
+          · 误排 web/ 源码 → git clone 场景构建不出前端（回到 issue #38）；
+          · 不排 node_modules → 多架构构建要把几百 MB 送进构建器（很慢）。
+
+        `web/node_modules` 是精确路径，不会连带排除源码 —— 但不能写成
+        `web/`（会同时排掉 out/ 与源码）。
+        """
+        di = (_ROOT / '.dockerignore').read_text(encoding='utf-8')
+        lines = [l.strip() for l in di.splitlines()
+                 if l.strip() and not l.strip().startswith('#')]
+        self.assertIn('web/node_modules', lines, '未排除 node_modules，构建上下文会很大')
+        for bad in ('web/', 'web', 'web/*'):
+            self.assertNotIn(bad, lines,
+                             f'.dockerignore 里的 {bad!r} 会连带排除前端源码与 out/')
+
+    def test_compose_passes_npm_registry_arg(self) -> None:
+        """compose 要能传 npm 镜像源（国内构建前端时必需），且与 Dockerfile 对齐。"""
+        import yaml
+        dc = yaml.safe_load((_ROOT / 'docker-compose.yml').read_text(encoding='utf-8'))
+        args = (dc['services']['workbuddy-manager'].get('build') or {}).get('args') or {}
+        self.assertIn('NPM_REGISTRY', args, 'compose 没有暴露 NPM_REGISTRY')
+        df = (_ROOT / 'Dockerfile').read_text(encoding='utf-8')
+        self.assertRegex(df, r'(?m)^ARG\s+NPM_REGISTRY',
+                         'Dockerfile 未声明 NPM_REGISTRY —— compose 传了也会被忽略')
+
+    def test_dockerfile_structure_checker_passes(self) -> None:
+        """跑一遍 Dockerfile 结构自检（指令拼写 / 阶段引用 / shell 配平）。
+
+        本地与 CI 都不一定随时能跑 `docker build`（本机就没装），而这份
+        Dockerfile 改错（阶段引用写错、shell 引号漏了）的代价是**用户装不上**。
+        检查器在 dev/check_dockerfile.py，这里把它接进测试，让 CI 也能拦住。
+        """
+        import subprocess
+        r = subprocess.run(
+            [sys.executable, str(_ROOT / 'dev' / 'check_dockerfile.py')],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(r.returncode, 0,
+                         'Dockerfile 结构自检失败：' + r.stdout + r.stderr)
 
     def test_compose_has_restart_policy(self) -> None:
         """restart 策略是容器版「一键更新」能生效的前提：

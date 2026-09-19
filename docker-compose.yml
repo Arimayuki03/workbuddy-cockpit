@@ -34,6 +34,11 @@ services:
         # 留空 = 官方源，失败时 Dockerfile 会自动降级到清华镜像重试。
         # 可选镜像：https://pypi.tuna.tsinghua.edu.cn/simple / https://mirrors.aliyun.com/pypi/simple
         PIP_INDEX_URL: ""
+        # 可选：npm 依赖镜像。**只在需要容器内构建前端时用得上**（即工作区
+        # 没有 web/out 的情况，如 git clone 部署）。成因与上面两个相同——
+        # 官方 registry 国内访问慢且会断。
+        #   docker compose build --build-arg NPM_REGISTRY=https://registry.npmmirror.com
+        NPM_REGISTRY: ""
     image: workbuddy-manager:latest
     container_name: workbuddy-manager
     # 这个 restart 策略是容器版「一键更新」能生效的前提：

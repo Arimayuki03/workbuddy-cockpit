@@ -26,6 +26,74 @@
 #
 # 4. **数据与凭据全部走卷**，不烘进镜像：data/（数据库、日志、更新状态）、
 #    以及上游的 auths/ 与 config.json。
+#
+# 5. **前端由前端构建阶段自己搞定**（见下，修 issue #38）。
+#    为什么需要它：`web/out` 是构建产物、被 .gitignore 排除，所以
+#    `git clone && docker build .` 拿到的工作区里**没有**它 —— 原先直接
+#    `COPY web/out` 会失败在：
+#
+#      ERROR: failed to build: ... "/web/out": not found
+#
+#    （issue #38 报的就是这个。发布包用户不受影响，因为包里带着构建好的
+#    web/out。）
+#
+#    现在：有现成产物就直接用（发布包 / CI），没有就在容器内构建
+#    （git clone）—— 两种部署都一条命令跑通，用户不必先装 Node。
+
+# ── 前端构建阶段 ─────────────────────────────────────────
+#
+# 这一步的存在是为了修 issue #38：`git pull && docker build .` 会失败在
+# `COPY web/out: not found` —— 因为 web/out 是构建产物、被 .gitignore 排除，
+# clone 出来的工作区里没有它。
+#
+# 但两种部署形态下 web/ 目录**都存在**，只是内容不同：
+#   · git clone：有源码，没有 out/
+#   · 发布包 / CI：有 out/（已构建），没有源码
+#
+# 所以这里 `COPY web/ /src/` 两种情况都不会失败，再由下一步在**构建期**
+# 判断走哪条路 —— 避免了「条件 COPY」这个 Docker 不支持的写法。
+#
+#   web/out 已存在 → 直接用它（发布包与 CI 走这条，秒过）
+#   否则           → 容器内 npm ci + next build（git clone 走这条，
+#                    用户不必先自行构建前端）
+FROM node:20-slim AS web-builder
+
+WORKDIR /src
+
+# 可选：npm 依赖镜像。与 Debian/PyPI 同一个成因——中国大陆访问官方 registry
+# 实测缓慢且会断。留空 = 官方源（失败时自动降级到 npmmirror）。
+#   docker compose build --build-arg NPM_REGISTRY=https://registry.npmmirror.com
+ARG NPM_REGISTRY=""
+
+COPY web/ /src/
+
+RUN set -eu; \
+    if [ -f /src/out/index.html ]; then \
+        echo "前端：使用已有的 web/out，跳过构建"; \
+        cp -r /src/out /dist; \
+    else \
+        echo "前端：工作区没有构建产物，在容器内构建（git clone 形态）"; \
+        mkdir -p /build && cp -r /src/. /build/; \
+        cd /build && rm -rf out .next; \
+        npm_ci() { npm ci --no-audit --no-fund ${1:+--registry="$1"}; }; \
+        if [ -n "${NPM_REGISTRY}" ]; then \
+            echo "npm: 使用指定源 ${NPM_REGISTRY}"; \
+            npm_ci "${NPM_REGISTRY}"; \
+        elif npm_ci ""; then \
+            echo "npm: 依赖安装成功（官方源）"; \
+        else \
+            echo "npm: 官方源失败，改用 registry.npmmirror.com 重试…" >&2; \
+            rm -rf node_modules; \
+            npm_ci https://registry.npmmirror.com; \
+            echo "npm: 改用镜像后安装成功（如需固定，构建时传 NPM_REGISTRY）"; \
+        fi; \
+        NEXT_OUTPUT_EXPORT=1 npx --no-install next build; \
+        test -f out/index.html || { echo "前端构建失败：缺少 out/index.html" >&2; exit 1; }; \
+        cp -r out /dist; \
+    fi; \
+    test -f /dist/index.html
+
+# ── 主镜像 ────
 FROM python:3.12-slim
 
 # 环境变量：Python 不要写 pyc（容器是一次性的，写了也没用）、日志不缓冲
@@ -186,7 +254,7 @@ RUN set -eu; \
 
 # 再拷代码与已构建的前端
 COPY server /app/server
-COPY web/out /app/web/out
+COPY --from=web-builder /dist /app/web/out
 COPY deploy /app/deploy
 COPY CHANGELOG.md README.md /app/
 

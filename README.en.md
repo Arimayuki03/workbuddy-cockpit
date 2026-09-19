@@ -469,6 +469,16 @@ docker compose up -d --build
 docker compose logs workbuddy-manager | grep -A2 password   # first-boot random password
 ```
 
+> **The frontend is built inside the image automatically.** `web/out` (the frontend
+> build output) is not committed, so a fresh `git clone` does not contain it. If the
+> build finds it missing, it runs `npm ci && next build` inside the container (one to
+> two minutes, and it pulls the Node image the first time). If it is already present
+> (for example from a release tarball), it is reused and this step is skipped. Neither
+> path requires you to install Node or build the frontend by hand.
+>
+> On slow networks you can point npm at a mirror:
+> `docker compose build --build-arg NPM_REGISTRY=https://registry.npmmirror.com`
+
 Or pull the prebuilt image (pushed to GHCR on every release):
 
 ```bash
@@ -533,8 +543,11 @@ The script will:
 **No manual config editing required.** If you already have the upstream, pass
 `--skip-upstream` and it will not touch your existing config or accounts.
 
-> When deploying via `git clone`, run `npm ci && npm run build:export` inside `web/` first
-> (build artifacts are not committed), or use the release package.
+> When deploying via `git clone` you do **not** need to build the frontend by hand:
+> the installer notices that `web/out` is missing (build artifacts are not committed)
+> and runs `npm ci && npm run build:export` for you (requires Node.js on the machine;
+> if it is absent the installer tells you to use the release package instead, which
+> already contains the built output).
 
 To read the initial admin password:
 

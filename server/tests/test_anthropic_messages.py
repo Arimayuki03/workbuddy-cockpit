@@ -63,14 +63,20 @@ class RequestTranslationTest(unittest.TestCase):
         self.assertEqual(out['messages'][0]['role'], 'assistant')
         self.assertEqual(out['messages'][0]['reasoning_content'], '只有思考')
 
-    def test_empty_thinking_still_sets_field(self) -> None:
-        """拿不到明文（空串）时字段仍要在 —— 上游按字段存在判断有无痕迹。"""
+    def test_empty_thinking_does_not_set_field(self) -> None:
+        """thinking 块里没有可用内容时**不挂字段**（而不是挂空串）。
+
+        社区实测（issue #37）称请求侧的 `reasoning` 为空串会被拒、非空才过。
+        本仓复现不出那个开关，但挂空串在"会被拒"时有害、在"不会拒"时又无收益
+        （上游兜底本就会补空串），所以不值得留 —— 改为不挂，并记 WARN。
+        """
         out = to_openai_request({'model': 'x', 'max_tokens': 10, 'messages': [
             {'role': 'assistant',
              'content': [{'type': 'thinking', 'thinking': ''}, {'type': 'text', 'text': '答'}]},
         ]})
-        self.assertIn('reasoning_content', out['messages'][0])
-        self.assertEqual(out['messages'][0]['reasoning_content'], '')
+        msg = out['messages'][0]
+        self.assertNotIn('reasoning', msg)
+        self.assertNotIn('reasoning_content', msg)
 
     def test_redacted_thinking_carries_ciphertext(self) -> None:
         """`redacted_thinking` 只有密文：带上它（字段存在即触发补丁），不能丢。"""
