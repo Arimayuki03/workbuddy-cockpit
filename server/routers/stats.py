@@ -136,11 +136,15 @@ def _failures(realm: str | None = None) -> dict:
         # 也被算进来（实测：只看 global 却统计到 cn 的历史记录）。
         rf = " AND COALESCE(realm, 'cn') = ?" if realm in ('cn', 'global') else ''
         for label, since in (('today', today), ('week', week)):
-            args = (since,) + ((realm,) if rf else ())
+            # 用 `ts >= 当地零点` 而不是 `day_sql(ts) >= 日期串`：两者逐行等价
+            # （见 test_day_filter_equivalence.py 的边界样本），但后者把 ts 包在
+            # 函数里，查询计划退化成 SCAN（扫整个索引），前者是 SEARCH（按范围
+            # 定位）。本接口在总览页被 30 秒轮询，是热路径。
+            args = (db.day_start_ts(since),) + ((realm,) if rf else ())
             row = db.query_one(
                 f"SELECT SUM(CASE WHEN status >= 400 AND status < 500 THEN 1 ELSE 0 END) AS c4, "
                 f"SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) AS c5 "
-                f"FROM request_logs WHERE {db.day_sql('ts')} >= ? AND key_id IS NOT NULL{rf}",
+                f"FROM request_logs WHERE ts >= ? AND key_id IS NOT NULL{rf}",
                 args,
             )
             if row:
@@ -186,10 +190,16 @@ def _usage_health(today: str, today_requests: int, realm: str | None = None) -> 
             " AND (COALESCE(prompt_tokens,0) + COALESCE(completion_tokens,0) > 0"
             '      OR COALESCE(credit,0) > 0)'
         )
+        # 用 ts 的半开区间 [当地零点, 次日零点) 代替 `day_sql(ts) = 日期串`：
+        # 逐行等价（见 test_day_filter_equivalence.py），但前者走索引。
+        #
+        # **等值必须给上下界**：只写 `ts >= 零点` 会把次日、下月、明年的记录
+        # 全算成今天 —— 那比慢更糟（数字直接错）。所以这里明确写 `< 次日零点`。
         logs_today = db.query_one(
             f'SELECT COUNT(*) AS c FROM request_logs '
-            f'WHERE {db.day_sql("ts")} = ? AND {should}{rgt}',
-            (today,) + (('cn', realm) if rgt else ()),
+            f'WHERE ts >= ? AND ts < ? AND {should}{rgt}',
+            (db.day_start_ts(today), db.day_start_ts(today) + 86400)
+            + (('cn', realm) if rgt else ()),
         )
         n = int(logs_today['c']) if logs_today else 0
     except Exception:  # noqa: BLE001
@@ -274,10 +284,12 @@ def _daily_failures(days: int, realm: str | None = None) -> dict[str, int]:
     try:
         # 同 `_failures`：NULL 固定归 cn，不能把 NULL 兜成查询目标版本
         rf = " AND COALESCE(realm, 'cn') = ?" if realm in ('cn', 'global') else ''
-        args = (_since(max(1, days)),) + ((realm,) if rf else ())
+        # 过滤用 ts 范围（走索引），**分组**仍必须用日期表达式（要按天聚合，
+        # 这个没法避免）。两者分开：过滤是热路径上的大头，分组只作用于过滤后的行。
+        args = (db.day_start_ts(_since(max(1, days))),) + ((realm,) if rf else ())
         rows = db.query(
             f"SELECT {db.day_sql('ts')} AS day, COUNT(*) AS n FROM request_logs "
-            f"WHERE {db.day_sql('ts')} >= ? AND status >= 400 AND key_id IS NOT NULL{rf} "
+            f"WHERE ts >= ? AND status >= 400 AND key_id IS NOT NULL{rf} "
             f'GROUP BY day',
             args,
         )
