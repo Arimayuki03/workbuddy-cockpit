@@ -1038,3 +1038,43 @@ func TestChatHeadersRacesRefreshToken(t *testing.T) {
 
 	wg.Wait()
 }
+
+// TestRefreshTokenExpiresInSanityCap expiresIn 量级上限：上游脏值（如
+// 99999999999 秒 ≈ 3170 年）不得把 ExpiresAt 推到荒谬未来（NeedsRefresh 永假
+// → token 永不刷新反而真过期失效）。依据 pr134-watchlist-analysis.md #4 可选加固：
+// 上限 10 年（实测 R-D 响应恒 expiresIn=5184000=60d，10 年是纯防御量级）。
+// 超限按脏值处理：保留旧 ExpiresAt（与缺省分支同语义）。
+func TestRefreshTokenExpiresInSanityCap(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":0,"data":{"accessToken":"newat","refreshToken":"newrt","expiresIn":99999999999}}`), nil
+	})
+	oldExpiry := time.Now().Add(time.Hour).Unix()
+	a := &auth.Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: oldExpiry}
+	if err := c.RefreshToken(a); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if a.ExpiresAt != oldExpiry {
+		t.Errorf("脏 expiresIn 应保留旧 ExpiresAt=%d, got %d（被推到荒谬未来）", oldExpiry, a.ExpiresAt)
+	}
+	// token 本身仍应写回（脏 expiresIn 只否决过期时间，不否决凭证）。
+	if a.AccessToken != "newat" || a.RefreshToken != "newrt" {
+		t.Errorf("tokens not updated: %+v", a)
+	}
+}
+
+// TestRefreshTokenExpiresInWithinCapApplied 正常量级（60d，实测 R-D 恒 5184000）
+// 不受上限影响：ExpiresAt 照常推进。
+func TestRefreshTokenExpiresInWithinCapApplied(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":0,"data":{"accessToken":"newat","refreshToken":"newrt","expiresIn":5184000}}`), nil
+	})
+	a := &auth.Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: 1}
+	before := time.Now().Unix()
+	if err := c.RefreshToken(a); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	want := before + 5184000
+	if a.ExpiresAt < want-2 || a.ExpiresAt > want+2 {
+		t.Errorf("ExpiresAt=%d want ~%d (60d 正常推进)", a.ExpiresAt, want)
+	}
+}

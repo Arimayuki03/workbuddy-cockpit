@@ -685,3 +685,132 @@ func TestModelsDevNegativesEvictsExpired(t *testing.T) {
 			after, probes+1)
 	}
 }
+
+// TestModelsDevNegativesReStampBlocksEviction 反复被查询的负缓存条目永不淘汰（#121 同类残留）。
+//
+// 缺陷：lookup 未命中的收尾无条件执行 `f.negatives[model] = now`，把条目的记录时刻
+// **重置为本次查询时刻**——TTL 因此从「最近一次查询」而非「首次未命中」起算。
+// 而 /v1/models 每次列出一个模型都会经 ContextWindowListingV4 +
+// MaxOutputTokensListingV4 各查一次，未知模型名又完全由客户端指定：只要这份名单
+// 稳定存在（每轮都被列出），其条目就永远 fresh，惰性淘汰（now.Sub(t) >= TTL）
+// 一条也扫不掉，且因为淘汰只在 len > 软上限时才扫，规模超限后**只增不减**。
+// #121 修的是「不再被查询的条目永不回收」，持续被查询的条目仍无界驻留。
+//
+// 断言：多轮重复列出同一批（超过软上限的）未知模型，map 规模必须保持有界。
+// 修复前：每轮都重新盖章，三轮后条目数 = 3*perRound 且永不回收 → RED。
+func TestModelsDevNegativesReStampBlocksEviction(t *testing.T) {
+	resetModelsDev()
+	resetModelCatalog()
+
+	modelsDev.mu.Lock()
+	modelsDev.doc = map[string]modelsDevEntry{"known-model": {Context: 100000, Output: 8192}}
+	modelsDev.fetched = true
+	modelsDev.lastFetch = time.Now()
+	modelsDev.mu.Unlock()
+
+	// 三轮，每轮把此前所有幽灵模型连同新增的一批一起再列一次（等价 /v1/models 反复输出）。
+	const perRound = modelsDevNegativesSoftCap + 200
+	const rounds = 3
+	for round := 0; round < rounds; round++ {
+		for i := 0; i < perRound*(round+1); i++ {
+			ContextWindowListingV4("ghost-"+itoa(int64(i)), 0, nil)
+		}
+	}
+
+	modelsDev.mu.Lock()
+	after := len(modelsDev.negatives)
+	modelsDev.mu.Unlock()
+	// 上限口径：软上限 + 一轮的新增（淘汰是惰性的，允许跨一个扫描窗口）。
+	if max := 2 * modelsDevNegativesSoftCap; after > max {
+		t.Errorf("反复被查询的负缓存条目无界增长: negatives=%d want <= %d（旧行为下为 %d 且永不回收）",
+			after, max, perRound*rounds)
+	}
+}
+
+// TestParseModelsDevDocTieBreakDeterministic T2 真平票（无官方源、3 家 vs 3 家
+// 同票不同值）的确定性：map 迭代序随机化必须被 provider 字典序 tie-break 压平。
+// 双断言锁死：多次解析结果两两相等，且等于 provider 字典序最小候选（"a-vendor"）。
+// 依据 pr134-watchlist-analysis.md #2：旧实现「先出现胜」依赖 map 迭代序——
+// 同 binary 两次拉取同一文档可能落不同值（/v1/models 可观测抖动 +
+// model.json 不可复现覆盖）。
+func TestParseModelsDevDocTieBreakDeterministic(t *testing.T) {
+	raw := fakeModelsDevDoc(map[string]map[string][2]int64{
+		"agg-a": {"kimi-k3": {1000000, 131072}},
+		"agg-b": {"kimi-k3": {1000000, 131072}},
+		"agg-c": {"kimi-k3": {1000000, 131072}},
+		"z-vendor": {"kimi-k3": {200000, 131072}},
+		"y-vendor": {"kimi-k3": {200000, 131072}},
+		"a-vendor": {"kimi-k3": {200000, 131072}},
+	})
+	run := func() int64 {
+		doc, err := parseModelsDevDoc([]byte(raw))
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		return doc["kimi-k3"].Context
+	}
+	first := run()
+	if first != 200000 {
+		t.Errorf("tie-break context=%d want 200000 (provider 字典序最小 a-vendor 一方)", first)
+	}
+	// map 迭代序随机化（-count 多次 + Go 每轮随机起点）下结果必须稳定。
+	for i := 0; i < 20; i++ {
+		if got := run(); got != first {
+			t.Fatalf("tie-break 不确定: run %d got %d want %d", i, got, first)
+		}
+	}
+}
+
+// TestParseModelsDevDocVendorTieBreakByProviderName T1 多官方源同票分歧
+//（zai 与 moonshotai 都报 kimi-k3 且值不同）：两候选都 vendor=true 同票，
+// 旧实现「先到先得」不确定，必须由 provider 字典序（moonshotai < zai）收敛。
+func TestParseModelsDevDocVendorTieBreakByProviderName(t *testing.T) {
+	raw := fakeModelsDevDoc(map[string]map[string][2]int64{
+		"zai":        {"kimi-k3": {1000000, 131072}},
+		"moonshotai": {"kimi-k3": {200000, 131072}},
+	})
+	run := func() int64 {
+		doc, err := parseModelsDevDoc([]byte(raw))
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		return doc["kimi-k3"].Context
+	}
+	first := run()
+	if first != 200000 {
+		t.Errorf("vendor tie-break context=%d want 200000 (provider 字典序 moonshotai < zai)", first)
+	}
+	for i := 0; i < 20; i++ {
+		if got := run(); got != first {
+			t.Fatalf("vendor tie-break 不确定: run %d got %d want %d", i, got, first)
+		}
+	}
+}
+
+// TestFetchDocNilClientDoesNotHitNetwork fetchDoc 拒绝 nil client：不回落
+// http.DefaultClient（无超时 + 打真网）。依据 pr134-watchlist-analysis.md #5：
+// 生产路径恒传非 nil（handler 恒传 cfg.Upstream.HTTP），nil 只出现在测试疏漏——
+// 静默打真网是最坏行为。断言 fake server 零命中 + doc 仍 nil（与 fetch 失败
+// 同语义：静默降级 1M 兜底）。
+func TestFetchDocNilClientDoesNotHitNetwork(t *testing.T) {
+	resetModelsDev()
+	f := newModelsDevServer(fakeModelsDevDoc(map[string]map[string][2]int64{
+		"zai": {"glm-5.2": {1000000, 131072}},
+	}))
+	defer f.ts.Close()
+
+	modelsDev.fetchDoc(nil, f.ts.URL)
+
+	f.mu.Lock()
+	hits := f.hits
+	f.mu.Unlock()
+	if hits != 0 {
+		t.Fatalf("nil client 不应打网络（回落 DefaultClient 打真网/被路由到 fake）: hits=%d", hits)
+	}
+	modelsDev.mu.Lock()
+	doc := modelsDev.doc
+	modelsDev.mu.Unlock()
+	if doc != nil {
+		t.Fatalf("nil client 时 doc 应保持 nil（拉取失败语义），got %d 条", len(doc))
+	}
+}

@@ -54,6 +54,12 @@ type Status struct {
 	ModelCosts []ModelCostStatus `json:"model_costs,omitempty"`
 	Disabled          bool               `json:"disabled"`
 	DisabledReason    string             `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
+	// ManualDisabled 运维手动停用（issue #138/#118）——与 disabled **并列独立**，
+	// 叠加态分别透出不合并（面板据此区分「系统判定坏了」与「我主动摘的」，
+	// 两种可用操作不同：前者可 revive，后者该 enable）。
+	// 零值也显式写出（运维口径，同 consecutive_fails：缺失会让人误以为"没记录"）。
+	ManualDisabled bool   `json:"manual_disabled"`
+	ManualReason   string `json:"manual_reason,omitempty"` // 仅手动停用：停用原因（运维可见）
 	SuccessCount      int64              `json:"success_count,omitempty"`
 	ErrTotal          int64              `json:"err_total,omitempty"`
 	LastSuccessTime   time.Time          `json:"last_success,omitempty"`
@@ -115,6 +121,12 @@ type entry struct {
 	until           time.Time // 冷却截止（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）
 	disabled        bool
 	reason          string
+	// manualDisabled 运维手动停用（issue #138/#118）：与 disabled 并列的独立状态位。
+	// 语义是「对话流量摘除」而非「账号冻结」——停用期间签到/token 保活/排程照常执行，
+	// 凭证与积分都是活的，只是不参与选号。与 disabled 各自独立清除，两位都清才回池。
+	// 持久化（stateAccount.ManualDisabled）：重启保留运维意图。
+	manualDisabled bool
+	manualReason   string
 	lastUsed        time.Time // 最近被选中时刻（防并发撞号）
 	// usedSeq 单调递增的选中序号：每次被 pick 选中时取 p.pickSeq 自增值。
 	// Windows 等平台 time.Now() 精度有限（~0.5ms），高并发/快速连续选号时多个
@@ -193,7 +205,7 @@ func (e *entry) modelCostOf(model string, now time.Time) (modelCostEntry, bool) 
 // 连败降权与冷却/熔断同入本判定（取更长者不叠加：三个截止是并列的或门，
 // 只要任一未到期即不可选，天然「并存取更远者」——不需要显式比较长短）。
 func (e *entry) healthy(now time.Time) bool {
-	if e.disabled {
+	if e.disabled || e.manualDisabled {
 		return false
 	}
 	if !e.until.IsZero() && now.Before(e.until) {
@@ -218,13 +230,14 @@ func (e *entry) healthy(now time.Time) bool {
 // degradeUntil 按**过期口径**判定（now 已过即不在窗口内）：degradeUntil 到期后
 // 仅由 NoteSuccess 清零，若按零值口径会把「降权已到期但尚无成功入账」的账号
 // 永久挡在豁免之外。disabled/breakerUntil 维持既有形态口径（布尔/IsZero，从
-// 保守侧不豁免，零回归）。降权窗口内账号对所有模型都不可选（healthy 的或门
-// 拦截 pick），豁免必须失效——否则「6004 模型冷却 + 连败降权」账号（现实可达：
-// NoteFailures 置 degradeUntil 不清 modelCooldowns，见 degrade.go）会让 /healthz
-// 返回 200 而该账号对所有模型 chat 实际 503。
+// 保守侧不豁免，零回归）。manualDisabled（上游运维停用位，issue #138）并入
+// 不豁免侧：手动摘除的账号探活不应视作可服务。降权窗口内账号对所有模型都不可
+// 选（healthy 的或门拦截 pick），豁免必须失效——否则「6004 模型冷却 + 连败降权」
+// 账号（现实可达：NoteFailures 置 degradeUntil 不清 modelCooldowns，见 degrade.go）
+// 会让 /healthz 返回 200 而该账号对所有模型 chat 实际 503。
 func (e *entry) modelExempt(now time.Time) bool {
 	return len(e.modelCooldowns) > 0 &&
-		!e.disabled && e.breakerUntil.IsZero() &&
+		!e.disabled && !e.manualDisabled && e.breakerUntil.IsZero() &&
 		(e.degradeUntil.IsZero() || !now.Before(e.degradeUntil))
 }
 
@@ -343,6 +356,11 @@ type stateAccount struct {
 	Credits      int64     `json:"credits"`
 	Disabled     bool      `json:"disabled"`
 	Reason       string    `json:"reason,omitempty"`
+	// ManualDisabled 运维手动停用（issue #138/#118）。持久化——重启保留运维意图，
+	// 这也正是该功能要解决的痛点之一（旧权宜做法改 state.json 会被 5s flush 覆盖，
+	// 入口化后无需再碰文件）。零值也显式写出（运维口径，同 err_total 注释）。
+	ManualDisabled bool   `json:"manual_disabled"`
+	ManualReason   string `json:"manual_reason,omitempty"`
 	Until        time.Time `json:"until,omitempty"`
 	CoolKind     CoolKind  `json:"cool_kind"`
 	SuccessCount int64     `json:"success_count,omitempty"`
@@ -426,7 +444,10 @@ type modelCostEntry struct {
 	Samples   int
 }
 
-// modelCooldown 单个 (账号, 模型) 的模型级独立冷却记录（运行态，不持久化）。
+// modelCooldown 单个 (账号, 模型) 的模型级独立冷却记录。**已持久化**（stateAccount.ModelCooldowns
+// → stateModelCooldown，见 2f4c77b）：Until/ResetAt/Reason 三字段落盘往返无损，Hits 不落盘
+// （见字段注释）。本注释此前写「运行态，不持久化」，是 908abbd 引入本结构体时的旧状态描述，
+// 在 2f4c77b 加上持久化后未同步更新，与上方 stateModelCooldown 的「落盘/恢复往返无损」自相矛盾。
 // 承载两种「该模型在此账号上不可用」语义：
 //   - 6004 模型级限流：Until 对齐上游重置墙钟；ResetAt 记录权威恢复时刻。
 //   - 11102 该后端无此模型：Until 为指数退避 TTL（6h 起、封顶 24h）；Hits 记录
@@ -484,13 +505,21 @@ const sessionDeadThreshold = 3
 //   - defaultDegradeCooldown=10m：出池时长。取软冷却封顶（2h）与熔断基数（30m）
 //     之间：长于单次软冷却（60s 级），短于熔断基数——连败的证据强度低于熔断，
 //     惩罚不应重于熔断。
-//   - defaultDegradeCooldownMax=2h：指数退避封顶，对齐 defaultSoftRateMax（同一
-//     「不知道何时恢复」的退避族）。
+//   - defaultDegradeCooldownMax=2h：降权时长的**上限钳制**（非指数退避封顶——
+//     连败降权为固定时长，见 degrade.go 注释「不做指数升级」），对齐
+//     defaultSoftRateMax 的量级。仅当显式配置的 degrade_cooldown 大于该值时钳制。
 const (
 	defaultDegradeThreshold   = 5
 	defaultDegradeCooldown    = 10 * time.Minute
 	defaultDegradeCooldownMax = 2 * time.Hour
 )
+
+// defaultCostExploreInterval costTier 条件探索的默认窗口（issue #136 方案 a′）。
+// 取 30m：≤ 48 次/天/模型 的探索上限算术（24h/30m=48），与池规模和 QPS 无关。
+// 探索=搭车改道（把一个既有真实用户请求改道给 tier 1 号），零新增上游请求；
+// 增量成本只是「该请求本可打免费号、实际打了可能收费的号」的期望计费差，
+// 且 tier 1 枯竭（活跃模型全号已学）后税基收敛到 0。config 显式 "0" 关停。
+const defaultCostExploreInterval = 30 * time.Minute
 
 // sessionDeadReason 12153 判定为 session 死亡时的持久化 reason。
 const sessionDeadReason = "12153 session dead"
