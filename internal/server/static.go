@@ -50,8 +50,21 @@ func (h staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 精确命中探测：路径存在（文件或目录）→ 交 FileServer（301 补斜杠 /
 	// 目录索引 / 静态文件服务全套 stdlib 语义）。
-	if f, err := h.root.Open(r.URL.Path); err == nil {
+	// 注意 http.FS 的坑：Open("/login/")（尾斜杠）报 invalid argument——
+	// 探测前必须剥掉尾斜杠（根 "/" 单独处理）；而 FileServer 收到的仍是
+	// 原始 URL，目录索引 / 301 补斜杠语义不受影响（2026-09-21 实测定位）。
+	probePath := strings.TrimSuffix(r.URL.Path, "/")
+	if probePath == "" {
+		probePath = "/" // 根路径本身：Open("/") 在 http.FS 下合法（返回目录）
+	}
+	if probePath == "/" || func() bool {
+		f, err := h.root.Open(probePath)
+		if err != nil {
+			return false
+		}
 		f.Close()
+		return true
+	}() {
 		h.fileServer.ServeHTTP(w, r)
 		return
 	}
@@ -83,10 +96,13 @@ func (h staticHandler) serveFile(w http.ResponseWriter, r *http.Request, name st
 	return true
 }
 
-// setStaticSecurityHeaders 静态资源的统一安全响应头（与 panel API 同组：
-// CSP 限制脚本同源、禁 iframe 嵌套、禁 MIME 嗅探、不外泄 Referer）。
+// setStaticSecurityHeaders 静态资源的统一安全响应头（与 panel API 同组）。
+// script-src 必须放行 'unsafe-inline'：Next.js App Router 静态导出把 RSC payload
+// 以多条内联 <script>self.__next_f.push(...)</script> 内嵌（加 next-themes 引导块），
+// 缺它则内联脚本被整体拦截，React 水合无初始数据 → 页面白屏（2026-09-21 实测）。
+// 注入面由 frame-ancestors/base-uri/self 兜住。
 func setStaticSecurityHeaders(w http.ResponseWriter) {
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; "+
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; "+
 		"style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; "+
 		"form-action 'none'; frame-ancestors 'none'; base-uri 'none'")
 	w.Header().Set("X-Content-Type-Options", "nosniff")

@@ -11,9 +11,14 @@ import (
 	"net/http"
 )
 
-// csp 内容安全策略（严格版，无需 unsafe-inline）：
+// csp 内容安全策略：
 //   - default-src 'self'        前端是 Next.js 静态导出（多 chunk + 样式），按同源自治理
-//   - script-src 'self'         只跑同源脚本；manager 壳无内联脚本依赖
+//   - script-src 'self' 'unsafe-inline'
+//     同源脚本 + **内联引导脚本必须放行**：Next.js App Router 静态导出把 RSC
+//     payload 以 9 条内联 <script>self.__next_f.push(...)</script> 内嵌在 HTML
+//     里，另有 next-themes 主题引导内联块——没有 unsafe-inline 时这些脚本被 CSP
+//     整体拦截，React 拿不到初始数据，页面永久白屏（2026-09-21 实测定位）。
+//     外部注入面已被 frame-ancestors/base-uri/self 限定兜住，风险可接受。
 //   - style-src 'self' 'unsafe-inline'
 //     shadcn/tailwind 运行时少量内联样式；允许内联样式不会导致脚本执行
 //   - connect-src 'self'        前端 fetch 只能打本服务
@@ -21,7 +26,7 @@ import (
 //   - form-action 'none'        页面无表单提交目标（设置页是 JS 提交）
 //   - frame-ancestors 'none'    禁止被任何站点 iframe 嵌套（点击劫持）
 //   - base-uri 'none'          禁止注入 <base> 改写相对路径
-const csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+const csp = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; " +
 	"connect-src 'self'; img-src 'self' data:; form-action 'none'; " +
 	"frame-ancestors 'none'; base-uri 'none'"
 

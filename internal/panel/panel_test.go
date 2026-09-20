@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"workbuddy2api/internal/httpauth"
 	"workbuddy2api/internal/pool"
 )
 
@@ -59,10 +60,10 @@ func TestLoginIssuesSessionCookie(t *testing.T) {
 	if !strings.Contains(sess.Value, ".") {
 		t.Fatalf("cookie value not signed form: %q", sess.Value)
 	}
-	if !verifySessionValue(sess.Value, "test-key") {
+	if !httpauth.VerifySessionValue(sess.Value, "test-key") {
 		t.Error("issued cookie must verify against the same key")
 	}
-	if verifySessionValue(sess.Value, "other-key") {
+	if httpauth.VerifySessionValue(sess.Value, "other-key") {
 		t.Error("cookie signed with another key must not verify (api_key rotation invalidates sessions)")
 	}
 }

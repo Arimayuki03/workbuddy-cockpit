@@ -45,6 +45,16 @@ func usagePathFor(stateFile string) string {
 	return filepath.Join(filepath.Dir(stateFile), "usage.json")
 }
 
+// sessionKeySupplier 网关原生端点的会话 cookie 通道密钥供应商：
+// enabled（面板开启）时返回读 live 快照的闭包（面板改 api_key → 旧 cookie 全部
+// 失效，签名密钥即 api_key）；未开启时返回 nil（handler 不认任何 wb_session）。
+func sessionKeySupplier(enabled bool, live *livecfg.Holder) func() string {
+	if !enabled {
+		return nil
+	}
+	return func() string { return live.Load().APIKey }
+}
+
 // stateSibling 返回与 state 文件同目录的指定文件名路径（相对路径场景回落当前目录）。
 // output_probes.json（模型上限探测，panel 移植件）共用本规则。
 func stateSibling(stateFile, name string) string {
@@ -337,6 +347,10 @@ func main() {
 		// 面板与静态托管（v1.2.0）：panel.enabled=false 时二者均为 nil（路由不注册）。
 		Panel:  panelHandler,
 		Static: staticFS,
+		// 会话 cookie 通道仅随面板开启：dashboard 调原生 /status、/v1/stats 只带
+		// 登录换发的签名 cookie；密钥经 live 快照读（面板改 api_key 后旧 cookie 失效）。
+		// panel.enabled=false 时保持 nil——不认任何 wb_session，行为与引入前一致。
+		SessionKey: sessionKeySupplier(panelHandler != nil, live),
 	})
 
 	srv := &http.Server{
