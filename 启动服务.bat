@@ -390,7 +390,11 @@ goto :menu
 :build
 rem %~1=目标 exe  %~2=包路径。go build 缓存命中时无实质重编译；
 rem 编译失败不会破坏旧产物（go build 失败时不写出目标文件），由调用方继续用旧版本。
-go build -o %~1 %~2
+rem wb2api.exe（./cmd/server）必须带 embed_panel 标签内嵌前端面板；
+rem 其它工具 exe 不吃该标签（无 embed 声明，加了也无害，统一省事）。
+set "GOTAGS="
+if "%~1"=="wb2api.exe" set "GOTAGS=-tags embed_panel"
+go build %GOTAGS% -o %~1 %~2
 if errorlevel 1 echo [Warning] %~1 编译失败，若已存在则继续使用旧版本。
 goto :eof
 
