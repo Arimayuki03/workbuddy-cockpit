@@ -17,6 +17,8 @@ call :build login.exe ./cmd/login
 call :build signin.exe ./cmd/signin
 call :build trial.exe ./cmd/trial
 call :build task.exe ./cmd/task
+call :build acct.exe ./cmd/acct
+call :build stats.exe ./cmd/stats
 
 :menu
 cls
@@ -34,6 +36,8 @@ echo     [7] 查看服务日志
 echo     [8] 加入用户（国内版 cn）
 echo     [9] 加入国际版用户（global）
 echo     [0] 领取国际版加油包（trial）
+echo     [a] 请求统计（/v1/stats 按模型）
+echo     [s] 账号运维（停用 / 恢复 / 复活）
 echo     [q] 退出
 echo  ============================================
 echo.
@@ -48,6 +52,8 @@ if /i "%c%"=="7" goto :log
 if /i "%c%"=="8" goto :add
 if /i "%c%"=="9" goto :add_global
 if /i "%c%"=="0" goto :trial
+if /i "%c%"=="a" goto :stats
+if /i "%c%"=="s" goto :acct
 if /i "%c%"=="q" goto :end
 goto :menu
 
@@ -122,7 +128,8 @@ if errorlevel 2 (
     echo  已中止，未添加账号。
 ) else (
     echo.
-    echo  加入完成。若服务运行中，需重启才能加载新账号（选 4 前先选 5 停止，再选 4 启动）。
+    echo  加入完成。服务运行中时 auths 目录热加载（5s 轮询）约 5 秒自动进池，无需重启；
+    echo  未配置 auth_dir 的部署需重启加载（选 5 停止，再选 4 启动）。
 )
 echo.
 pause
@@ -151,6 +158,90 @@ echo.
 echo.
 pause
 goto :menu
+
+:stats
+echo.
+echo  ===== 请求统计（按模型聚合，数据源 /v1/stats，需服务运行中） =====
+.\stats.exe
+echo.
+echo  [提示] 原地刷新: .\stats.exe -watch 5s     按扣费排序: .\stats.exe -sort credits
+echo         JSON 透传: .\stats.exe -json
+echo.
+pause
+goto :menu
+
+:acct
+rem acct 经网关管理端点操作运行中进程的内存状态（外部直接改 state.json 会被 5s flush
+rem 覆盖），故需服务运行中；管理端点还需 config.json 的 admin.enabled=true 显式打开。
+curl -s -m 2 http://127.0.0.1:7863/healthz | findstr /i "workbuddy2api" >nul 2>nul
+if errorlevel 1 (
+    echo  [提示] 服务未运行或未就绪。acct 走网关管理端点，请先选 4 启动服务。
+    echo.
+    pause
+    goto :menu
+)
+set "ADMIN_ON=no"
+for /f "usebackq delims=" %%i in (`powershell -NoProfile -Command "try { $c = ConvertFrom-Json -InputObject (Get-Content -Raw -Encoding UTF8 -LiteralPath 'config.json') } catch { $c = $null }; if ($c -and $c.admin -and $c.admin.enabled) { 'yes' } else { 'no' }"`) do set "ADMIN_ON=%%i"
+if "%ADMIN_ON%"=="yes" goto :acct_menu
+echo  [提示] config.json 的 admin.enabled 当前未开启（false 或缺省），管理端点不可用。
+echo         把 "admin": { "enabled": true } 写入 config.json 后重试。
+echo.
+pause
+goto :menu
+
+:acct_menu
+echo.
+echo  ============================================
+echo     账号运维（停用=对话流量摘除，签到保活照常）
+echo  ============================================
+echo     [1] 列出账号与状态（acct list）
+echo     [2] 临时停用（disable uid [原因]）
+echo     [3] 解除手动停用（enable uid）
+echo     [4] 解除系统自动禁用（revive uid）
+echo     [q] 返回主菜单
+echo  ============================================
+echo.
+set "a="
+set /p a=  请选择:
+if not defined a goto :acct_menu
+if /i "%a%"=="1" (.\acct.exe list & goto :acct_done)
+if /i "%a%"=="2" goto :acct_disable
+if /i "%a%"=="3" goto :acct_enable
+if /i "%a%"=="4" goto :acct_revive
+if /i "%a%"=="q" goto :menu
+goto :acct_menu
+
+:acct_disable
+set "UID="
+set /p UID=  请输入 uid（选 1 可先查列表）:
+if not defined UID goto :acct_menu
+set "REASON="
+set /p REASON=  停用原因（可留空）:
+.\acct.exe disable "%UID%" "%REASON%"
+goto :acct_done
+
+:acct_enable
+set "UID="
+set /p UID=  请输入 uid:
+if not defined UID goto :acct_menu
+.\acct.exe enable "%UID%"
+goto :acct_done
+
+:acct_revive
+set "UID="
+set /p UID=  请输入 uid:
+if not defined UID goto :acct_menu
+.\acct.exe revive "%UID%"
+goto :acct_done
+
+:acct_done
+echo.
+echo  [说明] 手动停用（disable/enable）与系统自动禁用（revive 清除）是两个独立状态位，
+echo         enable 不解除自动禁用、revive 不解除手动停用，都清空才回到选号池；
+echo         停用状态随池状态落盘，重启保留。
+echo.
+pause
+goto :acct_menu
 
 :status
 echo.

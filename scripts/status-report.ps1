@@ -66,19 +66,30 @@ foreach ($a in $st.accounts) {
     if ($nick.Length -gt 14) { $nick = $nick.Substring(0, 14) }
     $uid = [string]$a.uid
     if ($uid.Length -gt 9) { $uid = $uid.Substring(0, 9) }
+    # 双位状态：manual_disabled（运维手动停用）与 disabled（系统自动禁用）是两个独立
+    # 状态位（上游 issue #138/#118），各自清除、都清空才回到选号池，叠加时两个都列。
+    # 每轮必须清空 $stat：赋值全是条件式，不清会把上一账号的状态串到这一行。
+    $stat = ""
     if ($a.disabled) {
-        $stat = "禁用 " + $(if ($a.disabled_reason) { $a.disabled_reason } else { "" })
-    } elseif ($a.cooling) {
-        $extra = ""
-        if ($a.cool_remaining_sec -gt 0) {
-            $mins = [math]::Round($a.cool_remaining_sec / 60)
-            if ($mins -ge 60) { $extra = " (剩$([math]::Floor($mins / 60))小时$($mins % 60)分)" }
-            else { $extra = " (剩$mins分钟)" }
+        $stat = "自动禁用 " + $(if ($a.disabled_reason) { $a.disabled_reason } else { "" })
+    }
+    if ($a.manual_disabled) {
+        $manual = "手动停用 " + $(if ($a.manual_reason) { "($($a.manual_reason))" } else { "" })
+        $stat = if ($stat) { "$manual + $stat" } else { $manual }
+    }
+    if (-not $stat) {
+        if ($a.cooling) {
+            $extra = ""
+            if ($a.cool_remaining_sec -gt 0) {
+                $mins = [math]::Round($a.cool_remaining_sec / 60)
+                if ($mins -ge 60) { $extra = " (剩$([math]::Floor($mins / 60))小时$($mins % 60)分)" }
+                else { $extra = " (剩$mins分钟)" }
+            }
+            $stat = "冷却 " + $a.reason + $extra
+        } else {
+            $stat = "可用"
+            if ($a.in_flight -gt 0) { $stat = "可用 in_flight=$($a.in_flight)" }
         }
-        $stat = "冷却 " + $a.reason + $extra
-    } else {
-        $stat = "可用"
-        if ($a.in_flight -gt 0) { $stat = "可用 in_flight=$($a.in_flight)" }
     }
     if ($a.rate_limited_models) {
         $models = ($a.rate_limited_models | ForEach-Object { $_.model }) -join ","
@@ -101,5 +112,5 @@ foreach ($a in $st.accounts) {
 Write-Output ""
 Write-Output "[说明] 积分(缓存)=服务池内存快照:签到批次/对话扣费时回写,task.exe 手动任务的奖励"
 Write-Output "       不会实时反映(它在独立进程里),重启服务或等下次签到批次才刷新——实时余额见菜单 1。"
-Write-Output "       cooling=冷却中 disabled=禁用 限流=模型级6004台账 sticky=粘性会话 redis=状态镜像模式"
+Write-Output "       cooling=冷却中 disabled=自动禁用 手动停用=运维disable(恢复走acct enable) 限流=模型级6004台账 sticky=粘性会话 redis=状态镜像模式"
 Write-Output "       └行=成本台账: 每1k=实测千token均价(≤0免费), 6小时无观测自动消失, 选号按便宜优先"

@@ -10,7 +10,8 @@
 </p>
 
 <p align="center">
-  <img alt="Go" src="https://img.shields.io/badge/Go-1.22.5-00ADD8?logo=go&logoColor=white&style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/Version-v1.1.0-6E56CF?style=flat-square">
+  <img alt="Go" src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white&style=flat-square">
   <img alt="API" src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square">
   <img alt="Deploy" src="https://img.shields.io/badge/Deploy-Docker_Compose-2496ED?logo=docker&logoColor=white&style=flat-square">
   <img alt="Transport" src="https://img.shields.io/badge/Transport-SSE%20%2F%20Streaming-0DBD8B?style=flat-square">
@@ -141,7 +142,7 @@ flowchart LR
 
 - **Docker + Docker Compose**（推荐部署方式，镜像内已含 `app` 低权限用户与全部工具脚本）
 - 一个或多个已注册的 CodeBuddy 账号，用于 OAuth 登录
-- 宿主机 Go ≥ 1.22（仅源码构建时需要）
+- 宿主机 Go ≥ 1.22（仅源码构建时需要；`go.mod` 声明 1.22.5，Docker 构建镜像已升级到 Go 1.26）
 
 ### Docker Compose 一键部署
 
@@ -186,7 +187,7 @@ curl -s http://localhost:7863/healthz
 
 本仓库在上游基础上附带一套 Windows 原生工作流（无需 Docker，直接跑 `wb2api.exe`）：
 
-- **启动服务.bat** — 交互菜单：`1` 查积分 / `2` 手动批量签到 / `3` 手动执行定时任务 / `4` 后台启动（含状态判断）/ `5` 停止 / `6` 服务状态台账 / `7` 看日志 / `8` 加入用户（国内版）/ `9` 加入国际版用户 / `0` 领取国际版加油包。首次用到工具时自动 `go build` 出 `credit.exe` / `login.exe` / `signin.exe` / `trial.exe` / `task.exe` / `wb2api.exe`。
+- **启动服务.bat** — 交互菜单：`1` 查积分 / `2` 手动批量签到 / `3` 手动执行定时任务 / `4` 后台启动（含状态判断）/ `5` 停止 / `6` 服务状态台账 / `7` 看日志 / `8` 加入用户（国内版）/ `9` 加入国际版用户 / `0` 领取国际版加油包 / `a` 请求统计（`/v1/stats` 终端视图）/ `s` 账号运维（停用 / 恢复 / 复活，前置自动预检服务运行中 + `admin.enabled`）。首次用到工具时自动 `go build` 出 `credit.exe` / `login.exe` / `signin.exe` / `trial.exe` / `task.exe` / `acct.exe` / `stats.exe` / `wb2api.exe`。
 - **`login.exe join`** — 一步登录：拿授权 URL → 自动打开浏览器 → 轮询 token → 拉账号 →（CN）签到 → 原子落盘 `auths/workbuddy-<uid>.json`；等待授权期间按任意键可中止。等价于 `login.sh` 的编排，供 cmd/菜单直接驱动。支持 `--realm=cn|global`。
 - **`trial.exe`** — 国际版账号批量领取 /billing/ide/trial 加油包（CN 账号自动跳过）。
 - **`task.exe <kind>`** — 定时任务手动一次性触发器（checkin/activity/keepalive/travel/school/cat/all），独立进程立即跑一次与排程相同的任务体，不影响常驻服务的自动排程；菜单 `3` 提供子菜单入口。
@@ -296,6 +297,15 @@ curl -s http://localhost:7863/v1/chat/completions \
 - **部署与仓库卫生** — Docker config 改目录挂载（修复 admin 热改写回必败的部署矛盾）；`.dockerignore` 补齐 `*.exe` / `logs/` / `config.json.bak*` / `.claude/`；`.gitignore` 补 `.claude/`；`cmd/task` / `cmd/activity` 补池关闭兜底、`cmd/task` 接线快过期积分窗口
 
 > 上述多数修复已在 2026-09-20 合并的上游版本（`4561993`）中以独立提交形式落地（如 `855e5b9` RefreshToken 竞态、`94bc325` 空 content latch、`329cba4` Truncate 守卫、`a20d06f` admin fail-fast）；本地与上游重复实现的守卫在合并时择一保留，语义等价处优先取上游形态。
+
+### 版本
+
+当前版本：**v1.1.0**（2026-09-20）。
+
+- **v1.0.0**（2026-09-14）— 上游基线版本，随 ghcr 镜像发布流程（`build.yml` 打 tag 触发）固定。
+- **v1.1.0**（2026-09-20）— 吸收 2026-09-20 上游合并（`4561993`）：`/v1/stats` 请求统计（端点 + `stats.exe` 终端视图 + 倍率列）、账号临时停用/恢复/复活管理端点（`acct.exe` / 菜单 `s`）、auths 目录热加载（5s 轮询免重启）、global 域 `/v2` 固定路由与多处会话粘性 / 思维链回填修复。含少量破坏性变更：移除 `server.max_body_mb` 配置键与 `WB2A_MAX_BODY_MB` 环境变量。
+
+网关自身未在代码内嵌版本号；版本以 git tag 为准（`git tag -l`），`/healthz` 的 `service` 字段仅作服务身份标识。文档中的版本号随 tag 更新，未打 tag 的 HEAD 一律视作最新文档描述的下一版本。
 
 ## 免责声明
 

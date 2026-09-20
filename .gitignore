@@ -20,6 +20,8 @@ data/
 /signin.exe
 /trial.exe
 /task.exe
+/acct.exe
+/stats.exe
 # 换版前留的旧产物备份（*.exe.bak / *.exe.bak-日期 / *.exe.<tag>.bak）
 *.exe.bak*
 *.exe.*.bak*
@@ -54,6 +56,8 @@ __pycache__/
 wb2api.pid
 *.log
 draft_*_folder/
+# 本地调试脚本目录（一次性观测脚本，不入库）
+dev/
 
 # Backups (contains auth tokens)
 backups/
