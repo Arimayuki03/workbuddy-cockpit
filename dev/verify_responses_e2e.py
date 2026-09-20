@@ -42,6 +42,9 @@ UPSTREAM_CHUNKS = [
     {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}],
      'usage': {'prompt_tokens': 7, 'completion_tokens': 5}},
 ]
+_SEEN: list = []
+_SEEN_LOCK = threading.Lock()
+
 UPSTREAM_MODELS = {'object': 'list', 'data': [{'id': 'glm-5.2'}, {'id': 'global:gpt-5.6-sol'}]}
 
 
@@ -66,9 +69,15 @@ class Upstream(BaseHTTPRequestHandler):
         length = int(self.headers.get('content-length') or 0)
         raw = self.rfile.read(length)
         try:
-            want_stream = bool(json.loads(raw or b'{}').get('stream'))
+            sent = json.loads(raw or b'{}')
         except ValueError:
-            want_stream = False
+            sent = {}
+        # 记录**原样收到**的请求体：几个断言要确认字段真的落到了线上，
+        # 而不是只在我们自己的转换函数里存在（TestClient 与真 socket 的差别
+        # 正是这个脚本存在的理由）。
+        with _SEEN_LOCK:
+            _SEEN.append(sent)
+        want_stream = bool(sent.get('stream'))
 
         if not want_stream:
             self._json({
@@ -221,6 +230,35 @@ def main() -> int:
         assert kinds == ['reasoning', 'message'], f'输出项应为推理+正文两项：{kinds}'
         events = [ln[7:] for ln in raw.splitlines() if ln.startswith('event: ')]
         print(f'[流式] ✓ {len(events)} 个事件，客户端拼出 {text!r}，输出项 {kinds}')
+
+        # ── 2b. 推理档位真的落到了线上（issue #39）──
+        # 单元测试只能证明 to_openai_request 出了正确的 dict；这里确认它
+        # 一路走到真实 HTTP 请求体里，没有被中间层吃掉。
+        with _SEEN_LOCK:
+            _SEEN.clear()
+        r = client.post('/v1/chat/completions', headers=auth,
+                        json={'model': 'glm-5.2',
+                              'messages': [{'role': 'user', 'content': 'hi'}],
+                              'reasoning_effort': 'high'})
+        assert r.status_code == 200, r.text[:300]
+        with _SEEN_LOCK:
+            seen = list(_SEEN)
+        assert seen, '假上游没收到任何请求'
+        assert seen[-1].get('reasoning_effort') == 'high',             f'reasoning_effort 没到线上：{seen[-1].get("reasoning_effort")!r}'
+        print('[推理档位] ✓ reasoning_effort=high 出现在真实上游请求体里')
+
+        # ── 2c. Anthropic 的 output_config.effort 也会被翻译并送出（issue #39）──
+        with _SEEN_LOCK:
+            _SEEN.clear()
+        r = client.post('/v1/messages', headers=auth,
+                        json={'model': 'glm-5.2', 'max_tokens': 32,
+                              'messages': [{'role': 'user', 'content': 'hi'}],
+                              'output_config': {'effort': 'high'}})
+        assert r.status_code == 200, r.text[:300]
+        with _SEEN_LOCK:
+            seen = list(_SEEN)
+        assert seen and seen[-1].get('reasoning_effort') == 'high',             f'Anthropic 侧的 effort 没被翻译送出：{seen[-1] if seen else None}'
+        print('[Anthropic 档位] ✓ output_config.effort=high 翻译后到达上游')
 
         # ── 3. 版本隔离在 Responses 路径同样生效，且真实原因不被折叠 ──
         r = client.post('/api/keys', json={'name': 'e2e-cn', 'realm': 'cn'}, cookies=cookies)

@@ -127,7 +127,8 @@
     "days": {
       "one": "{n} day",
       "other": "{n} days"
-    }
+    },
+    "yesterday": "yesterday"
   },
   "expiry": {
     "expired": "Expired",
@@ -286,10 +287,13 @@
     "disabledReason": "Disabled reason: {reason}",
     "badgeDisabled": "● Disabled",
     "badgeDisabledByPanel": "● Paused",
+    "badgeManualDisabled": "● Paused",
     "badgeDisabledByPanelTitle": "You paused this account here: the upstream will not load it, so it is never selected. Press \"Enable\" to restore it anytime (credentials are kept).",
+    "badgeManualDisabledTitle": "You disabled this account upstream: it will not be picked for traffic, but it stays in the pool — check-in, token keep-alive and other jobs keep running, and its credentials and credits stay live. Click \"Enable\" on the right to resume at any time.",
     "disableTitle": "Pause this account (never selected upstream; reversible)",
     "enableTitle": "Enable this account (selected upstream again)",
     "disabled": "Account paused",
+    "manualDisabled": "Account paused (no longer picked for traffic; check-in and keep-alive continue)",
     "enabled": "Account enabled",
     "badgeDisabledRelogin": "● Disabled (re-login required)",
     "badgeExpired": "● Expired",
@@ -306,6 +310,11 @@
     "etaRecovery": "Recovers in about {left}",
     "limitedModels": "Rate-limited models: {models} (recovers automatically)",
     "missingModels": "Account lacks these models: {models} (temporarily skipped, no action needed)",
+    "modelLimitTitle": "These models are temporarily unavailable (the account is still online; other models work):",
+    "modelLimitBadge": "Models limited: {models}",
+    "modelLimited": "rate limited",
+    "modelLimitUntil": "expected back at {at}",
+    "modelMissing": "this account does not have this model",
     "creditsNoneTitle": "Upstream has not returned credits for this account yet (recently added, or upstream unreachable)",
     "creditsTitle": "Current spendable credit balance (all plans combined)",
     "cacheTitle": "Queried within the last 60 seconds — served from the server cache. Use Refresh credits to force a fresh query.",
