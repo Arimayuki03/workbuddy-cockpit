@@ -182,6 +182,31 @@ class NamespacedCustomStreamTest(unittest.TestCase):
         self.assertEqual(payload['item']['name'], 'apply_patch')
         self.assertEqual(payload['item']['input'], 'PATCH')
 
+    def test_custom_decision_uses_one_criterion(self) -> None:
+        """「是不是 custom」与「取哪份入参」必须是**同一个判据**。
+
+        曾经的写法是 `custom = seq in custom_inputs or restored_kind == 'custom'`，
+        随后又用 `custom_inputs[seq] if custom else ...` 取值——当两条判据不一致时
+        （判为 custom 而该字典没有这一项）直接 KeyError，把整条流打断。
+
+        判据统一用 `custom_inputs` 的成员关系就够：它的键正是「名字在
+        custom_names 里的 seq」，与 `restore` 认为的 custom 是同一批
+        （`_reverse` 里标 custom 的名字必然也在 custom_names 里）。
+        """
+        src = (Path(__file__).resolve().parents[1]
+               / 'routers' / 'responses.py').read_text(encoding='utf-8')
+        seg = src[src.index('def _close_tools'):]
+        seg = seg[:seg.index('def ', seg.index('def _close_tools') + 10)]
+        import re as _re
+        # 判据行必须**只**看 custom_inputs，不能带 or
+        m = _re.search(r'^\s*custom = (.+)$', seg, _re.M)
+        self.assertIsNotNone(m, '找不到 custom 判据那一行')
+        self.assertNotIn(' or ', m.group(1),
+                         '判据带了第二个条件 —— 与取值判据不一致时会 KeyError：'
+                         f'{m.group(1).strip()}')
+        self.assertIn('custom_inputs', m.group(1))
+        self.assertIn('custom_inputs[seq] if custom else', seg)
+
     def test_namespaced_plain_function_child_stays_function(self) -> None:
         """对照组：命名空间里的**普通** function 子工具不能被当成 custom。"""
         tools = [{'type': 'namespace', 'name': 'shell', 'tools': [

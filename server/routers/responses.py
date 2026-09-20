@@ -1030,21 +1030,12 @@ class _StreamTranslator:
             if not state or state.get('closed'):
                 continue
             state['closed'] = True
-            # 「是不是 custom」看两处，任一命中即可：
-            #   · `custom_inputs` 有这一项 —— 上游回的名字本来就是我们包装过的
-            #     custom（取值也用它，那里已整体校验过）；
-            #   · `restore` 说是 custom —— 命名空间展开的 custom 子工具也走这条。
-            # 两者在正常形态下一致；都看是防御性的：上游若回了半个名字（分片
-            # 拼接异常），只认前者会把它当普通 function 返回，客户端认不出
-            # （Codex 报 incompatible payload 的那类表现）。
-            restored_name, restored_kind = self.bridge.restore(state['name'])
-            custom = seq in custom_inputs or restored_kind == 'custom'
-            # 取值按**有没有校验过的 input** 来：`custom_inputs` 里没有就用原始
-            # args —— 不能拿 `custom` 去索引，否则 custom 判据命中而该字典没有
-            # 这一项时会 KeyError。
-            value = custom_inputs[seq] if seq in custom_inputs else state['args']
-            field = 'input' if custom else 'arguments'
-            family = 'custom_tool_call_input' if custom else 'function_call_arguments'
+            # 「是不是 custom」与「取哪份入参」必须用**同一个判据**：若判据说
+            # custom、而 `custom_inputs` 里没有这一项，下面取值就会 KeyError 并把
+            # 整条流打断。`custom_inputs` 的键恰好就是 custom 的判据
+            # （名字在 custom_names 里的 seq），所以两处都用它。
+            restored_name, _kind = self.bridge.restore(state['name'])
+            custom = seq in custom_inputs
             value = custom_inputs[seq] if custom else state['args']
             field = 'input' if custom else 'arguments'
             family = 'custom_tool_call_input' if custom else 'function_call_arguments'
