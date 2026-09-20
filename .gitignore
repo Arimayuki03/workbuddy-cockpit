@@ -70,6 +70,9 @@ dev/.admin-toggle
 dev/.shots-admin
 # 账号管理接口端到端验收（verify_admin_flow_e2e.py）的临时数据
 dev/.admin-flow
+# 白名单校验验收（verify_whitelist_hint.py）的临时数据与截图
+dev/.wl-hint
+dev/.shots-wl
 
 # 安全测试脚本（临时）
 .sec*.py

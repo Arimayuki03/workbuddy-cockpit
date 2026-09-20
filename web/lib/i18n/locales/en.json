@@ -415,7 +415,8 @@
     "disabled": "Disabled",
     "quotaCredit": "Credit quota",
     "quotaCreditHint": "Accumulated from the real charge reported by the upstream (not estimated from tokens). Independent of the token quota above — exceeding either one blocks calls. Leave 0 for unlimited",
-    "creditUsed": "{used} / {quota} credits"
+    "creditUsed": "{used} / {quota} credits",
+    "modelsUnknown": "No model matches these names (possible typo): {names}. They will not be listed and calls using them are rejected."
   },
   "logs": {
     "title": "Request logs",

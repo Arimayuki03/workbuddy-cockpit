@@ -391,7 +391,8 @@
     "disabled": "已停用",
     "quotaCredit": "积分额度",
     "quotaCreditHint": "按上游返回的真实扣费累计（不是按 token 估算）。与上面的 token 额度互不影响，任一超限即拒绝调用；留 0 = 不限",
-    "creditUsed": "积分 {used} / {quota}"
+    "creditUsed": "积分 {used} / {quota}",
+    "modelsUnknown": "这些名字找不到对应模型（可能拼错了）：{names}。它们不会被列出，调用时也会被拒。"
   },
   "logs": {
     "title": "请求日志",

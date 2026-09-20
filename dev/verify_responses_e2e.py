@@ -301,6 +301,29 @@ def main() -> int:
         assert params.get('required') == ['input'],             f'出站没把自定义工具包成 {{input: string}}：{sent_tools[:1]}'
         print('[自定义工具] ✓ 出站包成 {input: string}，回程还原为 custom_tool_call')
 
+        # ── 2e. /v1/models 按白名单裁剪，且**列表里每个 id 都能调用**（issue #46）──
+        # 这是用户报的现象：列表给出了白名单外的模型，选中就 400。
+        # 这里走真实 HTTP，并逐个把列表里的名字拿去调用，验证「列表 ⊆ 能用的」。
+        r = client.post('/api/keys', json={
+            'name': 'e2e-wl', 'realm': '',
+            'models': ['global:gpt-5.6-sol'],
+        }, cookies=cookies)
+        assert r.status_code == 200, r.text[:300]
+        wl = r.json()['key']
+        wl_auth = {'Authorization': f'Bearer {wl}'}
+
+        r = client.get('/v1/models', headers=wl_auth)
+        assert r.status_code == 200, r.text[:200]
+        listed = [m['id'] for m in (r.json().get('data') or [])]
+        assert listed == ['global:gpt-5.6-sol'],             f'白名单只留一个，列表却给出 {listed}（用户会看到能选、一选就失败）'
+
+        # 反向：列表里的名字必须真能调用（不是「恰好也没列出来」）
+        for mid in listed:
+            rr = client.post('/v1/chat/completions', headers=wl_auth,
+                             json={'model': mid, 'messages': [{'role': 'user', 'content': 'hi'}]})
+            assert rr.status_code == 200, f'列表给出的 {mid} 调用失败：{rr.status_code} {rr.text[:120]}'
+        print(f'[模型列表] ✓ 按白名单裁成 {listed}，且逐个调用均 200')
+
         # ── 3. 版本隔离在 Responses 路径同样生效，且真实原因不被折叠 ──
         r = client.post('/api/keys', json={'name': 'e2e-cn', 'realm': 'cn'}, cookies=cookies)
         cn = r.json()['key']
