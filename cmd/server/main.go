@@ -78,6 +78,11 @@ func main() {
 	p.RestoreFromSnapshot() // 择新恢复：Redis 快照比本地新才采用，否则本地优先
 	p.SyncToDir(auths)      // 与 auths 目录对齐：新账号加入、已删除文件账号剔除（状态保留）
 
+	// auths 目录热加载：新增凭证文件自动进池，免去「加完账号手动重启网关」。
+	// 启动时的 SyncToDir 已建立基线，监听只在后续目录内容变化时触发（见 pool/watch.go）。
+	stopWatch := p.StartAuthDirWatch(cfg.AuthDir)
+	defer stopWatch()
+
 	// 熔断器 + 在途上限 + 三因子加权调优（从 config 注入，非正值回退默认）。
 	p.SetBreaker(cfg.Pool.BreakerThreshold, cfg.BreakerCooldownDur, cfg.BreakerCooldownMaxD)
 	// 连败降权（issue #114）：ErrClient/传输层连败 N 次临时出池。
@@ -86,6 +91,7 @@ func main() {
 	p.SetMaxInFlightGlobal(cfg.Pool.MaxInFlightGlobal) // global 域在途分档（WAF 403 修复 P1-1，默认 2）
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
+	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
@@ -211,10 +217,10 @@ func main() {
 		SoftCooldown: cfg.SoftRateDur,
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
-		MaxBodyBytes: int64(cfg.Server.MaxBodyMB) << 20, // MB → 字节
 		// global realm 开关（handler 侧第三道闸：modelList 据此决定是否列 global 名单）。
 		GlobalEnabled: cfg.Global.Enabled,
-		// /admin 本地管理 API（缺省关闭；开启后 loopback + api_key 双重限制）。
+		// /admin 管理面（本地 tasks/credits/shutdown + 上游 accounts 运维端点共用
+		// admin.enabled 开关；缺省关闭。本地端点开启后 loopback + api_key 双重限制）。
 		// OnShutdown=stop：POST /admin/shutdown 等价一次 Ctrl+C，走既有 flush→close→
 		// srv.Shutdown 优雅路径（stop 可重复调用，defer 再触发无害）。
 		Admin: server.AdminConfig{
@@ -231,7 +237,8 @@ func main() {
 		Handler:           h,
 		ReadHeaderTimeout: 30 * time.Second,
 		// ReadTimeout 覆盖整个请求读取（含 body）：防慢速 body 拖死连接。
-		// 取值大于 MaxBodyMB 在常规带宽下的上传耗时；聊天请求体上限默认 8MB。
+		// max_body_mb 已移除（请求体无上限，交由上游自然响应），超大 body 成为
+		// 唯一的自然约束：60s 内传不完会得到连接错误（read timeout）而非 413。
 		ReadTimeout: 60 * time.Second,
 		// IdleTimeout keep-alive 空闲连接回收：配合 ctx 传播（FIX-2）防连接泄漏堆积。
 		// 注意：SSE 流式响应期间连接非空闲，不受此项掐断；不设全局 WriteTimeout

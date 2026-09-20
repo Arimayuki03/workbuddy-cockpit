@@ -16,6 +16,7 @@ data/
 /login.exe
 /credit.exe
 /wb2api.exe
+/signin_bin.exe
 /signin.exe
 /trial.exe
 /task.exe
@@ -38,12 +39,19 @@ workbuddy2api-dist.zip
 
 # Config with secrets (use config.example.json)
 config.json
-# admin PATCH 落盘自动备份 / 手动备份（同样含密钥）
-config.json.bak*
 
 # Build artifacts
 *.tmp
 __pycache__/
+
+# 运行时产物（API Key / 进程号 / 日志 / 工具草稿目录）
+# 为什么显式列 .apikey：它不是 config.json 的别名，而是 login.sh 等工具单独落盘的密钥文件，
+# 不写进这里会被 git add -A 直接提交（含明文 api_key）。
+.apikey
+.server.pid
+wb2api.pid
+*.log
+draft_*_folder/
 
 # Backups (contains auth tokens)
 backups/
@@ -59,4 +67,3 @@ docs/
 # 设计/计划文档（但 README.md 必须进版本库）
 *.md
 !README.md
-!使用指南.md
