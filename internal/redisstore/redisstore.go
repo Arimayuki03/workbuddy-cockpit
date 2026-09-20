@@ -11,6 +11,7 @@ package redisstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/url"
 	"sort"
@@ -21,6 +22,9 @@ import (
 
 	"github.com/redis/go-redis/v9"
 )
+
+// ErrEmptyURL Probe 收到空 url（面板"未配置 Upstash"提示用，非故障）。
+var ErrEmptyURL = errors.New("upstash url 未配置")
 
 // keyTTL 粘性会话镜像 + 状态快照的默认 TTL（redis 侧兜底，防脏数据长期滞留）。
 const keyTTL = 7 * 24 * time.Hour
@@ -91,6 +95,35 @@ func New(url, token string) Store {
 		sem:    make(chan struct{}, writeConcurrencyLimit),
 		done:   make(chan struct{}),
 	}
+}
+
+// Probe 用给定 url+token 做一次一次性连通性测试（面板 /api/settings/upstash/test
+// 用），连接随即关闭、不留任何后台资源。返回 error 时的文本已脱敏（不含连接串
+// 凭证），可直接透出给前端展示；成功返回 nil。
+//   - url 为空 → 返回 ErrEmptyURL（面板按"未配置"提示，不是故障）；
+//   - 其余路径与 New 同一套 normalize → ParseURL → Ping 链路，行为一致。
+func Probe(url, token string) error {
+	if url == "" {
+		return ErrEmptyURL
+	}
+	full := normalizeURL(url, token)
+	opt, err := redis.ParseURL(full)
+	if err != nil {
+		// 与 New 同口径：错误文本可能内嵌完整连接串（含 token），先脱敏再返回。
+		return errors.New("连接串解析失败: " + parseErrReason(err, full))
+	}
+	opt.ReadTimeout = readTimeout
+	opt.WriteTimeout = readTimeout
+	client := redis.NewClient(opt)
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := client.Ping(ctx).Err(); err != nil {
+		// go-redis 的 ping 错误含 addr（host:port，无凭证），可直接透出。
+		return fmt.Errorf("连接失败: %w", err)
+	}
+	return nil
 }
 
 // normalizeURL 把 url+token 归一化为可直接 ParseURL 的完整 rediss:// URL。
