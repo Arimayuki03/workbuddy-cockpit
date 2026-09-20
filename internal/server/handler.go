@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/httpauth"
 	"workbuddy2api/internal/logfmt"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/prompt"
@@ -73,6 +74,11 @@ type Config struct {
 	// 面板内部路由自带完整前缀，外层不做前缀剥离。面板内部路由已避开
 	// /api/request_logs 与 /api/system/check-update（本 handler 先注册优先）。
 	Panel http.Handler
+	// SessionKey 会话通道密钥供应商（v1.2.0，main 注入 livecfg 读取闭包）：
+	// 面板登录换发的 HMAC 会话 cookie 与本 handler 的 Bearer 等价——
+	// dashboard 调原生 /status、/v1/stats 只带 cookie，无此通道会 401 触发
+	// 前端硬跳登录页。nil = 不开会话通道（panel 未启用，行为与引入前一致）。
+	SessionKey func() string
 	// Static 前端静态托管 FS（v1.2.0，manager 壳 go:embed 产物；nil = 不注册）。
 	// 非 nil 时挂载到根 "/"：ServeMux 最长前缀匹配保证既有路由（/v1/*、/admin/*、
 	// /status、/api/* 已注册路径）优先，静态 handler 只兜住其余路径。
@@ -181,8 +187,18 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			// 常量时间比较（发现 7）：!= 短路时序随前缀长度变化，公网暴露下
 			// 理论上可逐字节探测 key 前缀；ConstantTimeCompare 消除该信号。
 			provided := strings.TrimPrefix(authz, "Bearer ")
-			if !strings.HasPrefix(authz, "Bearer ") ||
-				subtle.ConstantTimeCompare([]byte(provided), []byte(h.cfg.APIKey)) != 1 {
+			bearerOK := strings.HasPrefix(authz, "Bearer ") &&
+				subtle.ConstantTimeCompare([]byte(provided), []byte(h.cfg.APIKey)) == 1
+			// 会话 cookie 通道（v1.2.0）：面板登录换发的 HMAC 签名 cookie 与
+			// Bearer 等价——dashboard 同源 fetch 只带 cookie（withCredentials），
+			// 缺此通道 /status、/v1/stats、/api/request_logs 会 401，被前端
+			// 拦截器硬跳回登录页。SessionKey nil（panel 未启用）不开此通道。
+			if !bearerOK && h.cfg.SessionKey != nil &&
+				httpauth.VerifySessionRequest(r, h.cfg.SessionKey()) {
+				next(w, r)
+				return
+			}
+			if !bearerOK {
 				writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 				return
 			}

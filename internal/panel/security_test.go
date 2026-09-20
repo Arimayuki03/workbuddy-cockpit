@@ -43,7 +43,9 @@ func TestSecurityHeadersOnAllPanelResponses(t *testing.T) {
 	}
 }
 
-// CSP 核心约束：禁内联脚本、禁 iframe 嵌套、禁 <base> 注入。
+// CSP 核心约束：iframe 嵌套、<base> 注入禁止；script-src 放行内联
+// （Next.js 静态导出的 RSC payload / next-themes 引导是内联 <script>，
+// 缺 'unsafe-inline' 会白屏——2026-09-21 实测后放开，见 index.go 注释）。
 func TestCSPDisallowsInlineScriptAndFraming(t *testing.T) {
 	p := newTestPanel()
 	rec := httptest.NewRecorder()
@@ -51,16 +53,13 @@ func TestCSPDisallowsInlineScriptAndFraming(t *testing.T) {
 	csp := rec.Header().Get("Content-Security-Policy")
 
 	for _, must := range []string{
-		"script-src 'self'",
+		"script-src 'self' 'unsafe-inline'",
 		"frame-ancestors 'none'",
 		"base-uri 'none'",
 	} {
 		if !strings.Contains(csp, must) {
 			t.Errorf("CSP missing %q; got: %s", must, csp)
 		}
-	}
-	if strings.Contains(csp, "script-src 'self' 'unsafe-inline'") || strings.Contains(csp, "script-src 'unsafe-inline'") {
-		t.Errorf("CSP must not allow unsafe-inline scripts; got: %s", csp)
 	}
 }
 

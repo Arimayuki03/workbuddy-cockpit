@@ -13,22 +13,18 @@
 package panel
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
+	"workbuddy2api/internal/httpauth"
 	"workbuddy2api/internal/server"
 )
 
-// sessionCookie 会话 cookie 名。
-const sessionCookie = "wb_session"
+// sessionCookie 会话 cookie 名（httpauth 共享常量：panel 签发、server 校验同一名）。
+const sessionCookie = httpauth.SessionCookieName
 
 // sessionTTL 会话有效期（30 天）。
 const sessionTTL = 30 * 24 * time.Hour
@@ -64,29 +60,20 @@ func (p *Panel) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // issueSession 签发会话 cookie（payload 以当前时刻 + TTL 计算 exp）。
-// key 为空时不发（无鉴权部署无需会话）。
+// key 为空时不发（无鉴权部署无需会话）。签名实现见 httpauth.SignSessionToken
+// （server 侧 withAuth 用同一函数校验，口径只有一份）。
 func (p *Panel) issueSession(w http.ResponseWriter, key string) {
 	if key == "" {
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
-		Value:    signSessionToken(mustJSON(map[string]int64{"exp": time.Now().Add(sessionTTL).Unix()}), key),
+		Value:    httpauth.SignSessionToken(mustJSON(map[string]int64{"exp": time.Now().Add(sessionTTL).Unix()}), key),
 		Path:     "/",
 		Expires:  time.Now().Add(sessionTTL),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
-}
-
-// signSessionToken 生成 base64url(payload)+"."+hex(HMAC-SHA256(b64(payload),key))。
-// HMAC 的输入是 **base64 后的 payload 字符串**（与 verifySessionValue 对齐——
-// 校验侧只能从 cookie 值里拆出 b64 段，两侧对同一字节序列签名）。
-func signSessionToken(payload []byte, key string) string {
-	b64 := base64.RawURLEncoding.EncodeToString(payload)
-	mac := hmac.New(sha256.New, []byte(key))
-	mac.Write([]byte(b64))
-	return b64 + "." + hex.EncodeToString(mac.Sum(nil))
 }
 
 // mustJSON 编码失败回 "{}"（仅 int64 map，不可能失败；防御性兜底）。
@@ -98,47 +85,10 @@ func mustJSON(v any) []byte {
 	return raw
 }
 
-// verifySessionValue 校验会话 cookie 值：签名正确且未过期返回 true。
-// key 为空 = 未启用鉴权，恒 true（与 withAuth 语义一致）。
-func verifySessionValue(value, key string) bool {
-	if key == "" {
-		return true
-	}
-	dot := strings.LastIndexByte(value, '.')
-	if dot < 0 {
-		return false
-	}
-	payload, sigHex := value[:dot], value[dot+1:]
-	sig, err := hex.DecodeString(sigHex)
-	if err != nil {
-		return false
-	}
-	mac := hmac.New(sha256.New, []byte(key))
-	mac.Write([]byte(payload))
-	if !hmac.Equal(sig, mac.Sum(nil)) {
-		return false
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(payload)
-	if err != nil {
-		return false
-	}
-	var body struct {
-		Exp int64 `json:"exp"`
-	}
-	if json.Unmarshal(raw, &body) != nil {
-		return false
-	}
-	return body.Exp > time.Now().Unix()
-}
-
 // sessionAuth 会话通道判定：cookie 有效（或未启用鉴权）返回 true。
 // 密钥经 livecfg 快照读取——改 api_key 后旧 cookie 全部失效（签名密钥变更）。
 func (p *Panel) sessionAuth(r *http.Request) bool {
-	c, err := r.Cookie(sessionCookie)
-	if err != nil || c.Value == "" {
-		return false
-	}
-	return verifySessionValue(c.Value, p.apiKey())
+	return httpauth.VerifySessionRequest(r, p.apiKey())
 }
 
 // handleMe GET /api/me：manager 壳登录态探测。
