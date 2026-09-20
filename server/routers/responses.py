@@ -211,11 +211,27 @@ def attach_reasoning(msg: dict, text: str) -> None:
     这个字段反而会让上游那道兜底不生效**。这也是「两个都写」更稳的另一个理由
     ——万一字段名真有讲究，我们不依赖上游兜底也能过。
 
-    文本为空时仍然挂上（字段存在本身有意义），但要清楚**空串救不了场**：
-    真正的解法是不把推理文本丢掉，那是本模块其余逻辑在守的事。
+    ## 空文本要补一个空格（不是挂空串）
+
+    校验是 `len(reasoning) > 0` 且**不做 trim**：空白串过闸、空串不过。
+    所以没有真实推理文本时补一个空格 `" "`，而不是空串或干脆不挂。
+
+    这条判据来自上游（2026-09-19 commit 5657229，采纳社区 issue #37 的判定表
+    并复验）：它对每条 assistant 都保证 `reasoning` 非空，无内容时同样补空格，
+    理由是「该字段是透传校验位、不是内容消费位」，且官方客户端有同类占位先例
+    （Moonshot 的 `"-"`）。官方的理由是它是**校验位**而非内容位，所以占位不会
+    污染模型上下文。
+
+    **注意区分两种「空」**：
+      · 客户端**回了真实推理**（哪怕只有几个字节）→ 用原文，别动；
+      · 客户端回的推理项里确实取不到任何内容 → 补空格占位。
+    第二种是畸形输入（正常客户端不会把空的 reasoning item 发回来），
+    补占位是为了不让整轮请求因为这个字段被拒。
     """
-    msg['reasoning'] = text
-    msg['reasoning_content'] = text
+    # 空 → 单个空格：上游校验 len>0 且不 trim，空串过不了、空白串能过。
+    value = text if text else ' '
+    msg['reasoning'] = value
+    msg['reasoning_content'] = value
 
 
 def _reasoning_text(item: dict) -> str:
@@ -415,23 +431,20 @@ def to_chat_request(body: dict) -> dict:
                     pending_reasoning = (
                         text if pending_reasoning is None else pending_reasoning + text
                     )
-                else:
+                elif pending_reasoning is None:
                     # 客户端发了 reasoning 项、但里面**没有可用文本**（空 summary /
-                    # 空 content / 只有空的 encrypted_content）。这种畸形输入下我们
-                    # 无从还原推理内容，于是**不挂字段**，并记一条 WARN。
+                    # 空 content / 只有空的 encrypted_content）——畸形输入，
+                    # 正常客户端不会这么发。
                     #
-                    # 早先这里挂空串，理由是「字段存在就能满足校验」。但社区实测
-                    # （issue #37 的取值矩阵）表明**空串仍会被拒**、非空才过 ——
-                    # 若该结论成立，挂空串让我们从「没痕迹」变成「有痕迹但内容为空」，
-                    # 反而更糟；若该结论不成立（本仓复现不出，见该 issue 的讨论），
-                    # 挂空串与不挂在结果上又没差别（上游兜底本就会补空串）。
-                    # 两种情况都指向同一结论：**挂空串是无收益的风险**，故不挂。
-                    #
-                    # 记 WARN 是因为这条路径此前完全静默：真遇到 11155 时，
-                    # 用户与我们都看不到「是哪个客户端发了空推理项」，只能猜。
+                    # 记一个**空串占位**：`attach_reasoning` 见到空值会补一个空格
+                    # 交出去（上游校验 len>0 且不 trim，空格过闸、空串不过）。
+                    # 这里用空串而不是直接补空格，是为了让「有 item 但无内容」与
+                    # 「有内容」在语义上仍可区分 —— 同时下面的 WARN 能把这种
+                    # 畸形输入暴露出来（此前完全静默，真遇到 11155 时无从排查）。
+                    pending_reasoning = ''
                     logger.warning(
                         '客户端发来的 reasoning 项无可提取文本（type=%s keys=%s）——'
-                        '该轮将不带推理内容，若上游报 11155 请把此日志一并提供',
+                        '将按上游口径补占位，若上游报 11155 请把此日志一并提供',
                         item.get('type'), sorted(item.keys()),
                     )
                 continue
@@ -1151,9 +1164,19 @@ async def _handle(request: Request) -> JSONResponse | StreamingResponse:
             await resp.aclose()
             await client.aclose()
             latency = int((time.time() - started) * 1000)
+            # token 用量必须从 translator 攒下的 usage 取（上游在末帧给）。
+            #
+            # 此前这里 pt/ct 写死 0 —— 后果是走 /v1/responses 的流式请求在
+            # 「请求日志」与「用量统计」里 token 恒为 0（issue #41：客户端
+            # Hermes 的消耗完全看不见）。当时 credit 却已经从同一个 usage 取了，
+            # 属于「值拿到了却没用上」——与本文件其它几处修过的同类问题一样。
+            usage = translator.usage if isinstance(translator.usage, dict) else {}
             gateway._record(
-                key, ip, model, mapped or '', 200, 0, 0, latency, ua, error_text, True,
-                credit=gateway._usage_credit(translator.usage), first_token=first_token_ms,
+                key, ip, model, mapped or '', 200,
+                _as_int(usage.get('prompt_tokens')),
+                _as_int(usage.get('completion_tokens')),
+                latency, ua, error_text, True,
+                credit=gateway._usage_credit(usage), first_token=first_token_ms,
             )
 
     return StreamingResponse(gen(), status_code=200, media_type='text/event-stream')

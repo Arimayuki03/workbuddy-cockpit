@@ -59,6 +59,12 @@ dev/.fail-shots
 # 登录轮询可见性验收脚本（verify_login_poll_visibility.py）的临时数据与截图
 dev/.login-poll
 dev/.login-shots
+# 跨天时间显示验收脚本（verify_time_display.py）的临时数据与截图
+dev/.verify-44
+dev/.shots-44
+# 手动停用界面验收脚本（verify_manual_disabled_ui.py）的临时数据与截图
+dev/.manual-disabled
+dev/.shots-45
 
 # 安全测试脚本（临时）
 .sec*.py
