@@ -13,7 +13,7 @@ alive() { [[ -f $PIDFILE ]] && kill -0 "$(cat $PIDFILE)" 2>/dev/null; }
 case "${1:-status}" in
   start)
     if alive; then echo "已在运行 (PID $(cat $PIDFILE))"; exit 0; fi
-    [[ -x $BIN ]] || { echo "未找到 $BIN，先执行: CGO_ENABLED=0 go build -o wb2api ./cmd/server"; exit 1; }
+    [[ -x $BIN ]] || { echo "未找到 $BIN，先执行: CGO_ENABLED=0 go build -tags embed_panel -o wb2api ./cmd/server"; exit 1; }
     nohup "$BIN" -config config.json > "$LOG" 2>&1 &
     echo $! > "$PIDFILE"
     sleep 2

@@ -3,7 +3,7 @@ setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
 if not exist "wb2api.exe" (
-  echo Missing wb2api.exe. Build it with: go build -o wb2api.exe ./cmd/server
+  echo Missing wb2api.exe. Build it with: go build -tags embed_panel -o wb2api.exe ./cmd/server
   exit /b 1
 )
 if not exist "config.json" (
