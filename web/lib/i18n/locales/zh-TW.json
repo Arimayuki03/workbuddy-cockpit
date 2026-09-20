@@ -391,7 +391,8 @@
     "disabled": "已停用",
     "quotaCredit": "積分額度",
     "quotaCreditHint": "按上游回傳的真實扣費累計（不是按 token 估算）。與上面的 token 額度互不影響，任一超限即拒絕呼叫；留 0 = 不限",
-    "creditUsed": "積分 {used} / {quota}"
+    "creditUsed": "積分 {used} / {quota}",
+    "modelsUnknown": "這些名字找不到對應模型（可能拼錯了）：{names}。它們不會被列出，呼叫時也會被拒。"
   },
   "logs": {
     "title": "請求日誌",
