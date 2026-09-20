@@ -499,8 +499,24 @@ def to_chat_request(body: dict) -> dict:
     if choice is not None:
         out['tool_choice'] = choice
 
-    # 只透传**上游认识**的字段。`store` / `include` / `prompt_cache_key` /
-    # `reasoning` 这些是 OpenAI 专有的，透过去只会换来一个 400。
+    # `prompt_cache_key` 要**透传**（上游 2026-09-18 起明确支持并依赖它）：
+    # 上游 `cache_key.go` 实测同一段 8k token 前缀，不带该键时
+    # `prompt_cache_hit_tokens=0`、扣费≈0.34，带键时命中 7808、扣费≈0.02
+    # ——**费用差约 17 倍**。其 `InjectPromptCacheKey` 的优先级 1 就是
+    # 「客户端已带则原值保留」，并有测试钉住。
+    #
+    # 此前的注释写着「透过去只会换来 400」，**那是错的**：上游对请求体是
+    # `json.Unmarshal` 到 map（非 DisallowUnknownFields 严格模式），未知字段
+    # 天然忽略——它自己的测试注释也这么写。照旧丢弃等于让下游客户端**主动
+    # 提供的缓存键**失效，把费用优化的机会一起丢掉。
+    #
+    # `store` / `include` / `reasoning` 仍然丢弃：它们不是上游要的字段（丢了
+    # 才是对的），与 `prompt_cache_key` 不是一回事。
+    if isinstance(body.get('prompt_cache_key'), str) and body['prompt_cache_key']:
+        out['prompt_cache_key'] = body['prompt_cache_key']
+
+    # 只透传**上游认识**的字段。`store` / `include` / `reasoning` 这些 OpenAI
+    # 专有的，上游不认识、也无从消费。
     # （`stream` 不在其列——它必须转告上游，见函数开头。）
     return out
 

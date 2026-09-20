@@ -375,21 +375,51 @@ class RequestConversionTest(unittest.TestCase):
         self.assertEqual(out['tools'][0]['function']['name'], 'get')
 
     def test_openai_only_fields_not_passed_upstream(self) -> None:
-        """store/include/prompt_cache_key/reasoning 是 OpenAI 专有，透过去就 400。
+        """store/include/reasoning 是 OpenAI 专有，上游不认识，丢掉。
 
         `stream` **不在此列**：它必须转告上游（上游据此决定回 SSE 还是 JSON）。
         这条断言是 E2E 试出来的——早先把 stream 一并"过滤"掉，流式请求会静默
         变成空回答。
+
+        `prompt_cache_key` 也**不在此列**，见下一条（上游支持并依赖它）。
         """
         out = R.to_chat_request({
             'model': 'm', 'input': 'x', 'store': True,
             'include': ['reasoning.encrypted_content'],
-            'prompt_cache_key': 'k', 'prompt_cache_retention': '24h',
+            'prompt_cache_retention': '24h',
             'reasoning': {'effort': 'high'},
         })
-        for leaked in ('store', 'include', 'prompt_cache_key',
-                       'prompt_cache_retention', 'reasoning'):
+        for leaked in ('store', 'include', 'prompt_cache_retention', 'reasoning'):
             self.assertNotIn(leaked, out, f'{leaked} 不该透给上游')
+
+    def test_prompt_cache_key_forwarded(self) -> None:
+        """`prompt_cache_key` 要透传——它是上游的**费用优化开关**（约 17 倍差价）。
+
+        上游 `cache_key.go` 的实测：同一段 8k token 前缀，不带该键
+        `prompt_cache_hit_tokens=0`、扣费≈0.34；带键命中 7808、扣费≈0.02。
+        其 `InjectPromptCacheKey` 的优先级 1 就是「客户端已带则原值保留」，
+        并有测试钉住——所以下游客户端**主动提供**的键必须原样送到上游。
+
+        这条修正了一条错的旧注释：它写着「prompt_cache_key 透过去只会换来 400」。
+        实际上游是 `json.Unmarshal` 到 map（非严格模式），未知字段天然忽略，
+        它自己的测试注释也这么写。照旧丢弃等于白丢一次费用优化。
+        """
+        out = R.to_chat_request({'model': 'm', 'input': 'x',
+                                 'prompt_cache_key': 'client-key'})
+        self.assertEqual(out.get('prompt_cache_key'), 'client-key')
+
+    def test_prompt_cache_key_not_fabricated(self) -> None:
+        """客户端没给就不要凭空造一个：键的取值语义（复用哪个前缀）只有客户端知道。
+
+        上游在两源都空时仍会注入它自己按账号派生的键，那是它的职责；我们造一个
+        只会覆盖掉它（优先级 1 是「客户端已带则原值保留」）。
+        脏值（数字 / 空串）同样不透传。
+        """
+        for body in ({'model': 'm', 'input': 'x'},
+                     {'model': 'm', 'input': 'x', 'prompt_cache_key': 123},
+                     {'model': 'm', 'input': 'x', 'prompt_cache_key': ''}):
+            out = R.to_chat_request(body)
+            self.assertNotIn('prompt_cache_key', out, f'{body} 不该产出缓存键')
 
     def test_stream_flag_forwarded_to_upstream(self) -> None:
         """`stream` 必须转告上游：漏掉它，上游回 JSON，网关按 SSE 解析 →
