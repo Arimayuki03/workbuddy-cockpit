@@ -68,6 +68,8 @@ dev/.shots-45
 # 账号管理接口开关验收脚本（verify_admin_toggle_ui.py）的临时数据与截图
 dev/.admin-toggle
 dev/.shots-admin
+# 账号管理接口端到端验收（verify_admin_flow_e2e.py）的临时数据
+dev/.admin-flow
 
 # 安全测试脚本（临时）
 .sec*.py
