@@ -224,6 +224,24 @@ const BASE = process.env.BASE, OUT = process.env.OUT, CFG = process.env.CFG;
   step(/改文件名|完全退出账号池/.test(body), '文案说明了不开启时的代价');
   await page.screenshot({path: `${OUT}/settings-admin.png`, fullPage: true});
 
+  // ── 1b. 多语言：切到其它语言后，这个分组必须显示**译文**而不是中文原文 ──
+  // 短语表是按「渲染后的整串」查的，拼接少一个字符就静默退回中文原文
+  // （界面表现为漏翻）。这里在真实浏览器里确认译文真的生效。
+  const LOCALE_KEY = 'workbuddy-manager:locale';
+  for (const [code, expect, han] of [['en', /account management api/i, null],
+                                     ['ja', /アカウント管理/, null]]) {
+    await page.evaluate(([k, v]) => localStorage.setItem(k, v), [LOCALE_KEY, code]);
+    await page.reload({waitUntil: 'load'});
+    await page.waitForTimeout(3500);
+    const txt = await page.locator('body').innerText();
+    step(expect.test(txt), `切到 ${code} 后分组标题已翻译`, (txt.match(/account management api|アカウント管理/g) || [''])[0]);
+  }
+  // 切回中文，避免影响后续断言
+  await page.evaluate(([k, v]) => localStorage.setItem(k, v), [LOCALE_KEY, 'zh-CN']);
+  await page.reload({waitUntil: 'load'});
+  await page.waitForTimeout(3500);
+  body = await page.locator('body').innerText();
+
   // ── 2. 打开并保存，确认落到上游 config.json ──
   const before = JSON.parse(fs.readFileSync(CFG, 'utf8'));
   step(before.admin?.enabled === false, '前置：上游 config 里 admin.enabled 初始为 false');
