@@ -4,6 +4,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -24,6 +25,10 @@ const (
 
 // travelAccountDelay 账号间限速：全量账号约 40s，避免上游风控。测试可置 0。
 var travelAccountDelay = 800 * time.Millisecond
+
+// adoptReportGap 领养前置上报后的等待：给上游事件处理留时间再发 buddy/first。
+// 对齐 scripts/task_first_buddy.py 实测的 1.05s 间隔口径。测试可置 0。
+var adoptReportGap = 1050 * time.Millisecond
 
 // activityAccountDelay 活跃上报账号间限速：与旅行同口径，避免上游风控。测试可置 0。
 var activityAccountDelay = 800 * time.Millisecond
@@ -168,12 +173,23 @@ func (s *Scheduler) travelAdoptForce(a *auth.Auth) {
 	s.adoptBuddy(a, true) // force=true 豁免当日防抖
 }
 
-// adoptBuddy 无猫时领养：先同意协议（幂等）再 buddy/first。
-// conversation 门槛未达标（HTTP 400 first_buddy task not completed yet）属预期行为，
-// 记一次当日已试后静默跳过，不再重试。force=true 时豁免当日防抖（活跃上报补满对话量后重试）。
+// adoptBuddy 无猫时领养，链路：report → agreement → buddy/first。
+//
+// report 必须先跑（scripts/task_first_buddy.py 实测，panel 口径移植）：一条
+// chat_request_send 上报点亮 growth 连登并**解锁 first_buddy 任务**；未上报时
+// buddy/first 会返回 400 "first_buddy task not completed yet"——该门槛的真实
+// 来源是"当日无活跃上报"，不是账号问题（report.go 注释亦明确「解锁 first_buddy
+// 任务（领养前置）」）。conversation 门槛未达标仍属预期行为，记一次当日已试后
+// 静默跳过，不再重试。force=true 时豁免当日防抖（活跃上报补满对话量后重试）。
 func (s *Scheduler) adoptBuddy(a *auth.Auth, force bool) {
 	if !force && s.adoptTriedToday(a.UID) {
 		return
+	}
+	// 前置：解锁 first_buddy 任务（幂等；失败不阻塞，让 buddy/first 按既有错误路径暴露）。
+	if err := s.cfg.Upstream.ReportChatActivity(a, fmt.Sprintf("wb2api-adopt-%d", time.Now().UnixMilli()), ""); err != nil {
+		log.Printf("travel %s: adopt preflight report: %v", logfmt.Label(a.UID, a.Nickname), err)
+	} else {
+		time.Sleep(adoptReportGap) // 给上游事件处理留时间（对齐脚本实测的 1.05s 间隔口径）
 	}
 	if err := s.cfg.Upstream.BuddyAgreement(a); err != nil {
 		log.Printf("travel %s: agreement: %v", logfmt.Label(a.UID, a.Nickname), err)

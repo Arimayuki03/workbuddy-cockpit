@@ -706,6 +706,11 @@ type Client struct {
 	ChatBaseCN    string
 	BillingBaseCN string
 
+	// WebBaseCN 官网（workbuddy.cn）域：部分「任务领奖」类接口只在此域提供
+	//（growth 任务领奖 ClaimReward、Web 指纹上报——panel 移植件，见 desktop_bridge.go）。
+	// 空 = webBase 回落默认值 https://www.workbuddy.cn。
+	WebBaseCN string
+
 	// ChatBaseGlobal / BillingBaseGlobal 国际版（global realm）上游 base。
 	// 空 = 缺省默认 https://www.workbuddy.ai（D5）。
 	ChatBaseGlobal    string

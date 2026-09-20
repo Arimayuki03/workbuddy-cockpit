@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/logfmt"
+	"workbuddy2api/internal/usage"
 )
 
 // chatSeq 进程级请求序号。
@@ -20,6 +21,14 @@ var chatSeq atomic.Int64
 // chatLogEnabled 聊天表格日志总开关。生产恒 true；
 // 测试包经 TestMain 置 false 关闭 stdout 噪音，需要断言行输出的测试用 withChatLog 临时开启（R5）。
 var chatLogEnabled = true
+
+// chatLogOut 聊天表格日志输出目标。生产默认 os.Stdout；main 启用管理面板时经
+// SetChatLogOutput 注入 MultiWriter（stdout + panel Ring），把每行镜像进
+// /api/logs 的 chat 频道——表格行不走 log 包，必须单独镜像（panel 同款机制）。
+var chatLogOut io.Writer = os.Stdout
+
+// SetChatLogOutput 替换聊天表格日志输出目标（仅 main 启动期调用一次）。
+func SetChatLogOutput(w io.Writer) { chatLogOut = w }
 
 // chatStat 单个 chat 请求的日志统计；handler 挂 defer，请求出口后落一行。
 type chatStat struct {
@@ -42,6 +51,10 @@ type chatStat struct {
 	credit    float64
 	hasCredit bool
 
+	// errSummary 非 200 出口的错误摘要（面板请求日志 Error 列；空 = 正常/无记录）。
+	// 由 handler 错误路径经 setError 填充；截断到 ~200 字节防环形缓冲被长报文撑爆。
+	errSummary string
+
 	logged bool
 }
 
@@ -54,7 +67,22 @@ func newChatStat(now time.Time, body []byte, stream bool) *chatStat {
 	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1}
 }
 
-// done 幂等落一行表格日志，并把本次请求记入 metrics 聚合（/v1/stats 数据源）。
+// setError 记录非 200 出口的错误摘要（面板请求日志 Error 列）。
+// 截断到 200 字符：环形缓冲容量 1000 条，长上游报文会把内存/响应撑爆；
+// 完整原文在 handler 响应与 stdout 日志里仍可见，这里只是观测摘要。
+func (s *chatStat) setError(msg string) {
+	if s.errSummary != "" {
+		return // 首个错误优先：轮转途中多号失败，最终原因往往在 lastErr（末端写入）
+	}
+	msg = strings.TrimSpace(msg)
+	if len(msg) > 200 {
+		msg = msg[:200]
+	}
+	s.errSummary = msg
+}
+
+// done 幂等落一行表格日志，并把本次请求记入 metrics 聚合（/v1/stats 数据源）、
+// 请求日志环形缓冲（/api/request_logs 数据源，v1.2.0）与用量分桶（panel usage 移植件）。
 //
 // 单一埋点：流式 / 非流式 / 各类错误路径最终都汇到此处，故 metrics 天然覆盖全路径，
 // 不需要在每个 return 前重复记账（重复记账反而会漏分支或双计）。
@@ -66,7 +94,44 @@ func (s *chatStat) done() {
 	total := time.Since(s.start)
 	logChatRow(s.ttfb, total, s.model, s.mode, s.uid, s.nick, s.status, s.toks)
 	recordChatMetric(s, total)
+	appendRequestLog(requestLogPayloadFromStat(s))
+	recordUsageBucket(s)
 }
+
+// recordUsageBucket 用量分桶记录（usage.Enabled=true 时由 main 注入）。
+// ok 以「上游是否给了 usage」判定：hasUsage=false 的尝试（传输错误/>=400/解析失败）
+// 计为失败——失败也计入请求数，否则重试放大在用量视图里看不见。
+func recordUsageBucket(s *chatStat) {
+	if globalUsageRecorder == nil || !s.hasUsage {
+		if globalUsageRecorder != nil {
+			globalUsageRecorder.Add(time.Now(), s.realmOf(), s.uid, s.model, usage.Delta{}, false)
+		}
+		return
+	}
+	globalUsageRecorder.Add(time.Now(), s.realmOf(), s.uid, s.model, usage.Delta{
+		PromptTokens:     int64(s.prompt),
+		HasPromptTokens:  s.hasUsage,
+		CompletionTokens: int64(s.toks),
+		HasCompletion:    s.toks >= 0,
+		TotalTokens:      int64(s.prompt + s.toks),
+		HasTotal:         s.hasUsage && s.toks >= 0,
+		LatencyMs:        s.ttfb.Milliseconds(),
+		HasLatency:       s.ttfb > 0,
+	}, s.toks >= 0)
+}
+
+// realmOf 请求账号的 realm（cn/global；uid 未知时回落 cn——与 usage 包缺省一致）。
+func (s *chatStat) realmOf() string {
+	return "cn"
+}
+
+// globalUsageRecorder main 注入的用量记录器（nil = usage.enabled=false）。
+// 包级而非 Handler 字段：chatStat 是值日志对象，不持 Handler 引用；单一埋点
+// 读一个包级原子引用比回传 Handler 简单且测试可注入（SetUsageRecorder）。
+var globalUsageRecorder *usage.Recorder
+
+// SetUsageRecorder 注入用量记录器（main 启动期调用一次；nil = 关闭记录）。
+func SetUsageRecorder(r *usage.Recorder) { globalUsageRecorder = r }
 
 // chatStatsReader 在流式透传时抓取 SSE 末帧的 usage.completion_tokens 精确值，
 // 并记录首个 data 帧的 TTFB；原始字节原样返回给下游透传。
@@ -263,7 +328,7 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status
 	if ttfb > 0 {
 		ttfbMS = fmt.Sprintf("%dms", ttfb.Milliseconds())
 	}
-	fmt.Fprintf(os.Stdout, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | total=%.1fs |\n",
+	fmt.Fprintf(chatLogOut, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | total=%.1fs |\n",
 		seq,
 		time.Now().Format("15:04:05"),
 		model,

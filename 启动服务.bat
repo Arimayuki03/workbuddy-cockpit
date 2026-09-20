@@ -304,6 +304,23 @@ timeout /t 1 /nobreak >nul 2>nul
 goto :run
 
 :run
+rem 前端面板（v1.2.0）：有 Node 才重构建静态导出；无 Node 时跳过，
+rem 继续用上一次成功构建的产物（wb2api.exe 内嵌，本机增量场景）。
+where node >nul 2>nul
+if errorlevel 1 (
+    echo [提示] 未检测到 Node.js，跳过面板前端构建（使用上次构建产物）。
+    goto :skip_panel_build
+)
+if exist web\package.json (
+    echo 构建面板前端（npm run build:export，产物变化时才有开销）...
+    pushd web
+    call npm run build:export
+    popd
+    if errorlevel 1 echo [Warning] 前端构建失败，继续使用上次成功构建的产物。
+) else (
+    echo [提示] web 目录不存在，跳过面板前端构建。
+)
+:skip_panel_build
 rem 编译服务（go build 缓存命中秒级；源码更新后自动生效，无需手动删 exe）
 call :build wb2api.exe ./cmd/server
 if not exist wb2api.exe (

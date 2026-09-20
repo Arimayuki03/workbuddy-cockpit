@@ -73,3 +73,7 @@ SPEC.md
 *.md
 !README.md
 !docs/DESIGN-v1.2.0-panel-manager.md
+
+web/node_modules/
+web/.next/
+web/out/

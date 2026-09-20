@@ -1,0 +1,449 @@
+'use client';
+
+import {useCallback, useEffect, useMemo, useState} from 'react';
+import {Users, CircleCheck, TriangleAlert, Activity, Server, Coins} from 'lucide-react';
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+import {useHeartbeat} from '@/lib/use-heartbeat';
+import {accountApi, errText, statsApi} from '@/lib/api';
+import {useRealm} from '@/lib/realm-context';
+import type {
+  Account,
+  OverviewResponse,
+  UpstreamStatus,
+  UsageSnapshot,
+} from '@/lib/types';
+import {
+  fmtCompact,
+  fmtDateTime,
+  fmtNumber,
+} from '@/lib/format';
+import {
+  availabilityClass,
+  availabilityLabelKey,
+  availabilityOf,
+  availabilityTitleKey,
+  isDegraded,
+  type AvailabilityTier,
+} from '@/lib/account-status';
+import {PageHeader} from '@/components/common/layout/PageHeader';
+import {StatCard} from '@/components/common/layout/StatCard';
+import {EmptyState} from '@/components/common/layout/EmptyState';
+import {Badge} from '@/components/ui/badge';
+import {useT} from '@/lib/i18n/provider';
+import {notify} from '@/lib/toast';
+
+export default function DashboardPage() {
+  const {realm, label: realmName} = useRealm();
+  const t = useT();
+  const [overview, setOverview] = useState<OverviewResponse | null>(null);
+  const [usage, setUsage] = useState<UsageSnapshot | null>(null);
+  const [upstream, setUpstream] = useState<UpstreamStatus | null>(null);
+  /** 实时积分（按 uid），叠加到账号上 */
+  const [liveCredits, setLiveCredits] = useState<Record<string, number>>({});
+  /** 最近到期套餐（按 uid），来自 packages 查询 */
+  const [nextExpiry, setNextExpiry] = useState<{at: number; amount: number} | null>(null);
+
+  // 切换版本后要重新取积分：两个版本的账号池不同，credits 也不能混
+  const load = useCallback(async () => {
+    const results = await Promise.allSettled([
+      accountApi.overview(),
+      accountApi.status(),
+      statsApi.usage(168),
+    ]);
+    if (results[0].status === 'fulfilled') setOverview(results[0].value);
+    if (results[1].status === 'fulfilled') setUpstream(results[1].value);
+    if (results[2].status === 'fulfilled') setUsage(results[2].value);
+    if (results.some((r) => r.status === 'rejected')) {
+      const failed = results.find((r) => r.status === 'rejected');
+      notify.err(errText((failed as PromiseRejectedResult).reason));
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // 打开页面时拉一次积分包明细（最近到期时刻 + 实时余额）
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const r = await accountApi.packages();
+        if (!alive) return;
+        const credits: Record<string, number> = {};
+        let best: {at: number; amount: number} | null = null;
+        for (const row of r.accounts) {
+          if (typeof row.remain === 'number' && !row.error) credits[row.uid] = row.remain;
+          for (const p of row.packages ?? []) {
+            if (!p.end_time) continue;
+            const at = Date.parse(p.end_time);
+            if (!Number.isFinite(at) || p.remain <= 0) continue;
+            if (!best || at < best.at) best = {at, amount: p.remain};
+          }
+        }
+        setLiveCredits(credits);
+        setNextExpiry(best);
+      } catch {
+        /* 静默失败：仍显示池快照值 */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // 账号健康度与用量会持续变化，用心跳刷新避免展示陈旧数据
+  useHeartbeat(load, 30000);
+
+  /**
+   * 池快照按当前版本过滤。
+   * Go 侧单实例双版本共存，账号按自身 realm 路由；存量数据无 realm 字段时视为 cn。
+   */
+  const scoped = useMemo(
+    () => (overview?.accounts ?? []).filter((a) => (a.realm ?? 'cn') === realm),
+    [overview, realm],
+  );
+
+  /** 可用性分档的汇总（只统计「能正常调用」的，与账号页说法一致） */
+  const availability = useMemo(() => {
+    const counts: Record<AvailabilityTier, number> = {
+      disabled: 0, manualDisabled: 0, unknown: 0, cooling: 0, neverSucceeded: 0, online: 0,
+    };
+    for (const a of scoped) counts[availabilityOf(a)] += 1;
+    return counts;
+  }, [scoped]);
+
+  /**
+   * 「不可用」的账号数：冷却中 / 一直失败——这些是**用户需要处理**的。
+   * unknown（读不到池状态）与 manualDisabled（主动停用）不计入：
+   * 前者是我们看不到，后者是用户自己的决定。
+   */
+  const unusable = availability.cooling + availability.neverSucceeded;
+
+  /**
+   * 连败降权计数。上游把它并进 cooling，所以「冷却中」是个混数：既有等一会儿
+   * 就好的限流退避，也有「这个号在持续失败」的降权。这里从账号明细单独数一份。
+   */
+  const degraded = scoped.filter(isDegraded).length;
+
+  /** 池计数按当前版本（/status 的 realm_totals；缺失时退回 overview 顶层汇总） */
+  const pool = useMemo(() => {
+    const perRealm = upstream?.realm_totals?.[realm];
+    if (perRealm) {
+      return {known: true as const, ...perRealm};
+    }
+    return {
+      total: overview?.total ?? 0,
+      healthy: overview?.healthy ?? 0,
+      cooling: overview?.cooling ?? 0,
+      disabled: overview?.disabled ?? 0,
+      known: false as const,
+    };
+  }, [upstream, overview, realm]);
+
+  // 时序图：近 14 个日点；今天已有小时点时改用逐小时点（更细）。
+  // panel 的 series 是「日点升序 + 小时点升序」拼成的连续时序。
+  const chartData = useMemo(() => {
+    if (!usage) return [];
+    const now = new Date();
+    const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const dayPoints = usage.series.filter((p) => p.scope === 'day').slice(-14);
+    const dayData = dayPoints.map((p) => ({
+      day: p.t.slice(5),
+      requests: p.requests,
+      tokens: p.total_tokens,
+    }));
+    const hourPoints = usage.series.filter(
+      (p) => p.scope === 'hour' && p.t.startsWith(todayKey),
+    );
+    if (!hourPoints.length) return dayData;
+    const todayHourly = hourPoints.map((p) => ({
+      day: p.t.slice(11) + ':00',
+      requests: p.requests,
+      tokens: p.total_tokens,
+    }));
+    return [...dayData, ...todayHourly].slice(-24);
+  }, [usage]);
+
+  /** 今日用量（日点或小时点聚合） */
+  const todayUsage = useMemo(() => {
+    if (!usage) return {requests: 0, tokens: 0, credit: 0};
+    const now = new Date();
+    const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const hourPoints = usage.series.filter((p) => p.scope === 'hour' && p.t.startsWith(todayKey));
+    if (hourPoints.length) {
+      return hourPoints.reduce(
+        (acc, p) => ({
+          requests: acc.requests + p.requests,
+          tokens: acc.tokens + p.total_tokens,
+          credit: 0,
+        }),
+        {requests: 0, tokens: 0, credit: 0},
+      );
+    }
+    const todayDay = usage.series.find((p) => p.scope === 'day' && p.t === todayKey);
+    return todayDay
+      ? {requests: todayDay.requests, tokens: todayDay.total_tokens, credit: 0}
+      : {requests: 0, tokens: 0, credit: 0};
+  }, [usage]);
+
+  const valid = scoped.filter((a) => !a.disabled && !a.manual_disabled).length;
+  // 积分余额合计（仅统计已同步到的账号）
+  const credOf = (a: Account) => liveCredits[a.uid] ?? a.credits;
+  const creditsKnown = scoped.filter((a) => typeof credOf(a) === 'number');
+  const totalCredits = creditsKnown.reduce((sum, a) => sum + (credOf(a) || 0), 0);
+  const creditsLow = creditsKnown.filter((a) => (credOf(a) || 0) < 200).length;
+  // 7 天内的到期算紧急。取渲染时刻即可：本页每 30 秒重渲染一次。
+  const expiryUrgent = !!nextExpiry && nextExpiry.at - Date.now() < 7 * 86400_000;
+
+  return (
+    <div className="flex flex-col gap-4 md:gap-6">
+      {/* 本页 30 秒自动刷新，且没有任何会改变数据的操作，
+          因此不再放手动刷新按钮（移动端还省下一行） */}
+      <PageHeader
+        title={t('dashboard.title')}
+        description={t('dashboard.description', {realm: realmName})}
+      />
+
+      <section className="grid grid-cols-2 gap-3 lg:grid-cols-5 md:gap-4">
+        <StatCard
+          label={t('dashboard.totalAccounts')}
+          value={fmtNumber(scoped.length)}
+          hint={t('dashboard.totalAccountsHint', {realm: realmName})}
+          icon={Users}
+          tone="neutral"
+          delay={0}
+        />
+        <StatCard
+          label={t('dashboard.valid')}
+          value={fmtNumber(valid)}
+          hint={
+            unusable > 0
+              ? t('dashboard.unusable', {count: unusable, n: unusable})
+              : valid === scoped.length
+                ? t('dashboard.allOk')
+                : t('dashboard.abnormal', {count: scoped.length - valid, n: scoped.length - valid})
+          }
+          icon={CircleCheck}
+          tone={unusable > 0 ? 'warning' : 'success'}
+          hintTone={unusable > 0 ? 'warning' : (valid === scoped.length ? 'success' : 'warning')}
+          delay={0.05}
+        />
+        <StatCard
+          label={t('dashboard.cooling')}
+          value={fmtNumber(pool.known ? pool.cooling : (overview?.cooling ?? 0))}
+          hint={
+            degraded > 0
+              ? t('dashboard.degradedHint', {count: degraded, n: degraded})
+              : t('dashboard.noCooling')
+          }
+          icon={TriangleAlert}
+          tone={degraded > 0 ? 'warning' : 'neutral'}
+          hintTone={degraded > 0 ? 'warning' : undefined}
+          delay={0.1}
+        />
+        <StatCard
+          label={t('metric.credits')}
+          // 值里带上最近一笔到期：额度高但下周作废，比额度低更值得注意
+          value={creditsKnown.length ? fmtNumber(totalCredits) : '—'}
+          hint={
+            !creditsKnown.length
+              ? t('dashboard.waitingUpstream')
+              : creditsLow > 0
+                ? t('dashboard.creditsLow', {count: creditsLow, n: creditsLow})
+                : nextExpiry
+                  ? t('dashboard.creditsExpiry', {
+                      time: fmtDateTime(nextExpiry.at),
+                      amount: fmtNumber(nextExpiry.amount),
+                    })
+                  : t('dashboard.creditsCovered', {count: creditsKnown.length, n: creditsKnown.length})
+          }
+          icon={Coins}
+          tone={
+            !creditsKnown.length ? 'neutral' : creditsLow > 0 || expiryUrgent ? 'warning' : 'accent'
+          }
+          hintTone={creditsLow > 0 || expiryUrgent ? 'warning' : undefined}
+          delay={0.15}
+        />
+        <StatCard
+          label={t('dashboard.todayTokens')}
+          value={fmtCompact(todayUsage.tokens)}
+          hint={t('dashboard.todayRequests', {
+            n: fmtNumber(todayUsage.requests),
+            realm: realmName,
+          })}
+          icon={Activity}
+          tone="info"
+          delay={0.2}
+        />
+      </section>
+
+      <section className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <div className="rounded-[20px] bg-muted p-4 lg:col-span-2">
+          <div className="mb-3 flex items-center justify-between">
+            <div className="text-sm font-medium">{t('dashboard.trend14')}</div>
+            <div className="text-[11px] text-muted-foreground">
+              {t('dashboard.requestsByRealm', {realm: realmName})}
+            </div>
+          </div>
+          <div className="h-[220px] w-full">
+            {chartData.length ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={chartData} margin={{top: 4, right: 8, bottom: 0, left: -16}}>
+                  <defs>
+                    <linearGradient id="gReq" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="var(--chart-1)" stopOpacity={0.35} />
+                      <stop offset="100%" stopColor="var(--chart-1)" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="day" tickLine={false} axisLine={false} fontSize={11} stroke="var(--muted-foreground)" />
+                  <YAxis tickLine={false} axisLine={false} fontSize={11} stroke="var(--muted-foreground)" />
+                  <Tooltip
+                    contentStyle={{
+                      background: 'var(--popover)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 12,
+                      fontSize: 12,
+                    }}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="requests"
+                    name={t('metric.requests')}
+                    stroke="var(--chart-1)"
+                    fill="url(#gReq)"
+                    strokeWidth={2}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="grid h-full place-items-center text-xs text-muted-foreground">{t('dashboard.noCallData')}</div>
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-[20px] bg-muted p-4">
+          <div className="mb-3 flex items-center gap-2 text-sm font-medium">
+            <Server className="h-4 w-4" />
+            {t('dashboard.upstreamPanel')}
+          </div>
+          {overview ? (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">{t('dashboard.connStatus')}</span>
+                {upstream ? (
+                  <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">
+                    {t('dashboard.connected')}
+                  </Badge>
+                ) : (
+                  <Badge variant="destructive" className="rounded-full">
+                    {t('dashboard.unavailable')}
+                  </Badge>
+                )}
+              </div>
+              {([
+                [t('dashboard.healthyAccounts'), pool.known ? pool.healthy : '—'],
+                [t('dashboard.cooling'), pool.known ? pool.cooling : '—'],
+                [t('dashboard.degraded'), degraded],
+                [t('dashboard.disabled'), pool.known ? pool.disabled : '—'],
+                [t('dashboard.stickySessions'), overview.sticky_sessions ?? 0],
+                [t('dashboard.redisMode'), overview.redis_mode ?? '—'],
+              ] as [string, string | number][]).map(([k, v]) => (
+                <div key={k} className="flex items-center justify-between text-xs">
+                  <span className="text-muted-foreground">{k}</span>
+                  <span className="font-medium tabular-nums">{String(v)}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="grid h-[160px] place-items-center text-xs text-muted-foreground">{t('dashboard.noUpstreamStatus')}</div>
+          )}
+        </div>
+      </section>
+
+      <section className="rounded-[20px] bg-muted p-4">
+        <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span className="text-sm font-medium">{t('dashboard.healthSnapshot')}</span>
+          {/* 各档汇总：一眼看清「有几个能真用」。文案与账号页共用同一套键 */}
+          {(['online', 'cooling', 'neverSucceeded', 'disabled', 'unknown'] as AvailabilityTier[])
+            .filter((tier) => availability[tier] > 0)
+            .map((tier) => (
+              <span
+                key={tier}
+                className={`text-[11px] tabular-nums ${availabilityClass(tier)}`}
+                title={availabilityTitleKey(tier) ? t(availabilityTitleKey(tier)!) : undefined}
+              >
+                {t(availabilityLabelKey(tier, scoped.find((a) => availabilityOf(a) === tier)))}
+                {' '}
+                {availability[tier]}
+              </span>
+            ))}
+        </div>
+        {scoped.length ? (
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {scoped.slice(0, 9).map((a) => {
+              const tier = availabilityOf(a);
+              const statusLabel = t(availabilityLabelKey(tier, a));
+              const titleKey = availabilityTitleKey(tier);
+              const credit = credOf(a);
+              return (
+                <div key={a.uid} className="rounded-2xl bg-background/60 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span
+                      className={
+                        'truncate text-sm font-medium ' +
+                        (tier === 'disabled' ? 'text-muted-foreground' : '')
+                      }
+                    >
+                      {a.nickname || a.uid}
+                    </span>
+                    <span
+                      className={'shrink-0 text-[10px] font-medium ' + availabilityClass(tier)}
+                      title={titleKey ? t(titleKey) : undefined}
+                    >
+                      {statusLabel}
+                    </span>
+                  </div>
+                  <div className="mt-1.5 flex items-center justify-between gap-2">
+                    <span className="font-mono text-[10px] text-muted-foreground">{a.uid}</span>
+                    <span
+                      className={
+                        'text-[11px] font-medium tabular-nums ' +
+                        (typeof credit !== 'number'
+                          ? 'text-muted-foreground'
+                          : credit <= 0
+                            ? 'text-red-600 dark:text-red-400'
+                            : credit < 200
+                              ? 'text-amber-600 dark:text-amber-400'
+                              : 'text-foreground')
+                      }
+                      title={t('metric.credits')}
+                    >
+                      {typeof credit === 'number' ? t('metric.creditAmount', {n: fmtNumber(credit)}) : ''}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <EmptyState
+            icon={Users}
+            title={t('dashboard.noAccounts')}
+            description={t('dashboard.noAccountsHint')}
+            className="flex flex-col items-center justify-center py-12 text-center"
+          />
+        )}
+      </section>
+    </div>
+  );
+}

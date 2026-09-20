@@ -356,6 +356,24 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 	}
 }
 
+// Remove 把账号移出池（panel 移植件，v1.2.0 面板「移除账号」入口）：
+// 删除内存条目并立即落盘 state.json（该号从下次启动的快照中消失）。
+// 返回被移除账号的凭证（供调用方删除 auth 文件）；uid 不存在返回 nil。
+// 调用方删文件后，auths/ 目录监听（StartAuthDirWatch）会对齐目录内容——
+// 本方法已即时出池，双方收敛于同一状态，无复活竞态。
+func (p *Pool) Remove(uid string) *auth.Auth {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return nil
+	}
+	delete(p.byUID, uid)
+	p.dirty.Store(true)
+	p.saveLocked()
+	return e.a
+}
+
 // upsertLocked 更新或插入单个账号；已存在则只换凭证、保留 credits/cooling 状态。
 // 调用方必须已持有 p.mu；Add 与 SyncToDir 共用此 upsert 逻辑。
 func (p *Pool) upsertLocked(a *auth.Auth) {

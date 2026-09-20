@@ -1,19 +1,38 @@
 # syntax=docker/dockerfile:1
+
+# 三段构建（v1.2.0，设计文档 §7）：
+#   1) node:22       前端面板静态导出（npm ci && npm run build:export → web/out）
+#   2) golang:1.26   go:embed 内嵌前端产物（-tags embed_panel）+ 全部 CLI 二进制
+#   3) alpine:3.20   运行时（python3/bash/时区，与原镜像一致）
+
+# ---------- 1. 前端静态导出 ----------
+FROM node:22-alpine AS frontend
+WORKDIR /web
+# 先拷 manifest 单独 npm ci：依赖未变时利用层缓存
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+# NEXT_OUTPUT_EXPORT=1 → output:'export' + trailingSlash，产物落 /web/out
+RUN npm run build:export
+
+# ---------- 2. Go 编译（内嵌面板） ----------
 FROM golang:1.26-alpine AS build
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-# 一次编译全部二进制（工具进镜像，容器内可直接跑脚本）。全部 -trimpath -s -w。
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wb2api ./cmd/server \
+# 静态产物就位（embed 目录：internal/panel/dist）后再编译，-tags embed_panel 启用内嵌。
+COPY --from=frontend /web/out/ ./internal/panel/dist/
+RUN CGO_ENABLED=0 go build -trimpath -tags embed_panel -ldflags="-s -w" -o /out/wb2api ./cmd/server \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/signin_bin ./cmd/signin \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/login ./cmd/login \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/credit ./cmd/credit \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/trial_bin ./cmd/trial \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/activity_bin ./cmd/activity
 
+# ---------- 3. 运行时 ----------
 FROM alpine:3.20
-# python3：login.sh 的 JSON 解析 / 签到 / 落盘；bash：shell 脚本体。
+# python3：login.sh 的 JSON 解析 / 签到 / 落盘；bash：shell 脚本。
 RUN apk add --no-cache wget ca-certificates tzdata python3 bash \
  && adduser -D -u 10001 app \
  && mkdir -p /app/auths /app/data \
