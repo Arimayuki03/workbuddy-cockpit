@@ -18,7 +18,8 @@
 现象是「调了没反应」，且无从自查。
 
 这里钉住两条 + 一个**不做重复实现**的边界：档位合法性交给上游降级管线，
-我们只做语义等价的初步映射（Anthropic 的 `max` → 上游的 `xhigh`）。
+我们只做档位名的映射（名字重合的同名透传，**不把 `max` 降成 `xhigh`** —— 上游
+`payload.go` 的 `effortRank` 把 `xhigh` 排在 `max` 之前，两者是不同的档）。
 """
 from __future__ import annotations
 
@@ -81,14 +82,31 @@ class ReasoningEffortTest(unittest.TestCase):
         self.assertEqual(
             anthropic._reasoning_effort({'output_config': {'effort': 'LOW'}}), 'low')
 
-    def test_anthropic_max_maps_to_upstream_xhigh(self) -> None:
-        """上游没有叫 `max` 的档（那是模型自己的最高档名），Anthropic 的 max 落到 xhigh。"""
+    def test_anthropic_max_stays_max(self) -> None:
+        """`max` **不能**被降成 `xhigh` —— 上游两者是不同的档，`max` 更强。
+
+        上游 `payload.go` 的 `effortRank` 是
+        `off < minimal < low < medium < high < xhigh < max`，
+        而 `effort_catalog.go` 里 gpt-5.6 系同时声明了 `xhigh` 与 `max`。
+
+        降档的后果正是这个映射要消除的「设了没用」：用户选最高档，实际拿到次高档。
+        （这条断言早期版本写反了，是核对上游 effortRank 时发现的。）
+        """
         self.assertEqual(
-            anthropic._reasoning_effort({'output_config': {'effort': 'max'}}), 'xhigh')
+            anthropic._reasoning_effort({'output_config': {'effort': 'max'}}), 'max')
+
+    def test_upstream_native_levels_pass_through(self) -> None:
+        """上游合法但 Anthropic 文档没写的档位（`xhigh`）要能透传。
+
+        不认识就丢弃，等于客户端设了上游支持的档位却被我们吃掉。
+        """
+        self.assertEqual(
+            anthropic._reasoning_effort({'output_config': {'effort': 'xhigh'}}), 'xhigh')
 
     def test_budget_tokens_buckets(self) -> None:
+        # 最高一档用 max（不是 xhigh）：预算 ≥64k 表达的是「不限思考」，对应最强档。
         cases = [(1024, 'low'), (2048, 'low'), (8192, 'medium'),
-                 (32768, 'high'), (128000, 'xhigh')]
+                 (32768, 'high'), (128000, 'max')]
         for budget, want in cases:
             got = anthropic._reasoning_effort(
                 {'thinking': {'type': 'enabled', 'budget_tokens': budget}})

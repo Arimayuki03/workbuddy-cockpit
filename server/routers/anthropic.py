@@ -554,14 +554,25 @@ def _thinking_enabled(body: dict) -> bool:
 
 # Anthropic 的 `output_config.effort` → 上游 `reasoning_effort` 的档位映射。
 #
-# 两边的枚举不同：Anthropic 用 low/medium/high/max，上游（腾讯 CodeBuddy 官方
-# 客户端口径，见 workbuddy2api 的 effort_catalog.go）用 low/medium/high/xhigh/max。
-# 名字重合的档直接同名透传；Anthropic 独有的 `max` 要落到上游的 `xhigh`——
-# 上游没有叫 max 的档（deepseek-v4-flash / v4-pro 的最高档分别是 max / xhigh，
-# 由**模型自己**声明）。这里只做「语义等价」的初步映射，真正的「这个模型支持
-# 哪些档」由上游自己的降级管线（normalizeReasoningEffort）处理：它会把不受支持
-# 的档降到 ≤请求档的最高支持档。我们不重复实现那张表——重复就是两份事实来源。
-_EFFORT_MAP = {'low': 'low', 'medium': 'medium', 'high': 'high', 'max': 'xhigh'}
+# 上游的档位命名取自腾讯 CodeBuddy 官方客户端，其**从低到高**是
+# `off < minimal < low < medium < high < xhigh < max`（见 workbuddy2api 的
+# `payload.go: effortRank`，`effort_catalog.go` 里各模型声明的也正是这套）。
+# 也就是说 **`xhigh` 与 `max` 是两个不同的档**，`max` 更强。
+#
+# Anthropic 侧只用到 low/medium/high/max。名字重合的直接同名透传；`xhigh` 也接受
+# （它本就是上游的合法档，客户端可能直接给出）。
+#
+# **不要把 `max` 降成 `xhigh`**：那会让「选最高档」实际拿到次高档，正是这个映射
+# 要消除的「设了没用」。真正的「该模型支持哪些档」由上游自己的降级管线处理
+# （`normalizeReasoningEffort` 会按 `effortRank` 降到 ≤ 请求档的最高支持档），
+# 我们不重复实现那张表——重复就是两份事实来源。
+_EFFORT_MAP = {
+    'low': 'low',
+    'medium': 'medium',
+    'high': 'high',
+    'xhigh': 'xhigh',
+    'max': 'max',
+}
 
 
 def _reasoning_effort(body: dict) -> str | None:
@@ -599,7 +610,9 @@ def _reasoning_effort(body: dict) -> str | None:
             elif budget < 65536:
                 effort = 'high'
             else:
-                effort = 'xhigh'
+                # 最高一档是 `max`（不是 `xhigh`）：预算 ≥64k 表达的是「不限思考」，
+                # 对应上游最强档。给 `xhigh` 会让这种请求拿不到应有的深度。
+                effort = 'max'
     return effort
 
 
