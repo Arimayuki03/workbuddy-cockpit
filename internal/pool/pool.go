@@ -261,6 +261,64 @@ func (p *Pool) Release(uid string) {
 	}
 }
 
+// AcquireModel 同 Acquire 并对该请求的模型计数（在途模型观测台账）。
+// model 为空时退化为 Acquire（无模型语义的调用方不受影响）。CAS 成功后才
+// 计入模型台账，保证 in_flight 与 in_flight_by_model 的可见性一致。
+func (p *Pool) AcquireModel(uid, model string) bool {
+	if model == "" {
+		return p.Acquire(uid)
+	}
+	p.mu.RLock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		p.mu.RUnlock()
+		return false
+	}
+	limit := p.inFlightLimit(e)
+	p.mu.RUnlock()
+	if limit <= 0 {
+		// 不限：计数仍累加（供状态观测），但永不拒绝。
+		e.inFlight.Add(1)
+		e.acquireModel(model)
+		return true
+	}
+	for {
+		cur := e.inFlight.Load()
+		if cur >= int64(limit) {
+			return false
+		}
+		if e.inFlight.CompareAndSwap(cur, cur+1) {
+			e.acquireModel(model)
+			return true
+		}
+	}
+}
+
+// ReleaseModel 同 Release 并对模型台账归账。幂等语义与 Release 一致：名额已
+// 归零时不重复扣减，模型侧也不产生负数（releaseModel 对缺失/零值条目空操作）。
+func (p *Pool) ReleaseModel(uid, model string) {
+	if model == "" {
+		p.Release(uid)
+		return
+	}
+	p.mu.RLock()
+	e, ok := p.byUID[uid]
+	p.mu.RUnlock()
+	if !ok {
+		return
+	}
+	for {
+		cur := e.inFlight.Load()
+		if cur <= 0 {
+			return
+		}
+		if e.inFlight.CompareAndSwap(cur, cur-1) {
+			e.releaseModel(model)
+			return
+		}
+	}
+}
+
 // SetRandomSource 仅供测试注入确定性随机源；生产代码不应调用。
 // 注入源取 n∈[0,n) 后，pickWeighted 的抽签结果完全可预测。
 func (p *Pool) SetRandomSource(fn func(n int64) int64) {

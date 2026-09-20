@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/Version-v1.1.0-6E56CF?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/Version-v1.1.1-6E56CF?style=flat-square">
   <img alt="Go" src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white&style=flat-square">
   <img alt="API" src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square">
   <img alt="Deploy" src="https://img.shields.io/badge/Deploy-Docker_Compose-2496ED?logo=docker&logoColor=white&style=flat-square">
@@ -53,7 +53,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 - **OAuth 设备授权登录** — `login.sh` 一条命令完成：取授权 URL → 浏览器登录 → token 轮询 → 凭证落盘 → 重启加载，全程无 PKCE（state 由服务端签发），重复执行即可连续添加多账号
 - **三因子加权随机选号** — `credits 比例 ×10 + 快过期积分占比 ×8 + 闲置补偿` 三项加权（`pool.expiring_soon` 窗口内的积分优先消耗，默认 7 天），按权重降序取 **Top-5 候选短名单**，再在短名单内加权抽签（等权重候选先随机打乱防惊群、LRU 兜底覆盖全部候选），兼顾积分多、快过期积分先用掉、闲置久的账号；失败账号由熔断 / 冷却 / 连败降权状态机处置（不进权重公式）
 - **防惊群** — 跳过 100ms 内刚被选中的账号，多账号同时待命时不打爆同一台
-- **在途租约** — 单账号最大在途请求数（`pool.max_in_flight`）限制并发占用，占满的号不参与选号，避免单号过载
+- **在途租约** — 单账号最大在途请求数（`pool.max_in_flight`）限制并发占用，占满的号不参与选号，避免单号过载；`/status` 透出 `in_flight_by_model` 每模型在途台账（模型 → 计数，归零即删行），运维可看到"这个号正在跑什么模型"
 - **账本择优** — 每次成功请求按 `usage.credit` 折算每千 token 单价记入 `(账号, 模型)` 账本，免费 / 便宜的账号优先；观测按 EMA 平滑、6 小时未更新即失效（陈旧价格不复活），成本随上游活动实时变化；账本随池状态落盘 `state.json`，重启不丢学费；`/status` 透出 `model_costs` 台账（模型 / 单价 / 末次观测 / 样本数）
 - **成本分层条件探索** — costTier 硬过滤（免费 > 未知 > 收费）会把全池锁死在唯一的实测免费号上：其余账号永远轮不到、也就永远学不到「它其实也免费」（垄断 + 学习冻结，issue #136）。破解方式是**搭车改道**：tier 0 垄断层存在且 tier 1 有成员时，距上次探索 ≥ `pool.cost_explore_interval`（默认 30m，`"0"` 关停）就把本次选号改道给一个未知号——承接的是完整真实用户请求，**零新增上游请求**（IP 维度零增量，WAF 友好）。成功即毕业（首观测入账，免费回 tier 0 / 收费出局 tier 2，学费只付一次）；失败走既有冷却 / 熔断策略，无探测风暴。探索频率硬性限幅 ≤ 48 次 / 天 / 模型（24h ÷ 30m），与池规模和 QPS 无关；tier 1 枯竭后自动停探。探索节奏按 `(域, 模型)` 独立；`/status` 透出 `cost_explore` 台账（累计事件数 + 各 (域, 模型) 最近探索时刻），与 `model_costs` 行对照即可读出「探索 → 毕业」全链路
 
@@ -248,8 +248,12 @@ PID 写入 `wb2api.pid`，标准输出与错误日志分别写入 `data/server.o
 # 模型列表
 curl -s http://localhost:7863/v1/models -H "Authorization: Bearer your-api-key"
 
-# 账号状态（汇总 + 每账号详情，含 disabled / manual_disabled 双位）
+# 账号状态（汇总 + 每账号详情，含 disabled / manual_disabled 双位、
+# rate_limited_models 限流明细、model_costs 成本台账、in_flight_by_model 每模型在途）
 curl -s http://localhost:7863/status -H "Authorization: Bearer your-api-key"
+
+# 请求统计（按模型聚合请求量 / token / 扣费，进程内存聚合、重启清零）
+curl -s http://localhost:7863/v1/stats -H "Authorization: Bearer your-api-key"
 
 # 临时停用一个账号（需 config 里 admin.enabled = true）
 curl -s -X POST http://localhost:7863/admin/accounts/<uid>/disable \
@@ -300,10 +304,11 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 ### 版本
 
-当前版本：**v1.1.0**（2026-09-20）。
+当前版本：**v1.1.1**（2026-09-20）。
 
 - **v1.0.0**（2026-09-14）— 上游基线版本，随 ghcr 镜像发布流程（`build.yml` 打 tag 触发）固定。
 - **v1.1.0**（2026-09-20）— 吸收 2026-09-20 上游合并（`4561993`）：`/v1/stats` 请求统计（端点 + `stats.exe` 终端视图 + 倍率列）、账号临时停用/恢复/复活管理端点（`acct.exe` / 菜单 `s`）、auths 目录热加载（5s 轮询免重启）、global 域 `/v2` 固定路由与多处会话粘性 / 思维链回填修复。含少量破坏性变更：移除 `server.max_body_mb` 配置键与 `WB2A_MAX_BODY_MB` 环境变量。
+- **v1.1.1**（2026-09-20）— `/status` 新增 `in_flight_by_model` 每模型在途台账：`Pool.AcquireModel/ReleaseModel` 在在途租约建立 / 释放时对 `bareModel` 计数（归零即删行，运行态不持久化），运维与面板可看到"账号正在跑什么模型"；配套 TrafficMonitor 插件 v1.5.0 消费该字段与 `rate_limited_models` 明细。既有 `Acquire/Release` 签名与行为不变，零回归；快照构建取值单次读缓存（审查修复：消除过滤与取值两次 Load 之间的并发归零 TOCTOU）。
 
 网关自身未在代码内嵌版本号；版本以 git tag 为准（`git tag -l`），`/healthz` 的 `service` 字段仅作服务身份标识。文档中的版本号随 tag 更新，未打 tag 的 HEAD 一律视作最新文档描述的下一版本。
 
