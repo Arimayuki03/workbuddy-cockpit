@@ -92,6 +92,12 @@ func TestClassify(t *testing.T) {
 		// 落到 status==429 兜底会误归 soft_rate，账号级故障等不来自愈。
 		{429, `{"code":14017,"msg":"trial not activated"}`, ErrAccountFault},
 		{429, `{"error":{"data":{"code":11140,"msg":"request illegal"}}}`, ErrAccountFault},
+		// Issue #175：14018 明确表示账号积分耗尽，即使 HTTP 状态是 429 也必须
+		// 走硬积分冷却；仅有相同文案而无该业务码的普通 429 仍保持软限流。
+		{429, `{"code":14018,"msg":"Credits exhausted"}`, ErrHardCredit},
+		{429, `{"error":{"data":{"code":"14018","msg":"Credits exhausted"}}}`, ErrHardCredit},
+		{429, `{"requestId":"14018","msg":"Credits exhausted"}`, ErrSoftRate},
+		{429, `{"code":1,"msg":"Credits exhausted"}`, ErrSoftRate},
 		// WAF 403（P0-1）：403 + 无业务信封（无 "code":/"msg": 字段）→ ErrWafBlock。
 		// 空体 / HTML 拦截页 / 纯文本 / 非信封 JSON 均命中。
 		{403, ``, ErrWafBlock},
