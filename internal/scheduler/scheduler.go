@@ -87,6 +87,14 @@ type Scheduler struct {
 	running [kindCount]atomic.Bool
 	lastRun [kindCount]atomic.Int64
 	lastOut [kindCount]atomic.Value // string
+
+	// rearmBalance 是「余额刷新间隔已变，立即重算」通知（panel 移植件，
+	// balance_refresh.go）：StartBalanceRefresh 循环与 SetBalanceInterval 共用，
+	// 容量 1（重复通知合并，重算幂等）。
+	rearmBalance chan struct{}
+	// balanceInterval 余额刷新间隔（纳秒，0=暂停）。atomic 读写：执行循环每轮读
+	// 当前值，SetBalanceInterval 可任意时刻热改（面板保存配置）。
+	balanceInterval atomic.Int64
 }
 
 // kindCount 与 taskKind 枚举数量一致（checkin/travel/activity/keepalive/school/cat）。
@@ -116,7 +124,7 @@ func New(cfg Config) *Scheduler {
 	if cfg.ActivityReportCount <= 0 {
 		cfg.ActivityReportCount = 1
 	}
-	s := &Scheduler{cfg: cfg, adoptTried: make(map[string]string), rewardClaimed: make(map[string]string), wake: make(chan struct{}, 1)}
+	s := &Scheduler{cfg: cfg, adoptTried: make(map[string]string), rewardClaimed: make(map[string]string), wake: make(chan struct{}, 1), rearmBalance: make(chan struct{}, 1)}
 	// 排程开关初始化自 Config 的 Disabled 标志：零值 Config = 全部启用，与引入前逐字一致。
 	s.enabled[taskCheckin].Store(!cfg.CheckinDisabled)
 	s.enabled[taskTravel].Store(!cfg.TravelDisabled)
@@ -380,9 +388,40 @@ func summarizeCheckin(out []CheckinOutcome) string {
 }
 
 // RunCheckinNow 定时触发的立即签到：逐账号结果由 CheckinAll 记日志，此处只兜住"撞车跳过"。
+// 签到成功后追加连登管家（runStreakBonusTail 尾段：全档兑换 + 抽完抽奖次数；按天幂等，
+// 与活跃上报侧的 claimGrowthRewards 共用同一 rewardClaimed 日闸）——panel 连登管家
+// 并入签到尾部，不新增 schedule 键（设计文档 §3.8）。
 func (s *Scheduler) RunCheckinNow() {
 	if _, err := s.CheckinAll(); err != nil {
 		log.Printf("scheduled checkin skipped: %v", err)
+		return
+	}
+	s.runStreakBonusTail()
+}
+
+// runStreakBonusTail 签到尾段：逐可用账号执行连登管家（补签保连登 → 全档兑换 → 抽完）。
+// 由 RunCheckinNow 尾部调用；单号失败只该号 WARN，不影响其他账号；账号间限速
+// activityAccountDelay（与活跃上报同口径）。签到失败/撞车（ErrBusy）时跳过——
+// 管家依赖签到刚建立的当日活跃态，撞车场景说明另一处签到正在跑，其尾部自会触发。
+func (s *Scheduler) runStreakBonusTail() {
+	for _, st := range s.cfg.Pool.List() {
+		if st.Disabled {
+			continue
+		}
+		a := s.cfg.Pool.AuthByUID(st.UID)
+		if a == nil || a.AccessTokenValue() == "" {
+			continue
+		}
+		if a.IsGlobal() {
+			continue // D4 门控：global 无 CN 任务体系，不发起任何上游调用
+		}
+		if s.rewardClaimedToday(a.UID) {
+			continue // 当日已领过一轮（活跃上报侧已跑）：按天幂等
+		}
+		s.makeupYesterday(a) // 补签保连登（幂等写：无漏签/无卡静默）
+		// 全档兑换 + 抽完抽奖次数。复用活跃上报侧的挑档/抽取实现（streakClaimTiers）。
+		s.streakClaimTiers(a)
+		time.Sleep(activityAccountDelay)
 	}
 }
 
@@ -568,8 +607,13 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 			continue // N 条未发满：streak 自检与领养均无意义，下个账号
 		}
 		s.checkActivityStreak(a) // N 条全发满 → 回读 streak 自检（只留结论行）
-		s.travelAdoptForce(a)    // 无猫账号对话量刚补满 → 立即重试领养（豁免防抖）
-		s.claimGrowthRewards(a)  // 连登奖励 + 抽奖：点亮连登后按天领取（finally 语义：失败不拖累上报）
+		if !a.IsGlobal() {
+			// 无猫账号对话量刚补满 → 立即重试领养（豁免防抖）。global 无 CN 领养体系：
+			// adoptBuddy 前置 report（v1.2.0）会对 global 发 /v2/report 之外的 growth 写，
+			// 故在调用侧门控（PR #45 的 global 上报放行语义不变）。
+			s.travelAdoptForce(a)
+		}
+		s.claimGrowthRewards(a) // 连登奖励 + 抽奖：点亮连登后按天领取（finally 语义：失败不拖累上报；global 内部门控）
 	}
 }
 
@@ -665,6 +709,44 @@ func (s *Scheduler) claimGrowthRewards(a *auth.Auth) {
 	s.claimGrowthLottery(a)
 }
 
+// streakClaimTiers 连登兑换链的公共尾段（panel 连登管家口径）：
+// 读 reward-state → 挑所有「达标未领」档位逐档 redeem → 查 chances → 抽完。
+// 与旧 claimGrowthRewards 的差异： redeem 失败不中断后续档位（403 天数不足是正常态）；
+// 抽奖改为 claimGrowthLottery 的全抽完语义。调用方负责日闸（rewardClaimedToday）
+// 与标记（markRewardClaimed）。
+func (s *Scheduler) streakClaimTiers(a *auth.Auth) {
+	state, err := s.cfg.Upstream.GrowthRewardState(a)
+	if err != nil {
+		log.Printf("WARN: streak-bonus %s: reward-state: %v", logfmt.Label(a.UID, a.Nickname), err)
+		return
+	}
+	days := state.Days()
+	redeemed := 0
+	for i := len(state.Redemption.Tiers) - 1; i >= 0; i-- {
+		tier := state.Redemption.Tiers[i].Tier
+		if days < state.Redemption.Tiers[i].Days || state.Redemption.Claimed(tier) {
+			continue
+		}
+		res, err := s.cfg.Upstream.GrowthRedeem(a, tier, "")
+		switch {
+		case err == nil:
+			redeemed++
+			log.Printf("streak-bonus %s: redeem tier=%s ok (+%d credit, +%d energy, +%d chances)",
+				logfmt.Label(a.UID, a.Nickname), tier, res.CreditGranted, res.EnergyGranted, res.ChancesGranted)
+		case upstream.IsRedeemAlreadyClaimed(err) || upstream.IsRedeemNotEnoughDays(err):
+			// 正常态：已领/服务端判定不足，静默跳过（跨档竞态兜底）。
+		default:
+			log.Printf("streak-bonus %s: redeem tier=%s: %v", logfmt.Label(a.UID, a.Nickname), tier, err)
+		}
+	}
+	if redeemed == 0 {
+		// 无新达标档位：不动抽奖（兑换送次数才有的抽）。
+		return
+	}
+	s.markRewardClaimed(a.UID)
+	s.claimGrowthLottery(a)
+}
+
 // growthEligibleTier 按当前连登天数挑选「尚未领取且达标」的最高档位。
 // 返回 "" 表示无可领档（未达标或全部已领），调用方据此跳过 redeem（正常态）。
 func growthEligibleTier(days int, rs *upstream.GrowthRedemptionStatus) string {
@@ -723,27 +805,31 @@ func (s *Scheduler) makeupYesterday(a *auth.Auth) bool {
 	return true
 }
 
-// claimGrowthLottery 消耗连登奖励赠与的抽奖次数。仅抽 balance>0 的次数；无次数跳过
-// （400 insufficient 正常态静默）；抽奖未开启（400 lottery disabled）静默。
-// client_token 每次 draw 必须新键（security-relevant，见 upstream.GrowthLotteryDraw）。
+// claimGrowthLottery 抽完当前全部抽奖次数（panel 连登管家口径：全抽完而非抽一次）。
+// 余额查询失败记 WARN 返回；无次数静默跳过；单抽失败即停（剩余次数次日幂等重试）。
+// 400 无次数/未开启是正常态静默。client_token 每次 draw 必须新键
+// （security-relevant，见 upstream.GrowthLotteryDraw）。
 func (s *Scheduler) claimGrowthLottery(a *auth.Auth) {
 	chances, err := s.cfg.Upstream.GrowthLotteryChances(a)
 	if err != nil {
 		log.Printf("WARN: activity %s: lottery-chances: %v", logfmt.Label(a.UID, a.Nickname), err)
 		return
 	}
-	if chances <= 0 {
-		log.Printf("activity %s: lottery skip (no chances)", logfmt.Label(a.UID, a.Nickname))
-		return
+	for i := 0; i < chances; i++ {
+		res, err := s.cfg.Upstream.GrowthLotteryDraw(a, "") // 每次自动新 client_token
+		switch {
+		case err == nil:
+			log.Printf("activity %s: lottery %d/%d drawn prize=%s (%s)", logfmt.Label(a.UID, a.Nickname), i+1, chances, res.PrizeName, res.PrizeType)
+		case upstream.IsLotteryNoChance(err) || upstream.IsLotteryDisabled(err):
+			log.Printf("activity %s: lottery skip (no chances or disabled)", logfmt.Label(a.UID, a.Nickname))
+			return
+		default:
+			log.Printf("activity %s: lottery draw: %v", logfmt.Label(a.UID, a.Nickname), err)
+			return
+		}
 	}
-	res, err := s.cfg.Upstream.GrowthLotteryDraw(a, "") // 每次自动新 client_token
-	switch {
-	case err == nil:
-		log.Printf("activity %s: lottery drawn prize=%s (%s)", logfmt.Label(a.UID, a.Nickname), res.PrizeName, res.PrizeType)
-	case upstream.IsLotteryNoChance(err) || upstream.IsLotteryDisabled(err):
-		log.Printf("activity %s: lottery skip (no chances or disabled)", logfmt.Label(a.UID, a.Nickname))
-	default:
-		log.Printf("activity %s: lottery draw: %v", logfmt.Label(a.UID, a.Nickname), err)
+	if chances > 0 {
+		log.Printf("activity %s: lottery done %d draw(s)", logfmt.Label(a.UID, a.Nickname), chances)
 	}
 }
 

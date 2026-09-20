@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"flag"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -14,12 +15,15 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/livecfg"
+	"workbuddy2api/internal/panel"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/redisstore"
 	"workbuddy2api/internal/scheduler"
 	"workbuddy2api/internal/server"
 	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
+	"workbuddy2api/internal/usage"
 )
 
 // modelJSONPath 由 state.json 路径推导 model.json 路径（同目录同名换缀）：
@@ -30,6 +34,25 @@ func modelJSONPath(stateFile string) string {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(stateFile), "model.json")
+}
+
+// usagePathFor 由 state.json 路径推导 usage.json 路径（panel 同款推导：与 state
+// 同目录；state 为空的纯内存形态下落 data/usage.json 缺省位置）。
+func usagePathFor(stateFile string) string {
+	if stateFile == "" {
+		return filepath.Join("data", "usage.json")
+	}
+	return filepath.Join(filepath.Dir(stateFile), "usage.json")
+}
+
+// stateSibling 返回与 state 文件同目录的指定文件名路径（相对路径场景回落当前目录）。
+// output_probes.json（模型上限探测，panel 移植件）共用本规则。
+func stateSibling(stateFile, name string) string {
+	dir := filepath.Dir(stateFile)
+	if dir == "" || dir == "." {
+		return name
+	}
+	return filepath.Join(dir, name)
 }
 
 func main() {
@@ -53,12 +76,26 @@ func main() {
 	if cfg.Admin.Enabled && strings.TrimSpace(cfg.APIKey) == "" {
 		log.Fatalf("admin.enabled=true 但 api_key 为空：请先在 config.json 配置 api_key 再开启 admin（否则管理端点无鉴权暴露）")
 	}
+	// fail-fast（v1.2.0 设计文档 §8）：panel.enabled=true（缺省）且 api_key 为空拒启。
+	// 面板是浏览器可交互的管理面（登录换发 30 天会话 cookie + 全量运维端点），
+	// 空密钥部署等于把面板裸奔在监听地址上。校验在 main（normalize 层不做：
+	// panel.enabled 缺省 true，库内拦截会让全部既有空 api_key 配置一起拒载）。
+	if cfg.Panel.Enabled && strings.TrimSpace(cfg.APIKey) == "" {
+		log.Fatalf("panel.enabled=true 但 api_key 为空：请先在 config.json 配置 api_key，或将 panel.enabled 置 false 拒绝启动面板")
+	}
 
 	auths, err := auth.LoadDir(cfg.AuthDir)
 	if err != nil {
 		log.Fatalf("load auths: %v", err)
 	}
 	log.Printf("loaded %d account(s) from %s", len(auths), cfg.AuthDir)
+
+	// 模型映射链头种子（v1.2.0 设计文档 §4.3.1）：config model_map 段启动即生效；
+	// 运行期由面板设置页热改（SetModelMap + saveConfig 写回）。空表零开销路径。
+	if len(cfg.ModelMap) > 0 {
+		server.SetModelMap(cfg.ModelMap)
+		log.Printf("[model_map] 用户自定义模型映射已生效：%d 条", len(cfg.ModelMap))
+	}
 
 	// global realm 路由开关（config global.enabled，缺省 true）：注入 auth 包全局闸。
 	// Realm()/IsGlobal() 先过此闸——显式 false 时恒 cn（逃生门：纯 CN 锁定的第一道闸）。
@@ -121,6 +158,26 @@ func main() {
 		}
 		return 0
 	}
+
+	// 用量分桶记录器（panel 移植件，v1.2.0）：与 state 文件同目录，datapath 由
+	// state_file 路径推导，避免再加一个配置项。usage.enabled=false 时不构建，
+	// Handler/面板以 nil 判定"未启用"。
+	var usageRec *usage.Recorder
+	if cfg.Usage.Enabled {
+		usageRec = usage.New(usagePathFor(cfg.StateFile))
+		usageRec.Start()
+		defer usageRec.Stop()
+		log.Printf("[usage] 逐请求用量记录已启用: %s (%s)", usagePathFor(cfg.StateFile), usageRec.Describe())
+		server.SetUsageRecorder(usageRec)
+	}
+
+	// live 承载可热改字段（api_key/soft_rate/脱敏开关），面板保存配置时在线替换
+	// （v1.2.0 panel 移植件；withAuth/会话签名经 Holder 快照读，改 key 免重启生效）。
+	live := livecfg.New(livecfg.Snapshot{
+		APIKey:               cfg.APIKey,
+		SoftCooldown:         cfg.SoftRateDur,
+		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
+	})
 
 	up := upstream.New()
 	// 短 RPC 总时长上限（refresh/checkin/balance/FetchModels），语义不变。
@@ -207,6 +264,53 @@ func main() {
 	defer stop()
 	go sch.Run(ctx)
 
+	// Web 管理面板（v1.2.0，panel 移植件）：/panel/api/* 原生 + /api/* 别名
+	//（manager 壳契约）+ 登录会话。cfg.Panel.Enabled=false 时不构建（网关行为
+	// 与引入前一致）。panel.enabled=true 且 api_key 空已在 normalize fail-fast。
+	var panelHandler http.Handler
+	var staticFS http.FileSystem
+	if cfg.Panel.Enabled {
+		// 管理面板日志镜像：标准 log（stderr）与 chat 表格日志（stdout）双路复制
+		// 进面板环形缓冲，供 /panel/api/logs（与 /api/logs 别名）读取；控制台输出不变。
+		pn := panel.New(panel.Config{
+			Pool:               p,
+			Usage:              usageRec,
+			Upstream:           up,
+			Scheduler:          sch,
+			AuthDir:            cfg.AuthDir,
+			APIKey:             cfg.APIKey,
+			RedisMode:          redisMode,
+			StickyCount:        sessCount,
+			Version:            server.AppVersion(),
+			Live:               live,
+			ExpiringSoonWindow: cfg.ExpiringSoonDur,
+			ProbeFile:          stateSibling(cfg.StateFile, "output_probes.json"),
+			LoopbackOnly:       cfg.Panel.LoopbackOnly,
+			ConfigPath:         *cfgPath,
+			LoadConfig: func() (any, error) {
+				return Load(*cfgPath)
+			},
+			SaveConfig: func(raw []byte) ([]string, error) {
+				return saveConfig(raw, *cfgPath, live, p, up, sch)
+			},
+		})
+		log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
+		// chat 表格日志不走 log 包（stdout 直写），单独镜像进面板 ring 的 chat 频道。
+		server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
+		panelHandler = pn
+
+		// 前端静态托管：embed_panel 标签构建内嵌 manager 壳产物（DistFS）；
+		// 默认构建 HasEmbeddedFrontend()=false，根路径不注册静态路由（网关照常）。
+		if panel.HasEmbeddedFrontend() {
+			if fsys, ok := panel.DistFS(); ok {
+				staticFS = http.FS(fsys)
+				log.Printf("[panel] 前端静态托管已内嵌（-tags embed_panel 构建）")
+			}
+		} else {
+			log.Printf("[panel] 未内嵌前端（默认构建）：根路径不提供管理页面；生产构建请用 -tags embed_panel（先在 web/ 执行前端构建并拷入 internal/panel/dist/）")
+		}
+	}
+
 	h := server.NewHandler(server.Config{
 		Pool:         p,
 		Upstream:     up,
@@ -230,6 +334,9 @@ func main() {
 		},
 		Sched:      sch,
 		OnShutdown: stop,
+		// 面板与静态托管（v1.2.0）：panel.enabled=false 时二者均为 nil（路由不注册）。
+		Panel:  panelHandler,
+		Static: staticFS,
 	})
 
 	srv := &http.Server{

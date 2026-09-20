@@ -151,6 +151,31 @@ type Config struct {
 		GCInterval string `json:"gc_interval"` // 会话 GC 周期，默认 "5m"
 	} `json:"session_sticky"`
 
+	// Usage 逐请求用量分桶（panel 移植件，v1.2.0 设计文档 §3.5）。落盘
+	// data/usage.json（state_file 同目录推导），30s 防抖原子写。缺省开启。
+	Usage struct {
+		// Enabled 用量记录开关。缺省 true：分桶落盘是面板用量/统计页的数据源；
+		// 显式 false 关闭（Handler 的 Usage=nil，用量视图显示不可用而非空数据）。
+		Enabled bool `json:"enabled"`
+	} `json:"usage"`
+
+	// Panel Web 管理面板（v1.2.0 设计文档 §8）。缺省开启：面板后端与 /api/*
+	// 适配层随服务装配；api_key 为空且 enabled=true 时 fail-fast 拒启（见 main）。
+	Panel struct {
+		// Enabled 面板总开关。缺省 true；显式 false 时不装配面板 handler，
+		// /api/* 面板路由与静态托管都不注册（网关 /v1/*、/admin/* 行为不变）。
+		Enabled bool `json:"enabled"`
+		// LoopbackOnly 仅允许回环地址访问面板（RemoteAddr 判定，不解析
+		// X-Forwarded-For）。缺省 false：默认可挂反代公网（有严格安全头 + 鉴权）。
+		LoopbackOnly bool `json:"loopback_only"`
+	} `json:"panel"`
+
+	// ModelMap 用户自定义模型映射（v1.2.0 设计文档 §4.3.1）：key=请求模型名，
+	// value=实际模型名。链头查找，命中即整名替换（含 realm 前缀语义）；
+	// 服务 cc-switch 等写死模型名的客户端。空/缺省 = 不做映射（零开销路径）。
+	// 面板设置页可在线编辑（saveConfig 深合并写回 + SetModelMap 热生效）。
+	ModelMap map[string]string `json:"model_map"`
+
 	// 解析后
 	SoftRateDur         time.Duration `json:"-"`
 	SoftRateMaxDur      time.Duration `json:"-"`
@@ -211,6 +236,11 @@ func Default() *Config {
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
+	// 用量分桶缺省开启（panel 口径；usage.enabled=false 显式关闭）。
+	c.Usage.Enabled = true
+	// 面板缺省开启（panel.enabled=false 显式关闭；loopback_only 缺省 false——
+	// 默认可挂反代公网，鉴权与安全头由 panel/httpauth 层保证）。
+	c.Panel.Enabled = true
 	// admin 缺省关闭（Enabled=false 零值即关闭，路由不注册）；积分查询冷却默认 600s。
 	c.Admin.CreditRefreshMinIntervalSec = 600
 	return c
@@ -414,6 +444,10 @@ func (c *Config) normalize() error {
 	if c.Admin.Enabled && strings.TrimSpace(c.APIKey) == "" {
 		return fmt.Errorf("admin.enabled=true 但 api_key 为空：请设置 api_key 或将 admin.enabled 置 false")
 	}
+	// panel 的同类 fail-fast（v1.2.0 设计文档 §8：enabled 且 api_key 空拒启）
+	// 在 main 落地（log.Fatalf，对齐设计文档文案）——normalize 层不做，
+	// 与 admin 的差异点：panel.enabled 缺省 true，库内校验会让全部既有
+	// 空 api_key 配置路径（测试/Load 默认）一起拒载，闸收在启动入口。
 	// 排程段归一（空数组回落默认、ActivityReportCount 归一、小时范围校验）
 	// 由 internal/config 统一实现，cmd/server 与 cmd/activity 共用同一份语义。
 	if err := c.Schedule.Normalize(); err != nil {

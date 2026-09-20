@@ -125,8 +125,9 @@ func TestRunActivityNowErrorDoesNotAbort(t *testing.T) {
 
 	s.RunActivityNow() // 不应 panic
 
-	if n := okCalls.Load(); n != 1 {
-		t.Errorf("ok account report calls=%d want 1（失败账号不影响后续遍历）", n)
+	// 1 条上报 + 1 条领养前置 report（v1.2.0 adoptBuddy 链路 report → agreement → buddy/first）。
+	if n := okCalls.Load(); n != 2 {
+		t.Errorf("ok account report calls=%d want 2（上报 1 + 领养前置 1；失败账号不影响后续遍历）", n)
 	}
 }
 
@@ -318,14 +319,16 @@ func TestRunActivityNowBurstSharedCIDIndependentRID(t *testing.T) {
 
 	s.RunActivityNow()
 
-	if n := len(stub.reportBodies); n != 5 {
-		t.Fatalf("report bodies=%d want 5", n)
+	// 5 条连发 + 1 条领养前置 report（v1.2.0 adoptBuddy 链路，无猫账号）= 6。
+	if n := len(stub.reportBodies); n != 6 {
+		t.Fatalf("report bodies=%d want 6（连发 5 + 领养前置 1）", n)
 	}
-	// 5 条共用同一 conversationId。
+	// 前 5 条连发共用同一 conversationId（第 6 条是领养前置 report，cid 独立）。
 	cid := stub.reportBodies[0]["conversationId"]
-	for i, ev := range stub.reportBodies {
+	for i := 0; i < 5; i++ {
+		ev := stub.reportBodies[i]
 		if ev["conversationId"] != cid {
-			t.Errorf("event %d conversationId=%v want %v（应共用同一会话）", i, ev["conversationId"], cid)
+			t.Errorf("event %d conversationId=%v want %v（连发应共用同一会话）", i, ev["conversationId"], cid)
 		}
 	}
 	// requestId 各条独立。
@@ -359,8 +362,9 @@ func TestRunActivityNowBurstTriggersAdopt(t *testing.T) {
 	s.markAdoptTried("u1")
 	s.RunActivityNow()
 
-	if n := len(stub.reportBodies); n != 5 {
-		t.Errorf("report bodies=%d want 5", n)
+	// 5 条连发 + 1 条领养前置 report（v1.2.0 adoptBuddy 链路）= 6。
+	if n := len(stub.reportBodies); n != 6 {
+		t.Errorf("report bodies=%d want 6（连发 5 + 领养前置 1）", n)
 	}
 	if n := stub.infoCalls.Load(); n != 1 {
 		t.Errorf("buddy/info calls=%d want 1（上报后查有无猫）", n)

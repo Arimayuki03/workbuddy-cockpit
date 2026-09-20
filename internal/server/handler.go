@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	"workbuddy2api/internal/prompt"
 	"workbuddy2api/internal/scheduler"
 	"workbuddy2api/internal/session"
+	"workbuddy2api/internal/usage"
 	"workbuddy2api/internal/upstream"
 )
 
@@ -61,6 +63,20 @@ type Config struct {
 	// OnShutdown 优雅停机回调（main 注入 signal ctx 的 cancel）：POST /admin/shutdown
 	// 调用它走既有的 flush→关 store→srv.Shutdown 路径；nil 时端点退化为 os.Exit(0)。
 	OnShutdown func()
+
+	// Usage 逐请求用量分桶记录器（panel 移植件，可选；nil = usage.enabled=false，
+	// chatStat 不记录分桶——面板用量页显示"未启用"而非空数据）。
+	Usage *usage.Recorder
+
+	// Panel Web 管理面板 handler（v1.2.0，panel 移植件；nil = 不注册面板路由）。
+	// 非 nil 时挂载 "/panel/"（原生前缀）与 "/api/"（manager 壳别名前缀）——
+	// 面板内部路由自带完整前缀，外层不做前缀剥离。面板内部路由已避开
+	// /api/request_logs 与 /api/system/check-update（本 handler 先注册优先）。
+	Panel http.Handler
+	// Static 前端静态托管 FS（v1.2.0，manager 壳 go:embed 产物；nil = 不注册）。
+	// 非 nil 时挂载到根 "/"：ServeMux 最长前缀匹配保证既有路由（/v1/*、/admin/*、
+	// /status、/api/* 已注册路径）优先，静态 handler 只兜住其余路径。
+	Static http.FileSystem
 }
 
 // notFoundCooldown 上游 404 的固定短冷却时长。
@@ -119,6 +135,12 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /v1/stats", h.withAuth(h.stats))
 	h.mux.HandleFunc("POST /v1/stats/reset", h.withAuth(h.statsReset))
+	// 请求日志环形缓冲（v1.2.0，设计文档 §4.3.2）：面板「请求日志」tab 数据源。
+	// 与 /v1/stats 同鉴权（api_key / 会话 cookie 换发后的 Bearer 等价）。
+	h.mux.HandleFunc("GET /api/request_logs", h.withAuth(h.handleRequestLogs))
+	// 版本检查提示（v1.2.0，设计文档 §4.3.3）：只读比对 GitHub 上游 release，
+	// 不做自更新；无鉴权依赖（无敏感信息，且登录页就要用它提示新版本）。
+	h.mux.HandleFunc("GET /api/system/check-update", h.handleCheckUpdate)
 	// 上游运维端点（issue #138/#118）：账号临时停用/恢复/复活。与本地 /admin 管理面
 	// 共用 config admin.enabled 开关；鉴权与 /status 同源（withAuth + 同一个 api_key，
 	// 不另立管理密钥、不设 loopback 闸——面板可能跑在局域网其他机器上）。
@@ -134,6 +156,17 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.Admin.Enabled {
 		h.registerAdmin()
 	}
+	// Web 管理面板（v1.2.0）：Panel 非 nil 时挂 "/panel/"（原生）与 "/api/"
+	// （manager 壳别名）。对齐 panel handler.go 的挂载方式：外层 Handle 前缀、
+	// 内部路由自带完整路径、不做前缀剥离。必须先于静态根挂载（顺序不影响
+	// ServeMux 优先级，但保持注册次序可读）。
+	if cfg.Panel != nil {
+		h.mux.Handle("/panel/", cfg.Panel)
+		h.mux.Handle("/api/", cfg.Panel)
+	}
+	// 前端静态托管（v1.2.0）：Static 非 nil 时挂根路径（深链目录 index.html
+	// 兜底 + not-found 回落，见 static.go）。nil = 未嵌入前端的默认构建。
+	registerStatic(h, cfg.Static)
 	return h
 }
 
@@ -681,6 +714,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
+			st.setError("no healthy account available for model " + bareModel)
 			break
 		}
 		st.uid = acct.UID
@@ -756,6 +790,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 不计连败：否则粘性会话下远程客户端可借反复断连逐号打满阈值触发降权出池
 			// （判据见 isClientDisconnect；上游自身超时不误过滤）。
 			st.status = http.StatusServiceUnavailable
+			st.setError("transport: " + terr.Error())
 			lastErr = terr
 			if isClientDisconnect(r.Context(), terr) {
 				log.Printf("DEBUG: [server] chat transport error caused by client disconnect, skip consecutive-fail uid=%s: %v", logfmt.UID8(acct.UID), terr)
@@ -777,6 +812,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				kind = upstream.Classify(status, string(respBody))
 				uerr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
 			}
+			st.setError(fmt.Sprintf("http %d: %s", status, string(respBody)))
 			// 内容拦截误报（passthrough/append 模式首遇）：判定为 system 指纹误报，
 			// 触发降级到次日 00:00 CST，换 Degraded 中性提示词同请求内重试（append
 			// 降级重试同样退化为 replace——原文在场只会确定性再撞 400）。
@@ -905,6 +941,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			st.status = http.StatusBadGateway
+			st.setError("aggregate: " + err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, resp)
@@ -962,6 +999,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status
+	st.setError(msg)
 }
 
 // promptTooLongMessage 11115 透传 message：上游 body 原文（含真实 token 数/

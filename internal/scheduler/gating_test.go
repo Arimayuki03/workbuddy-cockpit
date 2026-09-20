@@ -109,9 +109,10 @@ func TestGlobalAndCNMixedPoolServed(t *testing.T) {
 	s := New(Config{Pool: p, Upstream: up, ActivityReportCount: 1})
 
 	s.RunActivityNow()
-	// CN + global 各上报一次（global 不再跳过）。
-	if n := stub.calls.Load(); n != 2 {
-		t.Errorf("activity report calls=%d want 2（CN + global 各 1）", n)
+	// CN + global 各上报一次 + CN 无猫账号领养前置 report 一次（v1.2.0 adoptBuddy
+	// 链路：report → agreement → buddy/first）= 3（global 放行上报，但不走领养）。
+	if n := stub.calls.Load(); n != 3 {
+		t.Errorf("activity report calls=%d want 3（CN+global 各 1 + CN 领养前置 1）", n)
 	}
 	// activity 阶段会顺带领猫（travelAdoptForce），把 buddy/info 计数打进快照；
 	// 旅行检验只数 RunTravelNow 这段的增量（global 被 travel 跳过，只有 CN 走）。

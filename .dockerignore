@@ -22,4 +22,8 @@ config.json.bak*
 PLAN.md
 SPEC.md
 LOOP.md
-README.md
+README.md# 前端构建缓存与依赖不进 Go 构建上下文（frontend 段单独 COPY web/）
+web/node_modules/
+web/.next/
+web/out/
+dev/

@@ -1,9 +1,13 @@
-// school.go 开学季任务与夜猫子任务的脚本类排程：从系统 crontab 迁入 Go scheduler。
+// school.go 开学季任务（脚本类）与夜猫子任务（panel 纯 API 口径）的排程执行器。
 //
 // 背景：school（12:00）与 cat（01:00 夜猫窗口）原由系统 crontab 调
 // scripts/school_open_day_cron.sh 执行——依赖外部系统 cron、容器重建可能丢失、
 // 不在 config 里配置。迁入后成为第五、第六类任务，时点由 schedule.school_hours /
 // schedule.cat_hours 配置，school_open_day_cron.sh 保留为手动触发入口。
+//
+// v1.2.0：cat 由 python 脚本（task_runner.py black_cat）改为 panel 移植的纯 API
+// 实现（差额探测 + 真实 glm-5.2 对话 + 事件上报），夜猫窗口判定与补足次数对齐
+// panel blackcat.go 口径（见 scheduler.RunCatNow）。
 package scheduler
 
 import (
@@ -12,6 +16,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"workbuddy2api/internal/logfmt"
+	"workbuddy2api/internal/upstream"
 )
 
 // repoRoot 定位仓库根（容器内 /app、宿主 /root/workbuddy2api）。
@@ -98,12 +106,40 @@ func (s *Scheduler) RunSchoolNow() {
 	})
 }
 
-// RunCatNow 立即执行夜猫子任务：task_runner.py ALL --yes --only black_cat。
-// black_cat 时段敏感：夜猫窗口 23:00–08:00 CST 内最多补 1 次（task_runner 内部
-// 判定，非窗口期打印 skip 正常退出）。失败只记 WARN。
+// RunCatNow 立即执行夜猫子任务（panel 纯 API 口径并入，不再走 python 脚本）：
+// 23:00–08:00 窗口内对池内账号补足 glm-5.2 对话并上报事件链（BlackcatNeed 差额
+// 探测 + RunNightChats 真实对话）。窗口外触发直接跳过（black_cat 窗口外不计分，
+// 打 skip 正常态）。单号失败只该号 WARN；账号间限速 activityAccountDelay。
 func (s *Scheduler) RunCatNow() {
-	root := repoRoot()
-	runScript("cat", root, [][]string{
-		{pythonCmd(), "scripts/task_runner.py", "ALL", "--yes", "--only", "black_cat"},
-	})
+	if !upstream.InNightWindow(time.Now()) {
+		log.Printf("cat: 当前不在 23:00–08:00 计数窗口，跳过")
+		return
+	}
+	for _, st := range s.cfg.Pool.List() {
+		if st.Disabled {
+			continue
+		}
+		a := s.cfg.Pool.AuthByUID(st.UID)
+		if a == nil || a.AccessTokenValue() == "" {
+			continue
+		}
+		if a.IsGlobal() {
+			continue // D4 门控：global 无 CN 任务体系，不发起任何上游调用
+		}
+		need, err := s.cfg.Upstream.BlackcatNeed(a)
+		if err != nil {
+			log.Printf("cat %s: %v", logfmt.Label(a.UID, a.Nickname), err)
+			continue
+		}
+		if need <= 0 {
+			continue
+		}
+		ok, err := s.cfg.Upstream.RunNightChats(a, int(need))
+		if err != nil {
+			log.Printf("cat %s: %d/%d 完成，中断: %v", logfmt.Label(a.UID, a.Nickname), ok, need, err)
+		} else {
+			log.Printf("cat %s: 完成 %d 次夜间对话", logfmt.Label(a.UID, a.Nickname), ok)
+		}
+		time.Sleep(activityAccountDelay)
+	}
 }

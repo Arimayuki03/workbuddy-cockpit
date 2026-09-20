@@ -5,11 +5,17 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/pool"
+	"workbuddy2api/internal/upstream"
 )
 
 // fakeScriptExec 记录命令构建参数并按需模拟执行失败，替代真实 exec 拉起 python3 子进程。
@@ -129,25 +135,71 @@ func TestRunSchoolNowBuildsCommand(t *testing.T) {
 	}
 }
 
-// TestRunCatNowBuildsCommand RunCatNow 构造
-// python3 scripts/task_runner.py ALL --yes --only black_cat，工作目录为仓库根。
-func TestRunCatNowBuildsCommand(t *testing.T) {
-	t.Setenv("WB2A_PYTHON", "")
-	f := installFakeExec(t)
-	s := New(Config{})
-	s.RunCatNow()
-	want := []string{"scripts/task_runner.py", "ALL", "--yes", "--only", "black_cat"}
-	if f.lastName != "python3" || !equalArgs(f.lastArgs, want) {
-		t.Errorf("cmd=%s %v want python3 %v", f.lastName, f.lastArgs, want)
+// TestRunCatNowSkipsOutsideNightWindow RunCatNow（v1.2.0 纯 API 口径）：夜猫窗口外
+// 触发直接跳过，不发任何上游调用；窗口内（InNightWindow=true 时）才走差额探测。
+func TestRunCatNowSkipsOutsideNightWindow(t *testing.T) {
+	if upstream.InNightWindow(time.Now()) {
+		t.Skip("当前处于夜猫窗口内，窗口外跳过分支无法验证")
 	}
-	if f.lastDir != repoRoot() {
-		t.Errorf("dir=%q want repo root %q", f.lastDir, repoRoot())
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+
+	s.RunCatNow()
+	if calls != 0 {
+		t.Errorf("窗口外不应发任何上游调用，got %d", calls)
+	}
+}
+
+// TestRunCatNowInsideNightWindow RunCatNow 窗口内：差额为 0（任务已完成）时不再发对话。
+func TestRunCatNowInsideNightWindowZeroNeed(t *testing.T) {
+	if !upstream.InNightWindow(time.Now()) {
+		t.Skip("当前不处于夜猫窗口内，窗口内分支无法验证")
+	}
+	var chatCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/tasks"):
+			// black_cat 已达标：current=target → need=0
+			w.Write([]byte(`{"code":0,"data":{"list":[{"task_code":"black_cat","current":3,"target_count":3,"claimed":false}]}}`))
+		case strings.HasSuffix(r.URL.Path, "/chat/completions"), strings.Contains(r.URL.Path, "chat"):
+			chatCalls++
+			w.Write([]byte(`{}`))
+		default:
+			w.Write([]byte(`{"code":0,"data":{}}`))
+		}
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+
+	old := activityAccountDelay
+	activityAccountDelay = 0
+	t.Cleanup(func() { activityAccountDelay = old })
+
+	s.RunCatNow()
+	if chatCalls != 0 {
+		t.Errorf("need=0 时不应发对话，got %d", chatCalls)
 	}
 }
 
 // TestDispatchSchoolCatAndFailureWarnsOnly dispatch 把 school/cat 分发给对应脚本；
 // 脚本失败只记 WARN（不 panic/不向上抛），且不影响后续任务继续分发。
-func TestDispatchSchoolCatAndFailureWarnsOnly(t *testing.T) {
+// TestDispatchSchoolAndFailureWarnsOnly dispatch 把 school 分发给脚本；
+// 脚本失败只记 WARN（不 panic/不向上抛），且不影响后续任务继续分发。
+// cat 已是纯 API 实现（不走 newScriptCmd），此处只验证 school 脚本链路。
+func TestDispatchSchoolAndFailureWarnsOnly(t *testing.T) {
 	t.Setenv("WB2A_PYTHON", "")
 	f := installFakeExec(t)
 	f.err = errors.New("boom boom")
@@ -165,16 +217,9 @@ func TestDispatchSchoolCatAndFailureWarnsOnly(t *testing.T) {
 	if f.runN != 1 || f.lastArgs[0] != "scripts/school_open_day_2026.py" {
 		t.Errorf("dispatch(school) 未执行: runN=%d last=%v", f.runN, f.lastArgs)
 	}
-	s.dispatch(context.Background(), taskCat)
-	if f.runN != 2 || f.lastArgs[0] != "scripts/task_runner.py" {
-		t.Errorf("dispatch(cat) 未执行: runN=%d last=%v", f.runN, f.lastArgs)
-	}
 	out := buf.String()
 	if !strings.Contains(out, "WARN") || !strings.Contains(out, "scripts/school_open_day_2026.py") {
 		t.Errorf("school 失败未按 WARN 记录:\n%s", out)
-	}
-	if !strings.Contains(out, "scripts/task_runner.py") {
-		t.Errorf("cat 失败未按 WARN 记录:\n%s", out)
 	}
 }
 

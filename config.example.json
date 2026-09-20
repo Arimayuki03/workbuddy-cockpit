@@ -85,5 +85,12 @@
     "enabled": true,
     "ttl": "30m",
     "gc_interval": "5m"
+  },
+  "usage": {
+    "enabled": true
+  },
+  "panel": {
+    "enabled": true,
+    "loopback_only": false
   }
 }

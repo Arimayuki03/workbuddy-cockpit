@@ -13,16 +13,24 @@ import (
 )
 
 // captureStdout 重定向 os.Stdout 并捕获 fn 期间的全部输出。
+// 同时重置 chatLogOut（chat 表格日志的输出目标）：生产默认 os.Stdout，
+// 但包级变量已被初始化时求值的 os.Stdout 覆盖（与重定向后的新 os.Stdout
+// 不同一），不重置的话表格行会写进旧管道，测试捕获不到。
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	old := os.Stdout
+	oldOut := chatLogOut
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
 	os.Stdout = w
+	chatLogOut = w
+	t.Cleanup(func() {
+		os.Stdout = old
+		chatLogOut = oldOut
+	})
 	fn()
-	os.Stdout = old
 	_ = w.Close()
 	raw, _ := io.ReadAll(r)
 	return string(raw)

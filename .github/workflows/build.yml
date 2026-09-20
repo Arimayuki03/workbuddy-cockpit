@@ -26,6 +26,21 @@ jobs:
       - name: Create config.json for build
         run: cp config.example.json config.json
 
+      # 前端构建（v1.2.0 三段构建）：Node 版本钉死 22（与 Dockerfile node:22-alpine 一致，
+      # 避免本地/CI 漂移——设计文档 §10 风险 5）。Dockerfile 的 frontend 段自行构建，
+      # 此步只为 GHA 缓存预热与早期失败暴露（npm ci/build 快速报错优于 20 分钟 docker build 后失败）。
+      - name: Set up Node 22 (panel frontend)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build panel frontend (smoke)
+        run: |
+          npm ci --prefix web
+          npm run build:export --prefix web
+
       # setup-qemu 必须在 setup-buildx 之前：buildx 多架构依赖 QEMU 跨平台模拟。
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

@@ -1,0 +1,184 @@
+// panel_config.go 面板保存配置（panel 移植件，v1.2.0 设计文档 §3.6）：
+// 校验 → 落盘 → 热应用 → 返回需重启的字段列表。
+//
+// 热生效范围（设计取舍）：
+//   - api_key / cooldown.soft_rate / features.sanitize_blacklist_fingerprints → livecfg 快照
+//   - pool.* → pool.SetBreaker/SetMaxInFlight/SetSoftRateMax/SetWeights/SetCostExploreInterval/SetDegrade
+//   - schedule.*_enabled → scheduler.SetEnabled（主仓库无 panel 的 Reconfigure——
+//     排程小时数组为启动期装配，热改只覆盖开关；hours 变更需重启，列入 restartRequired）
+//   - model_map → server.SetModelMap（模型映射链头热替换）
+//
+// 需重启（监听地址、HTTP client 超时、auth_dir 等装配期依赖）：
+//   - listen / auth_dir / state_file / upstream.* / upstash.* / session_sticky.*（TTL 类）/
+//     schedule.*_hours（主仓库排程小时不热改）/ global.enabled（auth 包全局闸装配期注入）
+//
+// 落盘：深合并保留未知键（用户手写注释性字段不丢失）+ tmp+rename 原子替换；
+// 校验与启动同一套 Default+normalize（ParseConfigInto），失败直接返回、不落盘。
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+
+	"workbuddy2api/internal/livecfg"
+	"workbuddy2api/internal/pool"
+	"workbuddy2api/internal/scheduler"
+	"workbuddy2api/internal/upstream"
+)
+
+// parseConfigInto 把 JSON 覆盖到 c 上并 normalize（不做 env、不读文件）。
+// 与 Load 的文件分支同一套校验链（Default 预置缺省 → Unmarshal → normalize），
+// 保证面板保存的配置与下次启动实际加载的行为一致。
+func parseConfigInto(raw []byte, c *Config) (*Config, error) {
+	if err := json.Unmarshal(raw, c); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if err := c.normalize(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// saveConfig 面板保存配置入口（panel.Config.SaveConfig 闭包的实现）。
+// raw 是面板提交的配置 JSON（整体或仅含其管理的键——深合并都能正确处理）。
+func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+	// 1) 解析现有文件为 map（保留用户手写的未知键），再深合并面板提交的键。
+	oldRaw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read current config: %w", err)
+	}
+	var cur, incoming map[string]any
+	if err := json.Unmarshal(oldRaw, &cur); err != nil {
+		cur = map[string]any{}
+	}
+	if err := json.Unmarshal(raw, &incoming); err != nil {
+		return nil, fmt.Errorf("parse submitted config: %w", err)
+	}
+	merged := mergeConfigMaps(cur, incoming)
+
+	// 2) 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。
+	newCfg, err := parseConfigInto(mergedJSON(merged), Default())
+	if err != nil {
+		return nil, err
+	}
+
+	// 3) 落盘（原子替换：tmp + rename）。
+	out, err := json.MarshalIndent(merged, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal config: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return nil, fmt.Errorf("write config: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return nil, fmt.Errorf("replace config: %w", err)
+	}
+
+	// 4) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
+	live.Store(livecfg.Snapshot{
+		APIKey:               newCfg.APIKey,
+		SoftCooldown:         newCfg.SoftRateDur,
+		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
+	})
+	up.SanitizeFingerprints = newCfg.Features.SanitizeBlacklistFingerprints
+	up.UserAgent = newCfg.Upstream.UserAgent
+	up.ClientVersion = newCfg.Upstream.ClientVersion
+	up.CliVersion = newCfg.Upstream.CliVersion
+	up.ClientName = newCfg.Upstream.ClientName
+	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
+	p.SetMaxInFlight(newCfg.Pool.MaxInFlight)
+	p.SetMaxInFlightGlobal(newCfg.Pool.MaxInFlightGlobal)
+	p.SetDegrade(newCfg.Pool.DegradeThreshold, newCfg.DegradeCooldownDur, newCfg.DegradeCooldownMaxD)
+	p.SetSoftRateMax(newCfg.SoftRateMaxDur)
+	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
+	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
+	// 排程开关热改（主仓库排程开关经 SetEnabled；hours 数组不热改）。
+	for _, kind := range scheduler.Kinds() {
+		var enabled bool
+		switch kind {
+		case "checkin":
+			enabled = newCfg.Schedule.CheckinEnabled
+		case "travel":
+			enabled = newCfg.Schedule.TravelEnabled
+		case "activity":
+			enabled = newCfg.Schedule.ActivityEnabled
+		case "keepalive":
+			enabled = newCfg.Schedule.KeepaliveEnabled
+		case "school":
+			enabled = newCfg.Schedule.SchoolEnabled
+		case "cat":
+			enabled = newCfg.Schedule.CatEnabled
+		}
+		_ = sch.SetEnabled(kind, enabled)
+	}
+
+	return restartRequiredFields(newCfg), nil
+}
+
+// restartRequiredFields 返回本次改动中无法热生效、需要重启进程的字段名。
+// 恒返回完整清单中的"与当前进程装配期依赖相关"的项——面板据此提示用户。
+func restartRequiredFields(c *Config) []string {
+	var out []string
+	// 这些字段在进程内被监听地址/HTTP client/目录句柄等装配期对象捕获。
+	if c.Listen != "" {
+		out = append(out, "listen")
+	}
+	if c.AuthDir != "" {
+		out = append(out, "auth_dir")
+	}
+	if c.StateFile != "" {
+		out = append(out, "state_file")
+	}
+	out = append(out, "upstream.timeout_seconds", "upstream.header_timeout_seconds", "upstream.idle_timeout_seconds")
+	if c.Upstash.URL != "" || c.Upstash.Token != "" {
+		out = append(out, "upstash")
+	}
+	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
+	// 主仓库排程小时数组是启动期装配（scheduler.cfg 快照），热改不覆盖。
+	out = append(out, "schedule.checkin_hours", "schedule.travel_hours", "schedule.activity_hours",
+		"schedule.keepalive_hours", "schedule.school_hours", "schedule.cat_hours")
+	// global.enabled 在 auth.SetGlobalEnabled / handler GlobalEnabled / upstream.GlobalEnabled
+	// 三处装配期注入；prompt 文本与 global base 同理。
+	out = append(out, "global.enabled", "global.chat_base", "global.billing_base",
+		"prompt.mode", "prompt.file")
+	return out
+}
+
+// mergeConfigMaps 把 incoming 深合并进 cur（原地），返回 cur。
+// 对嵌套对象逐键覆盖而不是整体替换：面板表单只提交它管理的键，
+// 未提交的兄弟键（含用户手写的未知键）保持原样。
+func mergeConfigMaps(cur, incoming map[string]any) map[string]any {
+	for k, v := range incoming {
+		if inMap, ok := v.(map[string]any); ok {
+			if curMap, ok := cur[k].(map[string]any); ok {
+				cur[k] = mergeConfigMaps(curMap, inMap)
+				continue
+			}
+		}
+		cur[k] = v
+	}
+	return cur
+}
+
+// mergedJSON 把合并后的 map 序列化回 JSON（供 ParseConfigInto 校验）。
+func mergedJSON(m map[string]any) []byte {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return []byte("{}")
+	}
+	return b
+}
+
+// saveModelMap 把模型映射写回 config.json（panel.SetModelMap 端点复用 saveConfig
+// 的合并/校验/落盘链路，只携带 model_map 一个键——深合并保留其余段落原样）。
+// 热生效（server.SetModelMap）由端点先行调用，此处仅负责持久化。
+func saveModelMap(m map[string]string, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) error {
+	raw, err := json.Marshal(map[string]any{"model_map": m})
+	if err != nil {
+		return fmt.Errorf("marshal model_map: %w", err)
+	}
+	_, err = saveConfig(raw, path, live, p, up, sch)
+	return err
+}
