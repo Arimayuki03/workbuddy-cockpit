@@ -498,6 +498,9 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		InFlight:          int(e.inFlight.Load()),
 		BreakerFails:      e.fails,
 		BreakerUntil:      e.breakerUntil,
+		// 每模型在途台账（观测）：运维据此看到"这个号正在跑什么模型"。空台账
+		// 时为 nil（omitempty 省略），对 /status 既有消费者零回归。
+		InFlightByModel: e.inFlightByModelSnapshot(),
 	}
 	if st.Disabled {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。

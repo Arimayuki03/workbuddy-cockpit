@@ -2,6 +2,8 @@
 package pool
 
 import (
+	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -73,6 +75,10 @@ type Status struct {
 	InFlight     int       `json:"in_flight"`
 	BreakerFails int       `json:"breaker_fails"`
 	BreakerUntil time.Time `json:"breaker_until,omitempty"`
+	// InFlightByModel 每模型在途请求数（运行态，不持久化）：AcquireModel/ReleaseModel
+	// 维护的观测台账，运维据此看到"这个号现在正在跑什么模型"。模型名 → 计数，
+	// 只含非零条目（计数归零即从台账消失，omitempty 整体省略）。
+	InFlightByModel map[string]int `json:"in_flight_by_model,omitempty"`
 }
 
 // RateLimitedModel 单个被限流模型的台账行（issue #36）。
@@ -178,12 +184,93 @@ type entry struct {
 	// inFlight 单账号在途请求数（运行态，不持久化）。用 atomic 避免 Pick 热路径拿写锁。
 	inFlight atomic.Int64
 
+	// inFlightByModel 每模型在途请求数（运行态，不持久化）：AcquireModel/ReleaseModel
+	// 维护。acquireModel 在选号租约建立时对 bareModel 计数，releaseModel 归零即删行，
+	// 台账不膨胀（每账号活跃模型数有限，与 modelCooldowns 同一纪律）。mutex 保护
+	// map 结构调整；计数本身用 atomic.Int64，Release 侧无需重扫。零值条目不存在
+	// ——Delete-on-zero 语义保证 /status 透出的 map 只含正在请求的模型。
+	inFlightByModelMu sync.Mutex
+	inFlightByModel   map[string]*atomic.Int64
+
 	// modelCost 实测扣费账本：model → 观测。由每次成功请求的 usage.credit
 	// 折算而来（上游没有"按模型的用量"接口，get-user-resource 只给套餐级积分
 	// 汇总，只能实测）。选号时据此把「该模型上免费/便宜的号」排在前面。
 	// 持久化（stateAccount.ModelCosts，P1-anti-monopoly）：重启后成本知识保留；
 	// 落盘/恢复按 modelCostTTL 惰性过滤，陈旧观测不复活（同 modelCooldowns 口径）。
 	modelCost map[string]modelCostEntry
+}
+
+// acquireModel 在途模型台账 +1（AcquireModel 的 CAS 成功后调用）。map 惰性建表。
+func (e *entry) acquireModel(model string) {
+	e.inFlightByModelMu.Lock()
+	if e.inFlightByModel == nil {
+		e.inFlightByModel = make(map[string]*atomic.Int64)
+	}
+	c, ok := e.inFlightByModel[model]
+	if !ok {
+		c = &atomic.Int64{}
+		e.inFlightByModel[model] = c
+	}
+	e.inFlightByModelMu.Unlock()
+	c.Add(1)
+}
+
+// releaseModel 在途模型台账 -1；归零即删行（台账只含正在请求的模型，不膨胀）。
+// 对缺失/已归零条目空操作（Release 的幂等语义在模型侧的同构保证）。
+func (e *entry) releaseModel(model string) {
+	e.inFlightByModelMu.Lock()
+	c, ok := e.inFlightByModel[model]
+	e.inFlightByModelMu.Unlock()
+	if !ok {
+		return
+	}
+	for {
+		cur := c.Load()
+		if cur <= 0 {
+			return
+		}
+		if c.CompareAndSwap(cur, cur-1) {
+			if cur == 1 { // 本次归零：删行（并发 +1 会重建条目，最多短暂少计，观测口径可接受）
+				e.inFlightByModelMu.Lock()
+				if cur2, ok2 := e.inFlightByModel[model]; ok2 && cur2.Load() == 0 {
+					delete(e.inFlightByModel, model)
+				}
+				e.inFlightByModelMu.Unlock()
+			}
+			return
+		}
+	}
+}
+
+// inFlightByModelSnapshot 构建状态透出的台账副本：只含非零条目，模型名排序
+// 保证 /status 输出稳定。空台账 → nil（omitempty 省略）。调用方需持 p.mu（读
+// statusOf 的调用约定）；条目计数读取无需条目锁（atomic）。
+func (e *entry) inFlightByModelSnapshot() map[string]int {
+	e.inFlightByModelMu.Lock()
+	defer e.inFlightByModelMu.Unlock()
+	if len(e.inFlightByModel) == 0 {
+		return nil
+	}
+	// 计数在 mutex 外被 acquire/release 原子增减：每条目只 Load 一次并缓存值，
+	// 过滤与取值同源——否则二次 Load 之间计数可能被并发归零，输出里出现
+	// 0 值条目（违背"只含正在请求的模型"的台账语义）。
+	models := make([]string, 0, len(e.inFlightByModel))
+	vals := make(map[string]int, len(e.inFlightByModel))
+	for m, c := range e.inFlightByModel {
+		if v := int(c.Load()); v > 0 {
+			models = append(models, m)
+			vals[m] = v
+		}
+	}
+	if len(models) == 0 {
+		return nil
+	}
+	sort.Strings(models)
+	out := make(map[string]int, len(models))
+	for _, m := range models {
+		out[m] = vals[m]
+	}
+	return out
 }
 
 // modelCostOf 返回该账号在指定 model 上的有效成本观测；无观测或观测过期返回 ok=false。

@@ -561,16 +561,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	reqHasImage := hasImagePart(body)
 
 	// 在途租约：成功选中即占名额；函数出口（含成功 return 与 panic）统一释放。
-	var heldUID string
+	// heldModel 记录租约对应的 bareModel（每模型在途台账的归账键；与 heldUID
+	// 同生命周期），Release 走 ReleaseModel 让 /status 的 in_flight_by_model 可观测。
+	var heldUID, heldModel string
 	defer func() {
 		if heldUID != "" {
-			h.cfg.Pool.Release(heldUID)
+			h.cfg.Pool.ReleaseModel(heldUID, heldModel)
 		}
 	}()
 	releaseHeld := func() {
 		if heldUID != "" {
-			h.cfg.Pool.Release(heldUID)
+			h.cfg.Pool.ReleaseModel(heldUID, heldModel)
 			heldUID = ""
+			heldModel = ""
 		}
 	}
 	// unbindSticky 解绑当前会话粘性号（stickyUID 非空时）。供「粘性号不可用/被抢」与 fail 共用。
@@ -686,7 +689,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		tried[acct.UID] = true
 
 		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。
-		if !h.cfg.Pool.Acquire(acct.UID) {
+		// AcquireModel：CAS 成功后同步记入每模型在途台账（bareModel，与选号/账本同键）。
+		if !h.cfg.Pool.AcquireModel(acct.UID, bareModel) {
 			// 若被抢的正是粘性号，立即解绑并回落普通轮换，避免下一轮仍撞同一个
 			// 满载粘性号再浪费一次粘性命中往返（语义与 fail()/粘性命中-nil 的解绑一致）。
 			if stickyUID != "" && acct.UID == stickyUID {
@@ -699,6 +703,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			continue // 最后一个名额被并发抢走 → 换号
 		}
 		heldUID = acct.UID
+		heldModel = bareModel
 
 		// token 临近过期 → 先 refresh（失败冷却换号）
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
