@@ -29,7 +29,9 @@ func TestAdminConfigDefaultsAndNormalize(t *testing.T) {
 
 func TestAdminConfigLoadFromFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"admin":{"enabled":true,"credit_refresh_min_interval_sec":120}}`), 0o600); err != nil {
+	// api_key 必带：上游 a20d06f 起 normalize fail-fast 校验 admin.enabled=true 时
+	// api_key 非空（未鉴权的 mutation 端点拒绝启动），无 key 的配置文件现在直接报错。
+	if err := os.WriteFile(path, []byte(`{"api_key":"sekret","admin":{"enabled":true,"credit_refresh_min_interval_sec":120}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	c, err := Load(path)
