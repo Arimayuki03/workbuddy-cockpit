@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import logging
 import time
 import uuid
@@ -59,17 +60,114 @@ class CustomToolArgumentsError(ValueError):
     """Custom/freeform tool output cannot be executed through a function wrapper."""
 
 
+def _tool_inner(tool: dict) -> dict:
+    inner = tool.get('function') if isinstance(tool.get('function'), dict) else tool
+    return inner if isinstance(inner, dict) else {}
+
+
+def _tool_name(tool: dict) -> str:
+    name = _tool_inner(tool).get('name')
+    return name if isinstance(name, str) else ''
+
+
+def _sanitize_tool_name(name: str) -> str:
+    cleaned = re.sub(r'[^A-Za-z0-9_-]+', '_', name).strip('_')
+    return (cleaned[:64] or 'tool')
+
+
+class _ToolBridge:
+    """Flatten namespace children for Chat, then restore Responses names/types."""
+
+    def __init__(self, tools: object):
+        self.chat_tools: list[dict] = []
+        self.custom_names: set[str] = set()
+        self._forward: dict[str, str] = {}
+        self._reverse: dict[str, tuple[str, str]] = {}
+        self._taken: set[str] = set()
+        if isinstance(tools, list):
+            self._walk(tools, ())
+
+    def _unique(self, preferred: str, fallback: str) -> str:
+        base = _sanitize_tool_name(preferred) if preferred else _sanitize_tool_name(fallback)
+        name, n = base, 2
+        while name in self._taken:
+            suffix = '_' + str(n)
+            name = (base[:64 - len(suffix)] + suffix) if len(base) + len(suffix) > 64 else base + suffix
+            n += 1
+        self._taken.add(name)
+        return name
+
+    def _walk(self, tools: list, path: tuple[str, ...]) -> None:
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            kind = tool.get('type')
+            name = _tool_name(tool)
+            if kind == 'namespace':
+                children = tool.get('tools')
+                if isinstance(children, list) and name:
+                    self._walk(children, path + (name,))
+                continue
+            if not name:
+                continue
+            preferred = name if name not in self._taken else '__'.join(path + (name,))
+            chat_name = self._unique(preferred, '__'.join(path + (name,)))
+            self._forward.setdefault(name, chat_name)
+            self._forward[chat_name] = chat_name
+            if path:
+                self._forward['.'.join(path + (name,))] = chat_name
+                self._forward['__'.join(path + (name,))] = chat_name
+            restored_kind = 'custom' if kind == 'custom' else 'function'
+            self._reverse[chat_name] = (name, restored_kind)
+            spec = {
+                'type': 'function',
+                'function': {
+                    'name': chat_name,
+                    'description': str(_tool_inner(tool).get('description') or ''),
+                    'parameters': _tool_inner(tool).get('parameters')
+                    or {'type': 'object', 'properties': {}},
+                },
+            }
+            if restored_kind == 'custom':
+                self.custom_names.add(chat_name)
+                spec['function']['description'] += (
+                    '\nPass the complete raw text for this custom tool in the input string. '
+                    'Do not encode it as function arguments inside that string. '
+                    'Any custom grammar is not enforced by this Chat Completions bridge.'
+                )
+                spec['function']['parameters'] = {
+                    'type': 'object',
+                    'properties': {
+                        'input': {
+                            'type': 'string',
+                            'description': 'Complete raw custom tool input.',
+                        },
+                    },
+                    'required': ['input'],
+                    'additionalProperties': False,
+                }
+                fmt = tool.get('format')
+                if (
+                    isinstance(fmt, dict)
+                    and fmt.get('type') == 'grammar'
+                    and isinstance(fmt.get('definition'), str)
+                ):
+                    spec['function']['description'] += (
+                        '\nRequested grammar (guidance only):\n' + fmt['definition']
+                    )
+            self.chat_tools.append(spec)
+
+    def outbound_name(self, name: object) -> str:
+        value = name if isinstance(name, str) else ''
+        return self._forward.get(value, value)
+
+    def restore(self, name: object) -> tuple[str, str]:
+        value = name if isinstance(name, str) else ''
+        return self._reverse.get(value, (value, 'custom' if value in self.custom_names else 'function'))
+
+
 def _custom_tool_names(body: dict) -> set[str]:
-    tools = body.get('tools')
-    if not isinstance(tools, list):
-        return set()
-    return {
-        tool['name'] for tool in tools
-        if isinstance(tool, dict)
-        and tool.get('type') == 'custom'
-        and isinstance(tool.get('name'), str)
-        and tool['name']
-    }
+    return _ToolBridge(body.get('tools')).custom_names
 
 
 def _custom_input(raw: object) -> str:
@@ -287,80 +385,32 @@ def _reasoning_text(item: dict) -> str:
     return ''
 
 
-def _convert_tools(tools: object) -> list[dict] | None:
-    """Responses 的扁平工具定义 → Chat Completions 的嵌套形状。
-
-    两种形状都收：规范的 `{type:'function', name, parameters}`，以及部分客户端
-    混用的嵌套 `{type:'function', function:{...}}`。宁可宽容也不要因为一层包装
-    差异就让整次请求 400。
-    """
-    if not isinstance(tools, list):
-        return None
-    out: list[dict] = []
-    for tool in tools:
-        if not isinstance(tool, dict):
-            continue
-        inner = tool.get('function') if isinstance(tool.get('function'), dict) else tool
-        name = inner.get('name')
-        if not isinstance(name, str) or not name:
-            continue
-        spec: dict = {
-            'type': 'function',
-            'function': {
-                'name': name,
-                'description': str(inner.get('description') or ''),
-                'parameters': inner.get('parameters')
-                or {'type': 'object', 'properties': {}},
-            },
-        }
-        if tool.get('type') == 'custom':
-            # Chat Completions has no freeform/custom tool shape. Keep the
-            # upstream call executable by using one strict string wrapper; the
-            # response side restores the original custom_tool_call contract.
-            spec['function']['description'] += (
-                '\nPass the complete raw text for this custom tool in the input string. '
-                'Do not encode it as function arguments inside that string. '
-                'Any custom grammar is not enforced by this Chat Completions bridge.'
-            )
-            spec['function']['parameters'] = {
-                'type': 'object',
-                'properties': {
-                    'input': {
-                        'type': 'string',
-                        'description': 'Complete raw custom tool input.',
-                    },
-                },
-                'required': ['input'],
-                'additionalProperties': False,
-            }
-            fmt = tool.get('format')
-            if (
-                isinstance(fmt, dict)
-                and fmt.get('type') == 'grammar'
-                and isinstance(fmt.get('definition'), str)
-            ):
-                spec['function']['description'] += (
-                    '\nRequested grammar (guidance only):\n' + fmt['definition']
-                )
-        out.append(spec)
-    return out or None
+def _convert_tools(tools: object, bridge: _ToolBridge | None = None) -> list[dict] | None:
+    """Responses 的扁平工具定义 → Chat Completions 的嵌套形状。"""
+    mapped = (bridge or _ToolBridge(tools)).chat_tools
+    return mapped or None
 
 
-def _convert_tool_choice(choice: object) -> object:
+def _convert_tool_choice(choice: object, bridge: _ToolBridge | None = None) -> object:
     if isinstance(choice, str):
         return choice
     if isinstance(choice, dict):
         name = choice.get('name')
         if not name and isinstance(choice.get('function'), dict):
             name = choice['function'].get('name')
+        if not name and isinstance(choice.get('custom'), dict):
+            name = choice['custom'].get('name')
         if name:
-            return {'type': 'function', 'function': {'name': str(name)}}
+            mapped = bridge.outbound_name(name) if bridge else str(name)
+            return {'type': 'function', 'function': {'name': mapped}}
     return None
 
 
-def to_chat_request(body: dict, custom_tool_names: set[str] | None = None) -> dict:
+def to_chat_request(body: dict, custom_tool_names: set[str] | None = None,
+                    bridge: _ToolBridge | None = None) -> dict:
     """Responses 请求体 → Chat Completions 请求体。"""
-    custom_tool_names = custom_tool_names or _custom_tool_names(body)
+    bridge = bridge or _ToolBridge(body.get('tools'))
+    custom_tool_names = custom_tool_names if custom_tool_names is not None else bridge.custom_names
     # `stream` 必须**转告上游**：上游靠这个字段决定是回 SSE 还是回一次性 JSON。
     # 漏掉它会得到一个"看起来很成功"的结果——网关按流式解析，上游却回了 JSON，
     # 于是一个 data 帧都解析不出来，客户端只收到 response.created + completed 的
@@ -426,7 +476,7 @@ def to_chat_request(body: dict, custom_tool_names: set[str] | None = None) -> di
                 if kind == 'custom_tool_call' and not isinstance(item.get('input'), str):
                     raise CustomToolArgumentsError(
                         'Custom tool history input must be a string.')
-                name = str(item.get('name') or '')
+                name = bridge.outbound_name(item.get('name'))
                 raw_arguments = (
                     json.dumps({'input': item.get('input')}, ensure_ascii=False)
                     if kind == 'custom_tool_call'
@@ -560,10 +610,10 @@ def to_chat_request(body: dict, custom_tool_names: set[str] | None = None) -> di
         if body.get(key) is not None:
             out[key] = body[key]
 
-    tools = _convert_tools(body.get('tools'))
+    tools = _convert_tools(body.get('tools'), bridge)
     if tools:
         out['tools'] = tools
-    choice = _convert_tool_choice(body.get('tool_choice'))
+    choice = _convert_tool_choice(body.get('tool_choice'), bridge)
     if choice is not None:
         out['tool_choice'] = choice
 
@@ -700,9 +750,11 @@ def to_responses_object(
     model: str,
     resp_id: str,
     custom_tool_names: set[str] | None = None,
+    bridge: _ToolBridge | None = None,
 ) -> dict:
     """Chat Completions 非流式响应 → Responses 响应体。"""
     custom_tool_names = custom_tool_names or set()
+    bridge = bridge or _ToolBridge([])
     choice = (data.get('choices') or [{}])[0] if isinstance(data.get('choices'), list) else {}
     message = choice.get('message') or {}
     finish = str(choice.get('finish_reason') or 'stop')
@@ -731,8 +783,9 @@ def to_responses_object(
         if not isinstance(call, dict):
             continue
         fn = call.get('function') or {}
-        name = str(fn.get('name') or '')
-        is_custom = name in custom_tool_names
+        raw_name = str(fn.get('name') or '')
+        name, restored_kind = bridge.restore(raw_name)
+        is_custom = restored_kind == 'custom' or raw_name in custom_tool_names
         output.append(_custom_call_item(
             str(call.get('id') or f'call_{uuid.uuid4().hex[:12]}'),
             'ctc_' + uuid.uuid4().hex[:20],
@@ -784,6 +837,7 @@ class _StreamTranslator:
         model: str,
         resp_id: str,
         custom_tool_names: set[str] | None = None,
+        bridge: _ToolBridge | None = None,
     ) -> None:
         self.model = model
         self.resp_id = resp_id
@@ -809,6 +863,7 @@ class _StreamTranslator:
         self.finish_reason: str | None = None
         self.usage: dict = {}
         self.custom_tool_names = custom_tool_names or set()
+        self.bridge = bridge or _ToolBridge([])
         self.failed = False
 
     # ── 事件构造 ──
@@ -957,8 +1012,13 @@ class _StreamTranslator:
             value = custom_inputs[seq] if custom else state['args']
             field = 'input' if custom else 'arguments'
             family = 'custom_tool_call_input' if custom else 'function_call_arguments'
+            restored_name, restored_kind = self.bridge.restore(state['name'])
+            custom = custom or restored_kind == 'custom'
+            value = custom_inputs[seq] if custom else state['args']
+            field = 'input' if custom else 'arguments'
+            family = 'custom_tool_call_input' if custom else 'function_call_arguments'
             item = (_custom_call_item if custom else _function_call_item)(
-                state['call_id'], state['id'], state['name'], value)
+                state['call_id'], state['id'], restored_name, value)
             self.items.append(item)
             if self.custom_tool_names:
                 out.append(_event('response.output_item.added', {
@@ -1190,10 +1250,11 @@ async def _handle(request: Request) -> JSONResponse | StreamingResponse:
 
     ua = request.headers.get('user-agent')
     stream = bool(body.get('stream'))
-    custom_tool_names = _custom_tool_names(body)
+    bridge = _ToolBridge(body.get('tools'))
+    custom_tool_names = bridge.custom_names
 
     try:
-        payload = to_chat_request(body, custom_tool_names)
+        payload = to_chat_request(body, custom_tool_names, bridge)
     except Exception as exc:  # noqa: BLE001
         gateway._record(key, ip, model, '', 400, 0, 0, 0, ua, str(exc), False)
         return _failed(f'请求转换失败：{exc}', 400)
@@ -1289,7 +1350,7 @@ async def _handle(request: Request) -> JSONResponse | StreamingResponse:
     async def gen():
         pending = ''
         translator = _StreamTranslator(
-            model, resp_id, custom_tool_names=custom_tool_names)
+            model, resp_id, custom_tool_names=custom_tool_names, bridge=bridge)
         error_text: str | None = None
         first_token_ms: int | None = None
 
