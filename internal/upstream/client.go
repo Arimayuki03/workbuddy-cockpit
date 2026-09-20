@@ -36,6 +36,7 @@ const (
 	ErrModelBlocked                  // 11102「该后端无此模型」→ (账号,模型) 负缓存避让，切模型/切账号
 	ErrWafBlock                      // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避（WAF 403 修复 P0-1）
 	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
+	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
 	ErrClient                        // 其他 4xx / 业务错误
 )
 
@@ -63,6 +64,8 @@ func (k ErrKind) String() string {
 		return "waf_block"
 	case ErrPromptTooLong:
 		return "prompt_too_long"
+	case ErrImageInvalid:
+		return "image_invalid"
 	case ErrClient:
 		return "client"
 	default:
@@ -179,6 +182,17 @@ var contentBlockedRule = errorRule{kind: ErrContentBlocked, mode: matchLower, pa
 var badParamsRule = errorRule{kind: ErrBadParams, mode: matchExact, patterns: []string{
 	"Unmarshal chat params failed",
 	`"code":11101`,
+}}
+
+// invalidImageRule 图片请求格式/数据无效（HTTP 400）。这类错误由请求内容决定，
+// 不是账号问题：换账号不会改变同一 body 的解析结果。上游常见形态包括
+// `Parse message failed: invalid image_url content`、invalid_image_data、code 11135。
+var invalidImageRule = errorRule{kind: ErrImageInvalid, mode: matchFold, patterns: []string{
+	"invalid image_url content",
+	"invalid_image_data",
+	"replace the image",
+	`"code":11135`,
+	`"code":"11135"`,
 }}
 
 // alreadyCheckinRule "今天已签到"关键词（上游对重复签到返回 code!=0，
@@ -539,6 +553,11 @@ func Classify(status int, body string) ErrKind {
 	// 带信封的 403 在上方各层已有权威分类，不受影响。
 	if IsWafBlocked(status, body) {
 		return ErrWafBlock
+	}
+	// 图片格式/数据错误是确定性的请求级错误：同 body 换账号结果不变，直接
+	// fail-fast，避免把健康账号轮转一遍后仍把最终 503 返回给客户端。
+	if status == http.StatusBadRequest && invalidImageRule.hit(body, lower) {
+		return ErrImageInvalid
 	}
 	// 内容策略拦截（HTTP 400 + 审核文案）：判在通用 ErrClient 之前。
 	// 这是误报信号，不罚账号，由网关降级重试处理（见 handler.applyErrorPolicy）。
