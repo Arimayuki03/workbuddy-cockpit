@@ -651,8 +651,14 @@ def read_container_logs(limit: int = 200, timestamps: bool = True) -> list[str]:
 # 也是 `load_upstream_config` 的**下发白名单**——两处必须是同一份，否则会出现
 # 「能保存但读不回来」或「读得到却存不回去」的不一致。顶层其余键（api_key、
 # auth_dir、state_file 等）一律不下发：它们是凭据或部署路径，界面不使用。
+#
+# `admin` 段：上游的运维管理端点开关（`admin.enabled`，默认 false），
+# 面板的「临时停用」优先走它——它只摘对话流量，签到与保活照常。
+# 必须可由界面开启：否则用户只能手改上游 config.json，而这条路的收益
+# （保留签到与保活）正需要一个「顺手就能开」的入口，否则没人会去开。
 _EDITABLE_SECTIONS = ('schedule', 'pool', 'cooldown', 'features',
-                      'session_sticky', 'prompt', 'server', 'upstream', 'global')
+                      'session_sticky', 'prompt', 'server', 'upstream', 'global',
+                      'admin')
 
 
 def _mask(v: str) -> str:
@@ -890,6 +896,24 @@ def _sanitize_section(section: str, incoming: dict) -> dict:
             if _has_control_chars(path):
                 raise ValueError('prompt.file 不能包含换行或控制字符')
             out[key] = path
+        elif section == 'admin' and key == 'enabled':
+            # 上游对这组配置有 **fail-fast**：`admin.enabled=true` 且 `api_key`
+            # 为空时 normalize() 直接返回错误、拒绝启动（其 config.go 原话：
+            # 「admin.enabled=true 但 api_key 为空：请设置 api_key 或将
+            # admin.enabled 置 false」）。开关本意是「管理端点必须有鉴权」——
+            # 未鉴权的 disable/revive 比读泄漏危险（可用性操作）。
+            #
+            # 所以这里必须拦：放行会得到「保存成功、然后上游起不来」这个最难查的
+            # 形态（本函数注释里点名的正是它）。可达路径是直接 POST
+            # /api/settings/upstream 透传 body，不经过前端表单。
+            #
+            # 判据用**落盘后的实际状态**：api_key 不在下发/写入白名单里，所以
+            # 这里永远读现有配置来判，而不是假定它为空。
+            if raw is True and not config.upstream_api_key().strip():
+                raise ValueError(
+                    '开启账号管理接口需要上游已设置 api_key（上游要求管理端点必须鉴权，'
+                    '否则拒绝启动）。请先在上游 config.json 里设置 api_key')
+            out[key] = bool(raw)
         elif section == 'upstream' and key in _UPSTREAM_TEXT_KEYS:
             # 单行文本：UA、客户端版本、用量归知名度、设备 token 文件路径
             val = str(raw or '').strip()

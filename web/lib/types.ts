@@ -450,6 +450,14 @@ export interface UpstreamConfig {
   upstream?: Record<string, unknown>;
   /** 国际版（workbuddy.ai）路由：enabled / chat_base / billing_base */
   global?: Record<string, unknown>;
+  /**
+   * 上游的运维管理端点开关：enabled。
+   *
+   * 决定账号页「临时停用」走哪条路——开启后走上游的停用接口（只摘转发流量，
+   * 签到与保活照常），不开启则回退为改文件名（账号完全退出账号池）。
+   * 上游默认关闭，所以面板提供一个开关，否则用户只能手改 config.json。
+   */
+  admin?: Record<string, unknown>;
   upstash?: UpstashConfig;
 }
 
