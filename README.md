@@ -1,316 +1,193 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/WorkBuddy.png" alt="WorkBuddy2API" width="120">
+  <img src="https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/WorkBuddy.png" alt="WorkBuddy Cockpit" width="120">
 </p>
 
-<h1 align="center">WorkBuddy2API</h1>
+<h1 align="center">WorkBuddy Cockpit</h1>
 
 <p align="center">
-  <b>把 CodeBuddy 账号变成 OpenAI 兼容 API 的多账号网关</b><br>
-  OAuth 登录 · 账号池轮转 · 熔断与冷却 · 会话粘性 · 积分补充
+  <b>把 WorkBuddy / CodeBuddy 账号变成 OpenAI 兼容 API，并且管好这一切</b><br>
+  多账号网关 · 内嵌 Web 管理面板 · 任务自动化 · 用量可观测
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/Version-v1.1.1-6E56CF?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/Version-v1.2.0.dev-6E56CF?style=flat-square">
   <img alt="Go" src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white&style=flat-square">
+  <img alt="Panel" src="https://img.shields.io/badge/Panel-Next.js%20%2B%20shadcn%2Fui-000000?logo=nextdotjs&logoColor=white&style=flat-square">
   <img alt="API" src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square">
   <img alt="Deploy" src="https://img.shields.io/badge/Deploy-Docker_Compose-2496ED?logo=docker&logoColor=white&style=flat-square">
   <img alt="Transport" src="https://img.shields.io/badge/Transport-SSE%20%2F%20Streaming-0DBD8B?style=flat-square">
-  <a href="https://t.me/sliverkiss_blog"><img alt="Telegram" src="https://img.shields.io/badge/Telegram-%E9%A2%91%E9%81%93-blue?logo=telegram&logoColor=white&style=flat-square"></a>
 </p>
 
 ---
 
-## 项目简介
+## 这是什么
 
-WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeBuddy``` 账号包装为统一的 `/v1/chat/completions` 服务。
+WorkBuddy Cockpit 是一个自托管的一体化项目：**后端**是多账号 OpenAI 兼容网关（OAuth 登录、账号池轮转、熔断与冷却、会话粘性），**前端**是内嵌进同一个二进制的全功能 Web 管理面板（账号、任务、用量、配置、日志），部署一个容器、记住一个地址，全部搞定。
 
-### 本项目做什么
+> 前身是 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的 fork（Arimayuki03/workbuddy2api，v1.1.1）。v1.2.0 起项目以独立形态演进：吸收 [workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 的后端管理能力与 [workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) 的前端设计，网关核心与上游保持同源兼容。设计决策见 [docs/DESIGN-v1.2.0-panel-manager.md](docs/DESIGN-v1.2.0-panel-manager.md)。
 
-- 通过 **OAuth 设备授权**（`login.sh`）获取账号凭证，在网关侧做 token 自动刷新、账号池调度与流量治理；
-- 面向 **个人多账号** 场景：多账号共享、单号故障自动换号、冷却 / 熔断防止雪崩、会话粘性保证多轮上下文不跳号；
-- 对客户端只暴露 OpenAI 兼容接口，现有 SDK / 前端 / 工具 **零改造接入**。
+### 与上游 / 同类项目的关系
 
-### 本项目不做什么
-
-- **只做上游网关，不做下游协议转换** — 本项目仅负责对接上游 ```CodeBuddy``` 并暴露 OpenAI Chat 协议；Anthropic Messages、Gemini 等其他协议的适配应由下游网关负责；
-- **不内嵌 Web 管理面板** — 网关核心保持精简，可视化面板作为独立项目维护，数据直取上游接口，不增加网关适配负担。
-
-### 社区前端面板
-
-需要 Web 管理面板的用户，可部署以下符合本理念的社区项目（独立维护，与网关解耦）：
-
-- [workbuddy2api-gui](https://github.com/287775856/workbuddy2api-gui) — 账号池状态可视化面板
-- [workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) — 账号管理工具
-
-> ⚠️ 合规须知：本项目是**非官方**网关，使用 ```CodeBuddy``` 账号作为上游，**仅限本人授权账号、本机 / 私有环境测试**。详细边界见[安全与合规](#安全与合规)。
-
-📖 完整文档见 [GitHub Wiki](https://github.com/Sliverkiss/workbuddy2api/wiki)。
+| | 上游 workbuddy2api | workbuddy2api-panel | workbuddy-manager | **本项目** |
+|---|---|---|---|---|
+| 形态 | 纯网关，无面板 | 网关 + 原生 HTML 面板 | 外挂面板（Python 中间层 + Next.js） | **网关 + 内嵌 Next.js 面板** |
+| 部署 | 单容器 | 单容器 | 网关 + 面板双容器 | **单容器** |
+| 账号池治理 | ✓ | ✓ | —（调网关 API） | ✓（上游同源 + cost_explore） |
+| 任务自动化 | ✓ 内置六类调度 | ✓ 全内置 | 依赖 Python 脚本 | ✓ 内置调度 + 成长任务/开学季一键自动化 |
+| 用量统计 | /v1/stats 聚合 | 逐请求分桶 | 自建 SQLite | **两者都有** |
+| Windows 工作流 | ✓ cmd 启停脚本 | — | 脚本 | ✓ cmd 启停 + bat 交互菜单 + CLI 全套 |
 
 ## 核心能力
 
-### 账号池治理
+### 🎛️ Web 管理面板（v1.2.0 新增）
 
-- **OAuth 设备授权登录** — `login.sh` 一条命令完成：取授权 URL → 浏览器登录 → token 轮询 → 凭证落盘 → 重启加载，全程无 PKCE（state 由服务端签发），重复执行即可连续添加多账号
-- **三因子加权随机选号** — `credits 比例 ×10 + 快过期积分占比 ×8 + 闲置补偿` 三项加权（`pool.expiring_soon` 窗口内的积分优先消耗，默认 7 天），按权重降序取 **Top-5 候选短名单**，再在短名单内加权抽签（等权重候选先随机打乱防惊群、LRU 兜底覆盖全部候选），兼顾积分多、快过期积分先用掉、闲置久的账号；失败账号由熔断 / 冷却 / 连败降权状态机处置（不进权重公式）
-- **防惊群** — 跳过 100ms 内刚被选中的账号，多账号同时待命时不打爆同一台
-- **在途租约** — 单账号最大在途请求数（`pool.max_in_flight`）限制并发占用，占满的号不参与选号，避免单号过载；`/status` 透出 `in_flight_by_model` 每模型在途台账（模型 → 计数，归零即删行），运维可看到"这个号正在跑什么模型"
-- **账本择优** — 每次成功请求按 `usage.credit` 折算每千 token 单价记入 `(账号, 模型)` 账本，免费 / 便宜的账号优先；观测按 EMA 平滑、6 小时未更新即失效（陈旧价格不复活），成本随上游活动实时变化；账本随池状态落盘 `state.json`，重启不丢学费；`/status` 透出 `model_costs` 台账（模型 / 单价 / 末次观测 / 样本数）
-- **成本分层条件探索** — costTier 硬过滤（免费 > 未知 > 收费）会把全池锁死在唯一的实测免费号上：其余账号永远轮不到、也就永远学不到「它其实也免费」（垄断 + 学习冻结，issue #136）。破解方式是**搭车改道**：tier 0 垄断层存在且 tier 1 有成员时，距上次探索 ≥ `pool.cost_explore_interval`（默认 30m，`"0"` 关停）就把本次选号改道给一个未知号——承接的是完整真实用户请求，**零新增上游请求**（IP 维度零增量，WAF 友好）。成功即毕业（首观测入账，免费回 tier 0 / 收费出局 tier 2，学费只付一次）；失败走既有冷却 / 熔断策略，无探测风暴。探索频率硬性限幅 ≤ 48 次 / 天 / 模型（24h ÷ 30m），与池规模和 QPS 无关；tier 1 枯竭后自动停探。探索节奏按 `(域, 模型)` 独立；`/status` 透出 `cost_explore` 台账（累计事件数 + 各 (域, 模型) 最近探索时刻），与 `model_costs` 行对照即可读出「探索 → 毕业」全链路
+> 🚧 **本节为 v1.2.0 设计目标**（设计定稿见文末版本节），随实施逐步落地；当前代码仅含网关能力。下述条目完成情况以 Release 说明为准。
 
-### 流量治理
+浏览器打开即用，与网关同端口同鉴权，明暗主题、简中/英文等多语言：
 
-- **分级熔断与冷却** — 429 软冷却（600s 起指数退避、封顶 `soft_rate_max`）、404 固定浅冷却、402 / 余额耗尽硬冷却至次日 04:00、连续失败熔断（`breaker_threshold` 触发后指数退避封顶 6h）
-- **模型级限流独立冷却** — 6004（该模型使用量超限）只冷却触发调用的模型，切其他模型立即可用；`/status` 透出 `rate_limited_models` 台账
-- **请求统计**（2026-09 上游新增） — `GET /v1/stats` 按模型聚合请求量 / token / 缓存命中 / 延迟 / 扣费 / 上游积分倍率（倍率与 `/v1/models` 同源目录，未下发则整体省略——缺失≠免费），`POST /v1/stats/reset` 清零；配套终端查看工具 `cmd/stats`（`go run ./cmd/stats [-json] [-watch 5s] [-sort credits]`，表格含倍率列、按扣费排序）
-- **账号临时停用 / 恢复** — 运维可把某个号临时摘出选号池、观察后再放回，不必删凭证（issue #138/#118）。语义是「对话流量摘除」而非「账号冻结」：停用期间签到、token 保活、排程任务照常执行，账号仍在池里、状态照常透出。与系统自动禁用是**两个独立状态位**（`manual_disabled` / `disabled`），各自清除、都清空才回到选号池——避免运维意图被签到解冻等自动复活路径意外解除；停用状态随池状态落盘，重启保留。入口：`/admin/accounts/{uid}/{disable,enable,revive}` 端点 + `cmd/acct` CLI（默认关闭，`admin.enabled` 显式开启）
-- **auths 目录热加载**（2026-09 上游新增） — 配置了 `auth_dir` 时后台 5s 轮询凭证目录，新增 / 移除账号文件自动对齐进池 / 出池，免手动重启
-- **状态持久化** — 池状态（积分 / 冷却 / 熔断 / 计数）本地原子落盘 `state.json`，可选镜像至 Upstash Redis，重启后择优恢复
+- **总览** — 账号健康分布、今日请求 / token / 积分扣费一目了然
+- **账号** — 池总览（状态 / 积分进度条 / 冷却倒计时 / 成功失败计数 / 在途数）；单号禁用 / 恢复 / 复活 / 签到 / 查余额 / 移除；批量签到 / 保活 / 余额刷新；**扫码 / 授权登录添加账号**，凭证落盘后热加载进池，免重启
+- **任务** — 成长任务一键自动化（17/18 个任务纯 API 完成：推进 → 轮询计分 → 自动领奖，执行队列账号内串行、账号间并发）；开学季活动 5 任务一键闭环 + **券码二维码**；六类定时任务快照与手动触发
+- **统计** — 逐请求用量分桶（时间片 × 域 × 账号 × 模型）时间轴图表 + 按模型聚合的请求量 / token / 延迟 / 扣费
+- **日志** — 请求日志（模型 / 账号 / 状态 / tokens / 首字延迟 / 扣费 / 错误，最近 1000 条）+ 系统日志（任务 / 对话 / 系统三频道）
+- **设置** — 配置热编辑（深合并原子写回，部分键立即生效）、Upstash 连通性测试、**模型映射**（自定义模型名 → 真实模型，服务 cc-switch 等写死模型名的客户端）、版本检查提示
+- **Playground** — 面板内直接对话测试，走本网关 `/v1/chat/completions`
 
-### 请求链路
+### 🐝 账号池治理
 
-- **流式 + 非流式** — 出站强制 `stream:true`；SSE 帧按 OpenAI 规范白名单重建；非流式由本地聚合为单响应
-- **DeepSeek 思维链注入** — 出站请求体注入 `thinking.type=enabled` + 默认档位，`reasoning_content` 多轮回填，`reasoning_effort` 按模型档位自动降级
-- **系统提示词三模式**（`prompt.mode`，缺省 `passthrough`） —
-  - `passthrough`（缺省）：透传客户端原始 system，遇内容拦截自动降级中性提示词重试
-  - `custom`：网关用自有提示词**替换**客户端 system/developer（从源头消除模板句误报；不参与降级）
-  - `append`：**两者并用**——开头连续 system/developer 块之后插入网关自有提示词，客户端项目规范/工具约定与网关人格共存（issue #129）；降级期与拦截首遇重试时退化为 `custom` 语义（换中性提示词，原文 system 移除）
-  - `prompt.file`（custom/append 生效）指向自定义提示词文件，空 = 内置默认
-- **会话头族注入** — 出站携带官方客户端会话头族（`X-Conversation-Request-ID` 聚合主键 · `X-Conversation-ID` 透传 · B3 链路），轮转 / 重试 / 路径回退复用同键，后台按对话轮聚合不再碎片化（issue #35）
-- **指纹脱敏** — 出站请求体黑名单指纹字段清洗（可开关），与提示词体系两层叠加
+- **OAuth 设备授权登录** — `login.sh` / 面板内加号，token 自动刷新、凭证落盘、热加载
+- **三因子加权随机选号** — 积分比例 ×10 + 快过期积分占比 ×8 + 闲置补偿，Top-5 候选短名单内抽签，防惊群
+- **在途租约** — 单号最大并发占用限制；`/status` 透出 `in_flight_by_model` 每模型在途台账
+- **账本择优** — 按 `usage.credit` 折算每千 token 单价记入 (账号， 模型) 账本，免费 / 便宜的号优先，观测 EMA 平滑、6h 失效
+- **成本分层条件探索** — tier 0 垄断时搭车改道探索未知号，承接真实请求零新增上游调用，成功即毕业（issue #136 的学习冻结破解）
+- **分级熔断与冷却** — 429 软冷却指数退避、402 硬冷却至次日 04:00、连败熔断、6004 模型级限流独立冷却（切模型豁免）、WAF IP 级 fail-fast
+- **会话粘性** — conversation 四键 → prompt_cache_key → 首条 user 消息派生，多轮上下文不跳号；粘性按模型判活
+- **双域适配** — 国内版（copilot.tencent.com）与国际版（www.workbuddy.ai）共享一池，按 realm 或模型名前缀路由
 
-### 选号语义
+### ⏰ 定时积分任务
 
-选号 = 会话粘性（命中即定）→ 成本分层（硬过滤）→ 加权随机（软均衡）三层串联，各层语义：
+六类任务独立排程、独立开关（`schedule.*_enabled`）：签到（09/21 点，尾部自动跑连登管家：7/14/28 档自动兑换 + 抽奖自动抽完）、活跃地图（10 点）、猫猫旅行（09/21 点，领养状态机修正）、token 保活（22 点）、开学季（12 点）、夜猫子（01 点）。面板与 `/admin/tasks` 均可手动触发。
 
-- **成本分层** — 账本把每个 `(账号, 模型)` 归入三档：**tier 0**（实测免费，单价 ≤ 0）、**tier 1**（无观测）、**tier 2**（实测收费）。同一次选号在**存活的最便宜档内**选：有 tier 0 就只在 tier 0 里挑，全池无免费观测才落到 tier 1，再不行才是 tier 2——即「贵号永远只作兜底」。tier 1 的号**不会被跳过**：新账号 / 新模型没跑过就没有观测，直接淘汰会把新号饿死。观测随 `usage.credit` 实时更新且 6 小时过期，所以限免窗口（如夜间免费）一结束，账号回到 tier 1 / tier 2，选号自动跟随——无需重启，日志会打 `free tier ended` 提示价格切换
-- **会话粘性** — 同一对话固定走同一账号（多轮上下文不跳号、上游 prompt cache 不碎）。粘性键按此优先级取：**conversation 维度四键**（`metadata.conversation_id` / `metadata.conversationId` / `conversation_id` / `conversationId` 任一）→ **`prompt_cache_key`**（pi-ai 系客户端把会话 ID 放在这个 OpenAI 前缀缓存字段里）→ **首条 user 消息文本的 sha256 兜底**（OpenAI 兼容协议无会话 ID 字段，dsh / Codex 等客户端四键全缺，此前粘性恒不命中、逐请求换号；现由首条 user 消息派生会话级稳定键——会话内历史追加不影响该键，开新会话自然换键）。`user_id` **不是**粘性键——它会把一个用户的所有并行对话钉到同一个号上（粒度远粗于上游对话级缓存边界），发 `user_id` 的客户端回落加权轮换（**该回落同样适用于首条 user 消息兜底**：请求体带 `metadata.user_id` 或顶层 `user_id` 时不派生兜底键）。绑定 30 分钟滚动续期，空闲即过期释放
-- **负载分布** — 粘性与分层都未限定时，三因子加权随机（`credits ×10 + 快过期积分 ×8 + 闲置补偿`）把流量摊开：高余额号多扛、快过期积分的号先用、闲置号补位；防惊群跳过 100ms 内刚选中的号。权重是**概率倾斜**而非硬排序（Top-5 短名单 + 名单内抽签），不会让单一账号垄断流量
+### 🔌 OpenAI 兼容接口
 
-### 定时积分任务
+- `/v1/chat/completions` 流式 + 非流式（出站强制 stream，SSE 白名单重建，非流式本地聚合）、`/v1/models`（effort 档位 / 积分倍率 / 上下文全字段）、`/v1/stats`、`/status`、`/healthz`
+- DeepSeek 思维链注入与 `reasoning_content` 回填、`reasoning_effort` 档位降级
+- 系统提示词三模式（passthrough / custom / append）+ 内容拦截降级重试
+- 指纹脱敏、模型映射、错误九分类轮转退避
 
-- **签到**（09 / 21 点）— 每日签到 + 余额查询，余额恢复自动解冻冷却账号
-- **活跃地图**（10 点）— 对话事件连发上报点亮活跃地图与连登天数、解锁领养前置，补签卡保连登、连登档位兑换 + 抽奖、礼包/补偿领取，回读 streak 自检
-- **猫猫旅行**（09 / 21 点）— 独立排程：领养 / 派出 / 领奖闭环推进
-- **token 保活**（22 点）— 全账号刷新 token，session 失效连续 3 次才禁用
-- **开学季任务**（12 点）— 任务点亮 + claim + 自动抽空抽奖余额，活动下线时自动跳过
-- **夜猫子任务**（01 点）— 夜猫窗口（23:00–08:00 CST）内补一次 black_cat 任务
+### 🖥️ Windows 原生工作流
 
-六类任务独立排程、独立开关（`schedule.*_enabled`），互不影响。
+**启动服务.bat** 交互菜单（积分 / 签到 / 任务 / 启停 / 日志 / 加号 / 统计 / 账号运维），`login.exe` / `credit.exe` / `acct.exe` / `stats.exe` / `task.exe` 等 CLI 全套；源码模式 `go run ./cmd/server` 即跑。详见 [使用指南.md](使用指南.md)。
 
-### 双域适配
+## 快速开始
 
-- 同时适配**国内版（CN，`copilot.tencent.com` / `www.codebuddy.cn`）与国际版（Global，`www.workbuddy.ai`）**账号
-- 共享同一账号池，由账号 `realm` 或请求模型名前缀（`cn:` / `global:`）决定路由；`global.enabled` 可一键锁死纯 CN 部署
-- 国际版支持注册激活、地区完善、一次性 trial 加油包领取（`./trial.sh`）
+### Docker Compose
 
-### 辅助工具
+```bash
+git clone https://github.com/Arimayuki03/workbuddy-cockpit.git
+cd workbuddy-cockpit
+mkdir -p config && cp config.example.json config/config.json
+# 编辑 config/config.json：至少设置 api_key；开启 panel 或 admin 时 api_key 必填（缺失 fail-fast）
+docker compose up -d --build
 
-- 积分日报：`./credit.sh`（美化 / `-json`，realm 感知双域）
-- 手动签到：`./signin.sh`（批量、幂等不重复计）
-- 账号停用 / 恢复：`./acct.sh list | disable <uid> [原因] | enable <uid> | revive <uid>`（需 `admin.enabled`，走网关管理端点）
-- 请求统计终端视图：`go run ./cmd/stats [-json] [-watch 5s] [-sort credits]`（数据源 `GET /v1/stats`）
-- 源码模式启停：`./dev.sh`（上游 helper，一键后台起停）
-- 领养联动 / 任务查询：`scripts/task_runner.py`（成长任务一体机，默认 dry-run）
-- 个性化提示词：`prompt.file` 指向自定义提示词文件即整体替换内置默认（`custom`/`append` 模式生效）
+# 打开面板
+# http://localhost:7863/   →  登录密码 = 你设置的 api_key
+```
+
+> 注：`workbuddy-cockpit` 为 v1.2.0 起的新仓库名；改名生效前请用旧地址 `https://github.com/Arimayuki03/workbuddy2api.git`（改名后旧名由 GitHub 自动重定向）。
+
+添加账号：面板「账号」页扫码 / 授权登录，或 `./login.sh`。
+
+### 源码构建
+
+```bash
+# 前端面板（需要 Node 20+，产物 embed 进二进制）
+cd web && npm ci && npm run build:export && cd ..
+
+# 后端
+go build ./...
+go run ./cmd/server -config config.json
+# 或单文件：CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o wb2api ./cmd/server
+```
+
+### 验证
+
+```bash
+# 网关身份与健康
+curl -s http://localhost:7863/healthz
+
+# 模型列表 / 账号状态 / 请求统计
+curl -s http://localhost:7863/v1/models  -H "Authorization: Bearer your-api-key"
+curl -s http://localhost:7863/status     -H "Authorization: Bearer your-api-key"
+curl -s http://localhost:7863/v1/stats   -H "Authorization: Bearer your-api-key"
+
+# 流式聊天
+curl -sN http://localhost:7863/v1/chat/completions \
+  -H "Authorization: Bearer your-api-key" -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true}'
+```
+
+## 配置
+
+配置以 `config.example.json` 为完整参考，`WB2A_*` 环境变量可覆盖（22 个）。v1.2.0 新增段：
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `panel.enabled` | `true` | 启用 Web 面板（关掉即回到纯网关形态） |
+| `panel.loopback_only` | `false` | 面板仅限本机回环访问（公网反代场景保持 false） |
+| `usage.enabled` | `true` | 逐请求用量分桶统计（关掉则统计页只剩 /v1/stats 聚合） |
+
+安全契约：`panel.enabled` 或 `admin.enabled` 为 true 且 `api_key` 为空时**拒绝启动**。面板与 API 同端口同鉴权，自带严格 CSP 等安全头；公网部署务必设置 api_key 并置于 HTTPS 反代之后。
+
+> ⚠️ 合规须知：本项目是**非官方**网关，使用 WorkBuddy / CodeBuddy 账号作为上游，**仅限本人授权账号、本机 / 私有环境测试**。详细边界见[安全与合规](#安全与合规)。
 
 ## 架构总览
 
 ```mermaid
 flowchart LR
-    Client["客户端 / SDK\nOpenAI 兼容请求"] --> H
+    B["浏览器 / SDK"] --> ROOT["/: Web 面板\nNext.js 静态导出 (go:embed)"]
+    B --> API["/api/*: 面板适配层"]
+    C["客户端 / SDK\nOpenAI 兼容请求"] --> H
 
-    subgraph GWI["WorkBuddy2API 网关 :7863"]
-        H["HTTP Handler\n鉴权 · 提示词改写 · 轮转"] --> P
+    subgraph GWI["WorkBuddy Cockpit :7863"]
+        ROOT --> EMBED["静态文件服务"]
+        API --> PG["面板后端\n账号/任务/用量/配置/日志"]
+        H["HTTP Handler\n鉴权 · 模型映射 · 提示词改写 · 轮转"] --> P
         H --> S
         P["账号池\n三因子加权 · 熔断 · 冷却 · 租约"] --> U
         S["会话粘性路由"] -.绑定镜像.-> REDIS
-        T["定时调度\n签到 09/21 · 旅行 09/21 · 活跃地图 10 · 保活 22\n开学季 12 · 夜猫子 01"] --> P
+        T["定时调度\n六类任务 + 连登管家"] --> P
         U["上游 Client\nChatHTTP 流式 · 短 RPC"]
+        PG --> P
+        PG -.用量分桶.-> DATA[("data/usage.json")]
     end
 
     P -. "读凭证 (0600)" .-> AUTH[("auths/*.json")]
     P -. "状态镜像" .-> REDIS[("Upstash Redis\n可选")]
-    U -->|"chat/completions (SSE)"| CB["CodeBuddy\ncopilot.tencent.com"]
-    U -->|"billing / auth / growth"| CB
-```
-
-上游请求在出站前经历统一的改写管线（`internal/upstream/payload.go`）：强制 `stream:true`、`developer` 角色归一、tool_choice 归一、DeepSeek 思维链注入、`reasoning_effort` 档位降级、`reasoning_content` 回填、指纹脱敏。
-
-## 快速开始
-
-### 环境要求
-
-- **Docker + Docker Compose**（推荐部署方式，镜像内已含 `app` 低权限用户与全部工具脚本）
-- 一个或多个已注册的 CodeBuddy 账号，用于 OAuth 登录
-- 宿主机 Go ≥ 1.22（仅源码构建时需要；`go.mod` 声明 1.22.5，Docker 构建镜像已升级到 Go 1.26）
-
-### Docker Compose 一键部署
-
-```bash
-git clone https://github.com/Sliverkiss/workbuddy2api.git
-cd workbuddy2api
-mkdir -p config && cp config.example.json config/config.json
-```
-
-编辑 `config/config.json`，**至少设置 `api_key`**（`留空 = 不鉴权`，公网部署务必设置；开启 `admin.enabled` 时 `api_key` 必填，缺失会在启动时 fail-fast 报错退出）。示例中的 `test_key` 等均为占位符，`config.example.json` 不含任何真实密钥。
-
-> **配置目录挂载（2026-09 起）**：compose 将 config 从单文件挂载改为目录挂载（`./config:/app/config`）——admin 热改写回走 tmp+rename，单文件 bind mount 的 rename 会被内核 EBUSY 拒绝（去掉 `:ro` 也一样），目录内 rename 才可行。旧部署迁移：`mkdir config && mv config.json config/ && chown -R 10001:10001 ./config`；容器内脚本（login.sh / checkin.sh）经 `WB2A_CONFIG` 环境变量读取新路径，无需额外操作。
-
-```bash
-# 登录添加账号（重复执行可加多号；注意：执行过下方说明中的 chown 后，
-# host 侧 login.sh 会被可写性预检拦截——此时请在容器内登录，见下方说明）
-./login.sh
-
-# 启动服务
-docker compose up -d --build
-
-# 健康检查（无可用账号时 503）；service 字段用于确认打到的是本网关
-curl -s http://localhost:7863/healthz
-# {"healthy":2,"total":3,"service":"workbuddy2api"}
-```
-
-`login.sh` 内置授权 URL 获取 + 浏览器登录 + token 轮询 + 首次签到 + `auths/workbuddy-<uid>.json` 落盘 + 容器重启，全程无 PKCE（state 由服务端签发）。账号池在容器启动时用 `auths/` 目录自动对齐，新增凭证文件即自动发现。
-
-> **非 root 宿主用户注意**：`./login.sh` 以**当前宿主用户**落盘凭证（权限 0600），而容器内网关以 `app(uid 10001)` 读 + 回写（refresh / realm 补标识走 tmp+rename，需要目录写权限）。二者 uid 不同（例如 Linux 非 root 账号通常是 uid 1000）时容器读不到凭证文件，`/status` 账号数为 0——与 `./data` 卷的属主问题同源。登录后、启动前把目录属主交给 10001（root 或部署用户执行）：
->
-> ```bash
-> chown -R 10001:10001 ./auths
-> ```
->
-> 之后新增账号**必须**进**容器内**登录（`app` 自身落盘，属主即 10001，无需反复 chown；chown 后 host 侧 `./login.sh` 无写权限，脚本会在启动浏览器授权前直接退出并提示，不会白走一遍 OAuth。容器内无 docker CLI，完成后回宿主机重启）：
->
-> ```bash
-> docker compose exec -it wb2api bash -c './login.sh' && docker compose restart wb2api
-> ```
-
-### Windows 免 Docker 使用（本仓库定制）
-
-本仓库在上游基础上附带一套 Windows 原生工作流（无需 Docker，直接跑 `wb2api.exe`）：
-
-- **启动服务.bat** — 交互菜单：`1` 查积分 / `2` 手动批量签到 / `3` 手动执行定时任务 / `4` 后台启动（含状态判断）/ `5` 停止 / `6` 服务状态台账 / `7` 看日志 / `8` 加入用户（国内版）/ `9` 加入国际版用户 / `0` 领取国际版加油包 / `a` 请求统计（`/v1/stats` 终端视图）/ `s` 账号运维（停用 / 恢复 / 复活，前置自动预检服务运行中 + `admin.enabled`）。首次用到工具时自动 `go build` 出 `credit.exe` / `login.exe` / `signin.exe` / `trial.exe` / `task.exe` / `acct.exe` / `stats.exe` / `wb2api.exe`。
-- **`login.exe join`** — 一步登录：拿授权 URL → 自动打开浏览器 → 轮询 token → 拉账号 →（CN）签到 → 原子落盘 `auths/workbuddy-<uid>.json`；等待授权期间按任意键可中止。等价于 `login.sh` 的编排，供 cmd/菜单直接驱动。支持 `--realm=cn|global`。
-- **`trial.exe`** — 国际版账号批量领取 /billing/ide/trial 加油包（CN 账号自动跳过）。
-- **`task.exe <kind>`** — 定时任务手动一次性触发器（checkin/activity/keepalive/travel/school/cat/all），独立进程立即跑一次与排程相同的任务体，不影响常驻服务的自动排程；菜单 `3` 提供子菜单入口。
-- **`credit.exe -pretty`** — 积分日报，除汇总外附账号明细表（昵称 / UID / 剩余 / 已用 / 总量 / 状态）。
-- **scripts/start-service.ps1** — 后台隐藏启动 `wb2api.exe`，stderr 重定向到 `logs/server.log`。
-- 详细图文见 **[使用指南.md](使用指南.md)**。
-
-### 源码构建
-
-```bash
-go build ./...
-go vet ./...
-go test ./...      # 完整测试套件
-go run ./cmd/server -config config.json
-```
-
-构建二进制：
-
-```bash
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o wb2api ./cmd/server
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o signin_bin ./cmd/signin
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o login ./cmd/login
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
-```
-
-#### Windows 原生运行（无需 Docker）
-
-Windows 10/11 自带的 PowerShell 与 `curl.exe` 即可管理后台进程。先准备配置并构建：
-
-```powershell
-Copy-Item config.example.json config.json
-# 编辑 config.json；建议把 listen 设为 127.0.0.1:7863，且务必设置 api_key
-
-go build -trimpath -ldflags="-s -w" -o wb2api.exe ./cmd/server
-go build -trimpath -ldflags="-s -w" -o login.exe ./cmd/login
-go build -trimpath -ldflags="-s -w" -o signin_bin.exe ./cmd/signin
-go build -trimpath -ldflags="-s -w" -o credit.exe ./cmd/credit
-```
-
-使用仓库自带脚本（2026-09 上游新增 `start/status/stop-workbuddy2api.cmd`）在后台启停并查看状态：
-
-```powershell
-.\start-workbuddy2api.cmd
-.\status-workbuddy2api.cmd
-.\stop-workbuddy2api.cmd
-```
-
-PID 写入 `wb2api.pid`，标准输出与错误日志分别写入 `data/server.out.log`、
-`data/server.err.log`。停止脚本会先验证 PID 对应的可执行文件确为当前目录下的
-`wb2api.exe`，不会因陈旧 PID 误杀其他进程。
-
-添加账号可使用配套管理面板，或在 Git Bash 中运行现有 `login.sh`（它还负责 CN
-首次签到以及 Global 注册地区/trial 流程；不建议只手工调用 `login.exe` 后跳过这些步骤）。
-
-### 验证
-
-```bash
-# 模型列表
-curl -s http://localhost:7863/v1/models -H "Authorization: Bearer your-api-key"
-
-# 账号状态（汇总 + 每账号详情，含 disabled / manual_disabled 双位、
-# rate_limited_models 限流明细、model_costs 成本台账、in_flight_by_model 每模型在途）
-curl -s http://localhost:7863/status -H "Authorization: Bearer your-api-key"
-
-# 请求统计（按模型聚合请求量 / token / 扣费，进程内存聚合、重启清零）
-curl -s http://localhost:7863/v1/stats -H "Authorization: Bearer your-api-key"
-
-# 临时停用一个账号（需 config 里 admin.enabled = true）
-curl -s -X POST http://localhost:7863/admin/accounts/<uid>/disable \
-  -H "Authorization: Bearer your-api-key" -H "Content-Type: application/json" \
-  -d '{"reason":"观察几天"}'
-# 或用 CLI（自动从 config.json 读网关地址与 key）
-./acct.sh list && ./acct.sh disable <uid> 观察几天 && ./acct.sh enable <uid>
-
-# 流式聊天
-curl -sN http://localhost:7863/v1/chat/completions \
-  -H "Authorization: Bearer your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true}'
-
-# 非流式聊天（本地聚合）
-curl -s http://localhost:7863/v1/chat/completions \
-  -H "Authorization: Bearer your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":false}'
+    U -->|"chat/completions (SSE)"| CB["WorkBuddy / CodeBuddy\ncopilot.tencent.com · workbuddy.ai"]
 ```
 
 ## 安全与合规
 
-### 发布来源与合规边界
-
-- **CI 自动打包**：GitHub Actions（`.github/workflows/build.yml`）每日定时 + push tag 触发多架构（amd64/arm64）构建，发布至 `ghcr.io`，同时输出 amd64 离线 `tar.gz` artifact 供 NAS / 离线环境使用；也可本地 `docker compose build` 自构建
-- 登录 / 签到 / 积分工具：`./login.sh` / `./signin.sh` / `./credit.sh`
-- **无产物校验和**：`go.sum` 仅约束 Go 模块依赖；Docker 镜像由本地 `docker compose build` 生成，未引用第三方镜像
+- **CI 自动打包**：GitHub Actions 多架构（amd64/arm64）构建发布至 `ghcr.io`，同时输出 amd64 离线 tar.gz；也可本地 `docker compose build`
 - 上游 CodeBuddy 属第三方商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责
+- 仅限**本人授权账号**、本机 / 私有环境测试；不得共享、转售、违规分发
+- 妥善保管 `auths/`（明文凭证）、`config/`（含 api_key）与网关端口；面板公网暴露务必 HTTPS 反代 + 强 api_key
 
-### 授权使用边界
+## 版本
 
-- 仅限**本人授权账号**、本机 / 私有环境测试
-- 不得共享、转售、违规分发，或用于违反目标平台条款的用途
-- 遵守 CodeBuddy 平台服务条款与所在地法律
-- 妥善保管 `auths/`（明文凭证）与网关端口
+当前版本：**v1.2.0（开发中）**。设计定稿见 [docs/DESIGN-v1.2.0-panel-manager.md](docs/DESIGN-v1.2.0-panel-manager.md)。
 
-### 安全加固与缺陷修复记录（2026-09）
+- **v1.0.0**（2026-09-14）— 上游基线（Sliverkiss/workbuddy2api），ghcr 镜像发布流程
+- **v1.1.0**（2026-09-20）— 吸收上游 2026-09-20 合并：`/v1/stats`、账号停用/恢复/复活端点、auths 热加载、global 域 /v2 路由
+- **v1.1.1**（2026-09-20）— `/status` 透出 `in_flight_by_model` 每模型在途台账
+- **v1.2.0**（开发中）— 项目更名 **WorkBuddy Cockpit**；整合 Web 管理面板（后端能力移植自 workbuddy2api-panel，前端设计采用 workbuddy-manager，均 MIT）；新增模型映射、请求日志环形缓冲、版本检查；"纯网关不做面板"定位废止，网关侧对既有客户端的接口契约（`/v1/*`、`/admin/*`、`/status`）保持完全兼容
 
-依据三份审查报告的交叉验证结论完成一轮集中修复（`go build` / `go vet` / `go test ./... -count=1` 全绿，并发相关包 `go test -race` 通过）：
+## 致谢
 
-- **鉴权与并发** — 账号 token 读取补齐锁内访问器（消除撕裂读风险）；admin 冷却间隔读写、config.json 最小 diff 写回（`patchConfigScalar`）补上互斥；`/admin/credits` 串行刷新感知客户端断连提前收尾；启动校验 `admin.enabled=true → api_key` 必填（缺失即拒绝启动）
-- **正确性** — `signin` 提前刷新窗口从 7.2µs 修正为 2 小时；池状态落盘失败回挂 dirty 恢复重试信号；非流式聚合不再吞上游流内错误帧（原先返回 200 + 空 content + 伪造 `finish_reason:"stop"`）；DST 时区"昨日"日期修正（先归一 CST 再减日）；`Retry-After` 数值溢出回绕守卫；`logfmt.Truncate` 负长度防御；连败降权的模型豁免补上 degrade 轴判定（消除 `/healthz` 200 但全模型 503 的口径分裂）
-- **可用性与安全** — 客户端断连不再计入账号连败（消除粘性会话下远程逐号降权的攻击链）；`12153` 会话失效判定收紧为结构化 code 匹配（消除 requestId / 时间戳撞串误禁号）；客户端可控 `conversationId` 加长度 + 字符集白名单（非法值回退服务端生成）；Redis 连接失败日志对 URL 脱敏（不再泄漏含 token 的完整连接串）
-- **部署与仓库卫生** — Docker config 改目录挂载（修复 admin 热改写回必败的部署矛盾）；`.dockerignore` 补齐 `*.exe` / `logs/` / `config.json.bak*` / `.claude/`；`.gitignore` 补 `.claude/`；`cmd/task` / `cmd/activity` 补池关闭兜底、`cmd/task` 接线快过期积分窗口
-
-> 上述多数修复已在 2026-09-20 合并的上游版本（`4561993`）中以独立提交形式落地（如 `855e5b9` RefreshToken 竞态、`94bc325` 空 content latch、`329cba4` Truncate 守卫、`a20d06f` admin fail-fast）；本地与上游重复实现的守卫在合并时择一保留，语义等价处优先取上游形态。
-
-### 版本
-
-当前版本：**v1.1.1**（2026-09-20）。
-
-- **v1.0.0**（2026-09-14）— 上游基线版本，随 ghcr 镜像发布流程（`build.yml` 打 tag 触发）固定。
-- **v1.1.0**（2026-09-20）— 吸收 2026-09-20 上游合并（`4561993`）：`/v1/stats` 请求统计（端点 + `stats.exe` 终端视图 + 倍率列）、账号临时停用/恢复/复活管理端点（`acct.exe` / 菜单 `s`）、auths 目录热加载（5s 轮询免重启）、global 域 `/v2` 固定路由与多处会话粘性 / 思维链回填修复。含少量破坏性变更：移除 `server.max_body_mb` 配置键与 `WB2A_MAX_BODY_MB` 环境变量。
-- **v1.1.1**（2026-09-20）— `/status` 新增 `in_flight_by_model` 每模型在途台账：`Pool.AcquireModel/ReleaseModel` 在在途租约建立 / 释放时对 `bareModel` 计数（归零即删行，运行态不持久化），运维与面板可看到"账号正在跑什么模型"；配套 TrafficMonitor 插件 v1.5.0 消费该字段与 `rate_limited_models` 明细。既有 `Acquire/Release` 签名与行为不变，零回归；快照构建取值单次读缓存（审查修复：消除过滤与取值两次 Load 之间的并发归零 TOCTOU）。
-
-网关自身未在代码内嵌版本号；版本以 git tag 为准（`git tag -l`），`/healthz` 的 `service` 字段仅作服务身份标识。文档中的版本号随 tag 更新，未打 tag 的 HEAD 一律视作最新文档描述的下一版本。
+- [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) — 网关核心的上游基座（本 fork 的起点）
+- [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) — 面板后端能力（账号池视图 / 任务自动化 / 开学季 / 用量分桶 / OAuth 加号 / 配置热编辑）的移植源（MIT）
+- [ithtelab/workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) — 前端面板设计与页面结构的来源（MIT）；其 UI 设计 token 与组件层改编自 [linux-do/cdk](https://github.com/linux-do/cdk)（MIT），一并致谢
 
 ## 免责声明
 
@@ -330,30 +207,11 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 **7. 条款变更。** 本项目保留随时修改、补充本声明的权利。修改后的声明自发布之日起生效，继续使用本项目即视为接受修订后的声明。本项目所有内容仅供学习和研究使用，请于学习研究完成后及时删除。
 
-## ☕ Coffee
-
-如果这个项目对你有帮助，欢迎请我喝杯咖啡～
-
-<table>
-  <tr>
-    <td align="center"><b>💰 Solana</b></td>
-    <td><code>AZAKF74rTu7UFVSNRzsKV4HHpTwarax6cG8KAh4fP5rQ</code></td>
-  </tr>
-  <tr>
-    <td align="center"><b>💎 Ethereum</b></td>
-    <td><code>0x1d418627aD6B043900CBE11fe439759bDF2b5170</code></td>
-  </tr>
-  <tr>
-    <td align="center"><b>₿ Bitcoin</b></td>
-    <td><code>bc1q9w7h4j9msyd9q6lhl0398n4s3g8h4vchpqvc2k</code></td>
-  </tr>
-</table>
-
 ## License
 
 本项目采用 [MIT License](LICENSE) 开源协议。
 
 - 在遵守 MIT License 前提下，允许使用、复制、修改、合并本项目源代码
-- 再分发（源码或二进制形式）时，须保留原仓库的 MIT 版权声明与许可声明，并在 NOTICE 或 README 中注明原始出处 `https://github.com/Sliverkiss/workbuddy2api`
-- 本项目不授予任何上游（CodeBuddy）接口或服务的权利；使用者仍需自行遵守上游服务条款
+- 再分发（源码或二进制形式）时，须保留本项目及上游 Sliverkiss/workbuddy2api、workbuddy2api-panel、workbuddy-manager 的 MIT 版权声明与许可声明
+- 本项目不授予任何上游（WorkBuddy / CodeBuddy）接口或服务的权利；使用者仍需自行遵守上游服务条款
 - 本项目的使用同时受上方**免责声明**约束；如免责声明与 MIT License 存在不一致，以免责声明为准
