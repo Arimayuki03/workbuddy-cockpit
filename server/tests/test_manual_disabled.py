@@ -394,6 +394,105 @@ class RouteIntegrationTest(unittest.TestCase):
             asyncio.run(acct_router.account_set_disabled(
                 self.fname, {'disabled': 'yes'}, {'username': 'admin'}))
 
+    def test_fallback_message_says_where_to_enable(self) -> None:
+        """回退提示必须给出**可操作的下一步**，不能只说「未启用」。
+
+        实测反馈（issue #45 的追加评论）：用户看到
+        「该上游未启用管理接口，已改用改名方式…」之后不知道去哪儿开，
+        只能回来问。提示里要写明开关位置与生效条件。
+        """
+        out, _calls = self._run(True, _Resp(404, '404 page not found\n'))
+        self.assertEqual(out['bit_code'], 'no_route')
+        msg = out['message']
+        self.assertIn('设置', msg, '提示里没说要到哪里开启')
+        self.assertIn('重启', msg, '没说清改动需要重启才生效')
+        self.assertIn('改名', msg, '没说明用了哪种方式')
+        self.assertIn('签到', msg, '没说明代价（任务会停）')
+
+
+class AdminSectionEditableTest(unittest.TestCase):
+    """上游的 `admin.enabled` 必须能在面板里开（issue #45 的追加反馈）。
+
+    为什么必须做成开关：上游这组管理接口默认不注册，而它带来的正是 issue #45
+    想要的效果（停用只摘流量、签到与保活照常）。只能在 config.json 里手改的话，
+    绝大多数用户不会去开——于是「临时停用」永远走回退路径，issue #45 的诉求
+    实际上没被满足。用户反馈的原话就是「我更新了最新版本，点击临时停用，显示
+    （回退提示）」。
+
+    另有一条**安全约束**必须一起守：上游对 `admin.enabled=true` 且 `api_key`
+    为空是 **fail-fast 拒绝启动**（它要求管理端点必须鉴权）。放行这种组合会得到
+    「保存成功，然后上游起不来」这个最难查的形态。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.cfg = Path(self._tmp.name) / 'config.json'
+        self._orig_cfg = config.UPSTREAM_CONFIG
+        self._orig_key = config.WB2API_KEY
+        config.UPSTREAM_CONFIG = self.cfg
+
+    def tearDown(self) -> None:
+        config.UPSTREAM_CONFIG = self._orig_cfg
+        config.WB2API_KEY = self._orig_key
+        try:
+            self._tmp.cleanup()
+        except PermissionError:
+            pass
+
+    def _write(self, api_key: str, enabled: bool = False) -> None:
+        self.cfg.write_text(json.dumps({'api_key': api_key,
+                                        'admin': {'enabled': enabled}}),
+                            encoding='utf-8')
+
+    def _read_admin(self) -> dict:
+        return json.loads(self.cfg.read_text(encoding='utf-8'))['admin']
+
+    def test_admin_is_in_editable_sections(self) -> None:
+        self.assertIn('admin', wb2api._EDITABLE_SECTIONS,
+                      'admin 段不在白名单里 —— 界面无法开启管理接口')
+
+    def test_admin_section_is_delivered_to_frontend(self) -> None:
+        self._write('k123')
+        view = wb2api.load_upstream_config()
+        self.assertIn('admin', view, 'admin 段没下发给界面，开关显示不出来')
+        self.assertIn('enabled', view['admin'])
+
+    def test_enable_allowed_when_api_key_present(self) -> None:
+        self._write('k123')
+        wb2api.save_upstream_config({'admin': {'enabled': True}})
+        self.assertTrue(self._read_admin()['enabled'])
+
+    def test_enable_rejected_when_api_key_empty(self) -> None:
+        """api_key 为空时开启必须被拒——否则上游会拒绝启动。"""
+        self._write('')
+        config.WB2API_KEY = ''
+        with self.assertRaises(ValueError) as ctx:
+            wb2api.save_upstream_config({'admin': {'enabled': True}})
+        self.assertIn('api_key', str(ctx.exception))
+        # 配置没被改坏
+        self.assertFalse(self._read_admin()['enabled'])
+
+    def test_disable_still_allowed_without_api_key(self) -> None:
+        """关掉永远允许：否则用户会被卡在「开了但起不来」的状态里出不去。"""
+        self._write('', enabled=True)
+        config.WB2API_KEY = ''
+        wb2api.save_upstream_config({'admin': {'enabled': False}})
+        self.assertFalse(self._read_admin()['enabled'])
+
+    def test_frontend_has_the_toggle(self) -> None:
+        """设置页要有这个开关，并且写清两条路的差别。
+
+        文案必须讲清「开与不开分别会怎样」——用户在账号页点停用时看到的提示
+        会随这个开关变化，不说清楚会以为是 bug。
+        """
+        src = (ROOT / 'web/app/(main)/settings/page.tsx').read_text(encoding='utf-8')
+        self.assertIn('ADMIN_FIELDS', src)
+        self.assertIn("id: 'admin'", src)
+        seg = src[src.index('const ADMIN_FIELDS'):]
+        seg = seg[:seg.index('];')]
+        self.assertIn('签到', seg, '没说明开启后签到照常')
+        self.assertIn('重启', seg, '没说明需要重启上游才生效')
+
 
 if __name__ == '__main__':
     unittest.main()
