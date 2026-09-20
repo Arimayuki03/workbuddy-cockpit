@@ -25,6 +25,8 @@ data/
 # 换版前留的旧产物备份（*.exe.bak / *.exe.bak-日期 / *.exe.<tag>.bak）
 *.exe.bak*
 *.exe.*.bak*
+# go build 覆盖被运行进程锁定的 exe 时留下的挪位备份（Windows 实测）
+*.exe~
 
 # Windows 下误重定向 nul 设备产生的空文件（Git Bash 会落出实体文件）
 /nul
