@@ -1,7 +1,27 @@
-import json
-import unittest
+"""Responses `type=namespace` / `type=custom` 工具的桥接（PR #42）。
 
-from server.routers import responses as R
+Responses 侧有而 Chat Completions 侧没有的两种工具形态：
+
+  · `type=custom`（自由文本工具，Codex 的 `apply_patch` 就是）：Responses 用
+    `custom_tool_call` + 原始字符串 `input`，Chat 侧没有对应形态——桥接时临时
+    包成严格的 `{input: string}` 函数定义，回来时再还原成 `custom_tool_call`。
+    不这么做，客户端会报 `tool apply_patch invoked with incompatible payload`。
+  · `type=namespace`（带子工具的分组）：Chat 侧没有分组概念，子工具要递归展开
+    成平铺的 `function`，重名时改名，**回程要还原成客户端原名**。
+
+后者是这里最容易出错的地方：客户端下一轮按**自己声明的名字**回传工具结果，
+一旦回程没还原（发出去的是内部改名），客户端就匹配不上。
+"""
+from __future__ import annotations
+
+import json
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from server.routers import responses as R  # noqa: E402
 
 
 def ns_tools():
@@ -81,6 +101,106 @@ class NamespaceCompatTests(unittest.TestCase):
         self.assertEqual(payload['item']['type'], 'custom_tool_call')
         self.assertEqual(payload['item']['name'], 'apply_patch')
         self.assertEqual(payload['item']['input'], 'p')
+
+
+class BothPathsRestoreNamesTest(unittest.TestCase):
+    """**流式与非流式必须还原同一套名字**（审查发现的缺陷）。
+
+    桥接给了两个出口：`to_responses_object`（非流式）与 `_StreamTranslator`
+    （流式）。两者都要拿到 `bridge` 才能把展开后的 Chat 名还原成客户端原名
+    ——`read_file_2` 是**我们内部**为了避免重名造出来的，客户端不认识它；
+    客户端下一轮按自己声明的 `read_file` 回传结果，名字对不上就匹配不了。
+
+    原实现的非流式出口漏传了 `bridge`，于是同一个请求只因为 `stream` 标志不同，
+    客户端就拿到两套工具名。上面那条 `test_response_restores_original_child_names`
+    测不出来，因为它是**手动**把 bridge 传进去的——测的是函数本身，不是生产
+    调用点。所以这里直接锚住调用点。
+    """
+
+    def test_non_streaming_callsite_passes_bridge(self):
+        """调用点必须把 bridge 传给 to_responses_object。"""
+        src = (Path(__file__).resolve().parents[1]
+               / 'routers' / 'responses.py').read_text(encoding='utf-8')
+        self.assertIn(
+            'to_responses_object(data, model, resp_id, custom_tool_names, bridge)',
+            src,
+            '非流式出口漏传 bridge —— 改名后的工具名会原样发给客户端，'
+            '而流式路径会还原，两条路径不一致',
+        )
+
+    def test_both_paths_agree_on_restored_name(self):
+        """同一次上游响应，两条路径还原出的名字必须一致。"""
+        bridge = R._ToolBridge(ns_tools())
+        data = {'choices': [{'finish_reason': 'tool_calls', 'message': {
+            'tool_calls': [
+                {'id': '2', 'function': {'name': 'read_file_2',
+                                         'arguments': '{"path":"a"}'}},
+            ]}}]}
+        non_stream = R.to_responses_object(
+            data, 'm', 'r', bridge.custom_names, bridge)['output']
+        self.assertEqual(non_stream[0]['name'], 'read_file',
+                         '非流式没还原成客户端原名')
+
+        t = R._StreamTranslator('m', 'r', bridge.custom_names, bridge)
+        events = t.feed(data)
+        events += t.finish('tool_calls')
+        done = [e for e in events
+                if e.startswith(b'event: response.output_item.done')]
+        self.assertTrue(done)
+        payload = json.loads(done[-1].split(b'\ndata: ', 1)[1].split(b'\n\n', 1)[0])
+        self.assertEqual(payload['item']['name'], 'read_file',
+                         '流式没还原成客户端原名')
+        self.assertEqual(non_stream[0]['name'], payload['item']['name'],
+                         '两条路径给出的工具名不一致')
+
+
+class NamespacedCustomStreamTest(unittest.TestCase):
+    """命名空间下的 **custom 子工具**在流式回程也要还原成 custom 形态。
+
+    这是两处判据叠加的情形：它既是 custom（要走 `{input}` 包装），又在命名空间里
+    （名字要还原）。判据任一命中即可，但两条都留着——上游分片异常时可能只给出半个
+    名字，那时只认其中一条就会把 custom 当普通 function 返回（客户端报
+    incompatible payload 的那类表现）。
+    """
+
+    def test_namespaced_custom_child_stays_custom(self) -> None:
+        tools = [{'type': 'namespace', 'name': 'shell', 'tools': [
+            {'type': 'custom', 'name': 'apply_patch'}]}]
+        bridge = R._ToolBridge(tools)
+        self.assertIn('apply_patch', bridge.custom_names)
+
+        t = R._StreamTranslator('m', 'r', bridge.custom_names, bridge)
+        events = t.feed({'choices': [{'delta': {'tool_calls': [
+            {'index': 0, 'id': 'c1',
+             'function': {'name': 'apply_patch', 'arguments': '{"input":"PATCH"}'}}]},
+            'finish_reason': 'tool_calls'}]})
+        events += t.finish('tool_calls')
+        done = [e for e in events
+                if e.startswith(b'event: response.output_item.done')]
+        payload = json.loads(done[-1].split(b'\ndata: ', 1)[1].split(b'\n\n', 1)[0])
+        self.assertEqual(payload['item']['type'], 'custom_tool_call')
+        self.assertEqual(payload['item']['name'], 'apply_patch')
+        self.assertEqual(payload['item']['input'], 'PATCH')
+
+    def test_namespaced_plain_function_child_stays_function(self) -> None:
+        """对照组：命名空间里的**普通** function 子工具不能被当成 custom。"""
+        tools = [{'type': 'namespace', 'name': 'shell', 'tools': [
+            {'type': 'function', 'name': 'read_file',
+             'parameters': {'type': 'object', 'properties': {}}}]}]
+        bridge = R._ToolBridge(tools)
+        self.assertEqual(bridge.custom_names, set())
+
+        t = R._StreamTranslator('m', 'r', bridge.custom_names, bridge)
+        events = t.feed({'choices': [{'delta': {'tool_calls': [
+            {'index': 0, 'id': 'c2',
+             'function': {'name': 'read_file', 'arguments': '{"path":"a"}'}}]},
+            'finish_reason': 'tool_calls'}]})
+        events += t.finish('tool_calls')
+        done = [e for e in events
+                if e.startswith(b'event: response.output_item.done')]
+        payload = json.loads(done[-1].split(b'\ndata: ', 1)[1].split(b'\n\n', 1)[0])
+        self.assertEqual(payload['item']['type'], 'function_call')
+        self.assertEqual(payload['item']['arguments'], '{"path":"a"}')
 
 
 if __name__ == '__main__':

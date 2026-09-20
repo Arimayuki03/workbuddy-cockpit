@@ -1030,12 +1030,21 @@ class _StreamTranslator:
             if not state or state.get('closed'):
                 continue
             state['closed'] = True
-            custom = seq in custom_inputs
-            value = custom_inputs[seq] if custom else state['args']
+            # 「是不是 custom」看两处，任一命中即可：
+            #   · `custom_inputs` 有这一项 —— 上游回的名字本来就是我们包装过的
+            #     custom（取值也用它，那里已整体校验过）；
+            #   · `restore` 说是 custom —— 命名空间展开的 custom 子工具也走这条。
+            # 两者在正常形态下一致；都看是防御性的：上游若回了半个名字（分片
+            # 拼接异常），只认前者会把它当普通 function 返回，客户端认不出
+            # （Codex 报 incompatible payload 的那类表现）。
+            restored_name, restored_kind = self.bridge.restore(state['name'])
+            custom = seq in custom_inputs or restored_kind == 'custom'
+            # 取值按**有没有校验过的 input** 来：`custom_inputs` 里没有就用原始
+            # args —— 不能拿 `custom` 去索引，否则 custom 判据命中而该字典没有
+            # 这一项时会 KeyError。
+            value = custom_inputs[seq] if seq in custom_inputs else state['args']
             field = 'input' if custom else 'arguments'
             family = 'custom_tool_call_input' if custom else 'function_call_arguments'
-            restored_name, restored_kind = self.bridge.restore(state['name'])
-            custom = custom or restored_kind == 'custom'
             value = custom_inputs[seq] if custom else state['args']
             field = 'input' if custom else 'arguments'
             family = 'custom_tool_call_input' if custom else 'function_call_arguments'
@@ -1324,7 +1333,12 @@ async def _handle(request: Request) -> JSONResponse | StreamingResponse:
                 return _failed('上游返回了无法解析的响应：' + resp.text[:300],
                                502, 'api_error', 'upstream_invalid_body')
             return JSONResponse(
-                to_responses_object(data, model, resp_id, custom_tool_names)
+                # bridge 必须一起传：它负责把展开后的 Chat 名还原成客户端原名
+                # （命名空间子工具 / 重名改名）。漏传时非流式路径会把
+                # `read_file_2` 这类内部名原样发给客户端，而**同一个请求只要带上
+                # stream 就会还原**——同一个请求换个标志就得到两套工具名，
+                # 客户端按名字回传下一轮时会匹配不上。
+                to_responses_object(data, model, resp_id, custom_tool_names, bridge)
             )
         except CustomToolArgumentsError as exc:
             return _failed(

@@ -78,6 +78,23 @@ class Upstream(BaseHTTPRequestHandler):
         with _SEEN_LOCK:
             _SEEN.append(sent)
         want_stream = bool(sent.get('stream'))
+        # 请求里带了 apply_patch（自定义工具）时回一个工具调用：用于验证
+        # custom 工具的往返（出站包装 / 回程还原）真的经过真实 HTTP。
+        wants_custom = any(
+            (t.get('function') or {}).get('name') == 'apply_patch'
+            for t in (sent.get('tools') or []) if isinstance(t, dict)
+        )
+        if wants_custom and not want_stream:
+            self._json({
+                'choices': [{'index': 0, 'finish_reason': 'tool_calls', 'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{'id': 'call_patch', 'type': 'function',
+                                    'function': {'name': 'apply_patch',
+                                                 'arguments': json.dumps({'input': 'PATCH-BODY'})}}],
+                }}],
+                'usage': {'prompt_tokens': 11, 'completion_tokens': 3},
+            })
+            return
 
         if not want_stream:
             self._json({
@@ -259,6 +276,30 @@ def main() -> int:
             seen = list(_SEEN)
         assert seen and seen[-1].get('reasoning_effort') == 'high',             f'Anthropic 侧的 effort 没被翻译送出：{seen[-1] if seen else None}'
         print('[Anthropic 档位] ✓ output_config.effort=high 翻译后到达上游')
+
+        # ── 2d. 自定义工具（apply_patch 那类）的往返，走真实 HTTP ──
+        # 出站必须包成 {input: string}，回程必须还原成 custom_tool_call + 原始字符串。
+        # 单元测试覆盖了转换函数，这里确认它在真 socket 上成立。
+        with _SEEN_LOCK:
+            _SEEN.clear()
+        r = client.post('/v1/responses', headers=auth, json={
+            'model': 'glm-5.2',
+            'tools': [{'type': 'custom', 'name': 'apply_patch'}],
+            'input': [{'role': 'user', 'content': 'patch it'}],
+        })
+        assert r.status_code == 200, r.text[:300]
+        items = r.json().get('output') or []
+        custom_items = [i for i in items if i.get('type') == 'custom_tool_call']
+        assert custom_items, f'自定义工具回程没还原成 custom_tool_call：{items}'
+        assert custom_items[0]['input'] == 'PATCH-BODY', custom_items[0]
+        assert custom_items[0]['name'] == 'apply_patch', custom_items[0]
+        with _SEEN_LOCK:
+            seen_tools = list(_SEEN)
+        assert seen_tools, '假上游没收到请求'
+        sent_tools = seen_tools[-1].get('tools') or []
+        params = ((sent_tools[0].get('function') or {}).get('parameters') or {}) if sent_tools else {}
+        assert params.get('required') == ['input'],             f'出站没把自定义工具包成 {{input: string}}：{sent_tools[:1]}'
+        print('[自定义工具] ✓ 出站包成 {input: string}，回程还原为 custom_tool_call')
 
         # ── 3. 版本隔离在 Responses 路径同样生效，且真实原因不被折叠 ──
         r = client.post('/api/keys', json={'name': 'e2e-cn', 'realm': 'cn'}, cookies=cookies)
