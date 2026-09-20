@@ -9,7 +9,8 @@
 //     SetManualDisabled/Remove...），添加账号走 auth.SaveAtomic + pool.Add，
 //     重启后与 auths/ 目录天然对齐；
 //   - 路由双前缀：原生 /panel/api/* 保留（内部复用），另注册 /api/* 别名
-//     （manager 壳契约，避开 /api/request_logs 与 /api/system/check-update）。
+//     （manager 壳契约，前端 lib/api.ts 全部走 /api/*，避开 /api/request_logs
+//     与 /api/system/check-update；OAuth 扫码族契约路径为 /api/auth/*）。
 package panel
 
 import (
@@ -55,6 +56,10 @@ type Config struct {
 
 	// StickyCount 返回粘性会话绑定数；nil 时报告 0。
 	StickyCount func() int
+
+	// UpstashSavedToken 返回 config.json 里已保存的 upstash token（面板"测试
+	// Upstash 连通性"在 token 输入框留空时回落用）；nil 或返回空 = 无已保存值。
+	UpstashSavedToken func() string
 
 	// Usage 逐请求用量记录器（nil = 用量接口返回 501）。
 	Usage *usage.Recorder
@@ -155,8 +160,8 @@ func New(cfg Config) *Panel {
 func (p *Panel) Logs() *Ring { return p.logs }
 
 // api 路由注册 helper：panel 原生 /panel/api/* 与 manager 壳契约的 /api/* 双前缀
-// 挂同一批 handler。aliasPath 为空串表示该路径不做 /api/* 别名（OAuth 轮询族
-// 仅 /panel 前缀使用；且避免与已有路由冲突）。冲突路径（/api/request_logs、
+// 挂同一批 handler。aliasPath 为空串表示该路径不做 /api/* 别名（当前路由表
+// 全部注册别名，该形态仅为扩展保留）。冲突路径（/api/request_logs、
 // /api/system/check-update 已被 server.Handler 注册，ServeMux 重复注册会 panic）
 // 天然避开——本表不出现这两个路径。
 func (p *Panel) api(method, panelPath, aliasPath string, h http.HandlerFunc) {
@@ -176,42 +181,46 @@ func (p *Panel) routes() {
 	// manager 设置页：模型映射读写（server.ModelMapView/SetModelMap + 写回 config.json）。
 	p.api("GET", "/api/settings/model-map", "/api/settings/model-map", p.handleGetModelMap)
 	p.api("POST", "/api/settings/model-map", "/api/settings/model-map", p.handleSetModelMap)
+	// manager 设置页：Upstash 连通性测试（settings.testUpstash；保存走 /api/config）。
+	p.api("POST", "/api/settings/upstash/test", "/api/settings/upstash/test", p.testUpstash)
 
-	// 原生 /panel/api/* 全保留 + /api/* 别名（避开 /api/request_logs、
-	// /api/system/check-update——两者已由 server.Handler 注册）。
+	// 全表 /api/* 别名（manager 壳契约，避开 server.Handler 已注册的
+	// /api/request_logs、/api/system/check-update——ServeMux 重复注册 panic）。
+	// OAuth 扫码加号族另挂 /api/auth/*：web/lib/api.ts 契约路径
+	// （/panel/api/login/* 原生与 /api/login/* 同步保留，内部脚本兼容）。
 	p.api("GET", "/api/overview", "/api/overview", p.overview)
 	p.api("GET", "/api/logs", "/api/logs", p.logsHandler)
 	p.api("GET", "/api/models", "/api/models", p.models)
-	p.api("POST", "/api/login/start", "", p.loginStart)
-	p.api("GET", "/api/login/poll", "", p.loginPoll)
-	p.api("GET", "/api/login/regions", "", p.loginRegions)
-	p.api("POST", "/api/accounts/{uid}/revive", "", p.accountRevive)
-	p.api("POST", "/api/accounts/{uid}/disable", "", p.accountDisable)
-	p.api("POST", "/api/accounts/{uid}/enable", "", p.accountEnable)
-	p.api("POST", "/api/accounts/{uid}/checkin", "", p.accountCheckin)
-	p.api("POST", "/api/accounts/{uid}/balance", "", p.accountBalance)
-	p.api("POST", "/api/accounts/{uid}/remove", "", p.accountRemove)
-	p.api("GET", "/api/accounts/{uid}/tasks", "", p.accountTasks)
-	p.api("POST", "/api/accounts/{uid}/tasks/accept", "", p.accountTaskAccept)
-	p.api("POST", "/api/accounts/{uid}/tasks/accept_all", "", p.taskAcceptAll)
-	p.api("POST", "/api/accounts/{uid}/tasks/claim", "", p.accountTaskClaim)
-	p.api("POST", "/api/accounts/{uid}/tasks/auto", "", p.accountTaskAuto)
-	p.api("POST", "/api/accounts/{uid}/tasks/auto_all", "", p.accountTaskAutoAll)
-	p.api("POST", "/api/tasks/scan_all", "", p.tasksScanAll)
-	p.api("POST", "/api/tasks/run_queue", "", p.tasksRunQueue)
-	p.api("GET", "/api/tasks/queue", "", p.tasksQueueStatus)
-	p.api("GET", "/api/school/status", "", p.schoolStatus)
-	p.api("POST", "/api/school/run_all", "", p.schoolRunAll)
-	p.api("GET", "/api/school/vouchers", "", p.schoolVouchers)
-	p.api("POST", "/api/checkin_all", "", p.checkinAll)
-	p.api("POST", "/api/travel_all", "", p.travelAll)
-	p.api("POST", "/api/activity_all", "", p.activityAll)
-	p.api("POST", "/api/keepalive_all", "", p.keepaliveAll)
-	p.api("POST", "/api/balance_all", "", p.balanceAll)
-	p.api("GET", "/api/packages", "", p.packages)
-	p.api("GET", "/api/usage", "", p.usage)
-	p.api("POST", "/api/usage/save", "", p.usageSave)
-	p.api("GET", "/api/model_probes", "", p.modelProbes)
+	p.api("POST", "/api/login/start", "/api/auth/start", p.loginStart)
+	p.api("GET", "/api/login/poll", "/api/auth/poll", p.loginPoll)
+	p.api("GET", "/api/login/regions", "/api/auth/regions", p.loginRegions)
+	p.api("POST", "/api/accounts/{uid}/revive", "/api/accounts/{uid}/revive", p.accountRevive)
+	p.api("POST", "/api/accounts/{uid}/disable", "/api/accounts/{uid}/disable", p.accountDisable)
+	p.api("POST", "/api/accounts/{uid}/enable", "/api/accounts/{uid}/enable", p.accountEnable)
+	p.api("POST", "/api/accounts/{uid}/checkin", "/api/accounts/{uid}/checkin", p.accountCheckin)
+	p.api("POST", "/api/accounts/{uid}/balance", "/api/accounts/{uid}/balance", p.accountBalance)
+	p.api("POST", "/api/accounts/{uid}/remove", "/api/accounts/{uid}/remove", p.accountRemove)
+	p.api("GET", "/api/accounts/{uid}/tasks", "/api/accounts/{uid}/tasks", p.accountTasks)
+	p.api("POST", "/api/accounts/{uid}/tasks/accept", "/api/accounts/{uid}/tasks/accept", p.accountTaskAccept)
+	p.api("POST", "/api/accounts/{uid}/tasks/accept_all", "/api/accounts/{uid}/tasks/accept_all", p.taskAcceptAll)
+	p.api("POST", "/api/accounts/{uid}/tasks/claim", "/api/accounts/{uid}/tasks/claim", p.accountTaskClaim)
+	p.api("POST", "/api/accounts/{uid}/tasks/auto", "/api/accounts/{uid}/tasks/auto", p.accountTaskAuto)
+	p.api("POST", "/api/accounts/{uid}/tasks/auto_all", "/api/accounts/{uid}/tasks/auto_all", p.accountTaskAutoAll)
+	p.api("POST", "/api/tasks/scan_all", "/api/tasks/scan_all", p.tasksScanAll)
+	p.api("POST", "/api/tasks/run_queue", "/api/tasks/run_queue", p.tasksRunQueue)
+	p.api("GET", "/api/tasks/queue", "/api/tasks/queue", p.tasksQueueStatus)
+	p.api("GET", "/api/school/status", "/api/school/status", p.schoolStatus)
+	p.api("POST", "/api/school/run_all", "/api/school/run_all", p.schoolRunAll)
+	p.api("GET", "/api/school/vouchers", "/api/school/vouchers", p.schoolVouchers)
+	p.api("POST", "/api/checkin_all", "/api/checkin_all", p.checkinAll)
+	p.api("POST", "/api/travel_all", "/api/travel_all", p.travelAll)
+	p.api("POST", "/api/activity_all", "/api/activity_all", p.activityAll)
+	p.api("POST", "/api/keepalive_all", "/api/keepalive_all", p.keepaliveAll)
+	p.api("POST", "/api/balance_all", "/api/balance_all", p.balanceAll)
+	p.api("GET", "/api/packages", "/api/packages", p.packages)
+	p.api("GET", "/api/usage", "/api/usage", p.usage)
+	p.api("POST", "/api/usage/save", "/api/usage/save", p.usageSave)
+	p.api("GET", "/api/model_probes", "/api/model_probes", p.modelProbes)
 	p.api("GET", "/api/config", "/api/config", p.getConfig)
 	p.api("POST", "/api/config", "/api/config", p.saveConfig)
 }

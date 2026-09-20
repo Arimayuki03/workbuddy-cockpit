@@ -303,6 +303,14 @@ func main() {
 			SaveConfig: func(raw []byte) ([]string, error) {
 				return saveConfig(raw, *cfgPath, live, p, up, sch)
 			},
+			UpstashSavedToken: func() string {
+				// 面板"测试 Upstash 连通性"token 留空时回落 config.json 已存值
+				// （LoadConfig 读盘而非启动快照：面板刚保存未重启也拿得到新值）。
+				if c, err := Load(*cfgPath); err == nil {
+					return c.Upstash.Token
+				}
+				return ""
+			},
 		})
 		log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 		// chat 表格日志不走 log 包（stdout 直写），单独镜像进面板 ring 的 chat 频道。

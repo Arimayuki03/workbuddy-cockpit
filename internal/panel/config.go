@@ -6,9 +6,13 @@
 package panel
 
 import (
+	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
+
+	"workbuddy2api/internal/redisstore"
 )
 
 // getConfig 返回当前配置文件内容与路径（前端按 schema 渲染表单）。
@@ -54,4 +58,32 @@ func (p *Panel) saveConfig(w http.ResponseWriter, r *http.Request) {
 		"ok":               true,
 		"restart_required": restartRequired,
 	})
+}
+
+// testUpstash 测试 Upstash 连通性（manager 设置页"测试连接"按钮）。
+// body {"url": "...", "token": "..."}——token 留空表示沿用已保存的值
+// （UpstashSavedToken 闭包，未注入或空则无回落）。url 必填。
+// 响应 {"ok": bool, "message": string}，ok=false 时 message 含脱敏后的失败原因。
+func (p *Panel) testUpstash(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		URL   string `json:"url"`
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, loginBodyLimit)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	token := body.Token
+	if token == "" && p.cfg.UpstashSavedToken != nil {
+		token = p.cfg.UpstashSavedToken()
+	}
+	if err := redisstore.Probe(body.URL, token); err != nil {
+		if errors.Is(err, redisstore.ErrEmptyURL) {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "message": "url 未填写"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "连接成功"})
 }
