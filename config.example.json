@@ -39,9 +39,6 @@
     "school_enabled": true,
     "cat_enabled": true
   },
-  "admin": {
-    "enabled": false
-  },
   "global": {
     "enabled": true,
     "chat_base": "",

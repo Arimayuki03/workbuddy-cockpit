@@ -39,6 +39,8 @@ workbuddy2api-dist.zip
 
 # Config with secrets (use config.example.json)
 config.json
+# admin 热改写回（PATCH /admin/tasks 等）写盘前自动生成的备份（含真实配置，不得入库）
+config.json.bak*
 
 # Build artifacts
 *.tmp

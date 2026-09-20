@@ -60,7 +60,9 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 
 - **分级熔断与冷却** — 429 软冷却（600s 起指数退避、封顶 `soft_rate_max`）、404 固定浅冷却、402 / 余额耗尽硬冷却至次日 04:00、连续失败熔断（`breaker_threshold` 触发后指数退避封顶 6h）
 - **模型级限流独立冷却** — 6004（该模型使用量超限）只冷却触发调用的模型，切其他模型立即可用；`/status` 透出 `rate_limited_models` 台账
+- **请求统计**（2026-09 上游新增） — `GET /v1/stats` 按模型聚合请求量 / token / 缓存命中 / 延迟 / 扣费 / 上游积分倍率（倍率与 `/v1/models` 同源目录，未下发则整体省略——缺失≠免费），`POST /v1/stats/reset` 清零；配套终端查看工具 `cmd/stats`（`go run ./cmd/stats [-json] [-watch 5s] [-sort credits]`，表格含倍率列、按扣费排序）
 - **账号临时停用 / 恢复** — 运维可把某个号临时摘出选号池、观察后再放回，不必删凭证（issue #138/#118）。语义是「对话流量摘除」而非「账号冻结」：停用期间签到、token 保活、排程任务照常执行，账号仍在池里、状态照常透出。与系统自动禁用是**两个独立状态位**（`manual_disabled` / `disabled`），各自清除、都清空才回到选号池——避免运维意图被签到解冻等自动复活路径意外解除；停用状态随池状态落盘，重启保留。入口：`/admin/accounts/{uid}/{disable,enable,revive}` 端点 + `cmd/acct` CLI（默认关闭，`admin.enabled` 显式开启）
+- **auths 目录热加载**（2026-09 上游新增） — 配置了 `auth_dir` 时后台 5s 轮询凭证目录，新增 / 移除账号文件自动对齐进池 / 出池，免手动重启
 - **状态持久化** — 池状态（积分 / 冷却 / 熔断 / 计数）本地原子落盘 `state.json`，可选镜像至 Upstash Redis，重启后择优恢复
 
 ### 请求链路
@@ -105,6 +107,8 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 - 积分日报：`./credit.sh`（美化 / `-json`，realm 感知双域）
 - 手动签到：`./signin.sh`（批量、幂等不重复计）
 - 账号停用 / 恢复：`./acct.sh list | disable <uid> [原因] | enable <uid> | revive <uid>`（需 `admin.enabled`，走网关管理端点）
+- 请求统计终端视图：`go run ./cmd/stats [-json] [-watch 5s] [-sort credits]`（数据源 `GET /v1/stats`）
+- 源码模式启停：`./dev.sh`（上游 helper，一键后台起停）
 - 领养联动 / 任务查询：`scripts/task_runner.py`（成长任务一体机，默认 dry-run）
 - 个性化提示词：`prompt.file` 指向自定义提示词文件即整体替换内置默认（`custom`/`append` 模式生效）
 
@@ -222,7 +226,7 @@ go build -trimpath -ldflags="-s -w" -o signin_bin.exe ./cmd/signin
 go build -trimpath -ldflags="-s -w" -o credit.exe ./cmd/credit
 ```
 
-使用仓库自带脚本在后台启停并查看状态：
+使用仓库自带脚本（2026-09 上游新增 `start/status/stop-workbuddy2api.cmd`）在后台启停并查看状态：
 
 ```powershell
 .\start-workbuddy2api.cmd
@@ -290,6 +294,8 @@ curl -s http://localhost:7863/v1/chat/completions \
 - **正确性** — `signin` 提前刷新窗口从 7.2µs 修正为 2 小时；池状态落盘失败回挂 dirty 恢复重试信号；非流式聚合不再吞上游流内错误帧（原先返回 200 + 空 content + 伪造 `finish_reason:"stop"`）；DST 时区"昨日"日期修正（先归一 CST 再减日）；`Retry-After` 数值溢出回绕守卫；`logfmt.Truncate` 负长度防御；连败降权的模型豁免补上 degrade 轴判定（消除 `/healthz` 200 但全模型 503 的口径分裂）
 - **可用性与安全** — 客户端断连不再计入账号连败（消除粘性会话下远程逐号降权的攻击链）；`12153` 会话失效判定收紧为结构化 code 匹配（消除 requestId / 时间戳撞串误禁号）；客户端可控 `conversationId` 加长度 + 字符集白名单（非法值回退服务端生成）；Redis 连接失败日志对 URL 脱敏（不再泄漏含 token 的完整连接串）
 - **部署与仓库卫生** — Docker config 改目录挂载（修复 admin 热改写回必败的部署矛盾）；`.dockerignore` 补齐 `*.exe` / `logs/` / `config.json.bak*` / `.claude/`；`.gitignore` 补 `.claude/`；`cmd/task` / `cmd/activity` 补池关闭兜底、`cmd/task` 接线快过期积分窗口
+
+> 上述多数修复已在 2026-09-20 合并的上游版本（`4561993`）中以独立提交形式落地（如 `855e5b9` RefreshToken 竞态、`94bc325` 空 content latch、`329cba4` Truncate 守卫、`a20d06f` admin fail-fast）；本地与上游重复实现的守卫在合并时择一保留，语义等价处优先取上游形态。
 
 ## 免责声明
 
