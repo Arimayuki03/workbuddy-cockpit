@@ -184,15 +184,17 @@ var badParamsRule = errorRule{kind: ErrBadParams, mode: matchExact, patterns: []
 	`"code":11101`,
 }}
 
-// invalidImageRule 图片请求格式/数据无效（HTTP 400）。这类错误由请求内容决定，
-// 不是账号问题：换账号不会改变同一 body 的解析结果。上游常见形态包括
-// `Parse message failed: invalid image_url content`、invalid_image_data、code 11135。
+// invalidImageRule 图片请求格式/数据无效（HTTP 400）的**文案**形态。这类错误由
+// 请求内容决定，不是账号问题：换账号不会改变同一 body 的解析结果。上游常见形态包括
+// `Parse message failed: invalid image_url content`、invalid_image_data、
+// `replace the image`。
+//
+// 业务码 11135 不放在这里：code 判定必须容忍 JSON 空白（`"code": 11135`），
+// 字面量 marker 只能覆盖紧凑形态，故统一走 codeMarker（见 Classify 的 400 分支）。
 var invalidImageRule = errorRule{kind: ErrImageInvalid, mode: matchFold, patterns: []string{
 	"invalid image_url content",
 	"invalid_image_data",
 	"replace the image",
-	`"code":11135`,
-	`"code":"11135"`,
 }}
 
 // alreadyCheckinRule "今天已签到"关键词（上游对重复签到返回 code!=0，
@@ -556,7 +558,10 @@ func Classify(status int, body string) ErrKind {
 	}
 	// 图片格式/数据错误是确定性的请求级错误：同 body 换账号结果不变，直接
 	// fail-fast，避免把健康账号轮转一遍后仍把最终 503 返回给客户端。
-	if status == http.StatusBadRequest && invalidImageRule.hit(body, lower) {
+	// 业务码 11135 经 codeMarker 而非字面量 marker：上游 JSON 含空白
+	// （`"code": 11135`）时字面量 marker 会漏判，导致退化成 ErrClient 并继续轮转。
+	// 口径与 hint.go 的 isInvalidImageData（同样用 codeMarker）一致。
+	if status == http.StatusBadRequest && (invalidImageRule.hit(body, lower) || codeMarker(lower, "11135")) {
 		return ErrImageInvalid
 	}
 	// 内容策略拦截（HTTP 400 + 审核文案）：判在通用 ErrClient 之前。

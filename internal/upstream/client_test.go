@@ -56,6 +56,14 @@ func TestClassify(t *testing.T) {
 		{400, `{"code":11101,"msg":"Parse message failed: invalid image_url content at index 2: json: cannot unmarshal string into Go value of type v2.ImageContent"}`, ErrImageInvalid},
 		{400, `{"code":11135,"msg":"invalid_image_data"}`, ErrImageInvalid},
 		{400, `invalid_image_data`, ErrImageInvalid},
+		// code 11135 的 JSON 空白容差（Copilot review #184 finding）：字面量 marker
+		// 只能命中紧凑形态，带空格的合法 body 会退化成 ErrClient 并继续轮转。
+		// 与 hint.go 的 isInvalidImageData / codeMarker 同口径。
+		{400, `{"code": 11135, "msg": "image rejected"}`, ErrImageInvalid},
+		{400, `{"code": "11135", "msg": "image rejected"}`, ErrImageInvalid},
+		{400, `{"error": {"code": 11135, "message": "image rejected"}}`, ErrImageInvalid},
+		// 其他 code 不得被 11135 口径误伤（防过宽）。
+		{400, `{"code": 11133, "msg": "other business error"}`, ErrClient},
 		{200, `quota exceeded`, ErrHardCredit},
 		// 账号级授权/配额故障（与 429 一起纳入轮换）：11140 request illegal = auth_forbidden
 		// 风控（需重登），14017 = quota_not_activated（试用未激活，需完成 register）。修复前
