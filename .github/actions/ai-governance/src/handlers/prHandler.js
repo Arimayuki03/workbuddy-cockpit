@@ -2,6 +2,7 @@ const core = require('@actions/core');
 const { logMessage, handleApiCall } = require('../utils/helpers');
 const PrWorkflowService = require('../services/prWorkflowService');
 const PrGovernanceService = require('../services/prGovernanceService');
+const PrReviewService = require('../services/prReviewService');
 const { isContentFilterError } = require('../services/ai');
 const { closePR, addComment } = require('../services/github');
 const { GOVERNANCE_DEFAULTS } = require('../utils/constants');
@@ -10,11 +11,14 @@ const { GOVERNANCE_DEFAULTS } = require('../utils/constants');
  * 处理新创建的PR。
  *
  * 链路（详见 DESIGN.md「§PR 治理」）：
- *   黑名单 → 垃圾检测（SPAM/恶意/trivial → 关闭，这是唯一会关 PR 的路径）
- *   → 有效 PR 分类打标 → 维护者/跳过名单豁免 → 治理（要点提炼 + canonical 关联，永不关闭合法 PR）。
+ *   黑名单 → 垃圾检测（SPAM/恶意/trivial → 关闭）
+ *   → 有效 PR 分类打标 → 维护者/跳过名单豁免
+ *   → 历史语境评审（pr-review-close 开启时：AI 对照相关历史 issue 的结论评审本 PR，
+ *      证据确凿 → 评审评论 + 关闭；证据不足 → 回落旧链路）
+ *   → 治理（要点提炼 + canonical 关联）。
  *
  * 与 issue 治理的安全阀完全同构：维护者 PR 跳过治理（垃圾检测保留）、dry-run 只评论、
- * AI 失败放行不动作。PR 治理永远不关闭 PR。
+ * AI 失败放行不动作。历史语境评审是唯一新增的合法 PR 关闭路径，且默认关闭（pr_review_close=false）。
  *
  * @param {Object} octokit GitHub API客户端
  * @param {Object} openai OpenAI客户端
@@ -80,6 +84,16 @@ async function handleNewPR(octokit, openai, context, owner, repo, aiModel, confi
       const isMaintainer = await isCollaborator(octokit, owner, repo, prAuthor);
       if (isMaintainer) {
         core.info(logMessage(config.logging.governance_pr_skip_maintainer, { number: pr.number }));
+        return;
+      }
+    }
+
+    // 历史语境评审层（可选，pr-review-close 开启时）：AI 对照相关历史 issue 的关闭结论评审本 PR。
+    // 返回 null（未触发/证据不足/回落）时继续走下方旧关联链路；已处理（含 dry-run）则直接结束。
+    if (gov.prReviewClose) {
+      const reviewService = new PrReviewService(openai, aiModel, config, gov);
+      const reviewResult = await reviewService.review(octokit, owner, repo, pr, fileChanges);
+      if (reviewResult) {
         return;
       }
     }
