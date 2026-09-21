@@ -213,10 +213,17 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 	if e.modelCost == nil {
 		e.modelCost = make(map[string]modelCostEntry)
 	}
+	now := time.Now()
 	const alpha = 0.3
 	prev, seen := e.modelCost[model]
+	// 过期观测不参与 EMA：LastSeen 超 modelCostTTL 的 prev 与「无观测」同义
+	// （读侧 modelCostOf 过期即 ok=false），混入会把时段性优惠/过时价格揉进本次
+	// 单价，与读侧「过期即无观测」口径不一致。过期 → 直接以本次观测重置。
+	if seen && (prev.LastSeen.IsZero() || now.Sub(prev.LastSeen) > modelCostTTL) {
+		seen = false
+	}
 	if !seen {
-		e.modelCost[model] = modelCostEntry{CostPer1k: per1k, LastSeen: time.Now(), Samples: 1}
+		e.modelCost[model] = modelCostEntry{CostPer1k: per1k, LastSeen: now, Samples: 1}
 	} else {
 		// 限免结束事件（判定在写入口，只看覆盖前值）：此前 tier 0（实测免费，
 		// per1k≤0）且本次实测收费（per1k>0）——账号在该模型上的免费窗口结束，
@@ -227,7 +234,7 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 		}
 		e.modelCost[model] = modelCostEntry{
 			CostPer1k: prev.CostPer1k*(1-alpha) + per1k*alpha,
-			LastSeen:  time.Now(),
+			LastSeen:  now,
 			Samples:   prev.Samples + 1,
 		}
 	}
@@ -478,26 +485,26 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		// 成本台账（P1-anti-monopoly）：每模型一行（modelCost 内 TTL 未过期的
 		// 条目），运维据此自查「为什么总选它」；只读遍历零风险，过期即消失。
 		ModelCosts: p.modelCostsStatusLocked(e, now),
-		Realm:             e.a.Realm(),
-		Nickname:          e.a.Nickname,
-		Credits:           e.credits,
+		Realm:      e.a.Realm(),
+		Nickname:   e.a.Nickname,
+		Credits:    e.credits,
 		// Cooling 口径含连败降权（degradeUntil）：降权期账号不可选，运维在 /status
 		// 应看到它处于非健康态（CoolRemaining 取三截止最远者，与 healthy 或门同口径）。
-		Cooling: now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil),
-		Reason:            reason,
-		Disabled:          e.disabled,
-		ManualDisabled:    e.manualDisabled,
-		SuccessCount:      e.successCount,
-		ErrTotal:          e.errTotal,
-		LastSuccessTime:   e.lastSuccess,
-		LastErrTime:       e.lastErr,
-		ConsecutiveFails:  e.consecutiveFails,
-		DegradeUntil:      e.degradeUntil,
-		Until:             e.until,
-		SoftStreak:        e.softStreak,
-		InFlight:          int(e.inFlight.Load()),
-		BreakerFails:      e.fails,
-		BreakerUntil:      e.breakerUntil,
+		Cooling:          now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil),
+		Reason:           reason,
+		Disabled:         e.disabled,
+		ManualDisabled:   e.manualDisabled,
+		SuccessCount:     e.successCount,
+		ErrTotal:         e.errTotal,
+		LastSuccessTime:  e.lastSuccess,
+		LastErrTime:      e.lastErr,
+		ConsecutiveFails: e.consecutiveFails,
+		DegradeUntil:     e.degradeUntil,
+		Until:            e.until,
+		SoftStreak:       e.softStreak,
+		InFlight:         int(e.inFlight.Load()),
+		BreakerFails:     e.fails,
+		BreakerUntil:     e.breakerUntil,
 		// 每模型在途台账（观测）：运维据此看到"这个号正在跑什么模型"。空台账
 		// 时为 nil（omitempty 省略），对 /status 既有消费者零回归。
 		InFlightByModel: e.inFlightByModelSnapshot(),
@@ -527,7 +534,16 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		if st.CoolRemaining < 0 {
 			st.CoolRemaining = 0
 		}
-		st.CoolKind = e.coolKind.String()
+		// coolKind 只在 until 冷却**仍生效**时透出：until 已过期/零值时继续输出
+		// e.coolKind 是陈旧值（旧缺陷：冷却已到期却显示 soft_rate/hard_credit，
+		// 误导排查看向已解除的冷却域）。此时若熔断是当前生效的截止，透出熔断专属
+		// kind "breaker"（与 pickEarliestExpiryLocked 的 fallbackKind 口径一致）；
+		// 两者都不生效（纯降权）则留空，由下方 degrade 分支补 "degrade"。
+		if !e.until.IsZero() && now.Before(e.until) {
+			st.CoolKind = e.coolKind.String()
+		} else if !e.breakerUntil.IsZero() && now.Before(e.breakerUntil) {
+			st.CoolKind = "breaker"
+		}
 		// 纯降权形态（无生效的 until/熔断）时 reason 取连败文案：降权由 NoteFailures
 		// 触发，不写 until/reason（coolKind 也不是它写的），运维在 /status 需要看到
 		// "为什么非健康"。有生效冷却时以冷却 reason 为准（冷却通常语义更具体）。

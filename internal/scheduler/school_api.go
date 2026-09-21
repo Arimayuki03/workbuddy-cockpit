@@ -207,7 +207,7 @@ func (s *Scheduler) schoolDesktopTask(a *auth.Auth) {
 		return
 	}
 	t := findSchoolTask(tasks, "desktop_chat_1_time")
-	if t == nil || t.Status == "claimed" || t.Progress >= t.TargetCount {
+	if t == nil || t.Status == "claimed" || (t.TargetCount > 0 && t.Progress >= t.TargetCount) {
 		return
 	}
 	if t.Status == "pending" {
@@ -226,14 +226,15 @@ func (s *Scheduler) schoolDesktopTask(a *auth.Auth) {
 		log.Printf("school %s: desktop events: %v", logfmt.Label(a.UID, a.Nickname), err)
 		return
 	}
-	// 异步计分轮询后领奖（失败不阻塞 share 主流程）。
+	// 异步计分轮询后领奖（失败不阻塞 share 主流程）。TargetCount>0 守卫同上：
+	// 上游省略 target_count 字段时 0>=0 恒真会误判「已完成」并提前退出。
 	for i := 0; i < schoolPollLoops; i++ {
 		time.Sleep(schoolPollGap)
 		tasks2, _, err := s.cfg.Upstream.SchoolTasks(a)
 		if err != nil {
 			continue
 		}
-		if t2 := findSchoolTask(tasks2, "desktop_chat_1_time"); t2 != nil && t2.Progress >= t2.TargetCount {
+		if t2 := findSchoolTask(tasks2, "desktop_chat_1_time"); t2 != nil && t2.TargetCount > 0 && t2.Progress >= t2.TargetCount {
 			if granted, err := s.cfg.Upstream.SchoolClaimTask(a, "desktop_chat_1_time"); err == nil {
 				log.Printf("school %s: ★ 桌面端体验任务完成 +100c +%d 抽奖", logfmt.Label(a.UID, a.Nickname), granted)
 			}

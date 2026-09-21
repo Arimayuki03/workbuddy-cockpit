@@ -185,9 +185,12 @@ func (p *Pool) BlockModelClear(uid, model string) {
 //
 // 语义：
 //   - resetAt 非零（上游带权威重置时间，无论 6004 还是 11140 rate-limiting）→
-//     账号级直到该墙钟（截断到 softRateMax，绝不指数堆加）；**不**在
-//     modelCooldowns 记模型（账号级语义，不产生切模型豁免，保持与旧
-//     CooldownSoftForModel 无解析分支一致——普通账号级限流不该因切模型绕过）。
+//     账号级直到该墙钟（截断到 softRateMax，绝不指数堆加）；与既有**未过期**冷却
+//     取更长者（max）：软冷却不得把更长的 CoolHard（余额耗尽，等次日 04:00 签到）
+//     截短——旧实现 resetAt 分支无条件覆盖 until，429 文案撞上 hard 冷却中的号会把
+//     十几个小时的硬冷却削到几分钟。**不**在 modelCooldowns 记模型（账号级语义，
+//     不产生切模型豁免，保持与旧 CooldownSoftForModel 无解析分支一致——普通账号级
+//     限流不该因切模型绕过）。
 //   - resetAt 零值且**不在冷却中**（首次/恢复后的新限流）→ 有界退避：按 softStreak
 //     指数退避并封顶 softRateMax（默认 2h，并经 softDurationLocked 统一封顶）。
 //     softStreak 只在真正进入一次新冷却时计数，由 NoteSuccess/reviveCoolingLocked
@@ -201,7 +204,14 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 	if e, ok := p.byUID[uid]; ok {
 		now := time.Now()
 		if !resetAt.IsZero() {
-			e.until = p.cappedSoftUntilLocked(now, resetAt)
+			// 新软冷却截止 = min(resetAt, now+softRateMax)；与既有未过期冷却取更长者，
+			// 不截短 CoolHard（及任何更长的未过期 until）。已过期的 until 不参与 max
+			//（否则零值/过期截止会反过来把新软冷却压成 0）。
+			soft := p.cappedSoftUntilLocked(now, resetAt)
+			if e.until.After(soft) && now.Before(e.until) {
+				soft = e.until
+			}
+			e.until = soft
 		} else if e.coolKind != CoolSoft || !now.Before(e.until) {
 			// 新限流（不在有效软冷却中）：推进有界退避；兜底探测（仍在软冷却中）不翻倍。
 			d := p.softDurationLocked(base, e.softStreak+1)

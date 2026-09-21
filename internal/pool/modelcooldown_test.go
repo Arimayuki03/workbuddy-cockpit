@@ -581,7 +581,7 @@ func TestModelCooldownsPersistRestartSkipsCooled(t *testing.T) {
 	}
 }
 
-// TestCooldownSoftForModelResetNoZombieReason 带解析时间分支只写 modelCooldowns，
+// TestCooldownSoftRateResetNoZombieReason 带解析时间分支只写 modelCooldowns，
 // 不碰账号级 coolKind/reason 域（模型级冷却不该污染账号级 coolKind/reason）。
 // 修复 54 个号 state.json 残留「until=0001 零值 + reason=6004 model rate limit」的不一致快照。
 func TestCooldownSoftForModelResetNoZombieReason(t *testing.T) {
@@ -597,6 +597,59 @@ func TestCooldownSoftForModelResetNoZombieReason(t *testing.T) {
 	// 重置时间分支不应覆盖账号级 coolKind/reason（正交）。
 	if coolKind != CoolSoft || reason != "429 rate limit" {
 		t.Errorf("重置分支污染账号级域: coolKind=%v reason=%q want CoolSoft/429 rate limit", coolKind, reason)
+	}
+}
+
+// TestCooldownSoftRateDoesNotShortenHardCooling CooldownSoftRate（带重置时间分支）
+// 不得把更长的 CoolHard 冷却截短：hard 冷却（次日 04:00）中再撞 429 文案时，
+// until 取两者更长者（保持 hard 语义到签到恢复），而不是被重置墙钟无条件覆盖。
+func TestCooldownSoftRateDoesNotShortenHardCooling(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.CooldownUntilTomorrow4AM("u1", "余额不足") // CoolHard，until ≈ 次日 04:00
+	p.mu.RLock()
+	hardUntil := p.byUID["u1"].until
+	p.mu.RUnlock()
+
+	// 429 重置墙钟仅 5 分钟后：远短于 hard 冷却。
+	p.CooldownSoftRate("u1", time.Minute, time.Now().Add(5*time.Minute), "429 rate limit")
+	p.mu.RLock()
+	until := p.byUID["u1"].until
+	p.mu.RUnlock()
+	if !until.Equal(hardUntil) {
+		t.Errorf("hard 冷却被 CooldownSoftRate 截短: until=%v want %v（取更长者）", until, hardUntil)
+	}
+}
+
+// TestCooldownSoftRateResetExtendsShorterExisting 带重置时间的软冷却与既有**更短**
+// 的未过期冷却取更长者：新冷却生效（不退化回旧短冷却），与「不截短」同一 max 语义。
+func TestCooldownSoftRateResetExtendsShorterExisting(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Cooldown("u1", CoolSoft, time.Minute, "旧冷却") // 1 分钟
+	reset := time.Now().Add(30 * time.Minute)
+	p.SetSoftRateMax(time.Hour)
+	p.CooldownSoftRate("u1", time.Minute, reset, "429 rate limit")
+	st, _ := p.Status("u1")
+	if d := st.Until.Sub(reset); d < -time.Second || d > time.Second {
+		t.Errorf("until=%v want ~reset=%v（更长者胜）", st.Until, reset)
+	}
+}
+
+// TestCooldownSoftRateResetAfterExpiredUntil 既有 until 已过期时不参与 max：
+// 新软冷却照常生效（过期截止不得把新冷却压回过去）。
+func TestCooldownSoftRateResetAfterExpiredUntil(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.mu.Lock()
+	p.byUID["u1"].until = time.Now().Add(-time.Hour) // 已过期
+	p.mu.Unlock()
+	reset := time.Now().Add(30 * time.Minute)
+	p.SetSoftRateMax(time.Hour)
+	p.CooldownSoftRate("u1", time.Minute, reset, "429 rate limit")
+	st, _ := p.Status("u1")
+	if d := st.Until.Sub(reset); d < -time.Second || d > time.Second {
+		t.Errorf("until=%v want ~reset=%v（过期旧 until 不参与 max）", st.Until, reset)
 	}
 }
 

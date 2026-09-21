@@ -11,6 +11,8 @@
 package scheduler
 
 import (
+	"context"
+	"errors"
 	"log"
 	"os"
 	"os/exec"
@@ -21,6 +23,11 @@ import (
 	"workbuddy2api/internal/logfmt"
 	"workbuddy2api/internal/upstream"
 )
+
+// scriptTimeout 单个脚本命令的总时长上限。school_open_day_2026.py 全量闭环
+// 实测分钟级，10 分钟已含数倍余量；挂死（上游不响应/解释器死锁）时到点强杀，
+// 不再让 runMu[taskSchool] 永久持有、每小时排程堆积。
+const scriptTimeout = 10 * time.Minute
 
 // repoRoot 定位仓库根（容器内 /app、宿主 /root/workbuddy2api）。
 // 策略：从当前工作目录逐级向上找 scripts/school_open_day_2026.py，
@@ -61,8 +68,15 @@ func (c *scriptCmd) Run() error        { return c.cmd.Run() }
 
 // newScriptCmd 构建脚本子进程。包级变量便于测试注入 fake（installFakeExec 覆盖）。
 // 工作目录由调用方 SetDir 显式设置仓库根。
+// 超时治理：ctx 带 scriptTimeout（10 分钟）——脚本挂起时 CommandContext 到期杀掉
+// 整组进程（cmd.Cancel），WaitDelay 再兜底回收残留管道句柄；否则 runMu[taskSchool]
+// 永不释放、每小时排程持续堆积（旧缺陷：无 ctx 无超时的 exec.Command().Run()）。
 var newScriptCmd = func(program string, args ...string) scriptRunner {
-	return &scriptCmd{cmd: exec.Command(program, args...)}
+	ctx, cancel := context.WithTimeout(context.Background(), scriptTimeout)
+	cmd := exec.CommandContext(ctx, program, args...)
+	cmd.Cancel = func() error { cancel(); return nil } // 超时到期：杀进程，释放 runMu
+	cmd.WaitDelay = 10 * time.Second
+	return &scriptCmd{cmd: cmd}
 }
 
 // pythonCmd 返回执行 scripts/*.py 的解释器名。
@@ -84,16 +98,29 @@ func pythonCmd() string {
 
 // runScript 依次执行若干脚本命令：任一命令失败只记一行 WARN，不向上抛、
 // 不影响调度主循环继续跑下一个时点。单命令失败不中断后续命令。
+// 超时（scriptTimeout 到期被 CommandContext 杀进程）也是失败的一种：记 WARN
+// 指明已超时强杀，调用方按失败语义继续后续命令。
 func runScript(name, root string, commands [][]string) {
 	for _, cmdArgs := range commands {
 		c := newScriptCmd(cmdArgs[0], cmdArgs[1:]...)
 		c.SetDir(root)
 		if err := c.Run(); err != nil {
+			if isContextDeadline(err) {
+				log.Printf("WARN: %s (%s): 超过 %s 强杀（脚本挂起）", name, cmdArgs[1], scriptTimeout)
+				continue
+			}
 			log.Printf("WARN: %s (%s): %v", name, cmdArgs[1], err)
 			continue
 		}
 		log.Printf("%s: ok (%s)", name, cmdArgs[1])
 	}
+}
+
+// isContextDeadline 报告 err 是否为 ctx 超时链（exec.Cmd 被 CommandContext 的
+// ctx 取消时，Wait 返回 "signal: killed" 包着 context.DeadlineExceeded 的链，
+// 经 errors.Is 逐层解包判定）。
+func isContextDeadline(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded)
 }
 
 // RunSchoolNow 立即执行开学季任务：school_open_day_2026.py ALL --run --yes。

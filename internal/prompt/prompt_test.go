@@ -474,3 +474,112 @@ func TestAppendRoleVariantStopsRun(t *testing.T) {
 		t.Errorf("role variant changed: %v", msgs[2])
 	}
 }
+
+// ---- 大整数保真（RawMessage 透传重构的回归锚点） ----
+
+// bigIntBody 构造含 >2^53 整数的请求体：顶层 seed、metadata.user_id（嵌套）、
+// messages[].metadata.seed（消息内）、工具 JSON Schema 整型枚举。json.Unmarshal
+// 到 map[string]any 会把这些数字 float64 化并丢精度（9007199254740993 →
+// 9007199254740992），Rewrite/Append 的 RawMessage 透传必须字节级保留它们。
+const bigIntBody = `{
+	"model":"glm-5.2",
+	"stream":true,
+	"seed":9007199254740993,
+	"metadata":{"conversation_id":"c1","user_id":90071992547409931},
+	"messages":[
+		{"role":"system","content":"被替换的旧提示词","metadata":{"seed":9007199254740993}},
+		{"role":"user","content":"你好","tool_schemas":[{"type":"integer","enum":[9007199254740993,18446744073709551615]}]}
+	]
+}`
+
+// assertBigIntPreserved 断言改写输出仍含全部大整数的原始字面量。
+func assertBigIntPreserved(t *testing.T, out []byte) {
+	t.Helper()
+	// 字面量断言用「出现次数」而非 Contains：user_id(90071992547409931) 以
+	// 9007199254740993 为前缀，裸 Contains 无法区分两者。
+	//   - Rewrite：3 处 9007199254740993（顶层 seed、schema enum；旧 system 消息
+	//     连同其 metadata.seed 一起被删）+ user_id 前缀重叠 1 处 = 4；
+	//   - Append：4 处 9007199254740993（多一条旧 system 的 metadata.seed）+ 重叠 = 5，
+	//     故此共享辅助只断言下界：至少 3 处真实出现、大整数未被 float64 化改写。
+	if got := strings.Count(string(out), "9007199254740993"); got < 3 {
+		t.Errorf("9007199254740993 出现 %d 次 want >=3（被 float64 化改写/丢失）: %s", got, out)
+	}
+	if !strings.Contains(string(out), "18446744073709551615") {
+		t.Errorf("18446744073709551615 被改写/丢失（float64 化）: %s", out)
+	}
+}
+
+func TestRewritePreservesBigIntegers(t *testing.T) {
+	out := Rewrite([]byte(bigIntBody), "SYS")
+	assertBigIntPreserved(t, out)
+	// 改写部分生效：旧 system 消息被删、新 system 在头部。
+	roles := systemRoles(t, out)
+	if len(roles) != 2 || roles[0] != "system" || roles[1] != "user" {
+		t.Fatalf("roles=%v want [system user]", roles)
+	}
+	// 字节级：未改写字段的字面量逐字保留（含嵌套 schema 枚举）。
+	if !strings.Contains(string(out), `"seed":9007199254740993`) {
+		t.Errorf("顶层 seed 字面量未字节级保留: %s", out)
+	}
+	if !strings.Contains(string(out), `"user_id":90071992547409931`) {
+		t.Errorf("metadata.user_id 字面量未字节级保留: %s", out)
+	}
+	if !strings.Contains(string(out), `"enum":[9007199254740993,18446744073709551615]`) {
+		t.Errorf("工具 schema 整型枚举未字节级保留: %s", out)
+	}
+	if strings.Contains(string(out), "被替换的旧提示词") {
+		t.Errorf("旧 system 内容应被删除: %s", out)
+	}
+}
+
+func TestAppendPreservesBigIntegers(t *testing.T) {
+	out := Append([]byte(bigIntBody), "GW")
+	assertBigIntPreserved(t, out)
+	// append 语义：既有消息逐字保留（含旧 system 的大整数 metadata）。
+	roles := systemRoles(t, out)
+	if len(roles) != 3 || roles[0] != "system" || roles[1] != "system" || roles[2] != "user" {
+		t.Fatalf("roles=%v want [system system user]", roles)
+	}
+	if got := strings.Count(string(out), "9007199254740993"); got != 4 { // 3 处 seed + user_id 前缀重叠
+		t.Errorf("三处大整数（顶层 seed/消息 metadata/schema enum）应逐字保留: %s", out)
+	}
+	var obj map[string]any
+	json.Unmarshal(out, &obj)
+	msgs := obj["messages"].([]any)
+	gw := msgs[1].(map[string]any)
+	if gw["content"] != "GW" {
+		t.Errorf("GW content=%v", gw["content"])
+	}
+	oldSys := msgs[0].(map[string]any)
+	if oldSys["content"] != "被替换的旧提示词" {
+		t.Errorf("既有 system 消息被改写: %v", oldSys)
+	}
+	// 三处大整数逐字保留：顶层 seed、旧 system 的 metadata.seed、schema enum。
+	// 逐字面量计数：裸 Count("9007199254740993") 会把 user_id(90071992547409931)
+	// 的前缀子串误计入，故对更长的 user_id 字面量单独计数并用总出现次数核对。
+	// 顶层键重排不影响字面量本身。
+	if got := strings.Count(string(out), "9007199254740993"); got != 4 { // 3 处 seed + user_id 的前缀重叠
+		t.Errorf("9007199254740993 出现次数=%d want 4（3 处 + user_id 前缀重叠）: %s", got, out)
+	}
+	if got := strings.Count(string(out), "90071992547409931"); got != 1 {
+		t.Errorf("user_id 出现次数=%d want 1: %s", got, out)
+	}
+}
+
+func TestAppendNoMessagesFieldPreservesBigIntegers(t *testing.T) {
+	in := []byte(`{"model":"m","seed":9007199254740993,"metadata":{"n":18446744073709551615}}`)
+	out := Append(in, "GW")
+	if !strings.Contains(string(out), `"seed":9007199254740993`) ||
+		!strings.Contains(string(out), `"n":18446744073709551615`) {
+		t.Errorf("无 messages 字段时大整数未字节级保留: %s", out)
+	}
+	var obj map[string]any
+	json.Unmarshal(out, &obj)
+	msgs, ok := obj["messages"].([]any)
+	if !ok || len(msgs) != 1 {
+		t.Fatalf("messages=%v want [GW]", obj["messages"])
+	}
+	if msgs[0].(map[string]any)["role"] != "system" {
+		t.Errorf("GW=%v", msgs[0])
+	}
+}
