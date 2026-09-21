@@ -237,6 +237,7 @@ func main() {
 		KeepaliveHours:      cfg.Schedule.KeepaliveHours,
 		SchoolHours:         cfg.Schedule.SchoolHours,
 		CatHours:            cfg.Schedule.CatHours,
+		QueueHours:          cfg.Schedule.QueueHours,
 		ActivityReportCount: cfg.Schedule.ActivityReportCount,
 		ExpiringSoonWindow:  cfg.ExpiringSoonDur, // 快过期积分优先消耗（issue:积分过期）
 		CheckinDisabled:     !cfg.Schedule.CheckinEnabled,
@@ -245,6 +246,7 @@ func main() {
 		KeepaliveDisabled:   !cfg.Schedule.KeepaliveEnabled,
 		SchoolDisabled:      !cfg.Schedule.SchoolEnabled,
 		CatDisabled:         !cfg.Schedule.CatEnabled,
+		QueueEnabled:        cfg.Schedule.QueueEnabled,
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
@@ -278,6 +280,9 @@ func main() {
 		log.Printf("夜猫子任务已禁用（schedule.cat_enabled=false）")
 	} else {
 		log.Printf("夜猫子任务已启用：%v 点（task_runner.py ALL --yes --only black_cat）", cfg.Schedule.CatHours)
+	}
+	if cfg.Schedule.QueueEnabled {
+		log.Printf("任务队列排程已启用：%v 点（任务中心执行队列：全账号成长任务 + 开学季闭环，schedule.queue_enabled）", cfg.Schedule.QueueHours)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -326,6 +331,11 @@ func main() {
 		// chat 表格日志不走 log 包（stdout 直写），单独镜像进面板 ring 的 chat 频道。
 		server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 		panelHandler = pn
+
+		// 任务队列定时排程（schedule.queue_enabled）：panel 的队列实现经回调注入
+		// scheduler（依赖方向 panel→scheduler 不能反）。panel 关闭时队列排程无执行体，
+		// 到点只记 WARN 跳过，不影响其余六类任务。
+		sch.SetQueueRunner(pn.ScheduledQueueRunner)
 
 		// 前端静态托管：embed_panel 标签构建内嵌 manager 壳产物（DistFS）；
 		// 默认构建 HasEmbeddedFrontend()=false，根路径不注册静态路由（网关照常）。

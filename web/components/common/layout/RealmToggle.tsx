@@ -26,7 +26,7 @@ export function RealmToggle({compact = false}: {compact?: boolean}) {
 
   return (
     <div
-      className="inline-flex items-center gap-0.5 rounded-full border border-border/60 bg-muted/60 p-0.5"
+      className="inline-flex h-8 items-center gap-0.5 rounded-full border border-border/60 bg-muted/60 p-1"
       role="tablist"
       aria-label={t('realm.switch')}
     >
@@ -41,7 +41,10 @@ export function RealmToggle({compact = false}: {compact?: boolean}) {
             title={title}
             onClick={() => setRealm(id)}
             className={cn(
-              'relative flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors',
+              // 外层 h-8 + p-1，内层撑满 h-full 垂直居中：总高与
+              // ThemeToggle / LanguageToggle 的 32px 圆胶囊一致。
+              // 激活 pill 依旧铺满按钮（inset-0）。
+              'relative flex h-full items-center gap-1.5 rounded-full px-3 text-xs font-medium transition-colors',
               active ? 'text-foreground' : 'text-muted-foreground hover:text-foreground',
             )}
           >
@@ -52,7 +55,7 @@ export function RealmToggle({compact = false}: {compact?: boolean}) {
                 transition={{type: 'spring', stiffness: 400, damping: 32}}
               />
             )}
-            <Icon className="relative h-3 w-3 shrink-0" />
+            <Icon className="relative h-3.5 w-3.5 shrink-0" />
             {!compact && <span className="relative">{label}</span>}
             {compact && <span className="sr-only">{label}</span>}
           </button>

@@ -1,6 +1,6 @@
 'use client';
 
-import {useCallback, useEffect, useMemo, useState} from 'react';
+import {useCallback, useMemo, useState} from 'react';
 import {
   Gift,
   Pause,
@@ -16,7 +16,8 @@ import {
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {accountApi, errText} from '@/lib/api';
-import type {Account, CreditPackage} from '@/lib/types';
+import {useCachedAsync, peekCache, putCache} from '@/lib/data-cache';
+import type {Account, CreditPackage, OverviewResponse, PackagesResponse} from '@/lib/types';
 import {fmtNumber} from '@/lib/format';
 import {
   availabilityLabelKey,
@@ -26,6 +27,7 @@ import {
 } from '@/lib/account-status';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
+import {CardRowsSkeleton, TableSkeleton} from '@/components/common/layout/LoadSkeleton';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {AddAccountDialog} from '@/components/common/accounts/AddAccountDialog';
 import {CreditCountdown} from '@/components/common/accounts/CreditCountdown';
@@ -47,57 +49,58 @@ export default function AccountsPage() {
   const {realm} = useRealm();
   const t = useT();
   const {isAdmin} = useAuth();
-  const [accounts, setAccounts] = useState<Account[]>([]);
-  const [loading, setLoading] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
   const [busyUid, setBusyUid] = useState<string | null>(null);
   const [checkinAllBusy, setCheckinAllBusy] = useState(false);
   const [balanceAllBusy, setBalanceAllBusy] = useState(false);
-  /** 实时积分（按 uid），叠加到账号上；packages 查询失败时用池快照值 */
-  const [liveCredits, setLiveCredits] = useState<Record<string, number>>({});
-  /** 每账号的积分包明细（到期倒计时用） */
-  const [creditPacks, setCreditPacks] = useState<Record<string, CreditPackage[]>>({});
 
-  /**
-   * 首次加载：overview（池快照）与 packages（实时余额）并行发、都落定后
-   * 一次性写入。分开写会让积分先渲染池快照值、约 1 秒后被实时值覆盖，
-   * 界面上数字闪一下——快照只是 packages 失败时的降级，不该先出来。
-   */
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [ov, pk] = await Promise.allSettled([accountApi.overview(), accountApi.packages()]);
-      // packages 拉取失败时静默降级：仍显示池快照的 credits（原始语义）
-      if (pk.status === 'fulfilled') {
-        const credits: Record<string, number> = {};
-        const packs: Record<string, CreditPackage[]> = {};
-        for (const row of pk.value.accounts) {
-          packs[row.uid] = row.packages ?? [];
-          if (typeof row.remain === 'number' && !row.error) credits[row.uid] = row.remain;
-        }
-        setLiveCredits(credits);
-        setCreditPacks(packs);
+  // overview 与 packages 分两个缓存条目：切页先出缓存值（积分列即刻可看），
+  // 后台刷新静默替换；packages 逐号查上游慢（1-2 秒），缓存命中后不再裸等。
+  const overviewCache = useCachedAsync<OverviewResponse>(
+    'overview',
+    () => accountApi.overview(),
+    {ttl: 5000},
+  );
+  const packagesCache = useCachedAsync<PackagesResponse>(
+    'packages',
+    () => accountApi.packages(),
+    {ttl: 5000},
+  );
+  const accounts = useMemo(
+    () => overviewCache.data?.accounts ?? [],
+    [overviewCache.data],
+  );
+  const loading = overviewCache.loading;
+  const load = overviewCache.refresh;
+
+  // 实时积分与包明细从 packages 缓存派生；packages 拉取失败时静默降级：
+  // 仍显示池快照的 credits（原始语义），包明细退化为空（倒计时自然消失）。
+  const packages = packagesCache.data;
+  const {liveCredits, packs} = useMemo(() => {
+    const credits: Record<string, number> = {};
+    const packMap: Record<string, CreditPackage[]> = {};
+    if (packages) {
+      for (const row of packages.accounts) {
+        packMap[row.uid] = row.packages ?? [];
+        if (typeof row.remain === 'number' && !row.error) credits[row.uid] = row.remain;
       }
-      if (ov.status === 'fulfilled') {
-        setAccounts(ov.value.accounts ?? []);
-      } else {
-        throw ov.reason;
-      }
-    } catch (e) {
-      notify.err(errText(e));
-    } finally {
-      setLoading(false);
     }
-  }, []);
+    return {liveCredits: credits, packs: packMap};
+  }, [packages]);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  // 包明细镜像到 state：CreditCountdown 只在 packages 变化时需要新值，
+  // 直接用派生对象即可，不再单独 setState（避免每次渲染新引用触发子树重渲染）。
+  const creditPacks = packs;
 
   // 池状态（冷却 / 成功计数等）会随时间变化，页面停留时定时刷新。
-  // 心跳沿用同一个 load：packages 会跟着重拉，accounts 与实时余额仍然
-  // 同帧落定，不会出现「先渲染旧积分再替换」的闪变路径。
-  useHeartbeat(load, 30000);
+  // 心跳同时刷新两个缓存条目，accounts 与实时余额仍然同帧续命。
+  useHeartbeat(
+    () => {
+      overviewCache.refresh().catch((e) => notify.err(errText(e)));
+      packagesCache.refresh().catch(() => {/* packages 失败静默降级，不弹错 */});
+    },
+    30000,
+  );
 
   /** 全量刷新余额：同步等待（完成后池内 credits 即最新值） */
   const refreshBalanceAll = useCallback(async () => {
@@ -144,9 +147,17 @@ export default function AccountsPage() {
         checkin_message?: string;
       };
       const ok = res.ok !== false;
-      // 签到会返回刷新后的实时积分，直接就地更新，省一次请求
+      // 签到会返回刷新后的实时积分，直接就地写入缓存并重渲染，省一次请求
       if (typeof res.credits === 'number') {
-        setLiveCredits((prev) => ({...prev, [uid]: res.credits as number}));
+        const cached = peekCache<OverviewResponse>('overview');
+        if (cached) {
+          putCache('overview', {
+            ...cached.data,
+            accounts: cached.data.accounts.map((a) =>
+              a.uid === uid ? {...a, credits: res.credits as number} : a,
+            ),
+          });
+        }
       }
       (ok ? notify.ok : notify.err)(res.message || res.checkin_message || okMsg);
       await load();
@@ -460,9 +471,7 @@ export default function AccountsPage() {
           {!visible.length && !loading && (
             <div className="px-4 py-12 text-center text-xs text-muted-foreground">{t('accounts.tableEmpty')}</div>
           )}
-          {loading && !accounts.length && (
-            <div className="px-4 py-12 text-center text-xs text-muted-foreground">{t('common.loading')}</div>
-          )}
+          {loading && !accounts.length && <CardRowsSkeleton rows={4} />}
         </div>
 
         {/* 桌面端：表格 */}
@@ -535,9 +544,7 @@ export default function AccountsPage() {
             )}
           </EmptyState>
         )}
-        {loading && !accounts.length && (
-          <div className="py-16 text-center text-xs text-muted-foreground">{t('common.loading')}</div>
-        )}
+        {loading && !accounts.length && <TableSkeleton rows={6} />}
       </section>
 
       <AddAccountDialog open={addOpen} onOpenChange={setAddOpen} onSuccess={load} />

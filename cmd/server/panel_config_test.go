@@ -102,3 +102,60 @@ func TestPanelSaveConfigMergePersist(t *testing.T) {
 		t.Errorf("failed save must not touch disk; api_key = %v", got2["api_key"])
 	}
 }
+
+// TestPanelSaveModelMapReplace 端到端验证模型映射保存链路（回归：面板删除
+// 映射条目后写盘、重启后不复活）。model_map 是整段替换语义——面板提交的表
+// 就是用户想要的最终表；若被当作普通嵌套段深合并，被删条目会从旧值合回来，
+// 删除永远无法落盘。
+func TestPanelSaveModelMapReplace(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "config.json")
+	orig := `{
+  "api_key": "k1",
+  "model_map": {"gpt-4o": "cn:glm-5.2", "keep-me": "cn:glm-5.3"},
+  "unknown_user_key": {"keep": true}
+}`
+	if err := os.WriteFile(fp, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	live := livecfg.New(livecfg.Snapshot{APIKey: "k1"})
+	p := pool.New("")
+	up := upstream.New()
+	sch := scheduler.New(scheduler.Config{Pool: p, Upstream: up})
+
+	// 面板提交：只保留 keep-me（等价于 UI 上删除 gpt-4o 条目 + 新增 new-map）。
+	if err := saveModelMap(
+		map[string]string{"keep-me": "cn:glm-5.3", "new-map": "cn:auto"},
+		fp, live, p, up, sch,
+	); err != nil {
+		t.Fatalf("saveModelMap: %v", err)
+	}
+
+	raw, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	mm, _ := got["model_map"].(map[string]any)
+	if mm == nil {
+		t.Fatalf("model_map missing after save: %s", raw)
+	}
+	// 被删条目不得从旧值合回来（深合并回归点）。
+	if _, ok := mm["gpt-4o"]; ok {
+		t.Errorf("deleted entry %q resurrected by deep merge; model_map = %v", "gpt-4o", mm)
+	}
+	if mm["keep-me"] != "cn:glm-5.3" || mm["new-map"] != "cn:auto" {
+		t.Errorf("model_map = %v, want keep-me/new-map kept and added", mm)
+	}
+	// 其余段落不受整段替换影响：未知键与未提交键原样。
+	if _, ok := got["unknown_user_key"]; !ok {
+		t.Error("unknown user key must survive model_map save")
+	}
+	if got["api_key"] != "k1" {
+		t.Errorf("api_key = %v, want k1 (untouched)", got["api_key"])
+	}
+}

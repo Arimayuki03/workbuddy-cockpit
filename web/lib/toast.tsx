@@ -4,7 +4,7 @@ import {motion} from 'motion/react';
 import {CircleCheck, CircleX, Info, TriangleAlert, X} from 'lucide-react';
 import {toast} from 'sonner';
 import {cn} from '@/lib/utils';
-import {t} from '@/lib/i18n';
+import {useT} from '@/lib/i18n/provider';
 
 /**
  * 统一提示：自定义渲染的卡片式通知。
@@ -36,6 +36,9 @@ function ToastCard({
   duration: number;
 }) {
   const {Icon, accent} = META[variant];
+  // 关闭按钮的无障碍文案走 context：消费 I18nContext 后语言切换会重渲染
+  // 已挂载的卡片（消息正文是 notify() 调用那一刻拼好的快照，不在此列，属预期）。
+  const t = useT();
 
   return (
     <motion.div

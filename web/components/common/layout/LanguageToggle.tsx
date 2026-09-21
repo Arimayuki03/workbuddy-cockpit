@@ -28,11 +28,23 @@ export function LanguageToggle({className}: {className?: string}) {
         aria-label={t('language.switch')}
         title={t('language.switch')}
         className={cn(
-          'h-6 w-auto gap-1.5 rounded-full border-border/60 bg-muted/60 px-2.5 text-[11px] font-medium',
+          // 与 ThemeToggle / RealmToggle 完全同款（高 32px 圆胶囊，h-6 时代
+          // 偏小已整体放大）：
+          // - 基类高度带 data-[size] 变体（h-9/h-8），特异性高于裸 h-8，
+          //   必须用同变体写法逐个压制为 h-8；
+          // - 基类 border-none 与 border 不同合并组，须用 border-solid 同组覆盖；
+          // - chevron 由基类注入（size-4 opacity-50，直接子 svg），
+          //   用 [&>svg] 压成 size-3.5/opacity-70；Languages 图标类名含 size-，
+          //   才不会被基类 [&_svg:not([class*='size-'])]:size-4 改写；
+          // - 基类 select-value 的 text-xs/text-sm 用同选择器组覆盖为 text-xs。
+          'h-8 w-auto gap-1.5 justify-start rounded-full border border-solid border-border/60 bg-muted/60 px-3 py-0 text-xs font-medium transition-colors hover:bg-muted/80 dark:bg-muted/60 dark:hover:bg-muted/80',
+          'data-[size=default]:h-8 data-[size=sm]:h-8',
+          '*:data-[slot=select-value]:text-xs [&:not([data-placeholder])_[data-slot=select-value]]:text-xs',
+          '[&>svg]:size-3.5 [&>svg]:opacity-70',
           className,
         )}
       >
-        <Languages className="h-3 w-3 shrink-0 opacity-70" />
+        <Languages className="size-3.5 shrink-0 opacity-70" />
         <SelectValue />
       </SelectTrigger>
       <SelectContent>

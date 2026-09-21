@@ -1,6 +1,6 @@
 'use client';
 
-import {useCallback, useEffect, useMemo, useState} from 'react';
+import {useCallback, useMemo, useState} from 'react';
 import {Activity, TrendingUp, Cpu, Users, Coins} from 'lucide-react';
 import {
   Bar,
@@ -14,11 +14,13 @@ import {
 } from 'recharts';
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {statsApi, errText} from '@/lib/api';
+import {useCachedAsync} from '@/lib/data-cache';
 import type {MetricsSnapshot, UsageKeyedAgg, UsageSnapshot} from '@/lib/types';
 import {fmtCompact, fmtNumber, fmtCredit} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {StatCard} from '@/components/common/layout/StatCard';
 import {EmptyState} from '@/components/common/layout/EmptyState';
+import {TableSkeleton} from '@/components/common/layout/LoadSkeleton';
 import {Button} from '@/components/ui/button';
 import {
   Select,
@@ -48,32 +50,36 @@ const CHART_COLORS = [
 ];
 
 export default function StatsPage() {
-  // 统计是全局记录（Go 网关单实例双版本），但分桶/时序自带 realm 维度，
-  // 模型表按当前版本过滤；by_account 行自带 realm 标注，保持全局对照。
+  // 统计是全局记录（Go 网关单实例双版本），但分桶/时序自带 realm 维度：
+  // 卡片、趋势图、账号表、模型表全部按当前版本过滤后展示（无 realm 标注的历史存量按 cn 归属）；
+  // 唯一保留全局口径的是原生 /v1/stats 卡片与其下表（重启即清的另一套数据）。
   const {realm, label: realmName} = useRealm();
   const t = useT();
-  const [usage, setUsage] = useState<UsageSnapshot | null>(null);
-  const [native, setNative] = useState<MetricsSnapshot | null>(null);
   const [hours, setHours] = useState('72');
   const [saveBusy, setSaveBusy] = useState(false);
-  const load = useCallback(async () => {
-    const results = await Promise.allSettled([
-      statsApi.usage(Number(hours) || 72),
-      statsApi.native(),
-    ]);
-    if (results[0].status === 'fulfilled') setUsage(results[0].value);
-    if (results[1].status === 'fulfilled') setNative(results[1].value);
-    if (results.every((r) => r.status === 'rejected')) {
-      notify.err(errText((results[0] as PromiseRejectedResult).reason));
-    }
-  }, [hours]);
+  // usage/native 都进缓存：切页先出上次的图表与卡片，后台静默刷新。
+  // key 带 hours：切时间窗 = 换一份快照，各自缓存互不覆盖。
+  const usageCache = useCachedAsync<UsageSnapshot>(
+    `stats:usage:${hours}`,
+    () => statsApi.usage(Number(hours) || 72),
+    {ttl: 5000},
+  );
+  const nativeCache = useCachedAsync<MetricsSnapshot>(
+    'stats:native',
+    () => statsApi.native(),
+    {ttl: 5000},
+  );
+  const usage = usageCache.data;
+  const native = nativeCache.data;
 
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  // 用量随调用持续累计，心跳刷新让页面保持接近实时
-  useHeartbeat(load, 60000);
+  // 心跳同时刷两个缓存条目（用量持续累计，保持接近实时）
+  useHeartbeat(
+    () => {
+      usageCache.refresh().catch((e) => notify.err(errText(e)));
+      nativeCache.refresh().catch((e) => notify.err(errText(e)));
+    },
+    60000,
+  );
 
   /** 立即落盘（正常由后台 30s 防抖负责） */
   const saveNow = useCallback(async () => {
@@ -92,16 +98,19 @@ export default function StatsPage() {
   // label 留完整时间供 tooltip 用，axis 只在 XAxis 按 interval 抽样显示，窄屏不再挤成一团。
   const chartData = useMemo(() => {
     if (!usage) return [];
-    return usage.series.map((p) => {
-      const isHour = p.scope === 'hour';
-      return {
-        label: isHour ? p.t.slice(5, 10) + ' ' + p.t.slice(11) + ':00' : p.t.slice(5),
-        tokens: p.total_tokens,
-        requests: p.requests,
-        errors: p.errors,
-      };
-    });
-  }, [usage]);
+    // 先按当前版本过滤再出图：无 realm 标注 = 历史存量，按 cn 归属（与后端 Add() 回落口径一致）
+    return usage.series
+      .filter((p) => (p.realm ?? 'cn') === realm)
+      .map((p) => {
+        const isHour = p.scope === 'hour';
+        return {
+          label: isHour ? p.t.slice(5, 10) + ' ' + p.t.slice(11) + ':00' : p.t.slice(5),
+          tokens: p.total_tokens,
+          requests: p.requests,
+          errors: p.errors,
+        };
+      });
+  }, [usage, realm]);
 
   // Token（左轴）与请求数（右轴）量级不同：混在一张双轴图里比各自缩放更直观，
   // 也省掉「请求数柱子矮到看不见」的问题；失败数继续用虚线叠在右轴上。
@@ -197,12 +206,13 @@ export default function StatsPage() {
 
   const hasErrors = useMemo(() => chartData.some((p) => p.errors > 0), [chartData]);
 
-  /** 今日用量：今天的全部小时点聚合；无小时点时回退今天的日点 */
+  /** 今日用量：先按当前版本过滤，再聚合今天的全部小时点；无小时点时回退今天的日点 */
   const todayUsage = useMemo(() => {
     if (!usage) return {requests: 0, tokens: 0, errors: 0};
     const now = new Date();
     const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-    const hourPoints = usage.series.filter((p) => p.scope === 'hour' && p.t.startsWith(todayKey));
+    const realmSeries = usage.series.filter((p) => (p.realm ?? 'cn') === realm);
+    const hourPoints = realmSeries.filter((p) => p.scope === 'hour' && p.t.startsWith(todayKey));
     if (hourPoints.length) {
       return hourPoints.reduce(
         (acc, p) => ({
@@ -213,11 +223,15 @@ export default function StatsPage() {
         {requests: 0, tokens: 0, errors: 0},
       );
     }
-    const todayDay = usage.series.find((p) => p.scope === 'day' && p.t === todayKey);
+    const todayDay = realmSeries.find((p) => p.scope === 'day' && p.t === todayKey);
     return todayDay
       ? {requests: todayDay.requests, tokens: todayDay.total_tokens, errors: todayDay.errors}
       : {requests: 0, tokens: 0, errors: 0};
-  }, [usage]);
+  }, [usage, realm]);
+
+  // 域内汇总：totals 是全局口径无法按域拆，改取 by_realm 当前域那一行
+  //（key 恒为 'cn'|'global'；realm 字段为空串的历史行用 key 兜底匹配）。
+  const realmAgg = usage?.by_realm.find((r) => (r.key || r.realm) === realm);
 
   /**
    * 模型行按当前版本过滤：后端 ByModel 按 (realm, model) 拆分并带 realm 标注，
@@ -225,7 +239,9 @@ export default function StatsPage() {
    * 归入 cn——同一裸模型名在双域是两行，不按版本过滤会重复展示。
    */
   const byModel = (usage?.by_model ?? []).filter((it) => (it.realm ?? 'cn') === realm);
-  const byAccount = usage?.by_account ?? [];
+  // 账号行同样按当前版本过滤（后端 ByAccount 按 (realm, account) 拆分并带标注），
+  // 不再作全局对照；行内 realm 小标注保留。
+  const byAccount = (usage?.by_account ?? []).filter((it) => (it.realm ?? 'cn') === realm);
 
   return (
     <div className="flex flex-col gap-4 md:gap-6">
@@ -273,27 +289,27 @@ export default function StatsPage() {
         />
         <StatCard
           label={t('stats.totalRequests')}
-          value={fmtNumber(usage?.totals.requests ?? 0)}
-          hint={t('stats.tokenHint', {v: fmtCompact(usage?.totals.total_tokens ?? 0)})}
+          value={fmtNumber(realmAgg?.requests ?? 0)}
+          hint={t('stats.tokenHint', {v: fmtCompact(realmAgg?.total_tokens ?? 0)})}
           icon={TrendingUp}
           tone="accent"
-          delay={0.05}
+          delay={0.04}
         />
         <StatCard
           label={t('stats.avgLatency')}
           value={
-            usage?.totals.avg_latency_ms
-              ? fmtCompact(Math.round(usage.totals.avg_latency_ms)) + 'ms'
+            realmAgg?.avg_latency_ms
+              ? fmtCompact(Math.round(realmAgg.avg_latency_ms)) + 'ms'
               : '—'
           }
           hint={
-            usage?.totals.avg_tokens_per_second
-              ? t('stats.tpsHint', {v: usage.totals.avg_tokens_per_second.toFixed(1)})
+            realmAgg?.avg_tokens_per_second
+              ? t('stats.tpsHint', {v: realmAgg.avg_tokens_per_second.toFixed(1)})
               : undefined
           }
           icon={Cpu}
           tone="neutral"
-          delay={0.1}
+          delay={0.08}
         />
         <StatCard
           label={t('stats.nativeTotal')}
@@ -305,7 +321,7 @@ export default function StatsPage() {
           }
           icon={Activity}
           tone="success"
-          delay={0.15}
+          delay={0.12}
         />
       </section>
 
@@ -320,7 +336,16 @@ export default function StatsPage() {
         </div>
         {chart}
         {!chart && (
-          <div className="grid h-[120px] place-items-center text-xs text-muted-foreground">{t('stats.noUsageData')}</div>
+          // 占位高度与图表等高（280px）：数据到达后不再有 160px 的高度跳变。
+          // usage 未到（首载）用脉动骨架占位，明确「在加载」；usage 已到但确实
+          // 无数据时保留原来的文案空态——两种情形不能混同，否则像「没有数据」。
+          (usage ? (
+            <div className="grid h-[280px] place-items-center text-xs text-muted-foreground">{t('stats.noUsageData')}</div>
+          ) : (
+            <div className="h-[280px]" aria-hidden>
+              <div className="mt-1 h-full w-full animate-pulse rounded-xl bg-background/60" />
+            </div>
+          ))
         )}
         {/* 图例自绘（recharts 默认图例在窄屏会换行错位）：线样与图上一致 */}
         <div className="mt-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
@@ -349,11 +374,13 @@ export default function StatsPage() {
           title={t('stats.byModel')}
           icon={Cpu}
           items={byModel}
+          loading={!usage}
         />
         <BreakdownPanel
           title={t('stats.byAccount')}
           icon={Users}
           items={byAccount}
+          loading={!usage}
         />
       </section>
 
@@ -362,7 +389,11 @@ export default function StatsPage() {
         <section className="rounded-[20px] bg-muted p-4">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <div className="text-sm font-medium">{t('stats.nativeByModel')}</div>
-            <div className="text-[11px] text-muted-foreground">{t('stats.nativeNote')}</div>
+            {/* 该区（含上面的原生卡片）是页面里唯一保留全局口径的数据：无 realm 维度 */}
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+              <span>{t('stats.globalNote')}</span>
+              <span>{t('stats.nativeNote')}</span>
+            </div>
           </div>
           <Table>
             <TableHeader>
@@ -409,10 +440,13 @@ function BreakdownPanel({
   title,
   icon: Icon,
   items,
+  loading = false,
 }: {
   title: string;
   icon: typeof Cpu;
   items: UsageKeyedAgg[];
+  /** 首次加载（缓存未命中）：展示与表格同节奏的骨架行，而不是先出空态再跳表格 */
+  loading?: boolean;
 }) {
   const t = useT();
   const max = Math.max(1, ...items.map((i) => i.total_tokens));
@@ -422,7 +456,9 @@ function BreakdownPanel({
         <Icon className="h-4 w-4" />
         {title}
       </div>
-      {items.length ? (
+      {loading ? (
+        <TableSkeleton rows={4} className="py-2" />
+      ) : items.length ? (
         <Table>
           <TableHeader>
             <TableRow className="border-b border-border/60 hover:bg-transparent">

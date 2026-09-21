@@ -161,6 +161,8 @@ export const taskApi = {
     post<TaskRunQueueResponse>('/api/tasks/run_queue', body),
   /** 队列状态（轮询用） */
   queue: () => get<TaskQueueResponse>('/api/tasks/queue'),
+  /** 手动取消执行队列：剩余待办停止调度，进行中条目自然完成后停止（幂等） */
+  cancelQueue: () => post<{ok: boolean; cancelled: boolean}>('/api/tasks/queue/cancel'),
 };
 
 /* ── 开学季活动（panel taskcenter.go school*）───────────── */

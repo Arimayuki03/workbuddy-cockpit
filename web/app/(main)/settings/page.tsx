@@ -22,9 +22,11 @@ import {useI18n} from '@/lib/i18n/provider';
 import {t as tGlobal, tp as tpGlobal} from '@/lib/i18n';
 import {RichText} from '@/lib/i18n/rich-text';
 import {settingsApi, modelApi, errText} from '@/lib/api';
-import type {ConfigGetResponse, UpdateCheck} from '@/lib/types';
+import {peekCache, useCachedAsync} from '@/lib/data-cache';
+import type {ConfigGetResponse, ModelMapResponse, UpdateCheck} from '@/lib/types';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
+import {Skeleton} from '@/components/ui/skeleton';
 import {useAuth} from '@/lib/auth-context';
 import {CopyButton} from '@/components/ui/copy-button';
 import {Button} from '@/components/ui/button';
@@ -259,6 +261,22 @@ const SCHEDULE_FIELDS: Field[] = [
     label: '夜猫时刻',
     desc: '在哪些整点尝试夜猫任务（0-23，可多个）。默认凌晨 1 点；窗口内每天最多补一次',
     def: [1],
+  },
+  {
+    key: 'queue_enabled',
+    kind: 'bool',
+    label: '自动执行任务队列',
+    desc: '到点自动执行任务中心的「执行队列」（全账号成长任务 + 开学季闭环，'
+      + '等同手动点一次启动）。会真实消耗上游配额，默认关闭；手动开过且未跑完时本轮跳过',
+    def: false,
+  },
+  {
+    key: 'queue_hours',
+    kind: 'hours',
+    label: '队列时刻',
+    desc: '在哪些整点自动执行任务队列（0-23，可多个）。默认 10 点；'
+      + '建议避开签到/上报时刻，错峰执行',
+    def: [10],
   },
 ];
 
@@ -527,7 +545,7 @@ const GROUPS: GroupDef[] = [
     id: 'schedule',
     section: 'schedule',
     title: '定时任务',
-    desc: '六类任务各自独立排程：签到 / 猫猫旅行 / 活跃上报 / 保活 / 开学季 / 夜猫。可分别开关并设置执行时刻。签到、旅行、活跃上报、开学季、夜猫**只对国内版账号生效**——国际版没有这些体系，只有保活照常执行',
+    desc: '七类任务各自独立排程：签到 / 猫猫旅行 / 活跃上报 / 保活 / 开学季 / 夜猫 / 任务队列。可分别开关并设置执行时刻。签到、旅行、活跃上报、开学季、夜猫、任务队列**只对国内版账号生效**——国际版没有这些体系，只有保活照常执行',
     fields: SCHEDULE_FIELDS,
   },
   {
@@ -727,6 +745,8 @@ export default function SettingsPage() {
   /** 高级模式（直接编辑整个配置 JSON） */
   const [advanced, setAdvanced] = useState(false);
   const [rawText, setRawText] = useState('');
+  /** 加载时的原始 JSON 文本，用于判断高级模式是否有改动 */
+  const rawOriginal = useRef('');
 
   const [modelMap, setModelMap] = useState<Record<string, string>>({});
   const [mapAlias, setMapAlias] = useState('');
@@ -735,51 +755,105 @@ export default function SettingsPage() {
   /** Upstash（Redis 持久化）表单 */
   const [upstashForm, setUpstashForm] = useState({url: '', token: ''});
   const [upstashBusy, setUpstashBusy] = useState(false);
+  /** 加载时的 Upstash 原始值，用于判断是否有改动（token 不回显，不计入比较） */
+  const upstashOriginal = useRef({url: ''});
   /** 版本检查 */
   const [update, setUpdate] = useState<UpdateCheck | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
 
+  // 三个配置端点都是本地快读，但也接缓存：切页先出上次的表单（TTL 内不重拉），
+  // 「重新加载」按钮强制刷新。config 变化是保存动作的依据，写操作成功后手动
+  // 刷新缓存（见各 save 函数里的 putCache）。
+  const configCache = useCachedAsync<ConfigGetResponse>(
+    'settings:config',
+    () => settingsApi.config(),
+    {ttl: 15_000},
+  );
+  const mapCache = useCachedAsync<ModelMapResponse>(
+    'settings:modelMap',
+    () => settingsApi.modelMap(),
+    {ttl: 15_000},
+  );
+  const updateCache = useCachedAsync<UpdateCheck>(
+    'settings:update',
+    () => settingsApi.checkUpdate(),
+    {ttl: 60_000},
+  );
+
   const load = useCallback(async () => {
-    // 本地数据很快（配置/映射/版本），先取到即渲染，不被上游探测拖慢
     const [c, mm, up] = await Promise.allSettled([
-      settingsApi.config(),
-      settingsApi.modelMap(),
-      settingsApi.checkUpdate(),
+      configCache.refresh(),
+      mapCache.refresh(),
+      updateCache.refresh(),
     ]);
-    if (c.status === 'fulfilled') {
-      const v = c.value;
-      setCfg(v);
-      const root = (v.config ?? {}) as Record<string, Record<string, unknown>>;
-      const picked: Record<Section, Record<string, FieldValue>> = {
-        schedule: pickValues(SCHEDULE_FIELDS, root.schedule),
-        prompt: pickValues(PROMPT_FIELDS, root.prompt),
-        cooldown: pickValues(COOLDOWN_FIELDS, root.cooldown),
-        pool: pickValues(POOL_FIELDS, root.pool),
-        features: pickValues(FEATURES_FIELDS, root.features),
-        session: pickValues(SESSION_FIELDS, root.session_sticky),
-        upstream: pickValues(UPSTREAM_FIELDS, root.upstream),
-        global: pickValues(GLOBAL_FIELDS, root.global),
-      };
-      setForm(picked);
-      original.current = Object.fromEntries(
-        Object.entries(picked).map(([k, v2]) => [k, {...v2}]),
-      ) as Record<Section, Record<string, FieldValue>>;
-      setRawText(JSON.stringify(v.config ?? {}, null, 2));
-      // url 可回显；token 不回显明文，留空表示不修改
-      const upstash = root.upstash as {url?: string; has_token?: boolean; token_masked?: string} | undefined;
-      setUpstashForm({url: upstash?.url || '', token: ''});
-    }
-    if (mm.status === 'fulfilled') {
+    if (c.status === 'fulfilled' && c.value) applyConfig(c.value);
+    if (mm.status === 'fulfilled' && mm.value) {
       // 后端响应是 {ok, map} 信封（session.go handleGetModelMap）：
       // 存整个信封会让「模型映射」表格把嵌套对象当行数据渲染，点击标签页即
       // React 崩溃（Objects are not valid as a React child）——必须拆出 map。
       setModelMap(mm.value?.map ?? {});
     }
-    if (up.status === 'fulfilled') setUpdate(up.value);
-  }, []);
+    if (up.status === 'fulfilled' && up.value) setUpdate(up.value);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configCache.refresh, mapCache.refresh, updateCache.refresh]);
 
-  /** 模型列表（模型映射的目标下拉用） */
-  const loadModels = useCallback(async () => {
+  /** 把 config 快照应用到可视化表单（load 与缓存回填共用）。 */
+  function applyConfig(v: ConfigGetResponse) {
+    setCfg(v);
+    const root = (v.config ?? {}) as Record<string, Record<string, unknown>>;
+    const picked: Record<Section, Record<string, FieldValue>> = {
+      schedule: pickValues(SCHEDULE_FIELDS, root.schedule),
+      prompt: pickValues(PROMPT_FIELDS, root.prompt),
+      cooldown: pickValues(COOLDOWN_FIELDS, root.cooldown),
+      pool: pickValues(POOL_FIELDS, root.pool),
+      features: pickValues(FEATURES_FIELDS, root.features),
+      session: pickValues(SESSION_FIELDS, root.session_sticky),
+      upstream: pickValues(UPSTREAM_FIELDS, root.upstream),
+      global: pickValues(GLOBAL_FIELDS, root.global),
+    };
+    setForm(picked);
+    original.current = Object.fromEntries(
+      Object.entries(picked).map(([k, v2]) => [k, {...v2}]),
+    ) as Record<Section, Record<string, FieldValue>>;
+    setRawText(JSON.stringify(v.config ?? {}, null, 2));
+    // url 可回显；token 不回显明文，留空表示不修改
+    const upstash = root.upstash as {url?: string; has_token?: boolean; token_masked?: string} | undefined;
+    const upstashUrl = upstash?.url || '';
+    setUpstashForm({url: upstashUrl, token: ''});
+    upstashOriginal.current = {url: upstashUrl};
+    rawOriginal.current = JSON.stringify(v.config ?? {}, null, 2);
+  }
+
+  // 缓存命中时（含整页刷新后从 sessionStorage 回放）立即回填表单：
+  // 后台刷新拿到新值后会再走一次 applyConfig——两帧内容一致，不会闪。
+  const cachedConfig = configCache.data;
+  useEffect(() => {
+    if (cachedConfig && !cfg) applyConfig(cachedConfig);
+    // 仅在首次拿到数据时应用；保存后的刷新由 load 显式触发
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cachedConfig]);
+
+  const cachedMap = mapCache.data;
+  useEffect(() => {
+    if (cachedMap) setModelMap(cachedMap?.map ?? {});
+  }, [cachedMap]);
+
+  const cachedUpdate = updateCache.data;
+  useEffect(() => {
+    if (cachedUpdate) setUpdate(cachedUpdate);
+  }, [cachedUpdate]);
+
+  /** 模型列表（模型映射的目标下拉用）。
+   *  reload 必传 true 强制绕过缓存重拉——models 页缓存的 TTL 会让「点刷新」
+   *  静默短路成读旧缓存，按钮看起来毫无反应；默认挂载加载才允许读缓存。 */
+  const loadModels = useCallback(async (reload = false) => {
+    if (!reload) {
+      const cached = peekCache<import('@/lib/types').PanelModelsResponse>('models:cn');
+      if (cached?.data?.models?.length) {
+        setModels(cached.data.models.map((m) => m.id));
+        return;
+      }
+    }
     try {
       const res = await modelApi.models();
       setModels((res.models ?? []).map((m) => m.id));
@@ -794,6 +868,12 @@ export default function SettingsPage() {
   }, [load, loadModels]);
 
   const cfgReady = !!cfg?.config;
+
+  /** Upstash 是否有未保存改动（token 不回显，输入即视为改动） */
+  const upstashDirty =
+    upstashForm.url !== upstashOriginal.current.url || upstashForm.token.trim() !== '';
+  /** 高级模式 JSON 是否有未保存改动 */
+  const rawDirty = rawText !== rawOriginal.current;
 
   /** 保存 Upstash 配置（token 留空表示保持原值） */
   async function saveUpstash() {
@@ -906,11 +986,15 @@ export default function SettingsPage() {
 
   async function saveModelMap(next: Record<string, string>) {
     try {
-      // 响应同为 {ok, map} 信封：以服务端回传的生效表为准（写盘失败时
-      // ok=false 且错误已由 errText 提示，但内存已生效——回显不撒谎）。
+      // 响应为 {ok, map, error?} 信封：ok=false 是写盘失败（映射内存已生效、
+      // 重启回落 config 值），必须按失败提示服务端错误——不能静默当成功。
       const res = await settingsApi.saveModelMap(next);
       setModelMap(res?.map ?? next);
-      notify.ok(t('settings.modelMapSaved'));
+      if (res?.ok === false) {
+        notify.err(res.error || t('settings.saveFailed'), t('settings.modelMapHotOnly'));
+      } else {
+        notify.ok(t('settings.modelMapSaved'));
+      }
     } catch (e) {
       notify.err(errText(e));
     }
@@ -934,6 +1018,19 @@ export default function SettingsPage() {
     }
   }
 
+  /** 顶部「重新加载」：强制重拉配置/映射/版本/模型列表。
+   *  busy 期间按钮转圈并禁用；完成/失败都给 toast——之前点击后毫无反馈，
+   *  用户不知道有没有生效。 */
+  async function reloadAll() {
+    setBusy(true);
+    try {
+      await Promise.allSettled([load(), loadModels(true)]);
+      notify.ok(t('settings.reloaded'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
@@ -945,12 +1042,10 @@ export default function SettingsPage() {
             size="sm"
             className="rounded-full"
             title={t('settings.reloadTitle')}
-            onClick={() => {
-              load();
-              loadModels();
-            }}
+            disabled={busy}
+            onClick={reloadAll}
           >
-            <RefreshCw />
+            <RefreshCw className={busy ? 'animate-spin' : ''} />
             {t('settings.reload')}
           </Button>
         }
@@ -977,8 +1072,33 @@ export default function SettingsPage() {
             </div>
           )}
 
-          {/* 可视化设置卡片 */}
-          {GROUPS.map((g) => {
+          {/* 可视化设置卡片。首载未拿到配置时整块显示骨架分组占位：
+              之前会先用默认值渲染真实开关（def: true 等），配置到达后表单
+              集体翻转，看起来像「设置自己变了」 */}
+          {!cfgReady && configCache.loading ? (
+            <>
+              {GROUPS.slice(0, 4).map((g) => (
+                <div key={g.id} className="rounded-[20px] bg-muted px-3.5 py-3" aria-hidden>
+                  <Skeleton className="h-4 w-24" />
+                  <div className="mt-3 grid grid-cols-1 gap-1.5 xl:grid-cols-2">
+                    {g.fields.slice(0, 2).map((f) => (
+                      <div
+                        key={f.key}
+                        className="flex items-center justify-between gap-3 rounded-2xl bg-background/60 px-3 py-2"
+                      >
+                        <div className="min-w-0 flex-1 space-y-1.5">
+                          <Skeleton className="h-3 w-28" />
+                          <Skeleton className="h-2.5 w-44" />
+                        </div>
+                        <Skeleton className="h-5 w-9 rounded-full" />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </>
+          ) : (
+          GROUPS.map((g) => {
             const dirty = isDirty(g.id);
             return (
               <div key={g.id} className="rounded-[20px] bg-muted px-3.5 py-3">
@@ -988,8 +1108,9 @@ export default function SettingsPage() {
                     {/* 分组说明里带加粗强调（如「只对国内版账号生效」），走 RichText 渲染 */}
                     <RichText className="text-[11px] text-muted-foreground" text={tp(g.desc)} />
                   </div>
-                  <div className="flex items-center gap-2">
-                    {dirty && (
+                  {/* 有改动才出现「撤销 / 保存」：没改过时按钮点了只会弹「无改动」，直接隐藏 */}
+                  {dirty && (
+                    <div className="flex items-center gap-2">
                       <Button
                         size="sm"
                         variant="ghost"
@@ -1000,18 +1121,17 @@ export default function SettingsPage() {
                         <RotateCcw className="h-3.5 w-3.5" />
                         {t('settings.revert')}
                       </Button>
-                    )}
-                    <Button
-                      size="sm"
-                      variant={dirty ? 'default' : 'outline'}
-                      className="rounded-full"
-                      disabled={!isAdmin || busy || !cfgReady}
-                      onClick={() => saveGroup(g.id)}
-                    >
-                      <Save className="h-3.5 w-3.5" />
-                      {t('common.save')}
-                    </Button>
-                  </div>
+                      <Button
+                        size="sm"
+                        className="rounded-full"
+                        disabled={!isAdmin || busy || !cfgReady}
+                        onClick={() => saveGroup(g.id)}
+                      >
+                        <Save className="h-3.5 w-3.5" />
+                        {t('common.save')}
+                      </Button>
+                    </div>
+                  )}
                 </div>
 
                 {/* 宽屏两列：开关与它对应的时刻/数值字段天然成对，行数减半 */}
@@ -1132,7 +1252,8 @@ export default function SettingsPage() {
                 )}
               </div>
             );
-          })}
+          })
+          )}
 
           {/* Redis / Upstash 持久化 */}
           <div className="rounded-[20px] bg-muted p-4">
@@ -1177,15 +1298,17 @@ export default function SettingsPage() {
                   {upstashBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PlugZap className="h-3.5 w-3.5" />}
                   {t('settings.testConnection')}
                 </Button>
-                <Button
-                  size="sm"
-                  className="rounded-full"
-                  disabled={!isAdmin || upstashBusy || !cfgReady}
-                  onClick={saveUpstash}
-                >
-                  <Save className="h-3.5 w-3.5" />
-                  {t('common.save')}
-                </Button>
+                {upstashDirty && (
+                  <Button
+                    size="sm"
+                    className="rounded-full"
+                    disabled={!isAdmin || upstashBusy || !cfgReady}
+                    onClick={saveUpstash}
+                  >
+                    <Save className="h-3.5 w-3.5" />
+                    {t('common.save')}
+                  </Button>
+                )}
               </div>
             </div>
 
@@ -1246,15 +1369,16 @@ export default function SettingsPage() {
               <div className="mt-4 space-y-2">
                 <div className="flex items-center justify-between">
                   <div className="font-mono text-[11px] text-muted-foreground">config.json</div>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 rounded-full text-[11px]"
-                    disabled={!isAdmin || busy || !cfgReady}
-                    onClick={() => saveJson(rawText)}
-                  >
-                    {t('common.save')}
-                  </Button>
+                  {rawDirty && (
+                    <Button
+                      size="sm"
+                      className="h-7 rounded-full text-[11px]"
+                      disabled={!isAdmin || busy || !cfgReady}
+                      onClick={() => saveJson(rawText)}
+                    >
+                      {t('common.save')}
+                    </Button>
+                  )}
                 </div>
                 <Textarea
                   rows={16}

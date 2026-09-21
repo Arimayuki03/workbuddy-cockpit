@@ -60,7 +60,6 @@
     "roleViewer": "只读用户",
     "poolOverview": "账号池概览",
     "managedAccounts": "受管账号",
-    "systemSettings": "系统设置",
     "quickLinks": "快速链接",
     "uiReference": "UI 参考",
     "upstream": "上游项目",
@@ -80,7 +79,8 @@
     "dark": "深色模式",
     "switchToDark": "切换深色模式",
     "switchToLight": "切换浅色模式",
-    "movedToToolbar": "深浅色切换已移至页面右上角（语言切换旁）"
+    "system": "跟随系统",
+    "systemShort": "系统"
   },
   "dock": {
     "tipTitle": "菜单栏引导",
@@ -224,7 +224,8 @@
     "legendErrors": "失败数",
     "axisTokens": "Token（左轴）",
     "axisRequests": "请求（右轴）",
-    "chartEmptyRange": "所选时间范围内暂无用量"
+    "chartEmptyRange": "所选时间范围内暂无用量",
+    "globalNote": "全局统计（国内版 + 国际版合计）"
   },
   "accounts": {
     "title": "账号管理",
@@ -381,7 +382,7 @@
   },
   "logs": {
     "title": "请求日志",
-    "description": "反代网关的每一次调用记录，含状态、延迟与 Token 计量（每 60 秒自动刷新；含国内版与国际版调用，不按版本过滤）",
+    "description": "反代网关的每一次调用记录，含状态、延迟与 Token 计量（含国内版与国际版调用，不按版本过滤）",
     "clearTitle": "清空所有日志？",
     "clearDesc": "将删除全部请求日志记录，用量统计的汇总数据不受影响。",
     "cleared": "已清空",
@@ -422,12 +423,16 @@
     "sysEmptyDesc": "系统日志为环形缓冲（最近 500 行），重启即清",
     "limitLabel": "条数上限",
     "requestsNote": "请求日志为环形缓冲（最近约 1000 条，重启即清）；筛选在本页进行。长期用量趋势见「用量」页。",
-    "systemNote": "任务 / 对话 / 系统三频道，最近 500 行；支持频道筛选、内容搜索与时间正/倒序切换。",
+    "systemNote": "任务 / 对话 / 系统三频道，环形缓冲最近 500 行；支持频道筛选、条数上限、内容搜索与时间正/倒序切换。",
     "searchPlaceholder": "搜索日志内容…",
+    "searchRequests": "搜索模型 / 账号 / 错误信息…",
     "searchModel": "搜索模型…",
     "sortTime": "时间排序",
     "sortAsc": "时间正序（旧→新）",
-    "sortDesc": "时间倒序（新→旧）"
+    "sortDesc": "时间倒序（新→旧）",
+    "liveToggle": "实时",
+    "liveOnNote": "当前每 5 秒自动刷新；右上角开关可暂停。",
+    "liveOffNote": "实时刷新已暂停，内容冻结在暂停那一刻；右上角开关可恢复。"
   },
   "security": {
     "title": "安全与 IP 管控",
@@ -716,7 +721,13 @@
     "colStatus": "状态",
     "kindSchool": "开学季",
     "viewDetail": "查看明细",
-    "collapseDetail": "收起明细"
+    "collapseDetail": "收起明细",
+    "queueCancel": "取消队列",
+    "queueCancelling": "取消中…",
+    "queueCancelledTitle": "队列已取消",
+    "queueCancelledDetail": "剩余待办已停止调度；进行中的任务会完成当前动作后停止",
+    "queueCancelConfirmTitle": "取消执行队列",
+    "queueCancelConfirmDesc": "停止调度剩余待办；正在执行的任务会完成当前动作后停止。"
   },
   "addAccount": {
     "title": "添加腾讯账号 · {realm}",
@@ -856,6 +867,8 @@
     "jsonInvalid": "JSON 格式有误，请检查括号与逗号",
     "jsonNotObject": "需要是一个 JSON 对象，例如 { \"checkin_hours\": [9, 21] }",
     "modelMapSaved": "模型映射已保存",
+    "saveFailed": "保存失败",
+    "modelMapHotOnly": "映射已在内存生效，写盘失败——重启后将回落到 config.json 中的旧值",
     "upstashUrlRequired": "请填写 Upstash 地址",
     "upstashSaved": "Upstash 配置已保存",
     "errNeedOneHour": "请至少填一个时刻",
@@ -869,7 +882,8 @@
     "configPath": "配置文件",
     "savedRestart": "已保存，部分字段需重启",
     "restartHint": "提示词 / 出站标识 / 国际版路由在装配期读取，重启服务后生效；其余字段已热生效",
-    "advancedNote": "保存时后端做深合并 + 原子替换，未展示的未知键会原样保留。"
+    "advancedNote": "保存时后端做深合并 + 原子替换，未展示的未知键会原样保留。",
+    "reloaded": "已重新加载"
   },
   "activity": {
     "title": "开学季活动",

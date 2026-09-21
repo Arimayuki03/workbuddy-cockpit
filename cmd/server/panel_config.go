@@ -110,6 +110,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 			enabled = newCfg.Schedule.SchoolEnabled
 		case "cat":
 			enabled = newCfg.Schedule.CatEnabled
+		case "queue":
+			enabled = newCfg.Schedule.QueueEnabled
 		}
 		_ = sch.SetEnabled(kind, enabled)
 	}
@@ -138,7 +140,7 @@ func restartRequiredFields(c *Config) []string {
 	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
 	// 主仓库排程小时数组是启动期装配（scheduler.cfg 快照），热改不覆盖。
 	out = append(out, "schedule.checkin_hours", "schedule.travel_hours", "schedule.activity_hours",
-		"schedule.keepalive_hours", "schedule.school_hours", "schedule.cat_hours")
+		"schedule.keepalive_hours", "schedule.school_hours", "schedule.cat_hours", "schedule.queue_hours")
 	// global.enabled 在 auth.SetGlobalEnabled / handler GlobalEnabled / upstream.GlobalEnabled
 	// 三处装配期注入；prompt 文本与 global base 同理。
 	out = append(out, "global.enabled", "global.chat_base", "global.billing_base",
@@ -146,15 +148,24 @@ func restartRequiredFields(c *Config) []string {
 	return out
 }
 
+// modelMapKey config.json 里的模型映射段名。它是**整段替换**语义：面板保存映射
+// 时提交的是「用户想要的完整映射表」（前端 saveModelMap 提交全量 next，
+// 删除条目的方式就是不带该键）——若走深合并，被删条目会从旧值里合回来，
+// 删除永远无法落盘，重启后"已删"条目复活。
+const modelMapKey = "model_map"
+
 // mergeConfigMaps 把 incoming 深合并进 cur（原地），返回 cur。
 // 对嵌套对象逐键覆盖而不是整体替换：面板表单只提交它管理的键，
 // 未提交的兄弟键（含用户手写的未知键）保持原样。
+// model_map 例外：整段替换（见 modelMapKey 注释）。
 func mergeConfigMaps(cur, incoming map[string]any) map[string]any {
 	for k, v := range incoming {
-		if inMap, ok := v.(map[string]any); ok {
-			if curMap, ok := cur[k].(map[string]any); ok {
-				cur[k] = mergeConfigMaps(curMap, inMap)
-				continue
+		if k != modelMapKey {
+			if inMap, ok := v.(map[string]any); ok {
+				if curMap, ok := cur[k].(map[string]any); ok {
+					cur[k] = mergeConfigMaps(curMap, inMap)
+					continue
+				}
 			}
 		}
 		cur[k] = v
@@ -172,10 +183,11 @@ func mergedJSON(m map[string]any) []byte {
 }
 
 // saveModelMap 把模型映射写回 config.json（panel.SetModelMap 端点复用 saveConfig
-// 的合并/校验/落盘链路，只携带 model_map 一个键——深合并保留其余段落原样）。
+// 的合并/校验/落盘链路，只携带 model_map 一个键——model_map 为整段替换语义，
+// 传入的表即最终落盘的表，深合并不会把已删条目合回来）。
 // 热生效（server.SetModelMap）由端点先行调用，此处仅负责持久化。
 func saveModelMap(m map[string]string, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) error {
-	raw, err := json.Marshal(map[string]any{"model_map": m})
+	raw, err := json.Marshal(map[string]any{modelMapKey: m})
 	if err != nil {
 		return fmt.Errorf("marshal model_map: %w", err)
 	}

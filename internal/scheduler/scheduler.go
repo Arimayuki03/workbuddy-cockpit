@@ -1,4 +1,4 @@
-// Package scheduler 定时任务：签到 / 活跃上报 / 猫猫旅行 / token keepalive / 开学季 / 夜猫子 六类独立排程。
+// Package scheduler 定时任务：签到 / 活跃上报 / 猫猫旅行 / token keepalive / 开学季 / 夜猫子 / 任务中心执行队列 七类独立排程。
 // 签到成功后重新查余额，余额 > 0 的冷却账号自动解冻。
 package scheduler
 
@@ -30,6 +30,7 @@ type Config struct {
 	KeepaliveHours []int // 默认 [22]
 	SchoolHours    []int // 默认 [12]：开学季任务（迁移自系统 crontab）
 	CatHours       []int // 默认 [1]：夜猫子任务（迁移自系统 crontab）
+	QueueHours     []int // 默认 [10]：任务中心执行队列（成长任务 + 开学季闭环）
 	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
 	// 默认 5 条同一 conversationId 内多轮上报把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int
@@ -52,6 +53,10 @@ type Config struct {
 	SchoolDisabled bool
 	// CatDisabled 显式关闭夜猫子任务排程（schedule.cat_enabled=false）。
 	CatDisabled bool
+	// QueueEnabled 任务中心执行队列排程开关（schedule.queue_enabled）。
+	// 命名与上面六个相反（Enabled 而非 Disabled）：队列缺省关——它对全账号执行
+	// 真实任务动作链（消耗上游配额），由用户显式打开；其余六类零值即启用是历史兼容。
+	QueueEnabled bool
 }
 
 // Scheduler 调度器。
@@ -95,10 +100,27 @@ type Scheduler struct {
 	// balanceInterval 余额刷新间隔（纳秒，0=暂停）。atomic 读写：执行循环每轮读
 	// 当前值，SetBalanceInterval 可任意时刻热改（面板保存配置）。
 	balanceInterval atomic.Int64
+
+	// queueRunner 任务中心执行队列的执行体（panel 的队列实现，main 装配期经
+	// SetQueueRunner 注入；internal/scheduler 不能 import internal/panel——依赖
+	// 方向相反，回调注入是唯一通路）。nil 时 dispatch 记 WARN 跳过（panel 未装配
+	// 或旧调用方），不 panic。
+	queueRunner func()
+	// queueMu 保护 queueRunner 的注入与读取（装配后注入一次，热改免锁也无害，
+	// 但 Go 内存模型上并发读写函数值仍需同步）。
+	queueMu sync.RWMutex
 }
 
-// kindCount 与 taskKind 枚举数量一致（checkin/travel/activity/keepalive/school/cat）。
-const kindCount = 6
+// SetQueueRunner 注入任务中心执行队列的执行体（panel.QueueRunner，main 装配期
+// 调用一次）。nil 清空。幂等：重复注入以最后一次为准。
+func (s *Scheduler) SetQueueRunner(fn func()) {
+	s.queueMu.Lock()
+	s.queueRunner = fn
+	s.queueMu.Unlock()
+}
+
+// kindCount 与 taskKind 枚举数量一致（checkin/travel/activity/keepalive/school/cat/queue）。
+const kindCount = 7
 
 // New 构建。
 func New(cfg Config) *Scheduler {
@@ -120,6 +142,9 @@ func New(cfg Config) *Scheduler {
 	if len(cfg.CatHours) == 0 {
 		cfg.CatHours = []int{1}
 	}
+	if len(cfg.QueueHours) == 0 {
+		cfg.QueueHours = []int{10}
+	}
 	// 0/缺省 = 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
 	if cfg.ActivityReportCount <= 0 {
 		cfg.ActivityReportCount = 1
@@ -132,6 +157,7 @@ func New(cfg Config) *Scheduler {
 	s.enabled[taskKeepalive].Store(!cfg.KeepaliveDisabled)
 	s.enabled[taskSchool].Store(!cfg.SchoolDisabled)
 	s.enabled[taskCat].Store(!cfg.CatDisabled)
+	s.enabled[taskQueue].Store(cfg.QueueEnabled)
 	for i := range s.lastOut {
 		s.lastOut[i].Store("")
 	}
@@ -189,6 +215,7 @@ const (
 	taskKeepalive
 	taskSchool
 	taskCat
+	taskQueue
 )
 
 // nextWake 返回 now 之后最近的唤醒时刻，以及该时刻需要执行的全部任务。
@@ -220,6 +247,9 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	}
 	if s.enabled[taskCat].Load() {
 		slots = append(slots, slot{nextFire(now, s.cfg.CatHours), taskCat})
+	}
+	if s.enabled[taskQueue].Load() {
+		slots = append(slots, slot{nextFire(now, s.cfg.QueueHours), taskQueue})
 	}
 	var earliest time.Time
 	for _, sl := range slots {
@@ -361,6 +391,8 @@ func (s *Scheduler) runOne(ctx context.Context, k taskKind) {
 	case taskCat:
 		s.RunCatNow()
 		summary = "done"
+	case taskQueue:
+		summary = s.RunQueueNow()
 	}
 	// 收尾顺序：running 先于 lastRun/lastOut 落定——观测者（/admin 轮询方）看到
 	// lastRun 更新时 running 必已复位，不存在"有结果却仍在跑"的中间态。
@@ -894,10 +926,10 @@ func (s *Scheduler) RunMinichatNow() {
 // /admin 热管理与观测（server 包的 /admin 端点依赖；对既有定时/CLI 行为零影响）
 // ============================================================================
 
-// kindNames/kindLabels 六类任务的稳定字符串标识与中文显示名（顺序与 taskKind 枚举一致）。
-var kindNames = [kindCount]string{"checkin", "travel", "activity", "keepalive", "school", "cat"}
+// kindNames/kindLabels 七类任务的稳定字符串标识与中文显示名（顺序与 taskKind 枚举一致）。
+var kindNames = [kindCount]string{"checkin", "travel", "activity", "keepalive", "school", "cat", "queue"}
 
-var kindLabels = [kindCount]string{"签到", "猫猫旅行", "活跃上报", "Token 保活", "开学季", "夜猫子"}
+var kindLabels = [kindCount]string{"签到", "猫猫旅行", "活跃上报", "Token 保活", "开学季", "夜猫子", "任务队列"}
 
 // Kinds 返回六类任务的字符串标识（枚举顺序），供外部遍历与参数校验。
 func Kinds() []string {
@@ -999,6 +1031,10 @@ func (s *Scheduler) hoursOf(k taskKind) []int {
 		return s.cfg.KeepaliveHours
 	case taskSchool:
 		return s.cfg.SchoolHours
+	case taskCat:
+		return s.cfg.CatHours
+	case taskQueue:
+		return s.cfg.QueueHours
 	default:
 		return s.cfg.CatHours
 	}

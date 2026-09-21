@@ -20,6 +20,7 @@ type Schedule struct {
 	KeepaliveHours []int `json:"keepalive_hours"` // [22]
 	SchoolHours    []int `json:"school_hours"`    // [12] 开学季任务（迁移自 school/cat 两条系统 crontab）
 	CatHours       []int `json:"cat_hours"`       // [1] 夜猫窗口 23-08 CST，01:00 窗口内补 1 次
+	QueueHours     []int `json:"queue_hours"`     // [10] 任务中心执行队列（成长任务 + 开学季闭环）
 	// CheckinEnabled/TravelEnabled/ActivityEnabled/KeepaliveEnabled/SchoolEnabled/CatEnabled
 	// 显式禁用开关（缺省 true）。
 	//
@@ -35,6 +36,10 @@ type Schedule struct {
 	KeepaliveEnabled bool `json:"keepalive_enabled"` // 缺省 true；false = 关 token 保活
 	SchoolEnabled    bool `json:"school_enabled"`    // 缺省 true；false = 停开学季任务
 	CatEnabled       bool `json:"cat_enabled"`       // 缺省 true；false = 停夜猫子任务
+	// QueueEnabled 任务中心执行队列排程开关。与上面六个缺省 true 不同：队列对
+	// 全账号执行真实任务动作链（含专家/技能真实对话，消耗上游配额），是"一键完成"
+	// 的自动化版，不适合无感默认开启——缺省 false，由用户显式打开。
+	QueueEnabled bool `json:"queue_enabled"` // 缺省 false；true = 按 queue_hours 到点自动跑执行队列
 	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
 	// 默认 5 条把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int `json:"activity_report_count"`
@@ -49,19 +54,22 @@ type Schedule struct {
 // ActivityReportCount 默认 5：领猫前置需 5 次对话，5 连发刷满 chat_5。
 func DefaultSchedule() Schedule {
 	return Schedule{
-		CheckinHours:        []int{9, 21},
-		TravelHours:         []int{9, 21},
-		ActivityHours:       []int{10},
+		CheckinHours:         []int{9, 21},
+		TravelHours:          []int{9, 21},
+		ActivityHours:        []int{10},
 		KeepaliveHours:       []int{22},
 		SchoolHours:          []int{12},
 		CatHours:             []int{1},
-		CheckinEnabled:      true,
-		TravelEnabled:       true,
-		ActivityEnabled:     true,
-		KeepaliveEnabled:    true,
-		SchoolEnabled:       true,
-		CatEnabled:          true,
-		ActivityReportCount: 5, // 领猫前置需 5 次对话，5 连发刷满 chat_5
+		QueueHours:           []int{10},
+		CheckinEnabled:       true,
+		TravelEnabled:        true,
+		ActivityEnabled:      true,
+		KeepaliveEnabled:     true,
+		SchoolEnabled:        true,
+		CatEnabled:           true,
+		ActivityReportCount:  5, // 领猫前置需 5 次对话，5 连发刷满 chat_5
+		// QueueEnabled 缺省 false（零值即关）：队列是全账号真实任务动作的批量执行，
+		// opt-in 才安全——与六个 *_enabled 的"缺省 true"相反，是有意的不对称。
 	}
 }
 
@@ -92,6 +100,9 @@ func (s *Schedule) Normalize() error {
 	if len(s.CatHours) == 0 {
 		s.CatHours = []int{1}
 	}
+	if len(s.QueueHours) == 0 {
+		s.QueueHours = []int{10}
+	}
 	// 0/负数 → 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
 	if s.ActivityReportCount <= 0 {
 		s.ActivityReportCount = 1
@@ -120,7 +131,10 @@ func (s *Schedule) validateHours() error {
 	if err := checkHourRange("schedule.school_hours", "school_enabled", s.SchoolHours); err != nil {
 		return err
 	}
-	return checkHourRange("schedule.cat_hours", "cat_enabled", s.CatHours)
+	if err := checkHourRange("schedule.cat_hours", "cat_enabled", s.CatHours); err != nil {
+		return err
+	}
+	return checkHourRange("schedule.queue_hours", "queue_enabled", s.QueueHours)
 }
 
 func checkHourRange(field, switchKey string, hours []int) error {

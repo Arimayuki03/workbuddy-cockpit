@@ -1,6 +1,9 @@
+'use client';
+
 import React from 'react';
 import {LucideIcon} from 'lucide-react';
-import {motion, type Variants} from 'motion/react';
+import {motion, useReducedMotion, type Variants} from 'motion/react';
+import {cn} from '@/lib/utils';
 
 /**
  * 空状态组件的Props接口
@@ -12,11 +15,18 @@ interface EmptyStateProps {
   title: string;
   /** 描述文本 */
   description?: string;
-  /** 自定义类名 */
+  /** 自定义类名（与默认样式合并，而非整体替换） */
   className?: string;
   /** 自定义按钮或操作 */
   children?: React.ReactNode;
 }
+
+/**
+ * 空状态的默认高度下限：数据到达前与到达后，空态块与实际内容块的
+ * 高度差是「二次跳动」的来源之一。min-h 保证空态不会塌成一行字，
+ * 传入 className 时也通过 cn 合并保留这条下限（可被覆盖）。
+ */
+const EMPTY_STATE_MIN_H = 'min-h-[240px]';
 
 /**
  * 通用空状态组件
@@ -25,9 +35,11 @@ export function EmptyState({
   icon: Icon,
   title,
   description,
-  className = 'flex flex-col items-center justify-center text-center p-8 h-full',
+  className,
   children,
 }: EmptyStateProps) {
+  const reduceMotion = useReducedMotion();
+
   const containerVariants: Variants = {
     hidden: {opacity: 0, y: 20},
     visible: {
@@ -68,8 +80,12 @@ export function EmptyState({
 
   return (
     <motion.div
-      className={className}
-      initial="hidden"
+      className={cn(
+        'flex h-full flex-col items-center justify-center p-8 text-center',
+        EMPTY_STATE_MIN_H,
+        className,
+      )}
+      initial={reduceMotion ? false : 'hidden'}
       animate="visible"
       variants={containerVariants}
     >
