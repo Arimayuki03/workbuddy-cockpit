@@ -34,6 +34,10 @@ jobs:
         uses: ./.github/actions/ai-governance
         with:
           github-token: ${{ github.token }}
+          # 治理身份令牌（可选）：配置 GOVERNANCE_TOKEN secret 后，治理评论/关闭/建 issue
+          # 将以该 PAT 对应账号的身份发布（如 Claude Code <noreply@anthropic.com>），
+          # 缺省回落 github-actions[bot]。PAT 需勾选 repo 权限（public 仓库 public_repo）。
+          governance-token: ${{ secrets.GOVERNANCE_TOKEN }}
           # AI 缺省走 GitHub Models（免费，靠 models:read）。
           # 若要切换自建/第三方 OpenAI 兼容端点，在仓库 Secrets 里配置以下三项即可，无需改本文件：
           #   AI_BASE_URL / AI_API_KEY / AI_MODEL
@@ -51,5 +55,12 @@ jobs:
           maintainer-exempt: 'true'
           # PR 治理：垃圾检测 + 要点提炼 + canonical 关联（永不关闭合法 PR）
           enable-pr-governance: 'true'
+          # PR 历史语境评审：AI 对照相关历史 issue 的关闭结论评审新 PR，
+          # 证据确凿 → 中文评审评论 + 关闭；证据不足 → 回落 canonical 关联链路（宁可漏判、不可误关）
+          pr-review-close: 'false'
+          max-related-issues: '3'
+          related-comments-per-issue: '10'
+          related-body-truncate: '1500'
           max-canonical-index: '50'
-          analyze-file-changes: 'false'
+          # R12：diff 是垃圾/质量检测与历史语境评审的核心证据，统一开启（成本可接受，2026-09 决策）
+          analyze-file-changes: 'true'
