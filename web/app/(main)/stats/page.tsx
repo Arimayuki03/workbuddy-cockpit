@@ -82,9 +82,21 @@ export default function StatsPage() {
   const [daily, setDaily] = useState<UsagePoint[]>([]);
   const [byModel, setByModel] = useState<UsageBreakdown[]>([]);
   const [byKey, setByKey] = useState<UsageBreakdown[]>([]);
-  const [days, setDays] = useState('30');
+  /**
+   * 时段。默认「今日」（issue #53）。
+   *
+   * 为什么默认改成今日：上方四张卡片本来就是「今日 / 本周」口径，而下面的趋势图
+   * 与两张分解表跟的是这个选择器——原先默认「近 30 天」，同一屏两种口径并存，
+   * 很容易把 30 天的数字当成今天的（报告者的原话）。而绝大多数时候打开这页就是
+   * 想看「今天用了多少」。
+   *
+   * 取值是**天数**而非枚举：`1` 就是今天一天（后端口径是「近 N 天且含今天」，
+   * 见 `server/routers/stats.py` 的 `_since`），所以趋势图、按模型、按密钥三处
+   * 与选择器天然同一口径，不需要各自翻译一遍。
+   */
+  const [days, setDays] = useState('1');
   const load = useCallback(async () => {
-    const d = Number(days) || 30;
+    const d = Number(days) || 1;
     const results = await Promise.allSettled([
       statsApi.summary(realm),
       statsApi.daily(d, realm),
@@ -127,6 +139,8 @@ export default function StatsPage() {
             <Select value={days} onValueChange={setDays}>
               <SelectTrigger className="h-8 w-[130px] rounded-full"><SelectValue /></SelectTrigger>
               <SelectContent>
+                {/* 「今日」排在第一位并作为默认：与上方卡片的「今日」口径对齐 */}
+                <SelectItem value="1">{t('stats.today')}</SelectItem>
                 <SelectItem value="7">{t('stats.last7')}</SelectItem>
                 <SelectItem value="30">{t('stats.last30')}</SelectItem>
                 <SelectItem value="90">{t('stats.last90')}</SelectItem>
@@ -274,7 +288,12 @@ export default function StatsPage() {
       <section className="rounded-[20px] bg-muted p-4">
         <div className="mb-3 flex items-center justify-between">
           <div className="text-sm font-medium">{t('stats.tokenTrend')}</div>
-          <div className="text-[11px] text-muted-foreground">{t('stats.dailyAgg')}</div>
+          {/* 窗口只有一天时「按天聚合」是废话（就一根柱子），换成「当日汇总」；
+              多天窗口保持原文案。两者都随选择器走，不会出现「选择器是今日、
+              副标题还写着按天聚合」的错配。 */}
+          <div className="text-[11px] text-muted-foreground">
+            {days === '1' ? t('stats.dailyAggToday') : t('stats.dailyAgg')}
+          </div>
         </div>
         <div className="h-[260px] w-full">
           {chartData.length ? (

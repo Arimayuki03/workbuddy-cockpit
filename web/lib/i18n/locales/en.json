@@ -212,6 +212,7 @@
   "stats": {
     "title": "Usage",
     "description": "Token consumption and request volume by time, model and key (auto-refresh every 60s; currently {realm} only)",
+    "today": "Today",
     "last7": "Last 7 days",
     "last30": "Last 30 days",
     "last90": "Last 90 days",
@@ -240,6 +241,7 @@
     "topModel": "Top model {model}",
     "distributing": "Distributing",
     "tokenTrend": "Token consumption trend",
+    "dailyAggToday": "Today only",
     "dailyAgg": "Aggregated daily",
     "noUsageData": "No usage data yet",
     "byModel": "By model",

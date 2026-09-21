@@ -188,6 +188,7 @@
   "stats": {
     "title": "사용량",
     "description": "기간, 모델, 키별로 Token 소비와 요청량을 집계합니다 (60초마다 자동 새로고침, 현재 {realm}만 집계)",
+    "today": "오늘",
     "last7": "최근 7일",
     "last30": "최근 30일",
     "last90": "최근 90일",
@@ -216,6 +217,7 @@
     "topModel": "주력 모델 {model}",
     "distributing": "분산 중",
     "tokenTrend": "Token 소비 추이",
+    "dailyAggToday": "오늘 집계",
     "dailyAgg": "일별 집계",
     "noUsageData": "사용량 데이터가 없습니다",
     "byModel": "모델별",
