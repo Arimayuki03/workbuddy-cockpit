@@ -287,7 +287,7 @@ echo.
 set /p r=  请选择 (y/n):
 if /i not "%r%"=="y" goto :menu
 echo 正在停止旧服务...
-taskkill /F /IM wb2api.exe >nul 2>nul
+call :stop_service
 timeout /t 1 /nobreak >nul 2>nul
 goto :run
 
@@ -298,28 +298,44 @@ echo.
 set /p r=  请选择 (y/n):
 if /i not "%r%"=="y" goto :menu
 echo 正在清理残留进程...
+call :stop_service
 taskkill /F /PID %PID% >nul 2>nul
-taskkill /F /IM wb2api.exe >nul 2>nul
 timeout /t 1 /nobreak >nul 2>nul
 goto :run
 
 :run
-rem 前端面板（v1.2.0）：有 Node 才重构建静态导出；无 Node 时跳过，
-rem 继续用上一次成功构建的产物（wb2api.exe 内嵌，本机增量场景）。
+rem 前端面板（v1.2.0）：只在源码/依赖比产物（web\out\index.html）新时才重建静态导出，
+rem 平时启动零构建开销；无 Node / 无 web 目录时同样跳过，沿用上一次成功构建的产物。
 where node >nul 2>nul
 if errorlevel 1 (
     echo [提示] 未检测到 Node.js，跳过面板前端构建（使用上次构建产物）。
     goto :skip_panel_build
 )
-if exist web\package.json (
-    echo 构建面板前端（npm run build:export，产物变化时才有开销）...
-    pushd web
-    call npm run build:export
-    popd
-    if errorlevel 1 echo [Warning] 前端构建失败，继续使用上次成功构建的产物。
-) else (
+if not exist web\package.json (
     echo [提示] web 目录不存在，跳过面板前端构建。
+    goto :skip_panel_build
 )
+rem PowerShell 时间戳比较：源码任一文件比产物新 → exit 1（需构建）；产物已最新 → exit 0（跳过）。
+set PANEL_BUILD=0
+powershell -NoProfile -Command "$out=Get-Item 'web\out\index.html' -ErrorAction SilentlyContinue; if(-not $out){exit 1}; $new=Get-ChildItem 'web\app','web\components','web\lib','web\hooks','web\public','web\package.json','web\next.config.ts' -Recurse -File -ErrorAction SilentlyContinue | Where-Object {$_.LastWriteTime -gt $out.LastWriteTime}; if($new){exit 1} else {exit 0}"
+if errorlevel 1 set PANEL_BUILD=1
+if "%PANEL_BUILD%"=="0" (
+    echo [提示] 面板前端产物已是最新，跳过构建。
+    goto :skip_panel_build
+)
+echo 构建面板前端（npm run build:export）...
+pushd web
+call npm run build:export
+popd
+if errorlevel 1 (
+    rem pushd/popd 不破坏 errorlevel，此处仍可判构建结果。
+    echo [Warning] 前端构建失败，继续使用上次成功构建的产物。
+    goto :skip_panel_build
+)
+rem 构建成功 → 同步产物到 internal\panel\dist（go:embed 的嵌入源，漏拷则编译进 exe 的仍是旧面板）。
+rem robocopy 退出码 0/1 算成功，>=8 才是失败（2-7 是“有文件拷贝/跳过”的正常组合）。
+robocopy web\out internal\panel\dist /MIR /NFL /NDL /NJH /NJS >nul
+if errorlevel 8 echo [Warning] 同步 web\out 到 internal\panel\dist 失败，本次编译可能内嵌旧面板。
 :skip_panel_build
 rem 编译服务（go build 缓存命中秒级；源码更新后自动生效，无需手动删 exe）
 call :build wb2api.exe ./cmd/server
@@ -329,13 +345,19 @@ if not exist wb2api.exe (
     goto :menu
 )
 if not exist logs mkdir logs
-set "LOG=%~dp0logs\server.log"
-set "EXE=%~dp0wb2api.exe"
 echo.
 echo  ===== 后台启动服务 =====
 echo  日志文件 : logs\server.log
 echo.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-service.ps1"
+rem 与 start-workbuddy2api.cmd 对齐：Start-Process 后台拉起 + 带 -config 参数 + 写 wb2api.pid，
+rem 两套脚本共享同一 pid 文件（Go 日志走 stderr，重定向到 server.log 即可）。
+powershell -NoProfile -Command "try { $p=Start-Process -FilePath '%~dp0wb2api.exe' -ArgumentList '-config','config.json' -WorkingDirectory '%~dp0' -WindowStyle Hidden -RedirectStandardError '%~dp0logs\server.log' -PassThru -ErrorAction Stop } catch { exit 1 }; [IO.File]::WriteAllText('%~dp0wb2api.pid', [string]$p.Id); exit 0"
+if errorlevel 1 (
+    echo  [错误] 服务进程启动失败，请选 7 查看日志。
+    echo.
+    pause
+    goto :menu
+)
 echo  服务已后台启动，正在等待端口 7863 就绪...
 rem 最多等 10 秒，轮询 healthz（匹配 service 身份字段，注意服务无账号时 /healthz 返回 503 也算就绪）
 set /a n=0
@@ -363,15 +385,48 @@ goto :menu
 :stop
 echo.
 echo  ===== 停止服务 =====
-taskkill /F /IM wb2api.exe >nul 2>nul
-if errorlevel 1 (
-    echo  未检测到运行中的服务（wb2api.exe）。
-) else (
-    echo  服务已停止。
-)
+call :stop_service
 echo.
 pause
 goto :menu
+
+rem 停止 wb2api：优先按 wb2api.pid 精确停止（与 start-workbuddy2api.cmd 共享同一 pid 文件，
+rem 先校验该 PID 确属 wb2api.exe，防 PID 复用误杀）；pid 缺失/失效时回退按映像名，
+rem 最后按端口 7863 兜底。成功置 STOPPED=1，未发现运行中的服务则保持 0。
+:stop_service
+set STOPPED=0
+set STOP_PID=
+if exist wb2api.pid set /p STOP_PID=<wb2api.pid
+set STOP_PID_NUM=
+if defined STOP_PID set /a STOP_PID_NUM=STOP_PID 2>nul
+if not "%STOP_PID_NUM%"=="%STOP_PID%" set STOP_PID=
+if defined STOP_PID (
+    tasklist /FI "PID eq %STOP_PID%" 2>nul | findstr /i "wb2api.exe" >nul 2>nul
+    if not errorlevel 1 (
+        taskkill /PID %STOP_PID% /T /F >nul 2>nul
+        if not errorlevel 1 set STOPPED=1
+    )
+    del /q wb2api.pid >nul 2>nul
+)
+if "%STOPPED%"=="1" goto :stop_service_done
+taskkill /F /IM wb2api.exe >nul 2>nul
+if not errorlevel 1 (
+    set STOPPED=1
+    goto :stop_service_done
+)
+rem 按映像名没杀到 → 端口 7863 仍有 LISTENING 则按端口兜底。
+set PORT_PID=
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":7863" ^| findstr "LISTENING" 2^>nul') do set PORT_PID=%%p
+if not defined PORT_PID goto :stop_service_done
+taskkill /F /PID %PORT_PID% /T /F >nul 2>nul
+if not errorlevel 1 set STOPPED=1
+:stop_service_done
+if "%STOPPED%"=="1" (
+    echo  服务已停止。
+) else (
+    echo  未检测到运行中的服务（wb2api.exe）。
+)
+goto :eof
 
 :log
 echo.

@@ -107,7 +107,9 @@ export function AddAccountDialog({
       // panel 返回 {ok, url, state, realm}：url 即授权链接（适配层已改名）
       setAuthUrl(data.url);
       setPhase('waiting');
-      setMessage(t('addAccount.waiting'));
+      // 等待文案按版本拆分：cn 是浏览器登录 / 扫码 / 手机号，global 是
+      // Google 等第三方登录 + 新号选地区注册——共用一句会对国际版误导。
+      setMessage(t(realm === 'global' ? 'addAccount.waitingGlobal' : 'addAccount.waitingCn'));
 
       const tick = async () => {
         // 标签页在后台就不查：浏览器本来也会把定时器节流到约 1 次/分钟。

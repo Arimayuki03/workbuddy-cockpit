@@ -69,6 +69,16 @@ func main() {
 	cfgPath := flag.String("config", "config.json", "path to config json")
 	flag.Parse()
 
+	// 面板/管理端点对用户展示与复制的是这个路径（设置页「复制 config.json 路径」），
+	// flag 默认值是相对路径——工作目录一变就复制出错误位置。启动时统一规范化为
+	// 绝对路径：Load/SaveConfig 闭包继续用 *cfgPath 原值（相对路径同样能读写，
+	// 且保持用户传入形态），仅展示/写回用途取 absPath。
+	absPath, err := filepath.Abs(*cfgPath)
+	if err != nil {
+		// 规范化失败（理论上是取工作目录失败）时回落原值，不让启动失败在展示细节上。
+		absPath = *cfgPath
+	}
+
 	cfg, err := Load(*cfgPath)
 	if err != nil {
 		// 配置文件不存在时给一次机会用纯默认 + env
@@ -296,7 +306,7 @@ func main() {
 			ExpiringSoonWindow: cfg.ExpiringSoonDur,
 			ProbeFile:          stateSibling(cfg.StateFile, "output_probes.json"),
 			LoopbackOnly:       cfg.Panel.LoopbackOnly,
-			ConfigPath:         *cfgPath,
+			ConfigPath:         absPath,
 			LoadConfig: func() (any, error) {
 				return Load(*cfgPath)
 			},
@@ -348,7 +358,9 @@ func main() {
 		Admin: server.AdminConfig{
 			Enabled:                  cfg.Admin.Enabled,
 			CreditRefreshMinInterval: time.Duration(cfg.Admin.CreditRefreshMinIntervalSec) * time.Second,
-			ConfigPath:               *cfgPath,
+			// 与面板 ConfigPath 同口径用绝对路径：它只用于写回 config.json，
+			// 相对路径也能工作，但统一后与设置页展示/复制的路径一致，排查更直观。
+			ConfigPath: absPath,
 		},
 		Sched:      sch,
 		OnShutdown: stop,

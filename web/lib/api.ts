@@ -16,6 +16,7 @@ import type {
   Me,
   MetricsSnapshot,
   ModelMap,
+  ModelMapResponse,
   ModelProbesResponse,
   OkOnlyResponse,
   OkResponse,
@@ -211,9 +212,9 @@ export const settingsApi = {
   /** 测试 Upstash 连通性；token 留空表示使用已保存的值 */
   testUpstash: (url: string, token?: string) =>
     post<UpstashTestResponse>('/api/settings/upstash/test', {url, token}),
-  /** 模型映射（后端 server.ModelMapView / SetModelMap + 配置写回） */
-  modelMap: () => get<ModelMap>('/api/settings/model-map'),
-  saveModelMap: (map: ModelMap) => post<ModelMap>('/api/settings/model-map', {map}),
+  /** 模型映射（后端 server.ModelMapView / SetModelMap + 配置写回）；响应是 {ok,map} 信封 */
+  modelMap: () => get<ModelMapResponse>('/api/settings/model-map'),
+  saveModelMap: (map: ModelMap) => post<ModelMapResponse>('/api/settings/model-map', {map}),
   /** 版本检查（后端 internal/server/version.go；只读比对，不做自更新） */
   checkUpdate: () => get<UpdateCheck>('/api/system/check-update'),
 };

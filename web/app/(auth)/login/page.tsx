@@ -10,6 +10,7 @@ import {Button} from '@/components/ui/button';
 import {Input} from '@/components/ui/input';
 import {Label} from '@/components/ui/label';
 import {LanguageToggle} from '@/components/common/layout/LanguageToggle';
+import {ThemeToggle} from '@/components/common/layout/ThemeToggle';
 import {useT} from '@/lib/i18n/provider';
 
 export default function LoginPage() {
@@ -67,8 +68,9 @@ export default function LoginPage() {
 
   return (
     <div className="bg-background relative flex min-h-svh flex-col items-center justify-center gap-6 p-6 md:p-10">
-      {/* 未登录也要能换语言：看不懂当前语言的人得先能切过去 */}
-      <div className="absolute right-4 top-4">
+      {/* 未登录也要能换语言和主题：看不懂/看不清当前界面的人得先能切过去 */}
+      <div className="absolute right-4 top-4 flex items-center gap-2">
+        <ThemeToggle />
         <LanguageToggle />
       </div>
       <motion.div

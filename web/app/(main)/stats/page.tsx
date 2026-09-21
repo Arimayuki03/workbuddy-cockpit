@@ -48,8 +48,9 @@ const CHART_COLORS = [
 ];
 
 export default function StatsPage() {
-  // 统计是全局记录（Go 网关单实例双版本），不随 realm 过滤；usage 分桶自带 realm 维度
-  const {label: realmName} = useRealm();
+  // 统计是全局记录（Go 网关单实例双版本），但分桶/时序自带 realm 维度，
+  // 模型表按当前版本过滤；by_account 行自带 realm 标注，保持全局对照。
+  const {realm, label: realmName} = useRealm();
   const t = useT();
   const [usage, setUsage] = useState<UsageSnapshot | null>(null);
   const [native, setNative] = useState<MetricsSnapshot | null>(null);
@@ -87,18 +88,114 @@ export default function StatsPage() {
     }
   }, [t]);
 
-  // 时序：小时点与日点混排（日点在前、小时点在后）；scope=hour 的 t 形如 2026-09-21T14
+  // 时序：小时点与日点混排（日点在前、小时点在后）；scope=hour 的 t 形如 2026-09-21T14。
+  // label 留完整时间供 tooltip 用，axis 只在 XAxis 按 interval 抽样显示，窄屏不再挤成一团。
   const chartData = useMemo(() => {
     if (!usage) return [];
-    return usage.series.map((p) => ({
-      day: p.scope === 'hour'
-        ? (p.t.slice(5, 10) + ' ' + p.t.slice(11) + ':00')
-        : p.t.slice(5),
-      tokens: p.total_tokens,
-      requests: p.requests,
-      errors: p.errors,
-    }));
+    return usage.series.map((p) => {
+      const isHour = p.scope === 'hour';
+      return {
+        label: isHour ? p.t.slice(5, 10) + ' ' + p.t.slice(11) + ':00' : p.t.slice(5),
+        tokens: p.total_tokens,
+        requests: p.requests,
+        errors: p.errors,
+      };
+    });
   }, [usage]);
+
+  // Token（左轴）与请求数（右轴）量级不同：混在一张双轴图里比各自缩放更直观，
+  // 也省掉「请求数柱子矮到看不见」的问题；失败数继续用虚线叠在右轴上。
+  const chartHeight = 280;
+  const chart = chartData.length ? (
+    <ResponsiveContainer width="100%" height={chartHeight}>
+      {/* 用 ComposedChart 而不是 BarChart：BarChart 会忽略非 Bar 子组件 */}
+      <ComposedChart data={chartData} margin={{top: 8, right: 4, bottom: 0, left: 0}} barCategoryGap="20%">
+        <defs>
+          {/* 柱体纵向渐变 + 顶部圆角：纯色平涂在深色主题下发闷，渐变让趋势的「形状」更突出 */}
+          <linearGradient id="tokenBarGradient" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--chart-1)" stopOpacity={0.95} />
+            <stop offset="100%" stopColor="var(--chart-1)" stopOpacity={0.45} />
+          </linearGradient>
+        </defs>
+        <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+        {/* X 轴按像素密度自动抽样标签（minTickGap），整点时间不再重叠；preserveStartEnd 保证首尾时间可见 */}
+        <XAxis
+          dataKey="label"
+          tickLine={false}
+          axisLine={false}
+          fontSize={11}
+          minTickGap={28}
+          stroke="var(--muted-foreground)"
+        />
+        <YAxis
+          yAxisId="tokens"
+          tickLine={false}
+          axisLine={false}
+          width={52}
+          fontSize={11}
+          stroke="var(--muted-foreground)"
+          tickFormatter={(v) => fmtCompact(Number(v))}
+        />
+        <YAxis
+          yAxisId="requests"
+          orientation="right"
+          tickLine={false}
+          axisLine={false}
+          width={40}
+          fontSize={11}
+          stroke="var(--muted-foreground)"
+          tickFormatter={(v) => fmtCompact(Number(v))}
+        />
+        <Tooltip
+          cursor={{fill: 'var(--accent)'}}
+          contentStyle={{
+            background: 'var(--popover)',
+            border: '1px solid var(--border)',
+            borderRadius: 12,
+            fontSize: 12,
+          }}
+          labelFormatter={(label) => String(label)}
+          formatter={(value, name) => {
+            const key = String(name);
+            if (key === 'tokens') return [fmtNumber(Number(value)), t('stats.legendTokens')];
+            if (key === 'errors') return [fmtNumber(Number(value)), t('stats.legendErrors')];
+            return [fmtNumber(Number(value)), t('stats.legendRequests')];
+          }}
+        />
+        <Bar
+          yAxisId="tokens"
+          dataKey="tokens"
+          name="tokens"
+          fill="url(#tokenBarGradient)"
+          radius={[4, 4, 0, 0]}
+          /* 限制柱宽：只有一两天数据时，柱子不会被拉伸占满整个图表 */
+          maxBarSize={48}
+        />
+        <Line
+          yAxisId="requests"
+          type="monotone"
+          dataKey="requests"
+          name="requests"
+          stroke="var(--chart-2)"
+          strokeWidth={1.5}
+          dot={false}
+        />
+        {/* 失败数：与请求数同轴（同为次数），红色虚线只作「那时出过事」的信号，具体数值看悬停 */}
+        <Line
+          yAxisId="requests"
+          type="monotone"
+          dataKey="errors"
+          name="errors"
+          stroke="var(--destructive)"
+          strokeWidth={1.5}
+          strokeDasharray="4 3"
+          dot={false}
+        />
+      </ComposedChart>
+    </ResponsiveContainer>
+  ) : null;
+
+  const hasErrors = useMemo(() => chartData.some((p) => p.errors > 0), [chartData]);
 
   /** 今日用量：今天的全部小时点聚合；无小时点时回退今天的日点 */
   const todayUsage = useMemo(() => {
@@ -122,7 +219,12 @@ export default function StatsPage() {
       : {requests: 0, tokens: 0, errors: 0};
   }, [usage]);
 
-  const byModel = usage?.by_model ?? [];
+  /**
+   * 模型行按当前版本过滤：后端 ByModel 按 (realm, model) 拆分并带 realm 标注，
+   * 无标注只可能是历史存量（新数据恒有标注，后端 Add() 把空 realm 回落为 cn），
+   * 归入 cn——同一裸模型名在双域是两行，不按版本过滤会重复展示。
+   */
+  const byModel = (usage?.by_model ?? []).filter((it) => (it.realm ?? 'cn') === realm);
   const byAccount = usage?.by_account ?? [];
 
   return (
@@ -208,7 +310,7 @@ export default function StatsPage() {
       </section>
 
       <section className="rounded-[20px] bg-muted p-4">
-        <div className="mb-3 flex items-center justify-between">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div className="text-sm font-medium">{t('stats.tokenTrend')}</div>
           <div className="text-[11px] text-muted-foreground">
             {t('stats.seriesNote', {
@@ -216,54 +318,28 @@ export default function StatsPage() {
             })}
           </div>
         </div>
-        <div className="h-[260px] w-full">
-          {chartData.length ? (
-            <ResponsiveContainer width="100%" height="100%">
-              {/* 用 ComposedChart 而不是 BarChart：BarChart 会忽略非 Bar 子组件 */}
-              <ComposedChart data={chartData} margin={{top: 4, right: 8, bottom: 0, left: -8}} barCategoryGap="20%">
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                <XAxis dataKey="day" tickLine={false} axisLine={false} fontSize={11} stroke="var(--muted-foreground)" />
-                <YAxis tickLine={false} axisLine={false} fontSize={11} stroke="var(--muted-foreground)" tickFormatter={(v) => fmtCompact(Number(v))} />
-                <Tooltip
-                  cursor={{fill: 'var(--accent)'}}
-                  contentStyle={{
-                    background: 'var(--popover)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 12,
-                    fontSize: 12,
-                  }}
-                  formatter={(value, name) => {
-                    const label = String(name);
-                    if (label === 'tokens') return [fmtNumber(Number(value)), 'Token'];
-                    if (label === 'errors') {
-                      return [fmtNumber(Number(value)), t('dashboard.failedRequests')];
-                    }
-                    return [fmtNumber(Number(value)), t('metric.requests')];
-                  }}
-                />
-                <Bar
-                  dataKey="tokens"
-                  name="tokens"
-                  fill="var(--chart-1)"
-                  radius={[4, 4, 0, 0]}
-                  /* 限制柱宽：只有一两天数据时，柱子不会被拉伸占满整个图表 */
-                  maxBarSize={48}
-                />
-                {/* 失败数用一条线叠在同一张图上：它与 token 柱不同量级，做成柱子
-                    会把柱形压扁。线只作「那天出过事」的信号，具体数值看悬停。 */}
-                <Line
-                  type="monotone"
-                  dataKey="errors"
-                  name="errors"
-                  stroke="var(--destructive)"
-                  strokeWidth={1.5}
-                  strokeDasharray="4 3"
-                  dot={false}
-                />
-              </ComposedChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="grid h-full place-items-center text-xs text-muted-foreground">{t('stats.noUsageData')}</div>
+        {chart}
+        {!chart && (
+          <div className="grid h-[120px] place-items-center text-xs text-muted-foreground">{t('stats.noUsageData')}</div>
+        )}
+        {/* 图例自绘（recharts 默认图例在窄屏会换行错位）：线样与图上一致 */}
+        <div className="mt-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-2 w-3 rounded-sm" style={{background: 'var(--chart-1)'}} />
+            {t('stats.legendTokens')}
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="inline-block h-0 w-3 border-t-2" style={{borderColor: 'var(--chart-2)'}} />
+            {t('stats.legendRequests')}
+          </span>
+          {hasErrors && (
+            <span className="inline-flex items-center gap-1.5">
+              <span
+                className="inline-block h-0 w-3 border-t-2 border-dashed"
+                style={{borderColor: 'var(--destructive)'}}
+              />
+              {t('stats.legendErrors')}
+            </span>
           )}
         </div>
       </section>

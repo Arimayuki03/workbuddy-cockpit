@@ -1,9 +1,11 @@
 'use client';
 
 import {memo, useEffect} from 'react';
-import {useRouter} from 'next/navigation';
+import {usePathname, useRouter} from 'next/navigation';
+import {motion, useReducedMotion} from 'motion/react';
 import {ManagementBar} from '@/components/common/layout/ManagementBar';
 import {LanguageToggle} from '@/components/common/layout/LanguageToggle';
+import {ThemeToggle} from '@/components/common/layout/ThemeToggle';
 import {RealmToggle} from '@/components/common/layout/RealmToggle';
 import {RealmProvider} from '@/lib/realm-context';
 import {useAuth} from '@/lib/auth-context';
@@ -17,6 +19,8 @@ export default function MainLayout({
 }) {
   const {me, loading} = useAuth();
   const router = useRouter();
+  const pathname = usePathname();
+  const reduceMotion = useReducedMotion();
 
   // 仅在确认未登录时跳转；不阻塞内容渲染，避免每次切页闪一下
   useEffect(() => {
@@ -36,10 +40,24 @@ export default function MainLayout({
                   移动端只显示图标（compact），避免窄屏被它占掉一行。
                 */}
                 <div className="flex flex-wrap items-center justify-end gap-2">
+                  <ThemeToggle />
                   <LanguageToggle />
                   <RealmToggle />
                 </div>
-                {children}
+                {/*
+                  切页入场动画：key 取路径，换页即重放；只动 opacity/transform。
+                  不包 ManagementBar；尊重系统"减弱动态效果"（此时直接呈现，不播动画）。
+                  reduced-motion 值只用于 transition（不进 SSR 标记），不会有水合不一致。
+                */}
+                <motion.div
+                  key={pathname}
+                  initial={{opacity: 0, y: 8}}
+                  animate={{opacity: 1, y: 0}}
+                  transition={reduceMotion ? {duration: 0} : {duration: 0.28, ease: 'easeOut'}}
+                  className="flex min-h-0 flex-1 flex-col"
+                >
+                  {children}
+                </motion.div>
               </div>
             </div>
           </div>

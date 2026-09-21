@@ -13,6 +13,7 @@
     "manualCopy": "可长按选中后手动复制",
     "close": "关闭",
     "loading": "加载中…",
+    "search": "搜索",
     "listSeparator": "、",
     "save": "保存",
     "yes": "是",
@@ -62,11 +63,13 @@
     "systemSettings": "系统设置",
     "quickLinks": "快速链接",
     "uiReference": "UI 参考",
+    "upstream": "上游项目",
+    "upstreamTitle": "workbuddy2api：本面板的上游网关项目",
     "community": "LINUX DO 社区",
     "communityTitle": "本项目在 LINUX DO 社区发布与交流",
     "help": "帮助",
-    "about": "关于 WorkBuddy Manager",
-    "aboutDesc": "WorkBuddy Manager 是为 workbuddy2api 打造的账号池管理与 OpenAI 兼容反代网关，支持多账号扫码纳管、自动签到、密钥分发、IP 管控与用量统计。",
+    "about": "关于 WorkBuddy Cockpit",
+    "aboutDesc": "WorkBuddy Cockpit 是自托管的一体化方案：多账号 OpenAI 兼容网关 + 内嵌 Web 管理面板，支持多账号扫码纳管、自动签到、任务自动化、密钥分发与用量统计。",
     "versionFallback": "（未取到运行版本）",
     "logout": "退出登录",
     "logoutTitle": "确认退出登录？",
@@ -76,7 +79,8 @@
     "light": "浅色模式",
     "dark": "深色模式",
     "switchToDark": "切换深色模式",
-    "switchToLight": "切换浅色模式"
+    "switchToLight": "切换浅色模式",
+    "movedToToolbar": "深浅色切换已移至页面右上角（语言切换旁）"
   },
   "dock": {
     "tipTitle": "菜单栏引导",
@@ -145,6 +149,8 @@
     "valid": "有效期内",
     "allOk": "全部正常",
     "abnormal": "{n} 个异常",
+    "manualDisabledHint": "另有 {n} 个账号已手动停用",
+    "mixedHint": "停用 {m} 个 · 异常 {n} 个",
     "waitingUpstream": "等待上游同步",
     "creditsLow": "{n} 个账号低于 200",
     "creditsCovered": "覆盖 {n} 个账号",
@@ -212,7 +218,13 @@
     "nativeNote": "来自 /v1/stats，重启即清；长期趋势看上面的用量分桶",
     "cacheHit": "缓存命中",
     "byAccount": "按账号",
-    "seriesNote": "含 {hours} 个小时粒度点，更早数据按日折叠"
+    "seriesNote": "含 {hours} 个小时粒度点，更早数据按日折叠",
+    "legendTokens": "Token 用量",
+    "legendRequests": "请求数",
+    "legendErrors": "失败数",
+    "axisTokens": "Token（左轴）",
+    "axisRequests": "请求（右轴）",
+    "chartEmptyRange": "所选时间范围内暂无用量"
   },
   "accounts": {
     "title": "账号管理",
@@ -410,7 +422,12 @@
     "sysEmptyDesc": "系统日志为环形缓冲（最近 500 行），重启即清",
     "limitLabel": "条数上限",
     "requestsNote": "请求日志为环形缓冲（最近约 1000 条，重启即清）；筛选在本页进行。长期用量趋势见「用量」页。",
-    "systemNote": "任务 / 对话 / 系统三频道，最近 500 行，时间升序。"
+    "systemNote": "任务 / 对话 / 系统三频道，最近 500 行；支持频道筛选、内容搜索与时间正/倒序切换。",
+    "searchPlaceholder": "搜索日志内容…",
+    "searchModel": "搜索模型…",
+    "sortTime": "时间排序",
+    "sortAsc": "时间正序（旧→新）",
+    "sortDesc": "时间倒序（新→旧）"
   },
   "security": {
     "title": "安全与 IP 管控",
@@ -500,6 +517,7 @@
     "loadFailed": "读取失败",
     "noModels": "暂无模型",
     "noModelsDesc": "未从腾讯模型接口或上游取到任何模型，请确认账号可用且上游容器在运行。",
+    "emptyForRealm": "当前版本（{realm}）暂无可用模型：需账号池里有 {realm} 账号，且（国际版）config 已开启 global.enabled",
     "noMatch": "没有匹配的模型",
     "noMatchDesc": "换个关键词或清除筛选条件试试。",
     "colModel": "模型",
@@ -553,8 +571,8 @@
     "noModels": "未取到模型，请检查「模型中心」",
     "sessionCreditTitle": "本次会话累计消耗的积分（每条回答来自上游 usage.credit）",
     "sessionCredit": "本次消耗 {v}",
-    "footnote1": "测试台仅用于调试（走管理端登录态，不经密钥与 IP 管控）",
-    "footnote2": "正式接入请用「API 密钥」页签发的 wbk_ 密钥",
+    "footnote1": "测试台仅用于调试（走管理端登录态，真实消耗账号积分）",
+    "footnote2": "正式接入请用 config.json 的 api_key 作为 Bearer Token 调用网关",
     "footnote3": "不支持的推理档位上游会自动降级"
   },
   "effort": {
@@ -697,7 +715,8 @@
     "colResult": "结果",
     "colStatus": "状态",
     "kindSchool": "开学季",
-    "viewDetail": "查看明细"
+    "viewDetail": "查看明细",
+    "collapseDetail": "收起明细"
   },
   "addAccount": {
     "title": "添加腾讯账号 · {realm}",
@@ -708,7 +727,8 @@
     "regionOption": "{label}（{code}）",
     "regionHint": "不选也可扫码，但账号会停留在「未注册地区」状态，聊天报 14017 时需回来重选。",
     "requesting": "正在向腾讯申请授权链接…",
-    "waiting": "等待授权完成（打开链接在浏览器里登录，或扫码；手机号登录也可以）…",
+    "waitingCn": "等待授权完成（打开链接在浏览器里登录，或扫码；手机号登录也可以）…",
+    "waitingGlobal": "等待授权完成（打开链接用 Google 等第三方账号登录，或扫码；国际版新号需先选地区完成注册）…",
     "success": "账号「{name}」授权成功",
     "successUpdated": "账号「{name}」授权成功（已更新）",
     "successGlobal": "国际版账号已加入账号池（国际版无签到，积分来自一次性 trial）",

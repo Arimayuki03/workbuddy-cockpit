@@ -191,12 +191,23 @@ export default function ModelsPage() {
   /** 实际显示的模型：按 realm 前缀过滤 + 合并探测标注 */
   const scoped = useMemo(
     () =>
-      models.map((m) => {
-        const prefix = realm === 'global' ? 'global:' : 'cn:';
-        const bare = m.id.startsWith('cn:') || m.id.startsWith('global:') ? m.id.slice(3) : m.id;
-        const probe = probes[bare] ?? probes[m.id] ?? null;
-        return {...m, id: m.id.startsWith(prefix) ? m.id : (prefix + bare), probe};
-      }).filter((m) => m.id.startsWith(realm === 'global' ? 'global:' : 'cn:')),
+      models
+        .filter((m) => {
+          // 双域 id 自带 cn:/global: 前缀：只保留当前域的条目——把对方域的
+          // 条目改前缀混进来会让两版列表看起来一样（裸 id 是旧数据形态，归当前域）。
+          const hasCn = m.id.startsWith('cn:');
+          const hasGlobal = m.id.startsWith('global:');
+          if (hasCn || hasGlobal) {
+            return realm === 'global' ? hasGlobal : hasCn;
+          }
+          return true;
+        })
+        .map((m) => {
+          const prefix = realm === 'global' ? 'global:' : 'cn:';
+          const bare = m.id.startsWith('cn:') || m.id.startsWith('global:') ? m.id.slice(3) : m.id;
+          const probe = probes[bare] ?? probes[m.id] ?? null;
+          return {...m, id: m.id.startsWith(prefix) ? m.id : (prefix + bare), probe};
+        }),
     [models, probes, realm],
   );
 
@@ -380,7 +391,7 @@ export default function ModelsPage() {
           <EmptyState
             icon={Boxes}
             title={t('models.noModels')}
-            description={t('models.noModelsDesc')}
+            description={t('models.emptyForRealm', {realm: realmName})}
           />
         ) : filtered.length === 0 ? (
           <EmptyState icon={Search} title={t('models.noMatch')} description={t('models.noMatchDesc')} />

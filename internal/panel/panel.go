@@ -326,20 +326,29 @@ func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
 // （gateway 路由协议，前端显示的 id 就是调用时要填的完整 model 值）。
 // 各域独立探测、独立容错：某域无可用账号则整域跳过；两域全空时才报错
 // （有错误明细回 502，一个账号都没有回 503）。
+// realm 查询参数（前端按当前版本取列表）："cn" 只探 CN 域、"global" 只探
+// global 域，空/其它值保持双域——省掉切版本后前端丢弃半份结果的探测开销，
+// 也避免「探了但没用上」的全局错误副作用。
 func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]any, 0)
 	var fetchErrs []string
 
+	realm := r.URL.Query().Get("realm")
+	probeCN := realm == "" || realm == "cn"
+	probeGlobal := realm == "" || realm == "global"
+
 	// CN 域：有可用 CN 账号才查（此前无条件 Pool.Pick()+FetchModels——选中 global
 	// 账号时打 CN 端点必然失败，混合池表现为偶发 502，纯 global 池必炸）。
-	if uids := p.cfg.Pool.AvailableUIDsForRealm("cn"); len(uids) > 0 {
-		if acct := p.cfg.Pool.AuthByUID(uids[0]); acct != nil {
-			infos, err := p.cfg.Upstream.FetchModels(acct)
-			if err != nil {
-				fetchErrs = append(fetchErrs, "cn: "+err.Error())
-			} else {
-				for _, mi := range infos {
-					out = append(out, panelModelEntry("cn", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.HTTP))
+	if probeCN {
+		if uids := p.cfg.Pool.AvailableUIDsForRealm("cn"); len(uids) > 0 {
+			if acct := p.cfg.Pool.AuthByUID(uids[0]); acct != nil {
+				infos, err := p.cfg.Upstream.FetchModels(acct)
+				if err != nil {
+					fetchErrs = append(fetchErrs, "cn: "+err.Error())
+				} else {
+					for _, mi := range infos {
+						out = append(out, panelModelEntry("cn", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.HTTP))
+					}
 				}
 			}
 		}
@@ -347,7 +356,7 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 
 	// global 域：路由开关开且有可用 global 账号才查（独立目录端点，FetchGlobalModelInfos；
 	// Upstream.GlobalEnabled 是探测侧同一道闸，与 main 装配的 config global.enabled 一致）。
-	if p.cfg.Upstream.GlobalEnabled {
+	if probeGlobal && p.cfg.Upstream.GlobalEnabled {
 		if uids := p.cfg.Pool.AvailableUIDsForRealm("global"); len(uids) > 0 {
 			if acct := p.cfg.Pool.AuthByUID(uids[0]); acct != nil {
 				infos := p.cfg.Upstream.FetchGlobalModelInfos(acct)
