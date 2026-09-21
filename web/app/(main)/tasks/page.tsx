@@ -154,14 +154,20 @@ export default function TasksPage() {
     loadQueue();
   }, [loadScan, loadQueue]);
 
-  // 队列执行中每 2 秒轮询，空闲时 30 秒一次（与心跳同频）
+  // 队列执行中每 2 秒轮询，空闲时 30 秒一次（与心跳同频）。
+  // tick 末尾**无条件**安排下一次：hidden 只跳过本轮请求——若在 return 前
+  // 就不重排，定时器会随一次切标签页永久死亡，切回来后再无轮询。
   useEffect(() => {
     let alive = true;
     const tick = async () => {
-      if (document.hidden) return;
-      const q = await loadQueue();
       if (!alive) return;
-      timer = window.setTimeout(tick, q?.running ? 2000 : 30000);
+      let running = false;
+      if (!document.hidden) {
+        const q = await loadQueue();
+        running = !!q?.running;
+      }
+      if (!alive) return;
+      timer = window.setTimeout(tick, running ? 2000 : 30000);
     };
     let timer = window.setTimeout(tick, 3000);
     return () => {

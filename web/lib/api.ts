@@ -47,6 +47,14 @@ export const http = axios.create({
 });
 
 /**
+ * 长端点超时（覆盖全局 60s）：
+ *  - auto_all 是账号内串行流水线（每项含真实对话 + 回读轮询），后端设计
+ *    兜底 5 分钟；balance_all 同步等全池逐号查上游。全局 60s 会先把前端
+ *    掐死而后端还在跑，两者统一放宽到 10 分钟。
+ */
+const LONG_TIMEOUT = {timeout: 600000};
+
+/**
  * 统一抽取后端错误信息。
  *
  * Go 侧错误统一是 `{"ok":false,"error":"..."}`（panel writeErr 口径）或
@@ -74,10 +82,10 @@ http.interceptors.response.use(
   },
 );
 
-const get = async <T>(url: string, params?: Record<string, unknown>): Promise<T> =>
-  (await http.get<T>(url, {params})).data;
-const post = async <T>(url: string, body?: unknown): Promise<T> =>
-  (await http.post<T>(url, body)).data;
+const get = async <T>(url: string, params?: Record<string, unknown>, cfg?: {timeout?: number}): Promise<T> =>
+  (await http.get<T>(url, {params, ...cfg})).data;
+const post = async <T>(url: string, body?: unknown, cfg?: {timeout?: number}): Promise<T> =>
+  (await http.post<T>(url, body, cfg)).data;
 /* ── 鉴权 ───────────────────────────────────────────── */
 export const authApi = {
   me: () => get<Me>('/api/me'),
@@ -119,8 +127,8 @@ export const accountApi = {
   travelAll: () => post<BatchStartResponse>('/api/travel_all'),
   activityAll: () => post<BatchStartResponse>('/api/activity_all'),
   keepaliveAll: () => post<BatchStartResponse>('/api/keepalive_all'),
-  /** 全量余额刷新：同步等待，返回最新池快照（紧接着拉 overview 即最新值） */
-  balanceAll: () => post<BalanceAllResponse>('/api/balance_all'),
+  /** 全量余额刷新：同步等待全池逐号查上游，返回最新池快照（长超时） */
+  balanceAll: () => post<BalanceAllResponse>('/api/balance_all', undefined, LONG_TIMEOUT),
 
   /* ── 积分包构成（券码/积分来源对比视图）──────────────────── */
   packages: () => get<PackagesResponse>('/api/packages'),
@@ -149,9 +157,13 @@ export const taskApi = {
     post<TaskAutoResponse>(`/api/accounts/${encodeURIComponent(uid)}/tasks/auto`, {
       task_code: taskCode,
     }),
-  /** 一键完成全部可自动任务（账号内串行流水线，5 分钟兜底超时） */
+  /** 一键完成全部可自动任务（账号内串行流水线，后端兜底 5 分钟；长超时） */
   autoAll: (uid: string) =>
-    post<TaskAutoAllResponse>(`/api/accounts/${encodeURIComponent(uid)}/tasks/auto_all`),
+    post<TaskAutoAllResponse>(
+      `/api/accounts/${encodeURIComponent(uid)}/tasks/auto_all`,
+      undefined,
+      LONG_TIMEOUT,
+    ),
 
   /* ── 扫描与执行队列 ─────────────────────────────────── */
   /** 全账号扫描（只读）：成长任务待办 + 开学季待办 */

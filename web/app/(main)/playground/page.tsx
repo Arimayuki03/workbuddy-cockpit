@@ -94,6 +94,15 @@ export default function PlaygroundPage() {
     el.scrollTop = el.scrollHeight;
   }, [msgs]);
 
+  // 卸载时中止仍在进行的流式请求：离开页面（或切版本导致本组件重挂）后
+  // 残留的 reader 会继续收 SSE 并对已卸载组件 setState。AbortError 分支
+  // 只更新气泡文案，卸载后 setState 被 React 忽略，无副作用。
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
+
   const onScroll = () => {
     const el = scrollerRef.current;
     if (!el) return;

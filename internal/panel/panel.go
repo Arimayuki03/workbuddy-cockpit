@@ -100,6 +100,13 @@ type Panel struct {
 	taskMu    sync.Mutex
 	taskLocks map[string]*sync.Mutex
 
+	// batchMu/batchLocks 全账号批量任务的按类型互斥（签到/旅行/活跃/保活/
+	// 余额/开学季）：同一类型同时只允许一轮全账号扫描在跑，重复触发返回
+	// 409「同类任务正在执行」而不是叠加扫描（TryLock 语义，条目常驻）。
+	// 注：只防面板手动触发的重入；scheduler 定时排程不经此锁（既有语义不变）。
+	batchMu    sync.Mutex
+	batchLocks map[string]*sync.Mutex
+
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
 	q         *queueState
@@ -125,6 +132,33 @@ func (p *Panel) unlockAccount(uid string) {
 	p.taskMu.Lock()
 	mu := p.taskLocks[uid]
 	p.taskMu.Unlock()
+	if mu != nil {
+		mu.Unlock()
+	}
+}
+
+// tryLockBatch 尝试锁定某类型的全账号批量任务；已在执行返回 false。
+// 类型即调用方给定的任务名（checkin/travel/activity/keepalive/balance/school），
+// 锁条目常驻（类型集合固定且有限）。
+func (p *Panel) tryLockBatch(kind string) bool {
+	p.batchMu.Lock()
+	if p.batchLocks == nil {
+		p.batchLocks = make(map[string]*sync.Mutex)
+	}
+	mu := p.batchLocks[kind]
+	if mu == nil {
+		mu = &sync.Mutex{}
+		p.batchLocks[kind] = mu
+	}
+	p.batchMu.Unlock()
+	return mu.TryLock()
+}
+
+// unlockBatch 释放类型批量锁（与 tryLockBatch 配对）。
+func (p *Panel) unlockBatch(kind string) {
+	p.batchMu.Lock()
+	mu := p.batchLocks[kind]
+	p.batchMu.Unlock()
 	if mu != nil {
 		mu.Unlock()
 	}
@@ -173,11 +207,13 @@ func (p *Panel) api(method, panelPath, aliasPath string, h http.HandlerFunc) {
 
 func (p *Panel) routes() {
 	// manager 壳契约（v1.2.0）：登录换发会话 cookie / 会话查询 / 登出。
-	// login/logout 本身不设闸（未登录态就是这两条路的调用方）；
-	// me 走双通道鉴权（cookie ∨ Bearer）。
-	p.mux.HandleFunc("POST /api/login", p.handleLogin)
+	// login/logout 本身不设鉴权闸（未登录态就是这两条路的调用方），但
+	// loopback_only 闸必须覆盖：该闸是「谁能碰到面板」的网络边界，若只挂在
+	// withAuth 里，login/logout 会成为绕过口（先登录拿 cookie 再谈鉴权）。
+	// 循环闸只检查 RemoteAddr；loopback_only=false（默认）时恒放行，行为零变化。
+	p.mux.HandleFunc("POST /api/login", p.loopback(p.handleLogin))
 	p.mux.HandleFunc("GET /api/me", p.withAuth(p.handleMe))
-	p.mux.HandleFunc("POST /api/logout", p.handleLogout)
+	p.mux.HandleFunc("POST /api/logout", p.loopback(p.handleLogout))
 	// manager 设置页：模型映射读写（server.ModelMapView/SetModelMap + 写回 config.json）。
 	p.api("GET", "/api/settings/model-map", "/api/settings/model-map", p.handleGetModelMap)
 	p.api("POST", "/api/settings/model-map", "/api/settings/model-map", p.handleSetModelMap)
@@ -249,7 +285,21 @@ func (p *Panel) loopbackOnly(r *http.Request) bool {
 	return host == "127.0.0.1" || host == "::1"
 }
 
-// withAuth 面板 API 双通道鉴权：会话 cookie 优先（manager 壳登录态），回落
+// loopback 仅回环闸中间件：loopback_only=true 时把 RemoteAddr 检查前置到
+// 不走 withAuth 的路由（login/logout），被拒请求统一 403。闸关闭（默认）
+// 时直接透传，行为与无中间件完全一致。
+func (p *Panel) loopback(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !p.loopbackOnly(r) {
+			writeErr(w, http.StatusForbidden, "panel restricted to loopback")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// withAuth 面板 API 双通道鉴权：先过 loopback_only 回环闸（login/logout 走
+// loopback 中间件共用同一判定），再验会话 cookie（manager 壳登录态），回落
 // Bearer（httpauth 常量时间比较，与 /v1/* 同口径）；二者任一通过即放行。
 // api_key 为空时放行（本机/私网部署，与主服务同语义）。
 // 密钥经 livecfg 快照读取：面板里改了 api_key，下一个请求即用新值（无需重启）。
@@ -587,45 +637,76 @@ func (p *Panel) accountRemove(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 // checkinAll 手动触发全量签到（异步执行，进度看日志区/账号状态变化）。
+// 按类型 TryLock 防重入：全账号动作都是秒级以上的扫描+上游调用，重复点击
+// 会叠加执行、放大上游压力，已在跑时返回 409 友好提示（批量族共用口径）。
 func (p *Panel) checkinAll(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Scheduler == nil {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	go p.cfg.Scheduler.RunCheckinNow()
+	if !p.tryLockBatch("checkin") {
+		writeErr(w, http.StatusConflict, "同类任务正在执行（全量签到），请等本轮结束后再试")
+		return
+	}
+	go func() {
+		defer p.unlockBatch("checkin")
+		p.cfg.Scheduler.RunCheckinNow()
+	}()
 	log.Printf("panel: 手动全量签到已触发（含猫猫旅行）")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
 
-// travelAll 手动触发全量猫猫旅行巡检（异步执行）。
+// travelAll 手动触发全量猫猫旅行巡检（异步执行；防重入口径同 checkinAll）。
 func (p *Panel) travelAll(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Scheduler == nil {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	go p.cfg.Scheduler.RunTravelNow()
+	if !p.tryLockBatch("travel") {
+		writeErr(w, http.StatusConflict, "同类任务正在执行（全量旅行巡检），请等本轮结束后再试")
+		return
+	}
+	go func() {
+		defer p.unlockBatch("travel")
+		p.cfg.Scheduler.RunTravelNow()
+	}()
 	log.Printf("panel: 手动全量旅行巡检已触发")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
 
-// activityAll 手动触发全量活跃上报（异步执行；点亮连登 + 解锁领养前置）。
+// activityAll 手动触发全量活跃上报（异步执行；点亮连登 + 解锁领养前置；
+// 防重入口径同 checkinAll）。
 func (p *Panel) activityAll(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Scheduler == nil {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	go p.cfg.Scheduler.RunActivityNow()
+	if !p.tryLockBatch("activity") {
+		writeErr(w, http.StatusConflict, "同类任务正在执行（全量活跃上报），请等本轮结束后再试")
+		return
+	}
+	go func() {
+		defer p.unlockBatch("activity")
+		p.cfg.Scheduler.RunActivityNow()
+	}()
 	log.Printf("panel: 手动全量活跃上报已触发")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
 
-// keepaliveAll 手动触发全量 token 保活（异步执行）。
+// keepaliveAll 手动触发全量 token 保活（异步执行；防重入口径同 checkinAll）。
 func (p *Panel) keepaliveAll(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Scheduler == nil {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	go p.cfg.Scheduler.RunKeepaliveNow()
+	if !p.tryLockBatch("keepalive") {
+		writeErr(w, http.StatusConflict, "同类任务正在执行（全量保活），请等本轮结束后再试")
+		return
+	}
+	go func() {
+		defer p.unlockBatch("keepalive")
+		p.cfg.Scheduler.RunKeepaliveNow()
+	}()
 	log.Printf("panel: 手动全量保活已触发")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
@@ -633,11 +714,17 @@ func (p *Panel) keepaliveAll(w http.ResponseWriter, r *http.Request) {
 // balanceAll 手动全量刷新余额：并发查上游、写回池内 credits（含解冻语义），
 // 完成后返回——面板紧接着拉 overview 即是最新值。账号量小（个位数），
 // 同步等待（上限受短 RPC 超时约束）比"触发后盲刷"体验更确定。
+// 按类型 TryLock 防重入：同步端点更怕叠加（每次都等全程），已在跑返回 409。
 func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Scheduler == nil {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
+	if !p.tryLockBatch("balance") {
+		writeErr(w, http.StatusConflict, "同类任务正在执行（全量余额刷新），请等本轮结束后再试")
+		return
+	}
+	defer p.unlockBatch("balance")
 	p.cfg.Scheduler.RunBalanceRefreshNow()
 	log.Printf("panel: 手动全量余额刷新完成")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": p.cfg.Pool.List()})

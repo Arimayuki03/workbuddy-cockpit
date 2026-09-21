@@ -13,6 +13,7 @@ package panel
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sort"
@@ -171,16 +172,26 @@ func (p *Panel) queue() *queueState {
 	return p.q
 }
 
+// queueBodyLimit 执行队列启动请求体上限（表单极小；64KB 与登录体上限同量级，
+// 防 oversized/恶意 body 拖内存）。
+const queueBodyLimit = 1 << 16
+
 // tasksRunQueue 启动执行队列：{concurrency:1-4, growth:bool, school:bool}。
 // 先做一次扫描，把全部待办项排队（growth 按账号内 autoActions 顺序执行，
 // school 逐账号跑闭环），账号内串行、账号间受并发信号量约束。
+// body 带 io.LimitReader 上限且解码错误显式返回 400：坏 body 静默吞掉会让
+// 结构体保持零值、走默认分支（growth+school 全账号任务）——意外触发全账号
+// 扫描比拒绝一次请求严重得多。
 func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Concurrency int  `json:"concurrency"`
 		Growth      bool `json:"growth"`
 		School      bool `json:"school"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(io.LimitReader(r.Body, queueBodyLimit)).Decode(&body); err != nil && r.ContentLength != 0 {
+		writeErr(w, http.StatusBadRequest, "invalid body: "+err.Error())
+		return
+	}
 	if !body.Growth && !body.School {
 		body.Growth, body.School = true, true
 	}
@@ -222,16 +233,33 @@ func (p *Panel) tasksCancelQueue(w http.ResponseWriter, r *http.Request) {
 }
 
 // startTaskQueue 队列启动的公共实现（HTTP 入口与定时排程共用）：
-// 并发扫描全账号待办 → 无待办返回 started=false → 组队并异步执行。
-// 队列已在跑返回错误（HTTP 层 409；定时层记日志跳过，下个时点再试）。
+// 原子占位 running → 并发扫描全账号待办 → 无待办回滚占位返回 started=false
+// → 组队并异步执行。队列已在跑返回错误（HTTP 层 409；定时层记日志跳过，
+// 下个时点再试）。
+//
+// 占位必须在扫描之前：此前「检查 running」与「置位 running」之间隔着一次
+// 秒级全账号扫描，手动触发与定时排程撞车会跑出双队列，且旧队列的
+// queueMarkAt 按索引写新队列的 items 切片，执行状态互相污染。
 func (p *Panel) startTaskQueue(concurrency int, wantGrowth, wantSchool bool) (total, seq int, started bool, err error) {
 	q := p.queue()
+	// 检查与置位同一临界区完成（原子占位）：扫描期间后续的启动请求一律 409。
 	q.mu.Lock()
 	if q.running {
 		q.mu.Unlock()
 		return 0, 0, false, fmt.Errorf("队列正在执行中（可在任务中心查看进度）")
 	}
+	q.running = true
 	q.mu.Unlock()
+	// 扫描失败 / 无待办 / 组队为空时回滚占位；顺带清掉占位期间收到的取消
+	// 请求——队列没真正开跑，取消意图不能残留到下一轮。
+	defer func() {
+		if !started {
+			q.mu.Lock()
+			q.running = false
+			q.cancelReq = false
+			q.mu.Unlock()
+		}
+	}()
 
 	// 扫描待办（复用扫描逻辑的拉取部分）。
 	states := p.cfg.Pool.List()
@@ -315,11 +343,11 @@ func (p *Panel) startTaskQueue(concurrency int, wantGrowth, wantSchool bool) (to
 		}
 	}
 	if len(items) == 0 {
-		return 0, q.seq, false, nil
+		return 0, q.seq, false, nil // started=false：defer 回滚占位
 	}
 
+	// 组队成功：补齐队列元数据并异步执行（running 已在扫描前占位）。
 	q.mu.Lock()
-	q.running = true
 	q.startedAt = time.Now()
 	q.items = items
 	q.conc = concurrency
@@ -457,26 +485,29 @@ func (p *Panel) pendingCount() (int, error) {
 			}
 			n := 0
 			failed := false
+			// 首查结果记下 code 集合：mp 分支去重直接复用，不再对每账号重复
+			// ListTasks（此前第二次调用只为构建去重集）；首查失败短路跳过
+			// mp 去重（默认口径已拿不到，mp 增量的去重基准缺失，宁少不多计）。
+			seen := map[string]bool{}
+			haveDefault := false
 			if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil {
 				for _, t := range tasks {
 					if growthPending(t) {
 						n++
 					}
+					seen[t.TaskCode] = true
 				}
+				haveDefault = true
 			} else {
 				failed = true
 			}
-			if mpTasks, err := p.cfg.Upstream.ListTasksMP(a); err == nil {
-				// mp 列表是默认口径的超集增量：只统计默认列表没有的 code。
-				seen := map[string]bool{}
-				if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil {
-					for _, t := range tasks {
-						seen[t.TaskCode] = true
-					}
-				}
-				for _, t := range mpTasks {
-					if growthPending(t) && !seen[t.TaskCode] {
-						n++
+			if haveDefault {
+				if mpTasks, err := p.cfg.Upstream.ListTasksMP(a); err == nil {
+					// mp 列表是默认口径的超集增量：只统计默认列表没有的 code。
+					for _, t := range mpTasks {
+						if growthPending(t) && !seen[t.TaskCode] {
+							n++
+						}
 					}
 				}
 			}
@@ -722,12 +753,21 @@ func (p *Panel) schoolStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // schoolRunAll 一键执行全部账号开学季闭环（异步，进度看任务频道日志）。
+// 按类型 TryLock 防重入：闭环逐账号向上游打全套请求，重复触发会叠加
+// 全账号扫描，已在跑时返回 409 友好提示（与 panel.go 批量动作同口径）。
 func (p *Panel) schoolRunAll(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Scheduler == nil {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	go p.cfg.Scheduler.RunSchoolNowAll() // panel 纯 API 口径全量闭环（school_api.go）
+	if !p.tryLockBatch("school") {
+		writeErr(w, http.StatusConflict, "同类任务正在执行（开学季全账号闭环），请等本轮结束后再试")
+		return
+	}
+	go func() {
+		defer p.unlockBatch("school")
+		p.cfg.Scheduler.RunSchoolNowAll() // panel 纯 API 口径全量闭环（school_api.go）
+	}()
 	log.Printf("panel: 开学季全账号闭环已触发")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }

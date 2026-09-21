@@ -94,9 +94,11 @@ export default function AccountsPage() {
 
   // 池状态（冷却 / 成功计数等）会随时间变化，页面停留时定时刷新。
   // 心跳同时刷新两个缓存条目，accounts 与实时余额仍然同帧续命。
+  // 周期心跳失败一律静默（与 logs 页同设计）：后台 30s 一轮的失败不该弹
+  // 错误雨，等下一轮自愈；错误提示只留给用户手动触发的操作（下方各按钮）。
   useHeartbeat(
     () => {
-      overviewCache.refresh().catch((e) => notify.err(errText(e)));
+      overviewCache.refresh().catch(() => {/* 静默，等下一轮心跳 */});
       packagesCache.refresh().catch(() => {/* packages 失败静默降级，不弹错 */});
     },
     30000,

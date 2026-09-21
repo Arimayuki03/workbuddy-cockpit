@@ -812,6 +812,8 @@ func runExpertTeamUse(p *Panel, a *auth.Auth) (string, error) {
 }
 
 // runExpertBatch 专家召唤+使用的公共实现。失败逐个继续，返回汇总信息。
+// 全部失败返回错误（任务标 error），部分失败把失败数并入消息——此前 fail
+// 被显式丢弃，全失败也标 done，用户看不到任何异常。
 func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (string, error) {
 	experts, err := p.cfg.Upstream.MarketExpertList(a, expertType)
 	if err != nil {
@@ -849,7 +851,14 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 			time.Sleep(expertSummonGap)
 		}
 	}
-	_ = fail
+	// 全失败：返回错误让调用方把任务标 error（一次成功的上报都没有，标 done
+	// 是在掩盖故障）；部分失败：消息里带上失败数，进度照常推进。
+	if ok == 0 && fail > 0 {
+		return "", fmt.Errorf("专家召唤+使用链全部失败（尝试 %d 位，类型 %s）", fail, expertType)
+	}
+	if fail > 0 {
+		return fmt.Sprintf("已对 %d 位真实专家完成召唤+使用链（类型 %s，%d 位失败）", ok, expertType, fail), nil
+	}
 	return fmt.Sprintf("已对 %d 位真实专家完成召唤+使用链（类型 %s）", ok, expertType), nil
 }
 

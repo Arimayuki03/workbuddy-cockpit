@@ -111,6 +111,15 @@ export function useCachedAsync<T>(
   const [refreshing, setRefreshing] = useState(false);
   const busy = useRef(false);
 
+  // key 变化（如 logs/stats 页的 limit/hours 换挡）= 换了一份快照：立即重置
+  // data/loading 到新 key 的缓存态，否则旧 key 的数据会闪现在新 key 的视图里。
+  useEffect(() => {
+    const hit = peekCache<T>(key);
+    setData(hit?.data ?? null);
+    setLoading(!hit);
+    // 只随 key 变化执行；refresh 的依赖含 key，此处刻意不追
+  }, [key]);
+
   const refresh = useCallback(async (): Promise<T | null> => {
     if (busy.current) return null;
     busy.current = true;
