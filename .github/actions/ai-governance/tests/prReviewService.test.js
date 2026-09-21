@@ -70,7 +70,7 @@ describe('PrReviewService', () => {
       '```json\n{"comment":' + JSON.stringify(reviewComment) + '}\n```'
     ]);
     const ops = makeOps({
-      canonicalItems: [{ number: 57, title: '缓存', body: '加缓存的诉求', state: 'closed' }],
+      canonicalItems: [{ number: 57, title: '缓存', body: '加缓存的诉求', state: 'closed', state_reason: 'not_planned', closed_at: '2026-01-02T00:00:00Z' }],
       comments: [{ author: 'maintainer', body: '不打算做这个，wontfix', created_at: '2026-01-01' }],
       timeline: [{ event: 'closed', actor: 'maintainer', commit_id: null, created_at: '2026-01-02' }]
     });
@@ -120,7 +120,7 @@ describe('PrReviewService', () => {
     const openai = makeOpenai([
       '```json\n{"decision":"KEEP","reasons":["PR implements what #57 asked for"],"evidence":["#57 requested caching"]}\n```'
     ]);
-    const ops = makeOps({ canonicalItems: [{ number: 57, title: '缓存', body: 'x', state: 'closed' }] });
+    const ops = makeOps({ canonicalItems: [{ number: 57, title: '缓存', body: 'x', state: 'closed', state_reason: 'not_planned', closed_at: '2026-01-02T00:00:00Z' }] });
     const svc = new PrReviewService(openai, 'model', config, { dryRun: false }, ops);
 
     const result = await svc.review({}, 'o', 'r', pr, '');
@@ -135,7 +135,7 @@ describe('PrReviewService', () => {
     const openai = makeOpenai([
       '```json\n{"decision":"UNCERTAIN","reasons":["evidence ambiguous"],"evidence":[]}\n```'
     ]);
-    const ops = makeOps({ canonicalItems: [{ number: 57, title: '缓存', body: 'x', state: 'closed' }] });
+    const ops = makeOps({ canonicalItems: [{ number: 57, title: '缓存', body: 'x', state: 'closed', state_reason: 'not_planned', closed_at: '2026-01-02T00:00:00Z' }] });
     const svc = new PrReviewService(openai, 'model', config, { dryRun: false }, ops);
 
     const result = await svc.review({}, 'o', 'r', pr, '');
@@ -150,7 +150,7 @@ describe('PrReviewService', () => {
       // 证据引用了语境包中不存在的 #999（幻觉）
       '```json\n{"decision":"CLOSE","reasons":["dup"],"evidence":["#999 already declined this"]}\n```'
     ]);
-    const ops = makeOps({ canonicalItems: [{ number: 57, title: '缓存', body: 'x', state: 'closed' }] });
+    const ops = makeOps({ canonicalItems: [{ number: 57, title: '缓存', body: 'x', state: 'closed', state_reason: 'not_planned', closed_at: '2026-01-02T00:00:00Z' }] });
     const svc = new PrReviewService(openai, 'model', config, { dryRun: false }, ops);
 
     const result = await svc.review({}, 'o', 'r', pr, '');
@@ -163,7 +163,7 @@ describe('PrReviewService', () => {
   test('AI 输出无法解析：视为 UNCERTAIN 回落，不关闭', async () => {
     const config = buildConfig();
     const openai = makeOpenai(['不是 JSON 的一团乱文本']);
-    const ops = makeOps({ canonicalItems: [{ number: 57, title: '缓存', body: 'x', state: 'closed' }] });
+    const ops = makeOps({ canonicalItems: [{ number: 57, title: '缓存', body: 'x', state: 'closed', state_reason: 'not_planned', closed_at: '2026-01-02T00:00:00Z' }] });
     const svc = new PrReviewService(openai, 'model', config, { dryRun: false }, ops);
 
     const result = await svc.review({}, 'o', 'r', pr, '');
@@ -178,7 +178,7 @@ describe('PrReviewService', () => {
       '```json\n{"decision":"CLOSE","reasons":["#57 wontfix"],"evidence":["#57 wontfix"]}\n```',
       '```json\n{"comment":' + JSON.stringify(reviewComment) + '}\n```'
     ]);
-    const ops = makeOps({ canonicalItems: [{ number: 57, title: '缓存', body: 'x', state: 'closed' }] });
+    const ops = makeOps({ canonicalItems: [{ number: 57, title: '缓存', body: 'x', state: 'closed', state_reason: 'not_planned', closed_at: '2026-01-02T00:00:00Z' }] });
     const svc = new PrReviewService(openai, 'model', config, {
       dryRun: true,
       prReviewClose: true
@@ -199,7 +199,7 @@ describe('PrReviewService', () => {
       '```json\n{"decision":"CLOSE","reasons":["#57 wontfix"],"evidence":["#57 wontfix"]}\n```',
       '```json\n{"comment":' + JSON.stringify(reviewComment) + '}\n```'
     ]);
-    const ops = makeOps({ canonicalItems: [{ number: 57, title: '缓存', body: 'x', state: 'closed' }] });
+    const ops = makeOps({ canonicalItems: [{ number: 57, title: '缓存', body: 'x', state: 'closed', state_reason: 'not_planned', closed_at: '2026-01-02T00:00:00Z' }] });
     ops.updatePullRequest.mockRejectedValue(new Error('close boom'));
     const svc = new PrReviewService(openai, 'model', config, { dryRun: false }, ops);
 
@@ -230,7 +230,7 @@ describe('PrReviewService', () => {
       '```json\n{"decision":"CLOSE","reasons":["#57 wontfix"],"evidence":["#57 wontfix"]}\n```'
     ]);
     openai._create.mockRejectedValueOnce(new Error('comment draft boom'));
-    const ops = makeOps({ canonicalItems: [{ number: 57, title: '缓存', body: 'x', state: 'closed' }] });
+    const ops = makeOps({ canonicalItems: [{ number: 57, title: '缓存', body: 'x', state: 'closed', state_reason: 'not_planned', closed_at: '2026-01-02T00:00:00Z' }] });
     const svc = new PrReviewService(openai, 'model', config, { dryRun: false }, ops);
 
     const result = await svc.review({}, 'o', 'r', pr, '');
@@ -245,7 +245,7 @@ describe('PrReviewService', () => {
       '```json\n{"decision":"KEEP","reasons":[],"evidence":["#57 ok"]}\n```'
     ]);
     const ops = makeOps({
-      canonicalItems: [{ number: 57, title: '缓存 canonical', body: 'x', state: 'closed' }],
+      canonicalItems: [{ number: 57, title: '缓存 canonical', body: 'x', state: 'closed', state_reason: 'not_planned', closed_at: '2026-01-02T00:00:00Z' }],
       searchHits: [
         { number: 57, title: '缓存 canonical', state: 'closed', state_reason: 'completed', closed_at: '2026-01-01', is_pr: false },
         { number: 63, title: '另一条', state: 'closed', state_reason: 'not_planned', closed_at: '2026-02-01', is_pr: false }
@@ -286,7 +286,7 @@ describe('PrReviewService', () => {
       '```json\n{"decision":"KEEP","reasons":[],"evidence":["#57 ok"]}\n```'
     ]);
     const ops = makeOps({
-      canonicalItems: [{ number: 57, title: '缓存', body: '正文'.repeat(2000), state: 'closed' }],
+      canonicalItems: [{ number: 57, title: '缓存', body: '正文'.repeat(2000), state: 'closed', state_reason: 'not_planned', closed_at: '2026-01-02T00:00:00Z' }],
       comments: [{ author: 'maintainer', body: 'wontfix，别再提了', created_at: '2026-01-01' }],
       timeline: [
         { event: 'closed', actor: 'maintainer', commit_id: null, created_at: '2026-01-02' },
