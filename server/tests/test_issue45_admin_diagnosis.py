@@ -95,7 +95,7 @@ class FallbackMessageTest(unittest.TestCase):
     def test_no_route_with_enabled_config_tells_restart(self) -> None:
         with mock.patch.object(wb2api, 'admin_enabled_in_config',
                               lambda: (True, '/srv/upstream/config.json')):
-            msg = accounts._fallback_why('no_route')
+            msg = accounts._fallback_why('no_route', True)
         self.assertIn('重启上游容器', msg)
         self.assertIn('/srv/upstream/config.json', msg)
         self.assertIn('2026-09-19', msg)
@@ -106,14 +106,14 @@ class FallbackMessageTest(unittest.TestCase):
     def test_no_route_with_disabled_config_points_at_the_switch(self) -> None:
         with mock.patch.object(wb2api, 'admin_enabled_in_config',
                               lambda: (False, '/srv/upstream/config.json')):
-            msg = accounts._fallback_why('no_route')
+            msg = accounts._fallback_why('no_route', True)
         self.assertIn('设置 → 账号管理接口', msg)
         self.assertNotIn('重启上游容器才生效', msg)
 
     def test_no_route_with_unreadable_config_says_so(self) -> None:
         with mock.patch.object(wb2api, 'admin_enabled_in_config',
                               lambda: (None, '未找到上游配置文件 /srv/x/config.json')):
-            msg = accounts._fallback_why('no_route')
+            msg = accounts._fallback_why('no_route', True)
         self.assertIn('/srv/x/config.json', msg)
         self.assertIn('设置 → 账号管理接口', msg)
 
@@ -121,13 +121,34 @@ class FallbackMessageTest(unittest.TestCase):
         """状态位成功或真失败时不该贴回退文案（那会误导）。"""
         for code in ('ok', 'not_found', 'error', 'skipped'):
             with self.subTest(code=code):
-                self.assertEqual(accounts._fallback_why(code), '')
+                self.assertEqual(accounts._fallback_why(code, True), '')
+
+    def test_enable_path_does_not_tell_user_to_stop_again(self) -> None:
+        """用户点的是**启用**：文案不能让他「再重新停用」——那是停用路径的下一步。
+
+        启用时状态位本来就没东西可清（账号是改名禁用的），账号已经恢复；此时
+        「开启开关后再重新停用」是答非所问。只提示「以后想保留签到与保活去哪儿开」。
+        """
+        with mock.patch.object(wb2api, 'admin_enabled_in_config',
+                               lambda: (False, '/p/config.json')):
+            msg = accounts._fallback_why('no_route', False)
+        self.assertNotIn('再重新停用', msg)
+        self.assertIn('设置 → 账号管理接口', msg)
+        self.assertIn('已改用改名方式启用', msg)
+
+    def test_disable_path_still_gives_the_re_stop_step(self) -> None:
+        """停用路径保留那一步：改名的账号要转到状态位，必须重新停用一次。"""
+        with mock.patch.object(wb2api, 'admin_enabled_in_config',
+                               lambda: (False, '/p/config.json')):
+            msg = accounts._fallback_why('no_route', True)
+        self.assertIn('再重新停用', msg)
+        self.assertIn('完全退出账号池', msg)
 
     def test_message_is_plain_text(self) -> None:
         """提示会直接显示在 toast 里——不要出现 markdown 记号。"""
         with mock.patch.object(wb2api, 'admin_enabled_in_config',
                               lambda: (True, '/p/config.json')):
-            msg = accounts._fallback_why('no_route')
+            msg = accounts._fallback_why('no_route', True)
         for token in ('**', '`', '##'):
             self.assertNotIn(token, msg)
 

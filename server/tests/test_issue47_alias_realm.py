@@ -164,6 +164,76 @@ class AuthorizeResolvesMappingTest(unittest.TestCase):
             self.assertIsNone(G._map_model(None))
 
 
+class RejectionRecordsMappingTest(unittest.TestCase):
+    """被拒的请求同样要记下映射后的名字（审核补漏）。
+
+    自查发现：拒绝/提前失败的那几条路径 `_record(..., mapped='', ...)`，于是
+    「别名指向国际版、被国内版密钥拒绝」的记录会被归到国内版栏——与本次修复
+    确立的口径（realm 按实际要用的名字归档）自相矛盾，按版本筛日志的人会看到
+    一条本不该在那儿的记录。
+    """
+
+    def _reject_and_capture(self, model: str) -> list[tuple]:
+        calls: list[tuple] = []
+        key = _key(realm='cn')          # 国内版密钥 + 指向国际版的别名 → 必被拒
+        with mock.patch.object(db, 'get_setting',
+                               lambda k, d=None: MAP if k == 'model_map' else d),              mock.patch.object(db, 'query', lambda *a, **k: []),              mock.patch.object(G, '_bearer', lambda r: 'wbk_x'),              mock.patch.object(keysvc, 'resolve', lambda t: key),              mock.patch.object(G, '_record', lambda *a, **k: calls.append(a)),              mock.patch.object(G, '_log_ip', lambda *a, **k: None),              mock.patch.object(G, 'get_security_config', lambda: {'enabled': False}):
+            G._authorize(mock.Mock(), model)
+        return calls
+
+    def test_realm_rejection_carries_mapped_name(self) -> None:
+        calls = self._reject_and_capture(ALIAS)
+        self.assertTrue(calls, '没有被拒的请求（这条守卫会空转）')
+        self.assertEqual(calls[0][3], TARGET,
+                         '被拒的请求没记下映射后的名字 —— 日志会归到错误的版本栏')
+
+    def test_realm_rejection_target_realm_is_the_outbound_one(self) -> None:
+        """口径核对：这条记录的 realm 该是 global（映射目标），不是 cn（别名）。"""
+        calls = self._reject_and_capture(ALIAS)
+        realm = db.realm_of_model(calls[0][3] or calls[0][2])
+        self.assertEqual(realm, 'global')
+
+    def test_identity_mapping_records_request_name(self) -> None:
+        """没有别名时（映射是恒等），记的就是请求名——行为不变。
+
+        用「国内版密钥 + 国际版模型」触发拒绝：这样映射没参与，记录的仍是原名。
+        """
+        calls = self._reject_and_capture('global:gpt-5.6-sol')
+        self.assertTrue(calls)
+        self.assertEqual(calls[0][3], 'global:gpt-5.6-sol')
+
+
+class MapModelRobustnessTest(unittest.TestCase):
+    """设置被写坏时，模型映射不能把整个网关带崩（审核补漏）。
+
+    `model_map` 是面板写入的设置项；一旦存成了非对象（异常写入、手工改库），
+    此前 `mapping.get` 会在**每个**请求上抛异常 → 整个网关 5xx。
+    坏数据只该影响它自己那一项，这与项目对非法 JSON 列的既有处理同一原则。
+    """
+
+    def test_non_dict_setting_falls_back_to_identity(self) -> None:
+        for bad in ('not-a-dict', 5, ['a', 'b']):
+            with self.subTest(value=bad):
+                with mock.patch.object(db, 'get_setting', lambda k, d=None: bad):
+                    self.assertEqual(G._map_model(ALIAS), ALIAS,
+                                     '设置坏掉时应按「没有映射」处理')
+
+    def test_dict_without_the_key_is_identity(self) -> None:
+        """字典形态但没配这条别名：原样返回（这是正常路径，不是容错分支）。"""
+        with mock.patch.object(db, 'get_setting', lambda k, d=None: {'other': 'x'}):
+            self.assertEqual(G._map_model(ALIAS), ALIAS)
+
+    def test_empty_or_missing_setting(self) -> None:
+        for value in ({}, None, ''):
+            with self.subTest(value=value):
+                with mock.patch.object(db, 'get_setting', lambda k, d=None: value):
+                    self.assertEqual(G._map_model(ALIAS), ALIAS)
+
+    def test_none_and_empty_model(self) -> None:
+        self.assertIsNone(G._map_model(None))
+        self.assertEqual(G._map_model(''), '')
+
+
 class CallSitesMapBeforeAuthorizeTest(unittest.TestCase):
     """结构守卫：按模型名鉴权的调用点必须显式传 `mapped=`。
 

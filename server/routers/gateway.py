@@ -343,6 +343,13 @@ def _authorize(request: Request, model: str | None,
         _log_ip(ip, path, True, ua, 'invalid_key')
         return None, ip, _oai_error('API Key 无效', 401, 'authentication_error', 'invalid_api_key')
 
+    # 映射只算一次，后面三处拒绝路径都要用它记账（见下）。
+    # 为什么拒绝路径也要传：日志的 `realm` 按**实际要用的那个名字**归档（issue #47
+    # 的统一口径）。别名不带 `global:` 前缀，若拒绝路径按请求名归档，一次「别名指向
+    # 国际版、却被国内版密钥拒绝」的记录会落在国内版栏目里——按版本筛日志的人会看到
+    # 一条本不该在那儿的记录，且看不出它原本指向国际版。
+    mapped = _map_model(model) if mapped is None else mapped
+
     # 全局入站 IP 规则
     sec = get_security_config()
     if sec.get('enabled'):
@@ -352,7 +359,7 @@ def _authorize(request: Request, model: str | None,
         ]
         if not iputil.evaluate(ip, rules, sec.get('mode', 'blacklist')):
             _log_ip(ip, path, True, ua, 'ip_blocked')
-            _record(key, ip, model or '', '', 403, 0, 0, 0, ua, 'IP 被拦截', False)
+            _record(key, ip, model or '', mapped or '', 403, 0, 0, 0, ua, 'IP 被拦截', False)
             return None, ip, _oai_error(f'来源 IP {ip} 被安全策略拦截', 403, 'permission_error', 'ip_blocked')
 
     # 注意这一行**在密钥校验之前**：密钥层面的拒绝（停用 / 过期 / 配额用尽 /
@@ -360,12 +367,13 @@ def _authorize(request: Request, model: str | None,
     # 「已放行」而请求其实失败了 —— 用户对着「已放行」找问题，方向直接跑偏。
     # 因此校验失败时改写这一行为拦截（见下），放行时才落「已放行」。
     reason = keysvc.validate(key, ip, model, is_model_list=is_model_list,
-                             mapped_model=_map_model(model) if mapped is None else mapped)
+                             mapped_model=mapped)
     if reason:
         # 状态码由 keysvc 决定，不再一律 403：一批客户端（DeepSeek Harness 等）
         # 把 401/403 统一显示成「API 密钥无效」，一律 403 会把「密钥版本不匹配」
         # 这种配置问题说成密钥坏了，用户便反复重建密钥（issue #18）。
-        _record(key, ip, model or '', '', getattr(reason, 'status', 403), 0, 0, 0, ua, reason, False)
+        _record(key, ip, model or '', mapped or '',
+                getattr(reason, 'status', 403), 0, 0, 0, ua, reason, False)
         _log_ip(ip, path, True, ua, _key_reject_code(reason, is_model_list))
         return None, ip, _oai_error(
             reason,
@@ -377,7 +385,7 @@ def _authorize(request: Request, model: str | None,
     limited, count = _rate_limited(key)
     if limited:
         msg = f'请求过于频繁（{RATE_WINDOW}s 内超过 {RATE_MAX_PER_MIN} 次）'
-        _record(key, ip, model or '', '', 429, 0, 0, 0, ua, msg, False)
+        _record(key, ip, model or '', mapped or '', 429, 0, 0, 0, ua, msg, False)
         _log_ip(ip, path, True, ua, 'rate_limited')
         return None, ip, _oai_error(msg, 429, 'rate_limit_error', 'rate_limit_exceeded')
 
@@ -399,9 +407,17 @@ def _key_reject_code(reason: object, is_model_list: bool) -> str:
 
 
 def _map_model(model: str | None) -> str | None:
+    """「模型映射」查表：别名 → 真名；没有映射时原样返回。
+
+    设置坏掉（存成了非对象）时按「没有映射」处理，**不能让整个网关 5xx**：
+    映射是可选的便利功能，坏数据只该影响它自己那一项，不连坐（与
+    `db._json_list` 对非法 JSON 列的处理同一原则）。
+    """
     if not model:
         return model
     mapping = db.get_setting('model_map', {}) or {}
+    if not isinstance(mapping, dict):
+        return model
     return mapping.get(model, model)
 
 

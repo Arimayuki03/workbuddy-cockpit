@@ -285,6 +285,10 @@ def _rsc_page_for(full_path: str) -> str | None:
 
     **只有对应页面确实存在时才返回**：`.txt` 也可能是真实静态文件
     （如 `robots.txt`），那种没有同名页面，不能一并重定向。
+
+    两种导出形态都要认：`<页>/index.html`（绝大多数页面，实测 dashboard 等）
+    与 `<页>.html`（根页面就是这种：`index.html` + `index.txt`）。少认一种，
+    对应形态的页面在真机上就会继续显示原始数据。
     """
     p = (full_path or '').strip('/')
     if not p.endswith('.txt'):
@@ -294,8 +298,9 @@ def _rsc_page_for(full_path: str) -> str | None:
         stem = stem[: -len('/index')]
     elif stem == 'index':
         stem = ''
-    candidate = f'{stem}/index.html' if stem else 'index.html'
-    if _safe_static_path(candidate) is None:
+    candidates = (f'{stem}/index.html' if stem else 'index.html',
+                  f'{stem}.html' if stem else 'index.html')
+    if not any(_safe_static_path(c) is not None for c in candidates):
         return None          # 没有同名页面 → 是真实文件，按普通静态资源处理
     return f'/{stem}' if stem else '/'
 

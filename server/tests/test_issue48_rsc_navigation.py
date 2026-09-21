@@ -58,6 +58,9 @@ class _Fixture:
             d.mkdir()
             (d / 'index.html').write_text(f'<html>{page}</html>', encoding='utf-8')
             (d / 'index.txt').write_text(FLIGHT, encoding='utf-8')
+        # 单一文件形态的页面（根页面就是这种：index.html + index.txt）
+        (root / 'playground.html').write_text('<html>playground</html>', encoding='utf-8')
+        (root / 'playground.txt').write_text(FLIGHT, encoding='utf-8')
         (root / 'robots.txt').write_text('User-agent: *\n', encoding='utf-8')
         self._patch = mock.patch.object(config, 'STATIC_DIR', root)
         self._patch.start()
@@ -79,6 +82,16 @@ class RscPageForTest(unittest.TestCase):
     def test_root_data_maps_to_root(self) -> None:
         with _Fixture():
             self.assertEqual(app_main._rsc_page_for('index.txt'), '/')
+
+    def test_single_file_shape_page(self) -> None:
+        """`<页>.html` + `<页>.txt` 这种形态（根页面就是）也要认。
+
+        导出产物里两种形态并存：绝大多数页面是 `<页>/index.html`，根页面是
+        `index.html` + `index.txt`。只认目录形态的话，单一文件形态的页面在真机上
+        会继续显示原始数据。
+        """
+        with _Fixture():
+            self.assertEqual(app_main._rsc_page_for('playground.txt'), '/playground')
 
     def test_real_txt_file_not_redirected(self) -> None:
         """`robots.txt` 是真实文件、没有同名页面 → 不能重定向。"""
@@ -138,6 +151,13 @@ class RscNavigationHttpTest(unittest.TestCase):
                             follow_redirects=False)
         self.assertEqual(r.status_code, 302)
         self.assertEqual(r.headers['location'], '/')
+
+    def test_single_file_shape_navigation_http(self) -> None:
+        """单一文件形态的页面，走真实请求也送回页面。"""
+        r = self.client.get('/playground.txt', headers={'accept': 'text/html'},
+                            follow_redirects=False)
+        self.assertEqual(r.status_code, 302)
+        self.assertEqual(r.headers['location'], '/playground')
 
     def test_client_side_fetch_still_gets_flight_data(self) -> None:
         """客户端路由抓数据必须照旧拿到 flight 文本，否则面板整站路由会坏。"""

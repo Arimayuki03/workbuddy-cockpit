@@ -214,6 +214,9 @@ def _authorize(request: Request, model: str | None, *,
         )
         return None, ip, _err('API Key 无效', 401, 'authentication_error')
 
+    # 供记账用（IP 拦截早于下面的映射归一化，这里先算一份）
+    _mapped_for_log = gateway._map_model(model) if mapped is None else mapped
+
     sec = get_security_config()
     if sec.get('enabled'):
         rules = [
@@ -222,7 +225,7 @@ def _authorize(request: Request, model: str | None, *,
         ]
         if not iputil.evaluate(ip, rules, sec.get('mode', 'blacklist')):
             gateway._log_ip(ip, path, True, ua, 'ip_blocked')
-            gateway._record(key, ip, model or '', '', 403, 0, 0, 0, ua, 'IP 被拦截', False)
+            gateway._record(key, ip, model or '', _mapped_for_log or '', 403, 0, 0, 0, ua, 'IP 被拦截', False)
             return None, ip, _err(f'来源 IP {ip} 被安全策略拦截', 403, 'permission_error')
 
     # 注意：`blocked=False` 的这一行现在默认**不写库**（审计日志只留拦截，
@@ -230,15 +233,19 @@ def _authorize(request: Request, model: str | None, *,
     # 与 gateway 行为一致，不多一条分叉。
     gateway._log_ip(ip, path, False, ua)
 
+    # 映射只算一次：拒绝路径也要用它记账（口径见 gateway._authorize 的说明——
+    # 日志的 realm 按实际要用的那个名字归档，别名不带前缀，按请求名记会归错栏）。
+    mapped = gateway._map_model(model) if mapped is None else mapped
+
     # model 为 None 时按「模型发现类请求」处理：跳过版本与模型白名单
     # （没有 model 就无从判定版本），但停用/过期/配额/IP 这些照常校验。
     reason = keysvc.validate(key, ip, model, is_model_list=(model is None),
-                             mapped_model=gateway._map_model(model) if mapped is None else mapped)
+                             mapped_model=mapped)
     if reason:
         # 与 gateway._authorize 同口径：状态码来自 keysvc，不再一律 403
         # （403 会被客户端显示成「API 密钥无效」，掩盖真实原因）。
         status = getattr(reason, 'status', 403)
-        gateway._record(key, ip, model or '', '', status, 0, 0, 0, ua, reason, False)
+        gateway._record(key, ip, model or '', mapped or '', status, 0, 0, 0, ua, reason, False)
         # 也记进安全页的入站日志：走 /v1/messages 的客户端被拒时，此前在
         # 「IP 访问日志」里**完全看不到**（只有 gateway 那条路记），两套协议
         # 的审计口径不一致。原因码复用 gateway 的归类，避免两处写法漂移。
@@ -248,7 +255,7 @@ def _authorize(request: Request, model: str | None, *,
     limited, _count = gateway._rate_limited(key)
     if limited:
         msg = f'请求过于频繁（{gateway.RATE_WINDOW}s 内超过 {gateway.RATE_MAX_PER_MIN} 次）'
-        gateway._record(key, ip, model or '', '', 429, 0, 0, 0, ua, msg, False)
+        gateway._record(key, ip, model or '', mapped or '', 429, 0, 0, 0, ua, msg, False)
         gateway._log_ip(ip, path, True, ua, 'rate_limited')
         return None, ip, _err(msg, 429, 'rate_limit_error')
 
@@ -979,7 +986,7 @@ async def messages(request: Request):
     try:
         payload = to_openai_request(body)
     except Exception as exc:  # noqa: BLE001
-        gateway._record(key, ip, model, '', 400, 0, 0, 0, ua, str(exc), False)
+        gateway._record(key, ip, model, mapped or '', 400, 0, 0, 0, ua, str(exc), False)
         return _err(f'请求转换失败：{exc}')
 
     if mapped:
