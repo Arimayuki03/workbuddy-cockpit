@@ -3,6 +3,9 @@ const { applyLocale } = require('../src/utils/config');
 const PrReviewService = require('../src/services/prReviewService');
 const { PR_REVIEW_DECISIONS } = require('../src/utils/constants');
 
+// callAI 对 429/5xx/网络错误做指数退避重试；测试注入 0ms 延迟加速（见 tests/ai.test.js）
+process.env.AI_RETRY_DELAY_MS = '0';
+
 function buildConfig() {
   const config = JSON.parse(JSON.stringify(baseConfig));
   applyLocale(config, 'zh-CN');
@@ -103,6 +106,41 @@ describe('PrReviewService', () => {
     // 不创建 canonical
     expect(ops.createIssue).not.toHaveBeenCalled();
     expect(ops.updateIssueState).not.toHaveBeenCalled();
+  });
+
+  test('评审评论注入：AI 草稿带 <script> 与 @user 时，发布前净化且闸门校验的 #57 引用保留', async () => {
+    const config = buildConfig();
+    // 评论草稿含 XSS、@提及、钓鱼链接，但 #57 是闸门认可的真实编号（保留）
+    const poisonedComment = [
+      '## 历史结论',
+      '- #57 已因 wontfix 关闭 <script>alert(1)</script>',
+      '',
+      '## 处理',
+      '联系 @admin：[点我](https://evil.example.com/refund)，本 PR 将被关闭。'
+    ].join('\n');
+    const openai = makeOpenai([
+      '```json\n{"decision":"CLOSE","reasons":["#57 wontfix"],"evidence":["#57 closed as wontfix"]}\n```',
+      '```json\n{"comment":' + JSON.stringify(poisonedComment) + '}\n```'
+    ]);
+    const ops = makeOps({
+      canonicalItems: [{ number: 57, title: '缓存', body: 'x', state: 'closed', state_reason: 'not_planned', closed_at: null }]
+    });
+    const svc = new PrReviewService(openai, 'model', config, { dryRun: false }, ops);
+
+    const result = await svc.review({}, 'o', 'r', pr, '');
+
+    expect(result).toMatchObject({ decision: PR_REVIEW_DECISIONS.CLOSE, closed: true });
+    const commentCall = ops.addComment.mock.calls.find(c => c[3] === 42);
+    expect(commentCall).toBeTruthy();
+    // XSS 连内容删除、@提及中和、第三方链接降级
+    expect(commentCall[4]).not.toContain('<script');
+    expect(commentCall[4]).not.toContain('alert(1)');
+    expect(commentCall[4]).toContain('@ admin');
+    expect(commentCall[4]).not.toContain('](https://evil.example.com/refund)');
+    // 闸门已校验的 #57 引用与模板前缀/日志行不受净化影响
+    expect(commentCall[4]).toContain('#57');
+    expect(commentCall[4].startsWith('🤖')).toBe(true);
+    expect(commentCall[4]).toContain('✅ Claude Code 操作日志：');
   });
 
   test('无相关历史 issue：返回 null 回落旧关联链路，不调 AI、不写任何东西', async () => {

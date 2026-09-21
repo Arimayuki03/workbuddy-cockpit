@@ -3,6 +3,10 @@ const { applyLocale } = require('../src/utils/config');
 const IssueGovernanceService = require('../src/services/issueGovernanceService');
 const { GOVERNANCE_DECISIONS } = require('../src/utils/constants');
 
+// callAI 现在对 429/5xx/网络错误做指数退避重试；测试里把基数注入为 0ms 加速
+// （AI 失败回落路径的 mock 耗尽后会触发多次重试，真实 2s/4s/8s 延迟会拖垮测试）。
+process.env.AI_RETRY_DELAY_MS = '0';
+
 function buildConfig() {
   const config = JSON.parse(JSON.stringify(baseConfig));
   applyLocale(config, 'zh-CN');
@@ -128,6 +132,84 @@ describe('IssueGovernanceService', () => {
     expect(ops.addComment).toHaveBeenCalled();
   });
 
+  test('WELL_FORMED 评审评论注入：AI 正文带 <script> 与 @user 时发布前被净化', async () => {
+    const config = buildConfig();
+    const poisoned = '感谢提交 <script>alert(1)</script>@someone\n\n## 分析认可\n- 好\n\n## 实现方案\n参考 [点我](https://evil.example.com/win)\n\n## 后续\n欢迎提 PR';
+    const openai = makeOpenai([
+      '```json\n{"要点":"a","要做的事":[]}\n```',
+      'WELL_FORMED',
+      poisoned
+    ]);
+    const ops = makeOps({ canonicalItems: [] });
+    const gov = new IssueGovernanceService(openai, 'model', config, { dryRun: false }, ops);
+    const octokit = {};
+
+    await gov.govern(octokit, 'o', 'r', issue, 'enhancement');
+
+    const commentCall = ops.addComment.mock.calls.find(c => c[3] === 22);
+    expect(commentCall).toBeTruthy();
+    // script 连内容删除；@提及中和为 @ someone；第三方 markdown 链接拆掉 href 语义
+    expect(commentCall[4]).not.toContain('<script');
+    expect(commentCall[4]).not.toContain('alert(1)');
+    expect(commentCall[4]).toContain('@ someone');
+    expect(commentCall[4]).not.toContain('](https://evil.example.com/win)');
+    // 模板前缀与日志行（受控部分）不受净化影响
+    expect(commentCall[4].startsWith('🤖')).toBe(true);
+    expect(commentCall[4]).toContain('✅ Claude Code 操作日志：');
+  });
+
+  test('NEW_TOPIC canonical 草稿注入：AI 标题/正文带 <script> 与 @user 时发布前被净化', async () => {
+    const config = buildConfig();
+    const openai = makeOpenai([
+      '```json\n{"要点":"新需求 yyy","要做的事":["做 yyy"]}\n```',
+      'NEEDS_NORMALIZE',
+      // canonical 语料为空 → 跳过归并匹配，直接进入 routeNormalize 起草
+      '[Feature] 支持缓存 @someone\n\n## 概述\n<script>alert("xss")</script>支持 yyy。\n\n## 来源\n- 原始 issue: #22'
+    ]);
+    const ops = makeOps();
+    const gov = new IssueGovernanceService(openai, 'model', config, { dryRun: false }, ops);
+    const octokit = {};
+
+    const result = await gov.govern(octokit, 'o', 'r', issue, 'enhancement');
+
+    expect(result.decision).toBe(GOVERNANCE_DECISIONS.NEW_TOPIC);
+    expect(ops.createIssue).toHaveBeenCalled();
+    const createArgs = ops.createIssue.mock.calls[0];
+    // 标题：@提及中和、script 删除
+    expect(createArgs[3]).toMatch(/^\[Feature\]/);
+    expect(createArgs[3]).toContain('@ someone');
+    expect(createArgs[3]).not.toContain('<script');
+    // 正文：script 连内容删除；#22 数字引用（来源语义）原样保留
+    expect(createArgs[4]).not.toContain('<script');
+    expect(createArgs[4]).not.toContain('alert');
+    expect(createArgs[4]).toContain('#22');
+    // 创建 canonical 成功后才关闭原 issue（顺序保证不变）
+    expect(ops.updateIssueState).toHaveBeenCalledWith(octokit, 'o', 'r', 22, 'closed', 'not_planned');
+  });
+
+  test('DUPLICATE 归并评论的要点段注入：<script> 在 summary 中被净化，#57 关联编号保留', async () => {
+    const config = buildConfig();
+    // 要点提炼的结构化输出被 prompt 注入污染
+    const openai = makeOpenai([
+      '```json\n{"要点":"支持 xxx <script>alert(1)</script>","要做的事":["请 @admin 立即处理"]}\n```',
+      'NEEDS_NORMALIZE',
+      'DUPLICATE(#57)'
+    ]);
+    const ops = makeOps({ canonicalItems: [{ number: 57, title: '已有 xxx 能力', body: '...' }] });
+    const gov = new IssueGovernanceService(openai, 'model', config, { dryRun: false }, ops);
+    const octokit = {};
+
+    const result = await gov.govern(octokit, 'o', 'r', issue, 'enhancement');
+
+    expect(result).toMatchObject({ decision: GOVERNANCE_DECISIONS.DUPLICATE, canonicalNumber: 57 });
+    const mergeCall = ops.addComment.mock.calls.find(c => c[3] === 22);
+    expect(mergeCall[4]).not.toContain('<script');
+    expect(mergeCall[4]).not.toContain('alert(1)');
+    expect(mergeCall[4]).toContain('@ admin');
+    // canonical 关联编号（闸门已校验）不被净化破坏
+    expect(mergeCall[4]).toContain('#57');
+  });
+
   test('dry-run 模式：不关闭、不创建、不打标签，仍执行分析与评论', async () => {
     const config = buildConfig();
     const openai = makeOpenai([
@@ -203,7 +285,9 @@ describe('IssueGovernanceService', () => {
     expect(commentCall[4]).toContain('## 分析认可');
     expect(commentCall[4]).toContain('## 实现方案');
     expect(commentCall[4]).toContain('## 后续');
-    expect(commentCall[4]).toContain('@someone');
+    // 净化语义：AI 正文里的 @提及 被中和为「@ someone」（不触发通知），见 src/utils/sanitize.js
+    expect(commentCall[4]).toContain('@ someone');
+    expect(commentCall[4]).not.toContain('@someone');
     // 机器人身份标记由服务端确定性补上（开头 🤖 + 结尾操作日志行）
     expect(commentCall[4].startsWith('🤖')).toBe(true);
     expect(commentCall[4]).toContain('✅ Claude Code 操作日志：');
