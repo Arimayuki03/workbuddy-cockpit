@@ -62,4 +62,5 @@ jobs:
           related-comments-per-issue: '10'
           related-body-truncate: '1500'
           max-canonical-index: '50'
-          analyze-file-changes: 'false'
+          # R12：diff 是垃圾/质量检测与历史语境评审的核心证据，统一开启（成本可接受，2026-09 决策）
+          analyze-file-changes: 'true'

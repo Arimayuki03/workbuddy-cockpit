@@ -71,4 +71,82 @@ describe('configuration', () => {
       expect(result.maxCanonicalIndex).toBe(30);
     });
   });
+
+  describe('GOV_INPUTS 声明表（R15/C15.6）', () => {
+    const GOV_INPUTS = require('../src/utils/config').GOV_INPUTS;
+
+    test('每个声明项的 defaults 键都真实存在于 config.json（漏配即失败）', () => {
+      const missing = GOV_INPUTS.filter(spec => !(spec.key in baseConfig.defaults))
+        .map(spec => spec.key);
+      expect(missing).toEqual([]);
+    });
+
+    test('action.yml 定义了表中的每个 input（漂移即失败）', () => {
+      const fs = require('fs');
+      const path = require('path');
+      const yml = fs.readFileSync(path.join(__dirname, '..', 'action.yml'), 'utf8');
+      const missing = GOV_INPUTS.filter(spec => !new RegExp(`^  ${spec.input}:`, 'm').test(yml))
+        .map(spec => spec.input);
+      expect(missing).toEqual([]);
+    });
+
+    test('env 名与 input 名的 snake 转换一致（INPUT_X 对应 x）', () => {
+      for (const spec of GOV_INPUTS) {
+        expect(spec.env).toBe('INPUT_' + spec.input.toUpperCase().replace(/-/g, '_'));
+      }
+    });
+  });
+
+  describe('parseInputs 两段式与历史语境参数（F1/F2 接线）', () => {
+    beforeEach(() => {
+      jest.resetModules();
+      Object.keys(process.env).filter(k => k.startsWith('INPUT_')).forEach(k => delete process.env[k]);
+    });
+
+    afterEach(() => {
+      Object.keys(process.env).filter(k => k.startsWith('INPUT_')).forEach(k => delete process.env[k]);
+    });
+
+    test('enable-two-stage / max-history-index / screening-model 缺省回落 config.defaults', () => {
+      const result = parseInputs(cloneConfig());
+      expect(result.enableTwoStage).toBe(false);
+      expect(result.maxHistoryIndex).toBe(100);
+      expect(result.maxScreenedCandidates).toBe(5);
+      expect(result.screeningModel).toBe('');
+    });
+
+    test('显式输入覆盖 defaults（含 NaN 守卫）', () => {
+      process.env.INPUT_ENABLE_TWO_STAGE = 'true';
+      process.env.INPUT_MAX_HISTORY_INDEX = '60';
+      process.env.INPUT_MAX_SCREENED_CANDIDATES = 'zzz'; // NaN → 回落默认 5
+      process.env.INPUT_SCREENING_MODEL = 'cheap-model';
+      const result = parseInputs(cloneConfig());
+      expect(result.enableTwoStage).toBe(true);
+      expect(result.maxHistoryIndex).toBe(60);
+      expect(result.maxScreenedCandidates).toBe(5);
+      expect(result.screeningModel).toBe('cheap-model');
+    });
+  });
+
+  describe('loadConfig / validateConfig（R15 顺手补测）', () => {
+    test('loadConfig 读取真实 config.json 并通过校验', () => {
+      jest.resetModules();
+      const { loadConfig } = require('../src/utils/config');
+      const config = loadConfig();
+      expect(config.prompts.history_screening).toBeTruthy();
+      expect(config.defaults.enable_two_stage).toBe(false);
+    });
+
+    test('validateConfig 拒绝缺少必需段落的配置', () => {
+      jest.resetModules();
+      const { validateConfig } = require('../src/utils/config');
+      expect(() => validateConfig({ prompts: {}, ai_settings: { max_tokens: 100, temperature: 0.1 } }))
+        .toThrow('缺少必需的段落');
+      expect(() => validateConfig({
+        prompts: { spam_detection: 'x', readme_coverage_check: 'x', content_quality_check: 'x', pr_spam_detection: 'x' },
+        responses: {}, logging: {},
+        ai_settings: { max_tokens: 0, temperature: 0.1 }, defaults: {}
+      })).toThrow('max_tokens');
+    });
+  });
 });

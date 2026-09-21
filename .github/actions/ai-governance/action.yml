@@ -39,9 +39,9 @@ inputs:
     required: false
     default: 'zh-CN'
   analyze-file-changes:
-    description: '是否分析 PR 文件变更用于垃圾检测'
+    description: '是否分析 PR 文件变更（垃圾/质量检测与历史语境评审的核心证据；R12 统一默认开启）'
     required: false
-    default: 'false'
+    default: 'true'
   max-analysis-depth:
     description: '分析深度：light / normal / deep'
     required: false

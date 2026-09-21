@@ -68,7 +68,6 @@ const PR_REVIEW_DECISIONS = {
 
 // 默认配置值
 const DEFAULTS = {
-  MAX_TOKENS: 100,
   TEMPERATURE: 0.1,
   MAX_FILES: 5,
   MAX_PATCH_LINES: 5,
@@ -100,6 +99,10 @@ const GOVERNANCE_DEFAULTS = {
   // 两段式 AI 流水线（F2）：默认关闭，先暗发观察再翻转（与 pr-review-close 同上线纪律）
   enableTwoStage: false,
   maxScreenedCandidates: 5,
+  screeningModel: '',
+  // 历史语境评审关闭的 PR 的确定性标签（R6/C6）：state_reason 对 PR 不可写，
+  // 标签是唯一可查的关闭理由标记（is:label 历史检索口径，供未来筛选阶段做语料信号）
+  historyRejectedLabel: 'history-rejected',
   // 永远豁免的账号（bot 自环防护）
   SKIP_USERS: ['github-actions[bot]', 'github-actions']
 };

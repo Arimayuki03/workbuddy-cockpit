@@ -87,6 +87,66 @@ function parseIntInput(value, fallback) {
 }
 
 /**
+ * 治理输入声明表（R15/C15.6）：一个治理旋钮此前要在四处手写映射
+ * （action.yml / parseInputs / GOVERNANCE_DEFAULTS / workflows yml），新增旋钮极易漏接线。
+ * 现在收拢为单张声明表，parseInputs 统一消费：
+ *   input  —— action.yml 的 input 名（同时对应 INPUT_* 环境变量）
+ *   env    —— 环境变量名（与 input 一致，列表仅作文档）
+ *   key    —— config.defaults 的默认值键
+ *   out    —— parseInputs 返回对象上的 camelCase 键
+ *   type   —— 'boolean' | 'int' | 'string'
+ */
+const GOV_INPUTS = [
+  { input: 'canonical-label', env: 'INPUT_CANONICAL_LABEL', key: 'canonical_label', out: 'canonicalLabel', type: 'string' },
+  { input: 'duplicate-label', env: 'INPUT_DUPLICATE_LABEL', key: 'duplicate_label', out: 'duplicateLabel', type: 'string' },
+  { input: 'dry-run', env: 'INPUT_DRY_RUN', key: 'dry_run', out: 'dryRun', type: 'boolean' },
+  { input: 'maintainer-exempt', env: 'INPUT_MAINTAINER_EXEMPT', key: 'maintainer_exempt', out: 'maintainerExempt', type: 'boolean' },
+  { input: 'enable-pr-governance', env: 'INPUT_ENABLE_PR_GOVERNANCE', key: 'enable_pr_governance', out: 'enablePrGovernance', type: 'boolean' },
+  { input: 'max-canonical-index', env: 'INPUT_MAX_CANONICAL_INDEX', key: 'max_canonical_index', out: 'maxCanonicalIndex', type: 'int' },
+  { input: 'canonical-body-truncate', env: 'INPUT_CANONICAL_BODY_TRUNCATE', key: 'canonical_body_truncate', out: 'canonicalBodyTruncate', type: 'int' },
+  { input: 'pr-review-close', env: 'INPUT_PR_REVIEW_CLOSE', key: 'pr_review_close', out: 'prReviewClose', type: 'boolean' },
+  { input: 'max-related-issues', env: 'INPUT_MAX_RELATED_ISSUES', key: 'max_related_issues', out: 'maxRelatedIssues', type: 'int' },
+  { input: 'related-comments-per-issue', env: 'INPUT_RELATED_COMMENTS_PER_ISSUE', key: 'related_comments_per_issue', out: 'relatedCommentsPerIssue', type: 'int' },
+  { input: 'related-body-truncate', env: 'INPUT_RELATED_BODY_TRUNCATE', key: 'related_body_truncate', out: 'relatedBodyTruncate', type: 'int' },
+  { input: 'max-history-index', env: 'INPUT_MAX_HISTORY_INDEX', key: 'max_history_index', out: 'maxHistoryIndex', type: 'int' },
+  { input: 'enable-two-stage', env: 'INPUT_ENABLE_TWO_STAGE', key: 'enable_two_stage', out: 'enableTwoStage', type: 'boolean' },
+  { input: 'max-screened-candidates', env: 'INPUT_MAX_SCREENED_CANDIDATES', key: 'max_screened_candidates', out: 'maxScreenedCandidates', type: 'int' },
+  { input: 'screening-model', env: 'INPUT_SCREENING_MODEL', key: 'screening_model', out: 'screeningModel', type: 'string' }
+];
+
+/**
+ * 按 GOV_INPUTS 声明表解析治理输入：input → env → defaults 三级回落，
+ * boolean/int 类型带 NaN/大小写守卫（FIX-E 语义保持不变）。
+ */
+function parseGovInputs(config) {
+  const out = {};
+  for (const spec of GOV_INPUTS) {
+    const raw = core.getInput(spec.input) || process.env[spec.env] || '';
+    if (raw !== '') {
+      if (spec.type === 'boolean') {
+        out[spec.out] = raw.toLowerCase() === 'true';
+        continue;
+      }
+      if (spec.type === 'int') {
+        out[spec.out] = parseIntInput(raw, config.defaults[spec.key]);
+        continue;
+      }
+      out[spec.out] = raw;
+      continue;
+    }
+    const fallback = config.defaults[spec.key];
+    if (spec.type === 'boolean') {
+      out[spec.out] = String(fallback).toLowerCase() === 'true';
+    } else if (spec.type === 'int') {
+      out[spec.out] = parseIntInput(String(fallback), fallback);
+    } else {
+      out[spec.out] = fallback !== undefined ? fallback : '';
+    }
+  }
+  return out;
+}
+
+/**
  * 解析用户输入参数
  * @param {Object} config 基础配置对象
  * @returns {Object} 解析后的配置对象
@@ -123,9 +183,26 @@ function parseInputs(config) {
     ? (core.getInput('analyze-file-changes') || process.env.INPUT_ANALYZE_FILE_CHANGES).toLowerCase() === 'true'
     : config.ai_settings.analyze_file_changes;
 
-  // 治理开关与参数（新增）
-  const canonicalLabel = core.getInput('canonical-label') || process.env.INPUT_CANONICAL_LABEL || config.defaults.canonical_label;
-  const duplicateLabel = core.getInput('duplicate-label') || process.env.INPUT_DUPLICATE_LABEL || config.defaults.duplicate_label;
+  // 治理开关与参数：GOV_INPUTS 声明表统一解析（R15/C15.6，替代四处分散的手写映射）
+  const govInputs = parseGovInputs(config);
+  const {
+    canonicalLabel,
+    duplicateLabel,
+    dryRun,
+    maintainerExempt,
+    enablePrGovernance,
+    maxCanonicalIndex,
+    canonicalBodyTruncate,
+    prReviewClose,
+    maxRelatedIssues,
+    relatedCommentsPerIssue,
+    relatedBodyTruncate,
+    maxHistoryIndex,
+    enableTwoStage,
+    maxScreenedCandidates,
+    screeningModel
+  } = govInputs;
+
   const skipUsersInput = core.getInput('skip-users') || process.env.INPUT_SKIP_USERS || '';
   const skipUsers = skipUsersInput
     ? skipUsersInput.split(',').map(u => u.trim().toLowerCase()).filter(u => u.length > 0)
@@ -136,24 +213,6 @@ function parseInputs(config) {
   // 注意：走 GitHub Models 时 AI 鉴权仍优先用 github-token（依赖 models:read），不强制要求本令牌具备。
   const governanceToken = core.getInput('governance-token') || process.env.INPUT_GOVERNANCE_TOKEN || '';
 
-  // PR 历史语境评审开关（新增）
-  const prReviewClose = (core.getInput('pr-review-close') || process.env.INPUT_PR_REVIEW_CLOSE || String(config.defaults.pr_review_close)).toLowerCase() === 'true';
-  const maxRelatedIssues = parseIntInput(core.getInput('max-related-issues') || process.env.INPUT_MAX_RELATED_ISSUES || String(config.defaults.max_related_issues), config.defaults.max_related_issues);
-  const relatedCommentsPerIssue = parseIntInput(core.getInput('related-comments-per-issue') || process.env.INPUT_RELATED_COMMENTS_PER_ISSUE || String(config.defaults.related_comments_per_issue), config.defaults.related_comments_per_issue);
-  const relatedBodyTruncate = parseIntInput(core.getInput('related-body-truncate') || process.env.INPUT_RELATED_BODY_TRUNCATE || String(config.defaults.related_body_truncate), config.defaults.related_body_truncate);
-
-  const dryRun = (core.getInput('dry-run') || process.env.INPUT_DRY_RUN || String(config.defaults.dry_run)).toLowerCase() === 'true';
-  const maintainerExempt = (core.getInput('maintainer-exempt') || process.env.INPUT_MAINTAINER_EXEMPT || String(config.defaults.maintainer_exempt)).toLowerCase() === 'true';
-  const enablePrGovernance = (core.getInput('enable-pr-governance') || process.env.INPUT_ENABLE_PR_GOVERNANCE || String(config.defaults.enable_pr_governance)).toLowerCase() === 'true';
-  const maxCanonicalIndex = parseIntInput(core.getInput('max-canonical-index') || process.env.INPUT_MAX_CANONICAL_INDEX || String(config.defaults.max_canonical_index), config.defaults.max_canonical_index);
-  const canonicalBodyTruncate = parseIntInput(core.getInput('canonical-body-truncate') || process.env.INPUT_CANONICAL_BODY_TRUNCATE || String(config.defaults.canonical_body_truncate), config.defaults.canonical_body_truncate);
-
-  // 统一历史语境层（F1）与两段式流水线（F2）
-  const maxHistoryIndex = parseIntInput(core.getInput('max-history-index') || process.env.INPUT_MAX_HISTORY_INDEX || String(config.defaults.max_history_index), config.defaults.max_history_index);
-  const enableTwoStage = (core.getInput('enable-two-stage') || process.env.INPUT_ENABLE_TWO_STAGE || String(config.defaults.enable_two_stage)).toLowerCase() === 'true';
-  const maxScreenedCandidates = parseIntInput(core.getInput('max-screened-candidates') || process.env.INPUT_MAX_SCREENED_CANDIDATES || String(config.defaults.max_screened_candidates), config.defaults.max_screened_candidates);
-  const screeningModel = core.getInput('screening-model') || process.env.INPUT_SCREENING_MODEL || config.defaults.screening_model || '';
-  
   // 解析分析深度参数，使用配置文件中的设置
   const analysisDepth = core.getInput('max-analysis-depth') || process.env.INPUT_MAX_ANALYSIS_DEPTH || config.defaults.analysis_depth;
   
@@ -210,5 +269,7 @@ module.exports = {
   parseInputs,
   validateConfig,
   applyLocale,
-  normalizeLanguage
+  normalizeLanguage,
+  GOV_INPUTS,
+  parseIntInput
 };
