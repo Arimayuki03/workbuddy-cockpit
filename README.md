@@ -165,7 +165,10 @@ flowchart LR
     P -. "读凭证 (0600)" .-> AUTH[("auths/*.json")]
     P -. "状态镜像" .-> REDIS[("Upstash Redis\n可选")]
     U -->|"chat/completions (SSE)"| CB["WorkBuddy / CodeBuddy\ncopilot.tencent.com · workbuddy.ai"]
+    U -->|"billing / auth / growth"| CB
 ```
+
+上游请求在出站前经历统一的改写管线（`internal/upstream/payload.go`）：强制 `stream:true`、`developer` 角色归一、tool_choice 归一、`image_url` 字符串兼容为 OpenAI 对象形态、DeepSeek 思维链注入、`reasoning_effort` 档位降级、`reasoning_content` 回填、指纹脱敏。
 
 ## 安全与合规
 
