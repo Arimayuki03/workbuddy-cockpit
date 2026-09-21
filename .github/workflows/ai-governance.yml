@@ -57,7 +57,11 @@ jobs:
           enable-pr-governance: 'true'
           # PR 历史语境评审：AI 对照相关历史 issue 的关闭结论评审新 PR，
           # 证据确凿 → 中文评审评论 + 关闭；证据不足 → 回落 canonical 关联链路（宁可漏判、不可误关）
-          pr-review-close: 'false'
+          # 2026-09-21 P0+F1-F4 全量合并后启用（PR #189）
+          pr-review-close: 'true'
+          # 两段式 AI 流水线：粗筛（紧凑索引选关联项）→ 确定性闸门 → 精处理（仅筛出条目的完整语境）。
+          # 关闭时行为与旧链路逐字节一致（有回归测试锚定），2026-09-21 启用（PR #189）
+          enable-two-stage: 'true'
           max-related-issues: '3'
           related-comments-per-issue: '10'
           related-body-truncate: '1500'
