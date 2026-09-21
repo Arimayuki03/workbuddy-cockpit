@@ -59,6 +59,13 @@ const GOVERNANCE_DECISIONS = {
   WELL_FORMED: 'WELL_FORMED'
 };
 
+// PR 历史语境评审判定值（AI 归一化返回）
+const PR_REVIEW_DECISIONS = {
+  CLOSE: 'CLOSE',
+  KEEP: 'KEEP',
+  UNCERTAIN: 'UNCERTAIN'
+};
+
 // 默认配置值
 const DEFAULTS = {
   MAX_TOKENS: 100,
@@ -83,6 +90,11 @@ const GOVERNANCE_DEFAULTS = {
   wellFormedMinSections: 3,
   wellFormedMinTitleLen: 8,
   wellFormedMinBodyLen: 80,
+  // PR 历史语境评审（prReviewService）：默认关闭 —— 会关 PR 的新能力必须显式开启
+  prReviewClose: false,
+  maxRelatedIssues: 3,
+  relatedCommentsPerIssue: 10,
+  relatedBodyTruncate: 1500,
   // 永远豁免的账号（bot 自环防护）
   SKIP_USERS: ['github-actions[bot]', 'github-actions']
 };
@@ -95,5 +107,6 @@ module.exports = {
   ANALYSIS_DEPTHS,
   DEFAULTS,
   GOVERNANCE_DECISIONS,
+  PR_REVIEW_DECISIONS,
   GOVERNANCE_DEFAULTS
 };

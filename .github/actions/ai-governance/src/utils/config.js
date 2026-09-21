@@ -121,6 +121,17 @@ function parseInputs(config) {
     ? skipUsersInput.split(',').map(u => u.trim().toLowerCase()).filter(u => u.length > 0)
     : [];
 
+  // 治理身份令牌（可选）：提供后所有 GitHub 写操作（评论/关闭/打标/建 issue）以该令牌
+  // 对应的账号身份发布（如 Claude Code 的 PAT），缺省回落 github-token（github-actions[bot]）。
+  // 注意：走 GitHub Models 时 AI 鉴权仍优先用 github-token（依赖 models:read），不强制要求本令牌具备。
+  const governanceToken = core.getInput('governance-token') || process.env.INPUT_GOVERNANCE_TOKEN || '';
+
+  // PR 历史语境评审开关（新增）
+  const prReviewClose = (core.getInput('pr-review-close') || process.env.INPUT_PR_REVIEW_CLOSE || String(config.defaults.pr_review_close)).toLowerCase() === 'true';
+  const maxRelatedIssues = parseInt(core.getInput('max-related-issues') || process.env.INPUT_MAX_RELATED_ISSUES || String(config.defaults.max_related_issues), 10);
+  const relatedCommentsPerIssue = parseInt(core.getInput('related-comments-per-issue') || process.env.INPUT_RELATED_COMMENTS_PER_ISSUE || String(config.defaults.related_comments_per_issue), 10);
+  const relatedBodyTruncate = parseInt(core.getInput('related-body-truncate') || process.env.INPUT_RELATED_BODY_TRUNCATE || String(config.defaults.related_body_truncate), 10);
+
   const dryRun = (core.getInput('dry-run') || process.env.INPUT_DRY_RUN || String(config.defaults.dry_run)).toLowerCase() === 'true';
   const maintainerExempt = (core.getInput('maintainer-exempt') || process.env.INPUT_MAINTAINER_EXEMPT || String(config.defaults.maintainer_exempt)).toLowerCase() === 'true';
   const enablePrGovernance = (core.getInput('enable-pr-governance') || process.env.INPUT_ENABLE_PR_GOVERNANCE || String(config.defaults.enable_pr_governance)).toLowerCase() === 'true';
@@ -157,6 +168,11 @@ function parseInputs(config) {
     customBaseUrl,
     customApiKey,
     aiApiType,
+    governanceToken,
+    prReviewClose,
+    maxRelatedIssues,
+    relatedCommentsPerIssue,
+    relatedBodyTruncate,
     canonicalLabel,
     duplicateLabel,
     skipUsers,

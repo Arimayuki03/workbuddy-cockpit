@@ -10,6 +10,10 @@ inputs:
     description: 'GitHub token（issues:write 足够；PR 治理改写标题/正文需 pull-requests:write；走 GitHub Models 时还需 models:read）'
     required: true
     default: '${{ github.token }}'
+  governance-token:
+    description: '治理身份令牌（可选 PAT）：提供后所有治理写操作（评论/关闭/打标/建 issue）以该令牌账号身份发布（如 Claude Code），缺省回落 github-token（github-actions[bot]）'
+    required: false
+    default: ''
   ai-model:
     description: 'AI 模型名'
     required: false
@@ -79,6 +83,23 @@ inputs:
     description: '构造 canonical 索引时每条正文的截断长度'
     required: false
     default: '1500'
+  # ---- PR 历史语境评审（pr-review-close）----
+  pr-review-close:
+    description: 'PR 历史语境评审开关：开启后 AI 对照相关历史 issue 的关闭结论评审新 PR，证据确凿时评论并关闭（默认关闭，关闭后回落旧的 canonical 关联链路）'
+    required: false
+    default: 'false'
+  max-related-issues:
+    description: '历史语境评审纳入的相关历史 issue 数量上限'
+    required: false
+    default: '3'
+  related-comments-per-issue:
+    description: '每条相关 issue 读取的评论数量上限'
+    required: false
+    default: '10'
+  related-body-truncate:
+    description: '历史语境评审中每条 issue 正文的截断长度'
+    required: false
+    default: '1500'
 
 runs:
   using: 'composite'
@@ -101,6 +122,7 @@ runs:
         node src/index.js
       env:
         INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_GOVERNANCE_TOKEN: ${{ inputs.governance-token }}
         INPUT_AI_MODEL: ${{ inputs.ai-model }}
         INPUT_LABELS: ${{ inputs.labels }}
         INPUT_LANGUAGE: ${{ inputs.language }}
@@ -118,3 +140,7 @@ runs:
         INPUT_ENABLE_PR_GOVERNANCE: ${{ inputs.enable-pr-governance }}
         INPUT_MAX_CANONICAL_INDEX: ${{ inputs.max-canonical-index }}
         INPUT_CANONICAL_BODY_TRUNCATE: ${{ inputs.canonical-body-truncate }}
+        INPUT_PR_REVIEW_CLOSE: ${{ inputs.pr-review-close }}
+        INPUT_MAX_RELATED_ISSUES: ${{ inputs.max-related-issues }}
+        INPUT_RELATED_COMMENTS_PER_ISSUE: ${{ inputs.related-comments-per-issue }}
+        INPUT_RELATED_BODY_TRUNCATE: ${{ inputs.related-body-truncate }}
