@@ -164,4 +164,93 @@ describe('IssueGovernanceService', () => {
 
     expect(openai._create).toHaveBeenCalledTimes(2); // extract + well_formed
   });
+
+  test('WELL_FORMED：发 AI 生成的实质性评审评论（认可/方案/后续），不打架固定模板', async () => {
+    const config = buildConfig();
+    const review = [
+      '感谢提交这份高质量的 issue @someone 👍',
+      '',
+      '## 分析认可',
+      '- 明确指出了 xxx 场景下的缺口',
+      '',
+      '## 实现方案',
+      '方案可落地，关键点：',
+      '1. 新增配置项',
+      '',
+      '## 后续',
+      '欢迎直接提 PR，基准分支 `main`，建议：',
+      '- PR 描述中关联本 issue（`Closes #22` 或 `Refs #22`）；'
+    ].join('\n');
+    // 依次: extract(structured) -> well_formed 判定 -> 评审评论生成
+    const openai = makeOpenai([
+      '```json\n{"要点":"a","要做的事":[]}\n```',
+      'WELL_FORMED',
+      review
+    ]);
+    const ops = makeOps({ canonicalItems: [] });
+    const gov = new IssueGovernanceService(openai, 'model', config, { dryRun: false }, ops);
+    const octokit = {};
+
+    const result = await gov.govern(octokit, 'o', 'r', issue, 'enhancement');
+
+    expect(result).toMatchObject({ decision: 'WELL_FORMED', promoted: true });
+    // 原地打 canonical + 分类标签，不关闭
+    expect(ops.addLabels).toHaveBeenCalledWith(octokit, 'o', 'r', 22, ['canonical', 'enhancement'], expect.any(String));
+    expect(ops.updateIssueState).not.toHaveBeenCalled();
+    // 评论是 AI 生成的实质内容，且保留机器人操作日志行
+    const commentCall = ops.addComment.mock.calls.find(c => c[3] === 22);
+    expect(commentCall).toBeTruthy();
+    expect(commentCall[4]).toContain('## 分析认可');
+    expect(commentCall[4]).toContain('## 实现方案');
+    expect(commentCall[4]).toContain('## 后续');
+    expect(commentCall[4]).toContain('@someone');
+    // 机器人身份标记由服务端确定性补上（开头 🤖 + 结尾操作日志行）
+    expect(commentCall[4].startsWith('🤖')).toBe(true);
+    expect(commentCall[4]).toContain('✅ 机器人操作日志：');
+  });
+
+  test('WELL_FORMED 但 AI 评审生成失败：回落固定模板评论，流程不中断', async () => {
+    const config = buildConfig();
+    // 依次: extract -> well_formed 判定 -> 评审生成抛错
+    const openai = makeOpenai([
+      '```json\n{"要点":"a","要做的事":[]}\n```',
+      'WELL_FORMED'
+    ]);
+    openai._create.mockRejectedValueOnce(new Error('review boom'));
+    const ops = makeOps({ canonicalItems: [] });
+    const gov = new IssueGovernanceService(openai, 'model', config, { dryRun: false }, ops);
+    const octokit = {};
+
+    const result = await gov.govern(octokit, 'o', 'r', issue, null);
+
+    expect(result).toMatchObject({ decision: 'WELL_FORMED', promoted: true });
+    expect(ops.addLabels).toHaveBeenCalledWith(octokit, 'o', 'r', 22, ['canonical'], expect.any(String));
+    // 回落到固定模板 + 日志行
+    const commentCall = ops.addComment.mock.calls.find(c => c[3] === 22);
+    expect(commentCall).toBeTruthy();
+    expect(commentCall[4]).toContain('已按模板规范填写');
+    expect(commentCall[4]).toContain('✅ 机器人操作日志：');
+  });
+
+  test('WELL_FORMED + dry-run：仍生成 AI 评审评论并演练发布，不做任何写操作', async () => {
+    const config = buildConfig();
+    const openai = makeOpenai([
+      '```json\n{"要点":"a","要做的事":[]}\n```',
+      'WELL_FORMED',
+      '感谢提交 @someone\n\n## 分析认可\n- 好\n\n## 实现方案\n可行\n\n## 后续\n欢迎提 PR'
+    ]);
+    const ops = makeOps({ canonicalItems: [] });
+    const gov = new IssueGovernanceService(openai, 'model', config, { dryRun: true }, ops);
+    const octokit = {};
+
+    const result = await gov.govern(octokit, 'o', 'r', issue, null);
+
+    expect(result).toMatchObject({ decision: 'WELL_FORMED', dryRun: true });
+    expect(ops.addLabels).not.toHaveBeenCalled();
+    expect(ops.updateIssueState).not.toHaveBeenCalled();
+    // dry-run 也走 AI 评审评论路径
+    const commentCall = ops.addComment.mock.calls.find(c => c[3] === 22);
+    expect(commentCall[4]).toContain('## 分析认可');
+    expect(commentCall[4].startsWith('🤖')).toBe(true);
+  });
 });
