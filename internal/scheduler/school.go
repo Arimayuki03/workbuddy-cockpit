@@ -143,3 +143,20 @@ func (s *Scheduler) RunCatNow() {
 		time.Sleep(activityAccountDelay)
 	}
 }
+
+// RunQueueNow 到点执行任务中心执行队列（panel 注入的 queueRunner 回调）：
+// 扫描全账号待办 → 按账号分组排队执行（成长任务 + 开学季闭环），语义与面板
+// 任务中心「启动执行队列」完全一致。panel 未装配（回调 nil）或队列已在跑
+// （panel 侧运行中直接拒启）时跳过并说明，均不视为失败。
+// 返回观测摘要（供 lastOut 展示）。
+func (s *Scheduler) RunQueueNow() string {
+	s.queueMu.RLock()
+	run := s.queueRunner
+	s.queueMu.RUnlock()
+	if run == nil {
+		log.Printf("queue: 面板队列执行体未注入（panel 未装配），跳过")
+		return "skipped: no runner"
+	}
+	run()
+	return "done"
+}

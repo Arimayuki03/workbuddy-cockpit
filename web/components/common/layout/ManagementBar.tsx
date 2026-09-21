@@ -579,17 +579,6 @@ export function ManagementBar() {
                             </div>
                           </div>
                         </div>
-
-                        {mounted && (
-                          <div className="space-y-2">
-                            <div className="text-[11px] font-medium text-muted-foreground">{t('profile.systemSettings')}</div>
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="text-[11px] text-muted-foreground/70">
-                                {t('theme.movedToToolbar')}
-                              </span>
-                            </div>
-                          </div>
-                        )}
                       </div>
                     </>
                   )}

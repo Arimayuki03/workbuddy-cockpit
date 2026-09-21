@@ -13,10 +13,12 @@ import {
 } from 'recharts';
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {accountApi, errText, statsApi} from '@/lib/api';
+import {useCachedAsync} from '@/lib/data-cache';
 import {useRealm} from '@/lib/realm-context';
 import type {
   Account,
   OverviewResponse,
+  PackagesResponse,
   UpstreamStatus,
   UsageSnapshot,
 } from '@/lib/types';
@@ -36,6 +38,7 @@ import {
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {StatCard} from '@/components/common/layout/StatCard';
 import {EmptyState} from '@/components/common/layout/EmptyState';
+import {CardRowsSkeleton} from '@/components/common/layout/LoadSkeleton';
 import {Badge} from '@/components/ui/badge';
 import {useT} from '@/lib/i18n/provider';
 import {notify} from '@/lib/toast';
@@ -43,64 +46,67 @@ import {notify} from '@/lib/toast';
 export default function DashboardPage() {
   const {realm, label: realmName} = useRealm();
   const t = useT();
-  const [overview, setOverview] = useState<OverviewResponse | null>(null);
+  // overview（池快照，快）与 packages（逐号查上游，慢）分两个缓存条目并行拉：
+  // 快的先渲染卡片骨架外的东西，慢的（积分）拿到后再补上——切页先出缓存值，
+  // 后台刷新静默替换，不再出现「整页空 1-2 秒」。
+  const overviewCache = useCachedAsync<OverviewResponse>(
+    'overview',
+    () => accountApi.overview(),
+    {ttl: 5000},
+  );
+  const packagesCache = useCachedAsync<PackagesResponse>(
+    'packages',
+    () => accountApi.packages(),
+    {ttl: 5000},
+  );
   const [usage, setUsage] = useState<UsageSnapshot | null>(null);
   const [upstream, setUpstream] = useState<UpstreamStatus | null>(null);
-  /** 实时积分（按 uid），叠加到账号上 */
-  const [liveCredits, setLiveCredits] = useState<Record<string, number>>({});
-  /** 最近到期套餐（按 uid），来自 packages 查询 */
-  const [nextExpiry, setNextExpiry] = useState<{at: number; amount: number} | null>(null);
+
+  const overview = overviewCache.data;
+  const packages = packagesCache.data;
 
   // 切换版本后要重新取积分：两个版本的账号池不同，credits 也不能混
+  //
+  // 实时积分与最近到期时间都从缓存数据**渲染期派生**：心跳/后台刷新写入缓存
+  // 后组件重渲染，这里自然跟随——没有独立 setState 时序，也不会出现
+  // 「先渲染池快照值、约 1 秒后被实时值覆盖」的闪变。
+  const liveCredits: Record<string, number> = {};
+  let nextExpiry: {at: number; amount: number} | null = null;
+  if (packages) {
+    for (const row of packages.accounts) {
+      if (typeof row.remain === 'number' && !row.error) liveCredits[row.uid] = row.remain;
+      for (const p of row.packages ?? []) {
+        if (!p.end_time) continue;
+        const at = Date.parse(p.end_time);
+        if (!Number.isFinite(at) || p.remain <= 0) continue;
+        if (!nextExpiry || at < nextExpiry.at) nextExpiry = {at, amount: p.remain};
+      }
+    }
+  }
+
+  // 上游健康与用量时序：这两个端点都很快，不进缓存，保持原有的一次性拉取。
+  // 心跳沿用原 load：同时刷上游状态、usage 与两个缓存条目，全部数据同帧续命。
   const load = useCallback(async () => {
     const results = await Promise.allSettled([
-      accountApi.overview(),
       accountApi.status(),
       statsApi.usage(168),
+      overviewCache.refresh(),
+      packagesCache.refresh(),
     ]);
-    if (results[0].status === 'fulfilled') setOverview(results[0].value);
-    if (results[1].status === 'fulfilled') setUpstream(results[1].value);
-    if (results[2].status === 'fulfilled') setUsage(results[2].value);
+    if (results[0].status === 'fulfilled') setUpstream(results[0].value);
+    if (results[1].status === 'fulfilled') setUsage(results[1].value);
     if (results.some((r) => r.status === 'rejected')) {
       const failed = results.find((r) => r.status === 'rejected');
       notify.err(errText((failed as PromiseRejectedResult).reason));
     }
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overviewCache.refresh, packagesCache.refresh]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  // 打开页面时拉一次积分包明细（最近到期时刻 + 实时余额）
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const r = await accountApi.packages();
-        if (!alive) return;
-        const credits: Record<string, number> = {};
-        let best: {at: number; amount: number} | null = null;
-        for (const row of r.accounts) {
-          if (typeof row.remain === 'number' && !row.error) credits[row.uid] = row.remain;
-          for (const p of row.packages ?? []) {
-            if (!p.end_time) continue;
-            const at = Date.parse(p.end_time);
-            if (!Number.isFinite(at) || p.remain <= 0) continue;
-            if (!best || at < best.at) best = {at, amount: p.remain};
-          }
-        }
-        setLiveCredits(credits);
-        setNextExpiry(best);
-      } catch {
-        /* 静默失败：仍显示池快照值 */
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  // 账号健康度与用量会持续变化，用心跳刷新避免展示陈旧数据
+  // 账号健康度与用量持续变化：心跳刷新全部数据源（含两个缓存条目）
   useHeartbeat(load, 30000);
 
   /**
@@ -256,7 +262,7 @@ export default function DashboardPage() {
           icon={CircleCheck}
           tone={unusable > 0 ? 'warning' : 'success'}
           hintTone={unusable > 0 ? 'warning' : (valid === scoped.length ? 'success' : 'warning')}
-          delay={0.05}
+          delay={0.04}
         />
         <StatCard
           label={t('dashboard.cooling')}
@@ -269,7 +275,7 @@ export default function DashboardPage() {
           icon={TriangleAlert}
           tone={degraded > 0 ? 'warning' : 'neutral'}
           hintTone={degraded > 0 ? 'warning' : undefined}
-          delay={0.1}
+          delay={0.08}
         />
         <StatCard
           label={t('metric.credits')}
@@ -292,7 +298,7 @@ export default function DashboardPage() {
             !creditsKnown.length ? 'neutral' : creditsLow > 0 || expiryUrgent ? 'warning' : 'accent'
           }
           hintTone={creditsLow > 0 || expiryUrgent ? 'warning' : undefined}
-          delay={0.15}
+          delay={0.12}
         />
         <StatCard
           label={t('dashboard.todayTokens')}
@@ -303,7 +309,7 @@ export default function DashboardPage() {
           })}
           icon={Activity}
           tone="info"
-          delay={0.2}
+          delay={0.16}
         />
       </section>
 
@@ -386,7 +392,7 @@ export default function DashboardPage() {
               ))}
             </div>
           ) : (
-            <div className="grid h-[160px] place-items-center text-xs text-muted-foreground">{t('dashboard.noUpstreamStatus')}</div>
+            <CardRowsSkeleton rows={3} />
           )}
         </div>
       </section>

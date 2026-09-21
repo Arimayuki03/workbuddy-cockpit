@@ -1,6 +1,6 @@
 'use client';
 
-import {motion} from 'motion/react';
+import {motion, useReducedMotion} from 'motion/react';
 import type {ReactNode} from 'react';
 import type {LucideIcon} from 'lucide-react';
 import {cn} from '@/lib/utils';
@@ -53,11 +53,15 @@ export function StatCard({
   hintTone?: StatTone;
   delay?: number;
 }) {
+  const reduceMotion = useReducedMotion();
   return (
+    // 入场与 (main)/layout 容器同向（y: -6 → 0）同曲线；delay 只保留极短的
+    // 逐卡错位（0.04s 步进），比之前 0.35s 时长 + 0.05s 步进的瀑布感更利落，
+    // 也与容器 0.22s 的落定时间大体对齐，不出现卡片比正文明显晚到的拖尾。
     <motion.div
-      initial={{opacity: 0, y: 12}}
+      initial={reduceMotion ? false : {opacity: 0, y: -6}}
       animate={{opacity: 1, y: 0}}
-      transition={{duration: 0.35, delay}}
+      transition={reduceMotion ? {duration: 0} : {duration: 0.22, ease: [0.22, 1, 0.36, 1], delay}}
       className="min-h-[88px] sm:min-h-[96px] rounded-[20px] bg-muted px-3.5 py-3 sm:px-4"
     >
       <div className="flex items-start justify-between gap-2">
@@ -77,7 +81,10 @@ export function StatCard({
       </div>
       <div
         className={cn(
-          'mt-3 text-xl sm:text-2xl font-semibold tracking-[-0.03em] tabular-nums',
+          // min-h：value 阶段性为 undefined/占位（数据未到）时数值行也有稳定高度，
+          // 避免数据到达后卡片内容整体「长高」把同行卡片往下推。
+          'mt-3 flex min-h-[1.75rem] items-center sm:min-h-[2rem]',
+          'text-xl sm:text-2xl font-semibold tracking-[-0.03em] tabular-nums',
           TONE_VALUE[tone],
         )}
       >

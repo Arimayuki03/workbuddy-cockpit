@@ -15,6 +15,7 @@ import {
 
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
+import {ModelRowsSkeleton} from '@/components/common/layout/LoadSkeleton';
 import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
 import {Input} from '@/components/ui/input';
@@ -27,11 +28,12 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import {modelApi, errText} from '@/lib/api';
+import {useCachedAsync} from '@/lib/data-cache';
 import {useRealm} from '@/lib/realm-context';
 import {notify} from '@/lib/toast';
 import {useT} from '@/lib/i18n/provider';
 import {cn} from '@/lib/utils';
-import type {CatalogModel, ModelProbe} from '@/lib/types';
+import type {CatalogModel, ModelProbe, ModelProbesResponse, PanelModelsResponse} from '@/lib/types';
 
 /** 上下文窗口显示：131072 → 128K；1048576 → 1M；0 → — */
 function fmtCtx(n?: number): string {
@@ -118,11 +120,50 @@ function ProbeBadge({probe}: {probe: ModelProbe}) {
 export default function ModelsPage() {
   const t = useT();
   const {realm, label: realmName} = useRealm();
-  const [models, setModels] = useState<CatalogModel[]>([]);
-  const [probes, setProbes] = useState<Record<string, ModelProbe>>({});
-  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
+
+  // models 直连上游实时探测（秒级），接缓存：切页/切版本先出上次的列表，
+  // 后台静默刷新。key 带 realm——两个域的探测结果各自缓存互不覆盖。
+  const modelsCache = useCachedAsync<PanelModelsResponse>(
+    `models:${realm}`,
+    () => modelApi.models(realm),
+    {ttl: 30_000},
+  );
+  const probesCache = useCachedAsync<ModelProbesResponse>(
+    'models:probes',
+    () => modelApi.probes(),
+    {ttl: 60_000},
+  );
+  const loading = modelsCache.loading;
+  // 缓存响应 → 展示模型（含 series 推导）。渲染期派生，刷新后自动跟随。
+  const models = useMemo<CatalogModel[]>(() => {
+    const list = modelsCache.data?.models ?? [];
+    return list.map((m) => ({
+      id: m.id,
+      name: m.name,
+      context_length: m.context_length ?? 0,
+      max_output_tokens: m.max_output_tokens ?? 0,
+      efforts: m.supported_efforts ?? [],
+      default_effort: m.default_effort ?? '',
+      description: m.description,
+      credits: m.credits,
+      vendor: m.vendor,
+      tags: m.tags,
+      is_default: m.is_default,
+      supports_reasoning: m.supports_reasoning,
+      supports_tool_call: m.supports_tool_call,
+      only_reasoning: m.only_reasoning,
+      reasoning_summary: m.reasoning_summary,
+      supports_images: !!m.supports_images,
+      series: seriesOf(m.id),
+      probe: null,
+    }));
+  }, [modelsCache.data]);
+  const probes = useMemo(
+    () => probesCache.data?.probes ?? {},
+    [probesCache.data],
+  );
 
   const [q, setQ] = useState('');
   const [series, setSeries] = useState('all');
@@ -133,60 +174,28 @@ export default function ModelsPage() {
    */
   const [sort, setSort] = useState<'default' | 'credits'>('default');
 
-  // panel models 是双域独立探测的结果（每条 id 自带 cn:/global: 前缀），
-  // realm 过滤在前端做：切版本只筛本域条目。
-  const load = useCallback(async (force = false) => {
-    if (force) setRefreshing(true);
-    else setLoading(true);
+  // 手动「重新获取」：绕过 TTL 强制拉新（refresh() 的 busy 防抖天然防连点）
+  const load = useCallback(async () => {
+    setRefreshing(true);
     try {
-      const [mRes, pRes] = await Promise.allSettled([
-        modelApi.models(realm),
-        modelApi.probes(),
-      ]);
-      if (mRes.status === 'fulfilled') {
-        const list = mRes.value.models ?? [];
-        setModels(list.map((m) => ({
-          id: m.id,
-          name: m.name,
-          context_length: m.context_length ?? 0,
-          max_output_tokens: m.max_output_tokens ?? 0,
-          efforts: m.supported_efforts ?? [],
-          default_effort: m.default_effort ?? '',
-          description: m.description,
-          credits: m.credits,
-          vendor: m.vendor,
-          tags: m.tags,
-          is_default: m.is_default,
-          supports_reasoning: m.supports_reasoning,
-          supports_tool_call: m.supports_tool_call,
-          only_reasoning: m.only_reasoning,
-          reasoning_summary: m.reasoning_summary,
-          supports_images: !!m.supports_images,
-          series: seriesOf(m.id),
-          probe: null,
-        })));
-      } else {
-        setModels([]);
-        setError(errText(mRes.reason));
-      }
-      if (pRes.status === 'fulfilled') setProbes(pRes.value.probes ?? {});
-      else setProbes({});
+      await modelsCache.refresh();
+      await probesCache.refresh();
       setError('');
     } catch (e) {
+      // 探测失败时错误信息由 useCachedAsync 保留旧数据，这里显式提示
       setError(errText(e));
     } finally {
-      setLoading(false);
       setRefreshing(false);
     }
-  }, [realm]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelsCache.refresh, probesCache.refresh]);
 
   useEffect(() => {
     // 切版本时清掉筛选状态，避免「上一版的系列筛选把新版过滤成空」
     setSeries('all');
     setCap('all');
     setQ('');
-    load();
-  }, [load]);
+  }, [realm]);
 
   /** 实际显示的模型：按 realm 前缀过滤 + 合并探测标注 */
   const scoped = useMemo(
@@ -270,7 +279,7 @@ export default function ModelsPage() {
             disabled={refreshing}
             title={t('models.refetchTitle')}
             onClick={() => {
-              load(true);
+              load();
               notify.info(t('models.refetching'));
             }}
           >
@@ -378,13 +387,10 @@ export default function ModelsPage() {
         </div>
       </section>
 
-      {/* 列表 */}
+      {/* 列表：加载态用与表格同节奏的骨架行，替换时高度差收敛（之前是一行转圈文字） */}
       <section className="overflow-hidden rounded-[20px] bg-muted">
         {loading ? (
-          <div className="flex items-center justify-center gap-2 py-16 text-xs text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            {t('models.loadingList')}
-          </div>
+          <ModelRowsSkeleton rows={6} />
         ) : error ? (
           <EmptyState icon={Boxes} title={t('models.loadFailed')} description={error} />
         ) : scoped.length === 0 ? (

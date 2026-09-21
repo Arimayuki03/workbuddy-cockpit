@@ -32,7 +32,9 @@ data/
 /nul
 
 # Runtime logs & distribution archive（本地定制）
-logs/
+# 必须锚定根目录（/logs/）：裸 "logs/" 会匹配任意层级，把面板源码
+# web/app/(main)/logs/ 也一起忽略，克隆到别的机器就丢了整页代码。
+/logs/
 workbuddy2api-dist.zip
 
 # Session artifacts

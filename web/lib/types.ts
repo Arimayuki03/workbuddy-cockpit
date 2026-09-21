@@ -335,7 +335,7 @@ export interface QueueItem {
   /** growth | school */
   kind: string;
   code: string;
-  /** pending | running | done | skipped | error */
+  /** pending | running | done | skipped | error | cancelled */
   status: string;
   message?: string;
 }
@@ -347,6 +347,8 @@ export interface TaskQueueResponse {
   started: boolean;
   started_at: string;
   seq: number;
+  /** true = 有取消请求，剩余待办不再调度（进行中的动作做完即停） */
+  cancel_requested?: boolean;
   items: QueueItem[];
 }
 

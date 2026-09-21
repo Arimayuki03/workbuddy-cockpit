@@ -10,21 +10,24 @@ import {
   Play,
   ScanSearch,
   TriangleAlert,
+  XCircle,
 } from 'lucide-react';
 import {notify} from '@/lib/toast';
 import {taskApi, errText} from '@/lib/api';
+import {useCachedAsync} from '@/lib/data-cache';
 import type {
   GrowthTask,
   QueueItem,
-  ScanAccountItem,
+  ScanAllResponse,
 } from '@/lib/types';
 import {fmtNumber} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
+import {TableSkeleton} from '@/components/common/layout/LoadSkeleton';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {useAuth} from '@/lib/auth-context';
 import {useRealm} from '@/lib/realm-context';
-import {useT} from '@/lib/i18n/provider';
+import {useI18n, useT, type TFn} from '@/lib/i18n/provider';
 import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
 import {
@@ -75,19 +78,43 @@ function queueTone(s: QueueItem['status']): string {
     case 'running': return 'text-sky-600 dark:text-sky-400';
     case 'error': return 'text-red-600 dark:text-red-400';
     case 'skipped': return 'text-muted-foreground';
+    case 'cancelled': return 'text-muted-foreground/60';
     default: return 'text-muted-foreground/60';
   }
+}
+
+/**
+ * 队列状态文案。cancelled 的 locales 键（tasks.queue_cancelled）尚未添加
+ * （本任务禁止改 locales，且 translate 不支持 defaultValue，缺键会直接回显
+ * 键名）——先按当前语言本地映射，locales 补键后收敛回 t()。
+ */
+function queueStatusLabel(s: string, t: TFn, locale: string): string {
+  if (s === 'cancelled') {
+    if (locale === 'zh-CN' || locale === 'zh-TW') return '已取消';
+    if (locale === 'ja') return 'キャンセル済み';
+    if (locale === 'ko') return '취소됨';
+    return 'Cancelled';
+  }
+  return t(`tasks.queue_${s}`) || s;
 }
 
 export default function TasksPage() {
   const {isAdmin} = useAuth();
   const {realm, label: realmName} = useRealm();
   const t = useT();
+  const {locale} = useI18n();
 
-  /** 全账号扫描结果（待办清单） */
-  const [scan, setScan] = useState<ScanAccountItem[] | null>(null);
-  const [pendingCount, setPendingCount] = useState(0);
-  const [scanBusy, setScanBusy] = useState(false);
+  /** 全账号扫描结果（待办清单）。
+   *  scan_all 要逐账号向上游扫任务（1-2 秒起），接缓存：切页先出上次的
+   *  扫描结果，后台静默刷新；手动「扫描」按钮仍即时触发。 */
+  const scanCache = useCachedAsync<ScanAllResponse>(
+    'tasks:scan',
+    () => taskApi.scanAll(),
+    {ttl: 10_000},
+  );
+  const scan = scanCache.data?.accounts ?? null;
+  const pendingCount = scanCache.data?.pending_count ?? 0;
+  const scanBusy = scanCache.loading || scanCache.refreshing;
   const [selectedUid, setSelectedUid] = useState<string>('all');
   /** 选中账号的任务明细（仅单号视图时拉取） */
   const [accountTasks, setAccountTasks] = useState<GrowthTask[]>([]);
@@ -97,22 +124,20 @@ export default function TasksPage() {
   const [queue, setQueue] = useState<{running: boolean; total: number; conc: number; items: QueueItem[]} | null>(null);
   const [queueBusy, setQueueBusy] = useState(false);
   const [concurrency, setConcurrency] = useState('2');
+  /** 取消队列请求进行中（按钮禁用 + 转圈） */
+  const [cancelBusy, setCancelBusy] = useState(false);
   /** 一键自动完成的进度反馈（单号 auto_all 是长请求，busy 即转圈） */
   const [autoAllBusyUid, setAutoAllBusyUid] = useState<string | null>(null);
   const autoAllBusyRef = useRef(false);
 
   const loadScan = useCallback(async () => {
-    setScanBusy(true);
     try {
-      const r = await taskApi.scanAll();
-      setScan(r.accounts ?? []);
-      setPendingCount(r.pending_count ?? 0);
+      await scanCache.refresh();
     } catch (e) {
       notify.err(errText(e));
-    } finally {
-      setScanBusy(false);
     }
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scanCache.refresh]);
 
   const loadQueue = useCallback(async () => {
     try {
@@ -186,6 +211,20 @@ export default function TasksPage() {
       notify.err(errText(e));
     } finally {
       setQueueBusy(false);
+    }
+  }
+
+  /** 取消执行队列：剩余待办停止调度，进行中的条目自然完成后停止 */
+  async function cancelQueue() {
+    setCancelBusy(true);
+    try {
+      await taskApi.cancelQueue();
+      notify.ok(t('tasks.queueCancelledTitle'), t('tasks.queueCancelledDetail'));
+      await loadQueue();
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setCancelBusy(false);
     }
   }
 
@@ -322,18 +361,43 @@ export default function TasksPage() {
                 </Badge>
               )}
             </div>
-            <Select value={concurrency} onValueChange={setConcurrency}>
-              <SelectTrigger className="h-7 w-[110px] rounded-full text-[11px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {[1, 2, 3, 4].map((n) => (
-                  <SelectItem key={n} value={String(n)} className="text-xs">
-                    {t('tasks.concurrencyN', {n})}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <div className="flex items-center gap-2">
+              {isAdmin && queue.running && (
+                <ConfirmDialog
+                  title={t('tasks.queueCancelConfirmTitle')}
+                  description={t('tasks.queueCancelConfirmDesc')}
+                  confirmText={t('tasks.queueCancel')}
+                  onConfirm={cancelQueue}
+                  trigger={
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 rounded-full text-[11px]"
+                      disabled={cancelBusy}
+                    >
+                      {cancelBusy ? (
+                        <Loader2 className="animate-spin" />
+                      ) : (
+                        <XCircle />
+                      )}
+                      {cancelBusy ? t('tasks.queueCancelling') : t('tasks.queueCancel')}
+                    </Button>
+                  }
+                />
+              )}
+              <Select value={concurrency} onValueChange={setConcurrency}>
+                <SelectTrigger className="h-7 w-[110px] rounded-full text-[11px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {[1, 2, 3, 4].map((n) => (
+                    <SelectItem key={n} value={String(n)} className="text-xs">
+                      {t('tasks.concurrencyN', {n})}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
           </div>
           <div className="scroll-slim max-h-[280px] overflow-auto">
             <Table>
@@ -355,7 +419,7 @@ export default function TasksPage() {
                     </TableCell>
                     <TableCell className="font-mono text-[11px]">{it.code}</TableCell>
                     <TableCell className={'text-xs font-medium ' + queueTone(it.status)}>
-                      {t(`tasks.queue_${it.status}`, {defaultValue: ''}) || it.status}
+                      {queueStatusLabel(it.status, t, locale)}
                     </TableCell>
                     <TableCell className="max-w-[280px] truncate pr-2 text-[11px] text-muted-foreground" title={it.message}>
                       {it.message || '—'}
@@ -486,10 +550,7 @@ export default function TasksPage() {
             {t('tasks.detailTitle')}
           </div>
           {accountTasksBusy ? (
-            <div className="flex items-center justify-center gap-2 py-10 text-xs text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              {t('common.loading')}
-            </div>
+            <TableSkeleton rows={4} />
           ) : accountTasks.length ? (
             <Table>
               <TableHeader>

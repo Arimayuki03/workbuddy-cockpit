@@ -37,7 +37,11 @@
     "activity_enabled": true,
     "keepalive_enabled": true,
     "school_enabled": true,
-    "cat_enabled": true
+    "cat_enabled": true,
+    "queue_hours": [
+      10
+    ],
+    "queue_enabled": false
   },
   "global": {
     "enabled": true,

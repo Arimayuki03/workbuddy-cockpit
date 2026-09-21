@@ -1,6 +1,6 @@
 'use client';
 
-import {useCallback, useEffect, useState} from 'react';
+import {useCallback, useState} from 'react';
 import {
   GraduationCap,
   Loader2,
@@ -12,10 +12,12 @@ import {
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {schoolApi, errText} from '@/lib/api';
-import type {SchoolAccountView, SchoolTaskView, VoucherRow} from '@/lib/types';
+import {useCachedAsync} from '@/lib/data-cache';
+import type {SchoolStatusResponse, SchoolTaskView, VoucherRow} from '@/lib/types';
 import {fmtDateTime, fmtNumber} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
+import {CardRowsSkeleton} from '@/components/common/layout/LoadSkeleton';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {CopyButton} from '@/components/ui/copy-button';
 import {useRealm} from '@/lib/realm-context';
@@ -74,40 +76,37 @@ export default function ActivityPage() {
   const t = useT();
   const {isAdmin} = useAuth();
   const {realm} = useRealm();
-  const [accounts, setAccounts] = useState<SchoolAccountView[]>([]);
-  const [vouchers, setVouchers] = useState<VoucherRow[]>([]);
-  const [loading, setLoading] = useState(true);
+  // 开学季状态逐账号查上游（秒级），接缓存：切页先出上次的矩阵，后台静默刷新
+  const statusCache = useCachedAsync<SchoolStatusResponse>(
+    'activity:status',
+    async () => {
+      const r = await schoolApi.status();
+      // 后端对 global 账号、任务查询出错的账号返回的 tasks 是 null（JSON 序列化成 null，
+      // 类型声明上仍是数组），先归一化成空数组，避免渲染层 a.tasks.every 抛 TypeError 崩页
+      return {...r, accounts: (r.accounts ?? []).map((a) => ({...a, tasks: a.tasks ?? [], chances: a.chances ?? 0}))};
+    },
+    {ttl: 10_000},
+  );
+  const accounts = statusCache.data?.accounts ?? [];
+  const loading = statusCache.loading;
+  const load = statusCache.refresh;
   const [runBusy, setRunBusy] = useState(false);
   /** 券码抽屉：当前查看的账号 uid */
   const [voucherUid, setVoucherUid] = useState<string | null>(null);
+  const [vouchers, setVouchers] = useState<VoucherRow[]>([]);
   const [vouchersBusy, setVouchersBusy] = useState(false);
-  /** 抽奖余额合计 */
+  /** 抽奖余额合计（渲染期派生，数据刷新后自动跟随） */
   const totalChances = accounts.reduce((sum, a) => sum + (a.chances ?? 0), 0);
   const doneCount = accounts.filter((a) =>
     a.tasks.every((x) => x.status === 'claimed' || (x.target_count > 0 && x.progress >= x.target_count)),
   ).length;
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const r = await schoolApi.status();
-      // 后端对 global 账号、任务查询出错的账号返回的 tasks 是 null（JSON 序列化成 null，
-      // 类型声明上仍是数组），先归一化成空数组，避免渲染层 a.tasks.every 抛 TypeError 崩页
-      setAccounts(
-        (r.accounts ?? []).map((a) => ({...a, tasks: a.tasks ?? [], chances: a.chances ?? 0})),
-      );
-    } catch (e) {
-      notify.err(errText(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  useHeartbeat(load, 60000);
+  useHeartbeat(
+    () => {
+      statusCache.refresh().catch((e) => notify.err(errText(e)));
+    },
+    60000,
+  );
 
   /** 一键执行全部账号开学季闭环（异步，进度看任务频道日志） */
   const runAll = useCallback(async () => {
@@ -115,13 +114,14 @@ export default function ActivityPage() {
     try {
       await schoolApi.runAll();
       notify.ok(t('activity.runAllStarted'), t('activity.runAllStartedDetail'));
-      await load();
+      // 闭环是异步任务，状态不会立刻变化：强制刷新缓存（绕过 TTL）拉最新矩阵
+      statusCache.refresh().catch(() => {/* 心跳稍后会再试 */});
     } catch (e) {
       notify.err(errText(e));
     } finally {
       setRunBusy(false);
     }
-  }, [load, t]);
+  }, [statusCache, t]);
 
   /** 打开券码抽屉时拉一次券码列表 */
   const openVouchers = useCallback(async () => {
@@ -225,10 +225,7 @@ export default function ActivityPage() {
       {/* 状态矩阵 */}
       <section className="overflow-hidden rounded-[20px] bg-muted">
         {loading && !accounts.length ? (
-          <div className="flex items-center justify-center gap-2 py-16 text-xs text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            {t('common.loading')}
-          </div>
+          <CardRowsSkeleton rows={4} />
         ) : accounts.length ? (
           <div className="divide-y divide-border/40">
             {accounts.map((a) => (

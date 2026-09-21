@@ -208,6 +208,7 @@ func (p *Panel) routes() {
 	p.api("POST", "/api/accounts/{uid}/tasks/auto_all", "/api/accounts/{uid}/tasks/auto_all", p.accountTaskAutoAll)
 	p.api("POST", "/api/tasks/scan_all", "/api/tasks/scan_all", p.tasksScanAll)
 	p.api("POST", "/api/tasks/run_queue", "/api/tasks/run_queue", p.tasksRunQueue)
+	p.api("POST", "/api/tasks/queue/cancel", "/api/tasks/queue/cancel", p.tasksCancelQueue)
 	p.api("GET", "/api/tasks/queue", "/api/tasks/queue", p.tasksQueueStatus)
 	p.api("GET", "/api/school/status", "/api/school/status", p.schoolStatus)
 	p.api("POST", "/api/school/run_all", "/api/school/run_all", p.schoolRunAll)

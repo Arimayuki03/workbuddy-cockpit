@@ -6,6 +6,7 @@
 
 import {cn} from '@/lib/utils';
 import {IconLayoutNavbarCollapse} from '@tabler/icons-react';
+import Link from 'next/link';
 import {
   AnimatePresence,
   MotionValue,
@@ -112,7 +113,7 @@ const FloatingDockMobile = memo(
                           {item.customComponent}
                         </div>
                       ) : item.href ? (
-                      <a
+                      <Link
                         href={item.href}
                         key={item.title}
                         className={cn(
@@ -126,7 +127,7 @@ const FloatingDockMobile = memo(
                         <div className="flex items-center justify-center">
                           {item.icon}
                         </div>
-                      </a>
+                      </Link>
                     ) : (
                       <button
                         onClick={item.onClick}
@@ -319,46 +320,52 @@ const IconContainer = memo(
         setHovered(false);
       }, []);
 
-      const Element = customComponent ? 'div' : href ? 'a' : 'button';
-      const elementProps = customComponent ? {} : href ?
-      {
-        href,
-        ...((external || href.startsWith('https://')) ?
-            {target: '_blank', rel: 'noopener noreferrer'} :
-            {}),
-      } :
-      {onClick};
-
-      return (
-        <Element {...elementProps}>
+      const inner = (
+        <motion.div
+          ref={ref}
+          style={{width, height}}
+          onMouseEnter={handleMouseEnter}
+          onMouseLeave={handleMouseLeave}
+          className="relative flex aspect-square items-center justify-center rounded-full bg-gray-200 cursor-pointer dark:bg-neutral-800"
+        >
+          <AnimatePresence>
+            {hovered && (
+              <motion.div
+                initial={{opacity: 0, y: 10, x: '-50%'}}
+                animate={{opacity: 1, y: 0, x: '-50%'}}
+                exit={{opacity: 0, y: 2, x: '-50%'}}
+                className="absolute -top-8 left-1/2 w-fit rounded-md border border-gray-200 bg-gray-100 px-2 py-0.5 text-xs whitespace-pre text-neutral-700 dark:border-neutral-900 dark:bg-neutral-800 dark:text-white"
+              >
+                {tooltip || title}
+              </motion.div>
+            )}
+          </AnimatePresence>
           <motion.div
-            ref={ref}
-            style={{width, height}}
-            onMouseEnter={handleMouseEnter}
-            onMouseLeave={handleMouseLeave}
-            className="relative flex aspect-square items-center justify-center rounded-full bg-gray-200 cursor-pointer dark:bg-neutral-800"
+            style={{width: widthIcon, height: heightIcon}}
+            className="flex items-center justify-center"
           >
-            <AnimatePresence>
-              {hovered && (
-                <motion.div
-                  initial={{opacity: 0, y: 10, x: '-50%'}}
-                  animate={{opacity: 1, y: 0, x: '-50%'}}
-                  exit={{opacity: 0, y: 2, x: '-50%'}}
-                  className="absolute -top-8 left-1/2 w-fit rounded-md border border-gray-200 bg-gray-100 px-2 py-0.5 text-xs whitespace-pre text-neutral-700 dark:border-neutral-900 dark:bg-neutral-800 dark:text-white"
-                >
-                  {tooltip || title}
-                </motion.div>
-              )}
-            </AnimatePresence>
-            <motion.div
-              style={{width: widthIcon, height: heightIcon}}
-              className="flex items-center justify-center"
-            >
-              {customComponent || icon}
-            </motion.div>
+            {customComponent || icon}
           </motion.div>
-        </Element>
+        </motion.div>
       );
+
+      /* 站内导航走 next/link：客户端路由 + 视口内预取，切页不再整页重载
+         （此前用原生 <a>，每次切页都是白屏闪烁 + JS 重解析 + 数据缓存失效）；
+         外链保持新开页。customComponent / 纯按钮分支维持原样。 */
+      if (href && !customComponent) {
+        const isExternal = external || href.startsWith('https://');
+        return (
+          <Link
+            href={href}
+            {...(isExternal ? {target: '_blank', rel: 'noopener noreferrer'} : {})}
+          >
+            {inner}
+          </Link>
+        );
+      }
+
+      const Element = customComponent ? 'div' : 'button';
+      return <Element {...(customComponent ? {} : {onClick})}>{inner}</Element>;
     },
 );
 

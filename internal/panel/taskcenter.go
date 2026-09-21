@@ -148,7 +148,7 @@ type queueItem struct {
 	Nickname string `json:"nickname"`
 	Kind     string `json:"kind"` // growth | school
 	Code     string `json:"code"`
-	Status   string `json:"status"` // pending | running | done | skipped | error
+	Status   string `json:"status"` // pending | running | done | skipped | error | cancelled
 	Message  string `json:"message,omitempty"`
 }
 
@@ -157,6 +157,7 @@ type queueItem struct {
 type queueState struct {
 	mu        sync.Mutex
 	running   bool
+	cancelReq bool // 手动取消请求：剩余 pending 待办停止调度，进行中条目不打断
 	startedAt time.Time
 	items     []queueItem
 	conc      int
@@ -189,12 +190,46 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	if body.Concurrency > 4 {
 		body.Concurrency = 4
 	}
+	total, seq, started, err := p.startTaskQueue(body.Concurrency, body.Growth, body.School)
+	if err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	if !started {
+		log.Printf("panel: 队列启动：无可执行待办（全部账号任务已完成）")
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": false, "message": "全部账号没有待办任务"})
+		return
+	}
+	log.Printf("panel: 队列启动：%d 项（并发 %d，成长 %v 开学季 %v）", total, body.Concurrency, body.Growth, body.School)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true, "total": total, "seq": seq})
+}
+
+// tasksCancelQueue 手动取消执行队列：置 cancelReq 标记，runQueueItems 的执行
+// 循环据此把剩余 pending 待办标为 cancelled。幂等——重复取消同样返回成功；
+// 队列未在跑返回 409。进行中的条目不打断（自然完成当前动作后停止）。
+func (p *Panel) tasksCancelQueue(w http.ResponseWriter, r *http.Request) {
+	q := p.queue()
+	q.mu.Lock()
+	if !q.running {
+		q.mu.Unlock()
+		writeErr(w, http.StatusConflict, "队列未在执行")
+		return
+	}
+	q.cancelReq = true
+	q.mu.Unlock()
+	log.Printf("panel: 队列取消请求：剩余待办停止调度")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cancelled": true})
+}
+
+// startTaskQueue 队列启动的公共实现（HTTP 入口与定时排程共用）：
+// 并发扫描全账号待办 → 无待办返回 started=false → 组队并异步执行。
+// 队列已在跑返回错误（HTTP 层 409；定时层记日志跳过，下个时点再试）。
+func (p *Panel) startTaskQueue(concurrency int, wantGrowth, wantSchool bool) (total, seq int, started bool, err error) {
 	q := p.queue()
 	q.mu.Lock()
 	if q.running {
 		q.mu.Unlock()
-		writeErr(w, http.StatusConflict, "队列正在执行中（可在任务中心查看进度）")
-		return
+		return 0, 0, false, fmt.Errorf("队列正在执行中（可在任务中心查看进度）")
 	}
 	q.mu.Unlock()
 
@@ -224,7 +259,7 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 			if a.IsGlobal() {
 				return
 			}
-			if body.Growth {
+			if wantGrowth {
 				if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil {
 					for _, t := range tasks {
 						if growthPending(t) {
@@ -265,7 +300,7 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 				accts = append(accts, one)
 				mu.Unlock()
 			}
-		}(a, body.School)
+		}(a, wantSchool)
 	}
 	wg.Wait()
 
@@ -280,23 +315,20 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(items) == 0 {
-		log.Printf("panel: 队列启动：无可执行待办（全部账号任务已完成）")
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": false, "message": "全部账号没有待办任务"})
-		return
+		return 0, q.seq, false, nil
 	}
 
 	q.mu.Lock()
 	q.running = true
 	q.startedAt = time.Now()
 	q.items = items
-	q.conc = body.Concurrency
+	q.conc = concurrency
 	q.seq++
-	seq := q.seq
+	seq = q.seq
 	q.mu.Unlock()
 
-	go p.runQueueItems(accts, items, body.Concurrency)
-	log.Printf("panel: 队列启动：%d 项（并发 %d，成长 %v 开学季 %v）", len(items), body.Concurrency, body.Growth, body.School)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true, "total": len(items), "seq": seq})
+	go p.runQueueItems(accts, items, concurrency)
+	return len(items), seq, true, nil
 }
 
 // runQueueItems 队列执行主体：按账号分组，账号内串行（per-account 锁），
@@ -306,6 +338,7 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 	defer func() {
 		q.mu.Lock()
 		q.running = false
+		q.cancelReq = false
 		q.mu.Unlock()
 		log.Printf("panel: 队列执行结束（共 %d 项）", len(items))
 	}()
@@ -333,6 +366,15 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 				time.Sleep(reportGap) // 给上游状态流转留时间
 			}
 			for i := range q.items {
+				// 取消检查（每个 item 处理前，含首个——覆盖拿到账号锁后的开始时机）：
+				// 置位则该账号剩余 pending 全部标 cancelled 并停止调度；已进入
+				// runGrowthQueued/runSchoolQueued 的条目不打断，自然完成后停。
+				if q.cancelRequested() {
+					if n := p.cancelRemainingFor(q, one.a.UID); n > 0 {
+						log.Printf("panel: 队列已取消：剩余待办标记为 cancelled")
+					}
+					break
+				}
 				uid, kind, code := q.snapshotAt(i)
 				if uid != one.a.UID {
 					continue
@@ -363,6 +405,123 @@ type queueAccount struct {
 	a      *auth.Auth
 	grow   []upstream.Task
 	school bool
+}
+
+// ScheduledQueueRunner 定时排程入口（scheduler 第七类任务 taskQueue 到点回调，
+// main 装配期经 Scheduler.SetQueueRunner 注入）：扫描全账号待办并启动执行队列。
+// 成长任务 + 开学季闭环都做，并发固定 2（定时无人值守，宁稳勿激）。
+// 队列已在跑（手动点过还没跑完）记日志跳过，等下个时点；无待办同样静默完成。
+func (p *Panel) ScheduledQueueRunner() {
+	pending, err := p.pendingCount()
+	if err != nil {
+		log.Printf("panel: 定时队列扫描失败: %v", err)
+		return
+	}
+	if pending == 0 {
+		log.Printf("panel: 定时队列：全部账号无待办任务")
+		return
+	}
+	total, _, started, err := p.startTaskQueue(2, true, true)
+	if err != nil {
+		log.Printf("panel: 定时队列跳过: %v", err)
+		return
+	}
+	if !started {
+		log.Printf("panel: 定时队列：扫描到 %d 项待办但组队为空，跳过", pending)
+		return
+	}
+	log.Printf("panel: 定时队列已启动：%d 项（并发 2）", total)
+}
+
+// pendingCount 只读扫描全账号待办总数（成长 + 开学季，与 startTaskQueue 同口径）。
+// 供定时入口决定"无待办不启队列"；扫描失败返回错误（宁可下个时点再试，不误启）。
+func (p *Panel) pendingCount() (int, error) {
+	states := p.cfg.Pool.List()
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	pending := 0
+	scanFailed := false
+	for _, st := range states {
+		if st.Disabled {
+			continue
+		}
+		a := p.cfg.Pool.AuthByUID(st.UID)
+		if a == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(a *auth.Auth) {
+			defer wg.Done()
+			if a.IsGlobal() {
+				return // D4 门控：global 无 CN 任务体系
+			}
+			n := 0
+			failed := false
+			if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil {
+				for _, t := range tasks {
+					if growthPending(t) {
+						n++
+					}
+				}
+			} else {
+				failed = true
+			}
+			if mpTasks, err := p.cfg.Upstream.ListTasksMP(a); err == nil {
+				// mp 列表是默认口径的超集增量：只统计默认列表没有的 code。
+				seen := map[string]bool{}
+				if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil {
+					for _, t := range tasks {
+						seen[t.TaskCode] = true
+					}
+				}
+				for _, t := range mpTasks {
+					if growthPending(t) && !seen[t.TaskCode] {
+						n++
+					}
+				}
+			}
+			if stasks, _, err := p.cfg.Upstream.SchoolTasks(a); err == nil {
+				for _, t := range stasks {
+					if schoolPending(t) {
+						n++
+					}
+				}
+			}
+			mu.Lock()
+			if failed {
+				scanFailed = true
+			}
+			pending += n
+			mu.Unlock()
+		}(a)
+	}
+	wg.Wait()
+	if scanFailed {
+		return pending, fmt.Errorf("部分账号任务列表查询失败")
+	}
+	return pending, nil
+}
+
+// cancelRequested 锁内读取消标记（执行循环每个 item 处理前检查）。
+func (q *queueState) cancelRequested() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.cancelReq
+}
+
+// cancelRemainingFor 把该账号所有仍是 pending 的条目标为 cancelled，
+// 返回标记条数（0 = 无需标记；已 running/done 的条目不动）。
+func (p *Panel) cancelRemainingFor(q *queueState, uid string) int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	n := 0
+	for i := range q.items {
+		if q.items[i].UID == uid && q.items[i].Status == "pending" {
+			q.items[i].Status, q.items[i].Message = "cancelled", "已取消"
+			n++
+		}
+	}
+	return n
 }
 
 // snapshotAt 锁内读条目三元组（避免锁外持有指针）。
@@ -491,13 +650,14 @@ func (p *Panel) tasksQueueStatus(w http.ResponseWriter, r *http.Request) {
 	items := make([]queueItem, len(q.items))
 	copy(items, q.items)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"running":    q.running,
-		"total":      len(items),
-		"conc":       q.conc,
-		"started":    !q.startedAt.IsZero(),
-		"started_at": q.startedAt,
-		"seq":        q.seq,
-		"items":      items,
+		"running":          q.running,
+		"total":            len(items),
+		"conc":             q.conc,
+		"started":          !q.startedAt.IsZero(),
+		"started_at":       q.startedAt,
+		"seq":              q.seq,
+		"cancel_requested": q.cancelReq,
+		"items":            items,
 	})
 }
 

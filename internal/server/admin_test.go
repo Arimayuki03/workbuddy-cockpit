@@ -105,7 +105,7 @@ func TestAdminTasksAuthAndBody(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
 		t.Fatal(err)
 	}
-	if v.Service != ServiceName || len(v.Tasks) != 6 {
+	if v.Service != ServiceName || len(v.Tasks) != 7 {
 		t.Fatalf("响应结构异常：%+v", v)
 	}
 	if v.Tasks[0].Kind != "checkin" || v.Tasks[0].Label == "" {

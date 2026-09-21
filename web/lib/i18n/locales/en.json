@@ -60,7 +60,6 @@
     "roleViewer": "Read-only",
     "poolOverview": "Account pool",
     "managedAccounts": "Managed accounts",
-    "systemSettings": "System settings",
     "quickLinks": "Quick links",
     "uiReference": "UI reference",
     "upstream": "Upstream project",
@@ -80,7 +79,8 @@
     "dark": "Dark mode",
     "switchToDark": "Switch to dark mode",
     "switchToLight": "Switch to light mode",
-    "movedToToolbar": "The theme switch has moved to the top-right corner, next to the language switch"
+    "system": "Follow system",
+    "systemShort": "Auto"
   },
   "dock": {
     "tipTitle": "Menu bar guide",
@@ -248,7 +248,8 @@
     "legendErrors": "Failures",
     "axisTokens": "Tokens (left axis)",
     "axisRequests": "Requests (right axis)",
-    "chartEmptyRange": "No usage in the selected range"
+    "chartEmptyRange": "No usage in the selected range",
+    "globalNote": "Global totals (CN + International combined)"
   },
   "accounts": {
     "title": "Accounts",
@@ -405,7 +406,7 @@
   },
   "logs": {
     "title": "Request logs",
-    "description": "Every call through the gateway, with status, latency and token metering (auto-refresh every 60s; includes both the China and Global editions, not filtered by edition)",
+    "description": "Every call through the gateway, with status, latency and token metering (includes both the China and Global editions, not filtered by edition)",
     "clearTitle": "Clear all logs?",
     "clearDesc": "All request log records will be deleted. Usage statistics are not affected.",
     "cleared": "Cleared",
@@ -446,12 +447,16 @@
     "sysEmptyDesc": "System logs are a ring buffer (last 500 lines) and are cleared on restart",
     "limitLabel": "Limit",
     "requestsNote": "Request logs are a ring buffer (about the last 1000 entries, cleared on restart); filter here. Long-term usage lives on the Usage page.",
-    "systemNote": "Three channels (task / chat / system), last 500 lines; filter by channel, search content, and toggle time order.",
+    "systemNote": "Three channels (task / chat / system) in a ring buffer of the last 500 lines; filter by channel, cap the count, search content, and toggle time order.",
     "searchPlaceholder": "Search log content…",
+    "searchRequests": "Search model / account / error message…",
     "searchModel": "Search models…",
     "sortTime": "Sort by time",
     "sortAsc": "Oldest first",
-    "sortDesc": "Newest first"
+    "sortDesc": "Newest first",
+    "liveToggle": "Live",
+    "liveOnNote": "Auto-refreshing every 5s; toggle in the top-right corner to pause.",
+    "liveOffNote": "Live refresh is paused and content is frozen; toggle in the top-right corner to resume."
   },
   "security": {
     "title": "Security & IP control",
@@ -740,7 +745,14 @@
     "colStatus": "Status",
     "kindSchool": "Campaign",
     "viewDetail": "Details",
-    "collapseDetail": "Collapse details"
+    "collapseDetail": "Collapse details",
+    "queueCancel": "Cancel queue",
+    "queueCancelling": "Cancelling…",
+    "queueCancelledTitle": "Queue cancelled",
+    "queueCancelledDetail": "Remaining items stopped; in-flight tasks finish their current action",
+    "queueCancelConfirmTitle": "Cancel the execution queue",
+    "queueCancelConfirmDesc": "Stop scheduling remaining items; in-flight tasks finish their current action.",
+    "queue_cancelled": "Cancelled"
   },
   "addAccount": {
     "title": "Add Tencent account · {realm}",
@@ -880,6 +892,8 @@
     "jsonInvalid": "Invalid JSON — check the braces and commas",
     "jsonNotObject": "It must be a JSON object, for example { \"checkin_hours\": [9, 21] }",
     "modelMapSaved": "Model mapping saved",
+    "saveFailed": "Save failed",
+    "modelMapHotOnly": "Mapping is active in memory but writing to disk failed — it will revert to the old value in config.json after a restart",
     "upstashUrlRequired": "Enter the Upstash URL",
     "upstashSaved": "Upstash configuration saved",
     "errNeedOneHour": "Enter at least one hour",
@@ -893,7 +907,8 @@
     "configPath": "Config file",
     "savedRestart": "Saved; some fields need a restart",
     "restartHint": "Prompt / outbound identity / global routing are read at boot and need a restart; everything else is applied live",
-    "advancedNote": "On save the backend deep-merges and atomically replaces the file; unknown keys are preserved."
+    "advancedNote": "On save the backend deep-merges and atomically replaces the file; unknown keys are preserved.",
+    "reloaded": "Reloaded"
   },
   "phrases": {
     "请求失败": "Request failed",
@@ -1098,7 +1113,12 @@
     "启用账号管理接口": "Enable the account management API",
     "仅对**旧版**上游生效：上游 9d1a21b 起已移除该配置、不再限制请求体大小。本网关自身的入站上限由环境变量 WB_GATEWAY_MAX_BODY_MB 控制（默认 32 MB）": "Applies to **older** upstream versions only: the upstream removed this setting in 9d1a21b and no longer limits request body size. This gateway's own inbound limit is controlled by the WB_GATEWAY_MAX_BODY_MB environment variable (default 32 MB)",
     "请求体上限（旧版上游）": "Request body limit (older upstream)",
-    "让「临时停用」只摘除转发流量（签到 / 保活照常、积分与凭证保持活跃）。不开启时停用会回退为「改文件名」，账号会完全退出账号池、任务一并停止。**需重启上游容器生效**；且上游要求 api_key 非空，否则拒绝启动": "Makes \"pause\" remove the account from traffic only (check-in / keep-alive keep running, credits and credentials stay alive). When off, pausing falls back to renaming the file — the account leaves the pool entirely and its tasks stop. **Requires restarting the upstream container**; the upstream also requires a non-empty api_key, otherwise it refuses to start."
+    "让「临时停用」只摘除转发流量（签到 / 保活照常、积分与凭证保持活跃）。不开启时停用会回退为「改文件名」，账号会完全退出账号池、任务一并停止。**需重启上游容器生效**；且上游要求 api_key 非空，否则拒绝启动": "Makes \"pause\" remove the account from traffic only (check-in / keep-alive keep running, credits and credentials stay alive). When off, pausing falls back to renaming the file — the account leaves the pool entirely and its tasks stop. **Requires restarting the upstream container**; the upstream also requires a non-empty api_key, otherwise it refuses to start.",
+    "自动执行任务队列": "Run task queue on schedule",
+    "到点自动执行任务中心的「执行队列」（全账号成长任务 + 开学季闭环，等同手动点一次启动）。会真实消耗上游配额，默认关闭；手动开过且未跑完时本轮跳过": "Automatically runs the task center queue at the scheduled hours (growth tasks + school-season loop for all accounts, same as clicking Start once). It consumes real upstream quota and is off by default; a round started manually is skipped, not doubled",
+    "队列时刻": "Queue hours",
+    "在哪些整点自动执行任务队列（0-23，可多个）。默认 10 点；建议避开签到/上报时刻，错峰执行": "Hours to run the task queue automatically (0-23, multiple allowed). Defaults to 10:00; stagger away from check-in/report hours to avoid bursts",
+    "七类任务各自独立排程：签到 / 猫猫旅行 / 活跃上报 / 保活 / 开学季 / 夜猫 / 任务队列。可分别开关并设置执行时刻。签到、旅行、活跃上报、开学季、夜猫、任务队列**只对国内版账号生效**——国际版没有这些体系，只有保活照常执行": "Seven task families are scheduled independently: check-in / cat travel / activity report / keep-alive / school season / night cat / task queue. Each can be toggled and given its own hours. Check-in, travel, activity report, school season, night cat and the task queue **apply to China-edition accounts only** — the Global edition has none of these, only keep-alive runs as usual"
   },
   "activity": {
     "title": "School Season",

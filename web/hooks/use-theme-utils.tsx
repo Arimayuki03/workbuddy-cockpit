@@ -72,18 +72,19 @@ export function useThemeUtils() {
     [theme],
   );
 
+  // 显式三态循环：light → dark → system → light。
+  // 用用户设置值（theme）直接推导下一态，不查系统偏好；
+  // 'system' 态（含挂载前的 undefined 兜底）必然轮到 'light'。
   const toggle = useCallback(() => {
-    const baseRules = getBaseRules(UserTheme.DARK, UserTheme.LIGHT);
-    const targetTheme = select({
-      ...baseRules,
-      system: selectSystem({
-        ...baseRules,
-      }),
-      default: UserTheme.SYSTEM,
-    });
+    const nextTheme =
+      theme === UserTheme.LIGHT ?
+        UserTheme.DARK :
+      theme === UserTheme.DARK ?
+        UserTheme.SYSTEM :
+        UserTheme.LIGHT;
 
-    setTheme(targetTheme);
-  }, [setTheme, select]);
+    setTheme(nextTheme);
+  }, [setTheme, theme]);
 
   const getIcon = (className: string) => {
     const baseRules = getBaseRules(
@@ -100,12 +101,11 @@ export function useThemeUtils() {
   };
 
   const getAction = () => {
+    // 语义：点击按钮将切换到的那一态，与 toggle 的循环一一对应。
     const baseRules = getBaseRules(t('theme.switchToDark'), t('theme.switchToLight'));
     return select({
       ...baseRules,
-      system: selectSystem({
-        ...baseRules,
-      }),
+      system: t('theme.system'),
       default: t('theme.switchToDark'),
     });
   };
