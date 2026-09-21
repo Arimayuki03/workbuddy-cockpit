@@ -175,8 +175,12 @@ def _resolve_key(request: Request):
     return None, (max(candidates, key=len) if candidates else '')
 
 
-def _authorize(request: Request, model: str | None) -> tuple[dict | None, str, JSONResponse | None]:
+def _authorize(request: Request, model: str | None, *,
+               mapped: str | None = None) -> tuple[dict | None, str, JSONResponse | None]:
     """完整鉴权：密钥 → 全局 IP 管控 → 密钥约束 → 限流。返回 `(key, ip, error)`。
+
+    mapped：`model` 经「模型映射」后的名字，版本归属判它（issue #47，
+    见 `keysvc.validate` 的说明）。与 `gateway._authorize` 同名同义。
 
     ⚠️ 这套检查与 `gateway._authorize` **必须保持同序同项**——同一把密钥在两个
     协议下得出不同结论是最难查的一类问题。之所以没直接复用：本层要遍历**多个
@@ -228,7 +232,8 @@ def _authorize(request: Request, model: str | None) -> tuple[dict | None, str, J
 
     # model 为 None 时按「模型发现类请求」处理：跳过版本与模型白名单
     # （没有 model 就无从判定版本），但停用/过期/配额/IP 这些照常校验。
-    reason = keysvc.validate(key, ip, model, is_model_list=(model is None))
+    reason = keysvc.validate(key, ip, model, is_model_list=(model is None),
+                             mapped_model=gateway._map_model(model) if mapped is None else mapped)
     if reason:
         # 与 gateway._authorize 同口径：状态码来自 keysvc，不再一律 403
         # （403 会被客户端显示成「API 密钥无效」，掩盖真实原因）。
@@ -958,7 +963,9 @@ async def messages(request: Request):
         return _err('缺少必填字段 max_tokens')
 
     # 鉴权：与 gateway._authorize 同一套检查、同一顺序（见该函数说明）
-    key, ip, auth_err = _authorize(request, model)
+    # 映射先算：版本归属判的是**映射后**的实际模型名（issue #47）
+    mapped = gateway._map_model(model)
+    key, ip, auth_err = _authorize(request, model, mapped=mapped)
     if auth_err:
         return auth_err
 
@@ -975,7 +982,6 @@ async def messages(request: Request):
         gateway._record(key, ip, model, '', 400, 0, 0, 0, ua, str(exc), False)
         return _err(f'请求转换失败：{exc}')
 
-    mapped = gateway._map_model(model)
     if mapped:
         payload['model'] = mapped
     if stream:
@@ -1183,7 +1189,10 @@ async def count_tokens(request: Request):
     # count_tokens 允许不带 model（那是常态），故 model 为 None 时按「模型发现
     # 类请求」处理：跳过版本与模型白名单，其余约束照常生效。
     model = body.get('model') if isinstance(body.get('model'), str) else None
-    _key, _ip, auth_err = _authorize(request, model)
+    # 同样是「映射先于鉴权」：客户端在发消息前先数 token，用的还是别名——
+    # 若这里按请求名判版本，配了别名映射的密钥会在这一步就被打回（issue #47）
+    _mapped = gateway._map_model(model)
+    _key, _ip, auth_err = _authorize(request, model, mapped=_mapped)
     if auth_err:
         return auth_err
 

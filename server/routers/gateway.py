@@ -145,19 +145,33 @@ RATE_MAX_PER_MIN = _env_int('WB_GATEWAY_RATE_PER_MIN', 120)
 
 
 def _rate_limited(key: dict) -> tuple[bool, int]:
-    """返回 (是否限流, 当前窗口内计数)。"""
+    """返回 (是否限流, 窗口内计数)。
+
+    **只有放行的请求才占用窗口额度**（issue #52）。此前不分放行与拒绝一律
+    `append()`，被拒的请求同样计入，于是与客户端重试构成正反馈：客户端以高于
+    阈值的速率持续重试时，窗口计数永远降不回阈值以下，表现为「凑满一窗之后
+    持续全拒、永不恢复」——限流器本该限速，却变成了熔断。
+
+    现在的语义是「滑动窗口内**放行**了多少次」：超出的请求被拒且不占额度，
+    因此客户端把速率降到阈值以下能立刻恢复，保持高于阈值则稳定放行到上限
+    （多余的被拒，不会雪崩）。放行数上限仍是 `RATE_MAX_PER_MIN`。
+    """
     kid = int(key['id'])
     if RATE_MAX_PER_MIN <= 0:
         return False, 0
     now = time.time()
     hits = [t for t in _rate.get(kid, []) if now - t < RATE_WINDOW]
-    hits.append(now)
+    limited = len(hits) >= RATE_MAX_PER_MIN
+    if not limited:
+        hits.append(now)
+    # 拒绝的分支也要回写：窗口内已过期的记录要顺手清掉，否则长期被限的密钥
+    # 会一直拖着一串陈旧时间戳（金额上限看不出问题，但内存是白占的）。
     _rate[kid] = hits
     # 顺带清理过期键，避免长期运行后字典无限增长
     if len(_rate) > 2000:
         for k in [k for k, v in _rate.items() if not v or now - v[-1] > RATE_WINDOW]:
             _rate.pop(k, None)
-    return len(hits) > RATE_MAX_PER_MIN, len(hits)
+    return limited, len(hits)
 
 
 def _log_ip(ip: str, path: str, blocked: bool, ua: str | None,
@@ -253,8 +267,12 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
     内容正常但报 terminated）。因此这里整体兜底。
     """
     try:
-        # realm 由**请求的模型名**判定（上游按 `cn:` / `global:` 前缀路由）：
+        # realm 由**实际发往上游的模型名**判定（上游按 `cn:` / `global:` 前缀路由）：
         # 它决定这次调用实际走了哪个账号池，也是界面按版本切换日志/统计的依据。
+        #
+        # 有「模型映射」时判**映射后**的名字（issue #47）：请求名可能是个别名，
+        # 别名本身不带前缀，按它判会把一次真实的国际版调用记成国内版，界面按
+        # 版本筛选时这条就跑到另一栏去了。没有映射时 mapped 为空，判请求名。
         #
         # **所有外部来源的文本都要清洗 + 截断**（`db._clean`）：
         #   * `model` 来自请求体，长度无上限。此前一个 1 MiB 的 model 会被写进
@@ -265,7 +283,7 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
         #     在日志页伪造出额外行，污染排查。
         # 清洗只影响入库文本，**不影响转发给上游的内容**（body 早已发走）。
         model_clean = db._clean(model, 128)
-        realm = db.realm_of_model(model_clean)
+        realm = db.realm_of_model(db._clean(mapped, 128) or model_clean)
         db.add_request_log(
             ts=int(time.time()),
             key_id=key['id'] if key else None,
@@ -300,8 +318,15 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
 
 
 def _authorize(request: Request, model: str | None,
-               *, is_model_list: bool = False) -> tuple[dict | None, str, JSONResponse | None]:
-    """返回 (key, ip, error_response)。"""
+               *, is_model_list: bool = False,
+               mapped: str | None = None) -> tuple[dict | None, str, JSONResponse | None]:
+    """返回 (key, ip, error_response)。
+
+    mapped：`model` 经「模型映射」后的名字。**默认在这里算**，因为版本归属判的
+    是映射后的名字（issue #47，见 `keysvc.validate`）——调用方算好了可以传进来
+    省一次设置读取，但漏传不会退回旧行为。调用方仍要自己再算一次用于改写 body
+    （或把这里的算法抽出去共用）。
+    """
     ip = iputil.client_ip(request)
     ua = request.headers.get('user-agent')
     path = request.url.path
@@ -334,7 +359,8 @@ def _authorize(request: Request, model: str | None,
     # 模型与版本不符 / IP 白名单）发生在这之后，若就这样返回，日志里会显示
     # 「已放行」而请求其实失败了 —— 用户对着「已放行」找问题，方向直接跑偏。
     # 因此校验失败时改写这一行为拦截（见下），放行时才落「已放行」。
-    reason = keysvc.validate(key, ip, model, is_model_list=is_model_list)
+    reason = keysvc.validate(key, ip, model, is_model_list=is_model_list,
+                             mapped_model=_map_model(model) if mapped is None else mapped)
     if reason:
         # 状态码由 keysvc 决定，不再一律 403：一批客户端（DeepSeek Harness 等）
         # 把 401/403 统一显示成「API 密钥无效」，一律 403 会把「密钥版本不匹配」
@@ -570,11 +596,13 @@ async def _chat(request: Request, upstream_path: str):
     # 这里直接拒掉，也顺带让模型白名单的判定有确定的输入。
     if requested_model is not None and not isinstance(requested_model, str):
         return _oai_error('model 必须是字符串', 400, 'invalid_request_error', 'invalid_model')
-    key, ip, err = _authorize(request, requested_model)
+    # 映射**先于鉴权**：版本归属判的是实际要用的名字（issue #47），配了
+    # 「别名 → 带前缀的真名」的密钥此前会被 realm 检查当成错版本打回。
+    mapped = _map_model(requested_model)
+    key, ip, err = _authorize(request, requested_model, mapped=mapped)
     if err:
         return err
 
-    mapped = _map_model(requested_model)
     if mapped:
         body['model'] = mapped
 

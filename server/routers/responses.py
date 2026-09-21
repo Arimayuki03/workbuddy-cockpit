@@ -1266,7 +1266,9 @@ async def _handle(request: Request) -> JSONResponse | StreamingResponse:
         return _failed('model 必须是字符串', 400, 'invalid_request_error', 'invalid_model')
 
     # 鉴权：与 gateway._authorize 同一套检查、同一顺序（含版本隔离与配额）
-    key, ip, auth_err = gateway._authorize(request, model)
+    # 映射先算：版本归属判的是**映射后**的实际模型名（issue #47）
+    mapped = gateway._map_model(model)
+    key, ip, auth_err = gateway._authorize(request, model, mapped=mapped)
     if auth_err:
         return auth_err
 
@@ -1285,7 +1287,6 @@ async def _handle(request: Request) -> JSONResponse | StreamingResponse:
         return _failed('input 为空：Responses 请求必须带 input 或 instructions',
                        400, 'invalid_request_error', 'empty_input')
 
-    mapped = gateway._map_model(model)
     if mapped:
         payload['model'] = mapped
     if stream:

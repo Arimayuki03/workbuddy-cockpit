@@ -370,12 +370,24 @@ def unknown_whitelist_entries(models: list[str], known_by_realm: dict,
 
 
 def validate(key: dict, ip: str, model: str | None,
-             *, is_model_list: bool = False) -> str | None:
+             *, is_model_list: bool = False,
+             mapped_model: str | None = None) -> str | None:
     """返回 None 表示放行，否则返回拒绝原因（`Rejection`，自带状态码）。
 
     is_model_list：请求是 `/v1/models`（模型发现，不带 model）。版本归属在这种
     请求上不拦——它没有版本可言，拦了会让限定版本的密钥连「我有哪些模型」都
     问不到；真正的隔离由调用时的模型名把关（见下）。
+
+    mapped_model：`model` 经「模型映射」后的名字（issue #47）。**两处判据的对象
+    不同，不能混为一谈**：
+
+      · **版本归属判映射后的名字**——真正发往上游、决定走哪个账号池的是它。
+        用请求名判，配了别名映射的密钥会永远被 realm 检查打回（issue #47：
+        别名 `claude-fable-5 → global:deepseek-v4.1-flash` 被判成国内版模型）。
+      · **模型白名单判请求名**——白名单约束的是「客户端可以发哪些名字」，而
+        `/v1/models` 的裁剪就是这么算的（别名条目以**别名**为 id 下发，见
+        `gateway._scope_models`）。改成判映射后的名字，会让「白名单里写别名」
+        的密钥反被拒掉，与列表自相矛盾——issue #46 修的正是这处一致性。
     """
     if not key['enabled']:
         return Rejection('密钥已停用', 403, 'permission_error', 'key_disabled')
@@ -411,23 +423,29 @@ def validate(key: dict, ip: str, model: str | None,
     # 版本归属：密钥限定版本后，只能调用该版本的模型。
     #
     # 判定依据与实际路由**同一来源**：上游按模型名的 `global:` 前缀选账号池，
-    # 所以「这次请求走哪个版本」由 model 决定（见 db.realm_of_model，日志与
-    # 统计也用它）。用别的东西判（比如当前界面切到哪版）会与真实流量对不上。
+    # 所以「这次请求走哪个版本」由**实际要用的那个名字**决定（见 db.realm_of_model，
+    # 日志与统计也用它）。用别的东西判（比如当前界面切到哪版）会与真实流量对不上。
     #
-    # 缺 model 时不放行：那会走上游默认模型，而默认模型属于国内版——限定
-    # 国际版的密钥反而能借此打到国内池，隔离就成了摆设。（模型白名单同理，
-    # 下面那段是同一个道理的另一处。）
+    # 而「实际要用的名字」是**映射之后**的：请求名可能是个别名，上游看不懂它，
+    # 真正路由的是映射目标（issue #47）。所以这里用 mapped_model —— 否则配了
+    # 「别名 → 带前缀的真名」的密钥永远被判成错版本。
+    effective = (mapped_model or model)
     want = _norm_realm(key.get('realm'))
     if want and not is_model_list:
-        if not isinstance(model, str) or not model.strip():
+        if not isinstance(effective, str) or not effective.strip():
             return Rejection(
                 f'该密钥限定了{"国际版" if want == "global" else "国内版"}模型，请求必须指定 model',
                 400, 'invalid_request_error', 'realm_mismatch')
-        got = 'global' if model.strip().lower().startswith('global:') else 'cn'
+        got = 'global' if effective.strip().lower().startswith('global:') else 'cn'
         if got != want:
             label = {'cn': '国内版', 'global': '国际版'}[want]
             other = '国际版' if want == 'cn' else '国内版'
-            hint = '模型名需带 global: 前缀' if want == 'global' else '请去掉 global: 前缀'
+            # 配了映射时，正确的做法是改映射或改密钥的版本，不是给请求名加前缀
+            # （那个名字客户端根本不发到上游）——所以提示分两种。
+            if mapped_model and mapped_model != model:
+                hint = f'{model} 按「模型映射」指向 {mapped_model}'
+            else:
+                hint = '模型名需带 global: 前缀' if want == 'global' else '请去掉 global: 前缀'
             return Rejection(
                 f'该密钥仅限{label}模型，当前请求是{other}模型（{hint}）',
                 400, 'invalid_request_error', 'realm_mismatch')
