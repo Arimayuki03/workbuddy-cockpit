@@ -77,6 +77,16 @@ function loadConfig() {
 }
 
 /**
+ * 数值输入解析：NaN 守卫（C17/FIX-E）。
+ * 此前 parseInt('abc', 10) → NaN 直接传播进 slice(0, NaN) = 空列表，
+ * 非数值输入会静默禁用整条特性。现在解析失败回落 fallback。
+ */
+function parseIntInput(value, fallback) {
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+/**
  * 解析用户输入参数
  * @param {Object} config 基础配置对象
  * @returns {Object} 解析后的配置对象
@@ -128,15 +138,15 @@ function parseInputs(config) {
 
   // PR 历史语境评审开关（新增）
   const prReviewClose = (core.getInput('pr-review-close') || process.env.INPUT_PR_REVIEW_CLOSE || String(config.defaults.pr_review_close)).toLowerCase() === 'true';
-  const maxRelatedIssues = parseInt(core.getInput('max-related-issues') || process.env.INPUT_MAX_RELATED_ISSUES || String(config.defaults.max_related_issues), 10);
-  const relatedCommentsPerIssue = parseInt(core.getInput('related-comments-per-issue') || process.env.INPUT_RELATED_COMMENTS_PER_ISSUE || String(config.defaults.related_comments_per_issue), 10);
-  const relatedBodyTruncate = parseInt(core.getInput('related-body-truncate') || process.env.INPUT_RELATED_BODY_TRUNCATE || String(config.defaults.related_body_truncate), 10);
+  const maxRelatedIssues = parseIntInput(core.getInput('max-related-issues') || process.env.INPUT_MAX_RELATED_ISSUES || String(config.defaults.max_related_issues), config.defaults.max_related_issues);
+  const relatedCommentsPerIssue = parseIntInput(core.getInput('related-comments-per-issue') || process.env.INPUT_RELATED_COMMENTS_PER_ISSUE || String(config.defaults.related_comments_per_issue), config.defaults.related_comments_per_issue);
+  const relatedBodyTruncate = parseIntInput(core.getInput('related-body-truncate') || process.env.INPUT_RELATED_BODY_TRUNCATE || String(config.defaults.related_body_truncate), config.defaults.related_body_truncate);
 
   const dryRun = (core.getInput('dry-run') || process.env.INPUT_DRY_RUN || String(config.defaults.dry_run)).toLowerCase() === 'true';
   const maintainerExempt = (core.getInput('maintainer-exempt') || process.env.INPUT_MAINTAINER_EXEMPT || String(config.defaults.maintainer_exempt)).toLowerCase() === 'true';
   const enablePrGovernance = (core.getInput('enable-pr-governance') || process.env.INPUT_ENABLE_PR_GOVERNANCE || String(config.defaults.enable_pr_governance)).toLowerCase() === 'true';
-  const maxCanonicalIndex = parseInt(core.getInput('max-canonical-index') || process.env.INPUT_MAX_CANONICAL_INDEX || String(config.defaults.max_canonical_index), 10);
-  const canonicalBodyTruncate = parseInt(core.getInput('canonical-body-truncate') || process.env.INPUT_CANONICAL_BODY_TRUNCATE || String(config.defaults.canonical_body_truncate), 10);
+  const maxCanonicalIndex = parseIntInput(core.getInput('max-canonical-index') || process.env.INPUT_MAX_CANONICAL_INDEX || String(config.defaults.max_canonical_index), config.defaults.max_canonical_index);
+  const canonicalBodyTruncate = parseIntInput(core.getInput('canonical-body-truncate') || process.env.INPUT_CANONICAL_BODY_TRUNCATE || String(config.defaults.canonical_body_truncate), config.defaults.canonical_body_truncate);
   
   // 解析分析深度参数，使用配置文件中的设置
   const analysisDepth = core.getInput('max-analysis-depth') || process.env.INPUT_MAX_ANALYSIS_DEPTH || config.defaults.analysis_depth;
