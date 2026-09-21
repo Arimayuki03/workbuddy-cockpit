@@ -306,6 +306,100 @@ async function listCanonicalIssues(octokit, owner, repo, label, maxResults = 50,
 }
 
 /**
+ * 历史语境索引检索（F1）：一次性拉取仓库的 issue 与 PR（不分状态），
+ * 按 updated 倒序，作为「仓库全部历史经验」的紧凑索引来源。
+ * @returns {Promise<Array>} 形如 [{ number, kind, title, labels, state, state_reason, closed_at }] 的数组
+ *   state: 'open'|'closed'|'merged'（pull_request.merged_at 存在 → merged，C10）
+ */
+async function searchIssuesAndPRs(octokit, owner, repo, maxResults = 100) {
+  const response = await handleApiCall(
+    () => octokit.rest.search.issuesAndPullRequests({
+      q: `repo:${owner}/${repo}`,
+      per_page: Math.min(maxResults, 100),
+      sort: 'updated',
+      order: 'desc'
+    }),
+    '检索历史索引失败'
+  );
+
+  return (response.data.items || []).slice(0, maxResults).map(item => ({
+    number: item.number,
+    kind: item.pull_request ? 'pr' : 'issue',
+    title: item.title,
+    labels: (item.labels || []).map(l => l.name || l),
+    state: item.pull_request && item.pull_request.merged_at ? 'merged'
+      : (item.state === 'closed' ? 'closed' : 'open'),
+    state_reason: item.state_reason || null,
+    closed_at: item.closed_at || null
+  }));
+}
+
+/**
+ * 读取单条 issue/PR 的元信息（正文不截断，截断口径由调用方决定）。
+ * enrich 阶段用它取全文（列表 API 的 body 已被截断过一次，无法二次放宽）。
+ */
+async function getIssueDetail(octokit, owner, repo, issueNumber) {
+  const response = await handleApiCall(
+    () => octokit.rest.issues.get({
+      owner,
+      repo,
+      issue_number: issueNumber
+    }),
+    `读取 issue #${issueNumber} 详情失败`
+  );
+  const item = response.data;
+  return {
+    number: item.number,
+    title: item.title,
+    body: item.body || '',
+    state: item.pull_request && item.pull_request.merged_at ? 'merged'
+      : (item.state === 'closed' ? 'closed' : 'open'),
+    state_reason: item.state_reason || null,
+    closed_at: item.closed_at || null
+  };
+}
+
+/**
+ * PR 文件变更摘要（F1）：从 prHandler.analyzeFileChanges 抽出的共享逻辑，
+ * PR 路径与历史语境补全共用同一实现。
+ * @returns {Promise<{summary: string, total: number}>}
+ */
+async function listPRFilesSummary(octokit, owner, repo, prNumber, { maxFiles = 5, maxPatchLines = 5 } = {}) {
+  const response = await handleApiCall(
+    () => octokit.rest.pulls.listFiles({
+      owner,
+      repo,
+      pull_number: prNumber
+    }),
+    `读取 PR #${prNumber} 文件变更失败`
+  );
+
+  const files = response.data || [];
+  if (files.length === 0) {
+    return { summary: '', total: 0 };
+  }
+
+  const filesToAnalyze = files.slice(0, maxFiles);
+  const summary = filesToAnalyze.map(file => {
+    let changeInfo = `${file.filename}(${file.status},+${file.additions}/-${file.deletions})`;
+    if (file.patch) {
+      const patchLines = file.patch.split('\n');
+      const diffLines = patchLines.filter(line => line.startsWith('+') || line.startsWith('-'));
+      const limitedPatch = diffLines.slice(0, maxPatchLines).join('\n');
+      if (limitedPatch.trim()) {
+        changeInfo += `\n${limitedPatch}`;
+        if (diffLines.length > maxPatchLines) {
+          changeInfo += '\n...';
+        }
+      }
+    }
+    return changeInfo;
+  }).join('\n---\n');
+
+  return { summary, total: files.length };
+}
+
+/**
  * 搜索与 PR 主题相关的「已关闭」历史 issue（文本检索，不含 PR）。
  * 用标题关键词做 full-text search，state:closed 只看历史结论，
  * 上限由 maxResults 限制，避免上下文膨胀。
@@ -468,6 +562,9 @@ module.exports = {
   getReadmeContent,
   getPinnedIssuesContent,
   listCanonicalIssues,
+  searchIssuesAndPRs,
+  getIssueDetail,
+  listPRFilesSummary,
   searchRelatedClosedIssues,
   listIssueComments,
   listIssueTimeline,

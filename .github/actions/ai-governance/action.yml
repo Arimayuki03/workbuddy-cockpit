@@ -100,6 +100,23 @@ inputs:
     description: '历史语境评审中每条 issue 正文的截断长度'
     required: false
     default: '1500'
+  # ---- 统一历史语境层 + 两段式 AI 流水线（F1/F2）----
+  max-history-index:
+    description: '历史语境索引拉取的 issue+PR 总量上限（紧凑索引，供筛选与归并匹配共用）'
+    required: false
+    default: '100'
+  enable-two-stage:
+    description: '两段式流水线开关：开启后先廉价筛选 AI 在紧凑索引上选候选，再深加工；关闭时行为与原先完全一致（默认关闭，先暗发观察）'
+    required: false
+    default: 'false'
+  max-screened-candidates:
+    description: '两段式流水线第二阶段纳入的候选数量上限'
+    required: false
+    default: '5'
+  screening-model:
+    description: '筛选阶段专用模型（可选，缺省用 ai-model；可配置更廉价的模型）'
+    required: false
+    default: ''
 
 runs:
   using: 'composite'
@@ -144,3 +161,7 @@ runs:
         INPUT_MAX_RELATED_ISSUES: ${{ inputs.max-related-issues }}
         INPUT_RELATED_COMMENTS_PER_ISSUE: ${{ inputs.related-comments-per-issue }}
         INPUT_RELATED_BODY_TRUNCATE: ${{ inputs.related-body-truncate }}
+        INPUT_MAX_HISTORY_INDEX: ${{ inputs.max-history-index }}
+        INPUT_ENABLE_TWO_STAGE: ${{ inputs.enable-two-stage }}
+        INPUT_MAX_SCREENED_CANDIDATES: ${{ inputs.max-screened-candidates }}
+        INPUT_SCREENING_MODEL: ${{ inputs.screening-model }}
