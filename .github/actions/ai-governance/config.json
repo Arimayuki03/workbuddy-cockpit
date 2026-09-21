@@ -189,7 +189,9 @@
     "issue_blacklist_log": "Blacklisted user issue #{number} has been closed",
     "history_index_search_failed": "历史索引全量检索失败（容忍，回落 canonical-only）: {error}",
     "history_index_canonical_failed": "历史索引 canonical 通道检索失败（容忍）: {error}",
-    "history_enrich_failed": "补全历史条目 #{number} 失败（跳过该条）: {error}"
+    "history_enrich_failed": "补全历史条目 #{number} 失败（跳过该条）: {error}",
+    "history_screening_failed": "历史语境筛选失败（容忍，回落关键词启发式）: {error}",
+    "history_screening_hallucination_dropped": "筛选候选中的幻觉编号被剔除（防幻觉引用）"
   },
   "ai_settings": {
     "analyze_file_changes": true,
