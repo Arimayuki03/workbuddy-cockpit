@@ -301,6 +301,112 @@ async function listCanonicalIssues(octokit, owner, repo, label, maxResults = 50,
 }
 
 /**
+ * 搜索与 PR 主题相关的「已关闭」历史 issue（文本检索，不含 PR）。
+ * 用标题关键词做 full-text search，state:closed 只看历史结论，
+ * 上限由 maxResults 限制，避免上下文膨胀。
+ * @param {Array<string>} keywords 从 PR 标题/正文提取的检索关键词
+ * @returns {Promise<Array>} 形如 [{ number, title, body, state, state_reason }] 的数组
+ */
+async function searchRelatedClosedIssues(octokit, owner, repo, keywords, maxResults = 10) {
+  // search API 的特殊字符会破坏查询语法，先剥离；空格分组 AND 语义
+  const sanitized = (keywords || [])
+    .map(k => String(k).replace(/["']/g, '').trim())
+    .filter(k => k.length > 1)
+    .slice(0, 4);
+  if (sanitized.length === 0) {
+    return [];
+  }
+  const q = `repo:${owner}/${repo} is:issue is:closed ${sanitized.map(k => `"${k}"`).join(' ')}`;
+  const response = await handleApiCall(
+    () => octokit.rest.search.issuesAndPullRequests({
+      q,
+      per_page: Math.min(maxResults, 100),
+      sort: 'updated',
+      order: 'desc'
+    }),
+    '搜索相关历史 issue 失败'
+  );
+  return (response.data.items || []).slice(0, maxResults).map(item => ({
+    number: item.number,
+    title: item.title,
+    state: item.state,
+    state_reason: item.state_reason || null,
+    closed_at: item.closed_at || null,
+    // PR 检索结果混入时用 pull_request 字段甄别（is:issue 理论上排除，双保险）
+    is_pr: Boolean(item.pull_request)
+  }));
+}
+
+/**
+ * 读取单条 issue 的全部评论（分页封顶），供历史语境评审还原「为什么被关」。
+ * @param {number} perPage 每页数量（同时是总数封顶）
+ * @returns {Promise<Array>} 形如 [{ author, body }] 的数组
+ */
+async function listIssueComments(octokit, owner, repo, issueNumber, perPage = 30) {
+  const response = await handleApiCall(
+    () => octokit.rest.issues.listComments({
+      owner,
+      repo,
+      issue_number: issueNumber,
+      per_page: perPage,
+      page: 1
+    }),
+    `读取 issue #${issueNumber} 评论失败`
+  );
+  return (response.data || []).map(c => ({
+    author: c.user ? c.user.login : 'unknown',
+    created_at: c.created_at,
+    body: c.body || ''
+  }));
+}
+
+/**
+ * 读取单条 issue 的事件时间线，还原关闭路径：merged / closed / reopened 等。
+ * @param {number} perPage 每页数量（同时是总数封顶）
+ * @returns {Promise<Array>} 形如 [{ event, actor, commit_id, created_at }] 的数组
+ */
+async function listIssueTimeline(octokit, owner, repo, issueNumber, perPage = 30) {
+  const response = await handleApiCall(
+    () => octokit.rest.issues.listEvents({
+      owner,
+      repo,
+      issue_number: issueNumber,
+      per_page: perPage,
+      page: 1
+    }),
+    `读取 issue #${issueNumber} 时间线失败`
+  );
+  return (response.data || []).map(e => ({
+    event: e.event,
+    actor: e.actor ? e.actor.login : 'unknown',
+    commit_id: e.commit_id || null,
+    created_at: e.created_at
+  }));
+}
+
+/**
+ * 读取 PR 的提交列表（含提交信息），供评审确认 PR 实际做了什么。
+ * @param {number} perPage 每页数量（同时是总数封顶）
+ * @returns {Promise<Array>} 形如 [{ message, author }] 的数组
+ */
+async function listPRCommits(octokit, owner, repo, prNumber, perPage = 20) {
+  const response = await handleApiCall(
+    () => octokit.rest.pulls.listCommits({
+      owner,
+      repo,
+      pull_number: prNumber,
+      per_page: perPage,
+      page: 1
+    }),
+    '读取 PR 提交列表失败'
+  );
+  return (response.data || []).map(c => ({
+    message: (c.commit && c.commit.message) || '',
+    author: (c.commit && c.commit.author && c.commit.author.name) || 'unknown'
+  }));
+}
+
+/**
  * 在仓库中创建一条新 issue，作者将是 GITHUB_TOKEN 对应的 github-actions bot。
  * @returns {Promise<Object>} octokit 响应
  */
@@ -357,6 +463,10 @@ module.exports = {
   getReadmeContent,
   getPinnedIssuesContent,
   listCanonicalIssues,
+  searchRelatedClosedIssues,
+  listIssueComments,
+  listIssueTimeline,
+  listPRCommits,
   createIssue,
   updateIssueState,
   updatePullRequest
