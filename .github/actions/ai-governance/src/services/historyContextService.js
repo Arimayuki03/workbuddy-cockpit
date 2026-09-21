@@ -37,12 +37,18 @@ class HistoryContextService {
 
   /**
    * 构建紧凑历史索引。
+   * 索引条目额外携带截断正文（body）—— 筛选阶段会剥离它（ScreeningService 只取
+   * 紧凑字段），但归并匹配阶段用它保持与旧 listCanonicalIssues 提示词口径一致。
    * @returns {Promise<Array<HistoryIndexItem>}
    *   [{ number, kind: 'issue'|'pr', title, labels: string[], state: 'open'|'closed'|'merged',
-   *      state_reason, closed_at }]
+   *      state_reason, closed_at, body }]
    */
   async buildIndex(owner, repo) {
     const candidates = new Map(); // `${kind}:${number}` → item
+    const truncate = (text) => {
+      const s = String(text || '');
+      return s.length > this.gov.relatedBodyTruncate ? s.slice(0, this.gov.relatedBodyTruncate) : s;
+    };
 
     // 通道 a：全量 issue+PR 检索（C10：历史 PR 必须进语料）
     let searchItems = [];
@@ -53,7 +59,7 @@ class HistoryContextService {
       core.warning(logMessage(this.config.logging.history_index_search_failed, { error: error.message }));
     }
     searchItems.forEach(item => {
-      candidates.set(`${item.kind}:${item.number}`, item);
+      candidates.set(`${item.kind}:${item.number}`, { ...item, body: truncate(item.body) });
     });
 
     // 通道 b：canonical 标签（治理一手结论，保证入选，标记 canonical）
@@ -73,15 +79,15 @@ class HistoryContextService {
     }
     canonicalItems.forEach(item => {
       // canonical 优先：覆盖 search 通道的同号条目（保留其 state 字段，R2）
-      const labels = ['canonical'];
       candidates.set(`issue:${item.number}`, {
         number: item.number,
         kind: 'issue',
         title: item.title,
-        labels,
+        labels: ['canonical'],
         state: item.state || 'closed',
         state_reason: item.state_reason || null,
-        closed_at: item.closed_at || null
+        closed_at: item.closed_at || null,
+        body: truncate(item.body)
       });
     });
 

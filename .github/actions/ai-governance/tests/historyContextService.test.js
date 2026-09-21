@@ -174,7 +174,8 @@ describe('HistoryContextService.buildIndex', () => {
       labels: ['canonical'],
       state: 'closed',
       state_reason: 'not_planned',
-      closed_at: '2026-01-02T00:00:00Z'
+      closed_at: '2026-01-02T00:00:00Z',
+      body: '正文'
     }]);
   });
 });
