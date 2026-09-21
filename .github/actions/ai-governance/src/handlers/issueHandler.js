@@ -115,6 +115,14 @@ async function handleNewIssue(octokit, openai, context, owner, repo, aiModel, co
       // UNCLEAR：已要求补充信息，此处停留，不进入治理
       return;
     }
+    if (triage.error) {
+      // 分诊失败（FIX-D/C8）：绝不能带着 classification=null 流入治理 ——
+      // splitCanonical 会把崩溃的 bug 报告误前缀成 [Feature]，污染 canonical 索引。
+      // 宁可漏判：fail-open 评论后放行，维护者可重跑。
+      core.warning(logMessage(config.logging.classification_failed, { error: 'triage error, skip governance' }));
+      await failOpenComment(octokit, owner, repo, issue, config);
+      return;
+    }
     const classification = triage.classification;
 
     if (skipGovernance) {
