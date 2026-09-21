@@ -2,6 +2,7 @@ const core = require('@actions/core');
 const { logMessage } = require('../utils/helpers');
 const { callAIStructured } = require('./ai');
 const { PR_REVIEW_DECISIONS, GOVERNANCE_DEFAULTS } = require('../utils/constants');
+const ScreeningService = require('./screeningService');
 const githubOps = require('./github');
 
 /**
@@ -43,6 +44,7 @@ class PrReviewService {
     this.config = config;
     this.gov = { ...GOVERNANCE_DEFAULTS, ...gov };
     this.ops = ops;
+    this.screening = new ScreeningService(openai, aiModel, config, this.gov);
   }
 
   /**
@@ -54,15 +56,19 @@ class PrReviewService {
    * @param {string} repo
    * @param {Object} pr 结构含 number/title/body/user.login
    * @param {string} fileChanges 已组装的文件变更描述（上游 analyzeFileChanges 产物，直接复用）
+   * @param {Object} ctx 可选共享历史语境（F3）：{ historyContext, index }。
+   *   缺省 null 时本服务自行检索（向后兼容既有调用与测试）。
    */
-  async review(octokit, owner, repo, pr, fileChanges = '') {
+  async review(octokit, owner, repo, pr, fileChanges = '', ctx = null) {
     const { number } = pr;
     core.info(logMessage(this.config.logging.pr_review_start, { number }));
 
-    // 1. FETCH：相关历史 issue（canonical 标签 + 文本检索双通道，取并集去重）
+    // 1. FETCH：确定相关历史条目。
+    //    两段式开启（F2）：阶段一筛选 AI 在共享紧凑索引上选候选（issue+PR，C10），
+    //    空/失败回落关键词启发式；两段式关闭：与原先完全一致的双通道启发式。
     let related = [];
     try {
-      related = await this.collectRelatedIssues(octokit, owner, repo, pr);
+      related = await this.collectRelated(octokit, owner, repo, pr, ctx);
     } catch (error) {
       // 检索失败视为「无历史语境」，回落旧链路 —— 不让检索故障演变成误关
       core.warning(logMessage(this.config.logging.pr_review_fetch_failed, { number, error: error.message }));
@@ -74,8 +80,11 @@ class PrReviewService {
       return null;
     }
 
-    // 2. FETCH：为每条相关 issue 补全全文 + 评论 + 时间线（失败容忍，跳过该条继续）
-    const relatedWithDetail = await this.enrichRelatedIssues(octokit, owner, repo, related);
+    // 2. FETCH：为每条相关条目补全全文 + 评论 + 时间线（失败容忍，跳过该条继续）
+    //    两段式开启时经 HistoryContextService.enrich（issue+PR 通用，C10）；关闭时保持旧 enrichRelatedIssues。
+    const relatedWithDetail = this.gov.enableTwoStage
+      ? await this.enrichViaHistoryContext(octokit, owner, repo, ctx, related)
+      : await this.enrichRelatedIssues(octokit, owner, repo, related);
     if (relatedWithDetail.length === 0) {
       core.info(logMessage(this.config.logging.pr_review_no_related, { number }));
       return null;
@@ -98,6 +107,82 @@ class PrReviewService {
 
     // 5. ACTION：生成评审评论 → 先评论后关闭；不创建 canonical
     return await this.executeClose(octokit, owner, repo, pr, verdict, relatedWithDetail);
+  }
+
+  /**
+   * 相关历史条目检索分发（F2）：
+   *   - enableTwoStage 开启：阶段一筛选（ScreeningService，主路径）∪ 关键词回落（并集，
+   *     有界于 maxRelatedIssues —— 筛选漏掉的关键词命中不丢，C16 缓解）；
+   *   - enableTwoStage 关闭：与原先完全一致的关键词双通道（byte-identical 行为）。
+   * 返回统一形状 [{ number, kind, title, body, state, state_reason, closed_at, source }]。
+   */
+  async collectRelated(octokit, owner, repo, pr, ctx = null) {
+    if (!this.gov.enableTwoStage) {
+      return this.collectRelatedIssues(octokit, owner, repo, pr);
+    }
+
+    // 共享索引（F3：prHandler 每次运行只取一次）；无 ctx 时自行构建（兼容独立调用）
+    const index = await this.obtainIndex(octokit, owner, repo, ctx);
+    if (index.length === 0) {
+      return this.collectRelatedIssues(octokit, owner, repo, pr);
+    }
+
+    const screened = await this.screening.screen(
+      { kind: 'pr', number: pr.number, title: pr.title, body: pr.body },
+      index
+    );
+    const screenedItems = screened
+      .map(c => {
+        const hit = index.find(i => i.kind === c.kind && i.number === c.number);
+        return hit ? { ...hit, source: 'screened' } : null;
+      })
+      .filter(Boolean);
+
+    // 并集（screened ∪ 关键词回落，有界），防止筛选漏掉关键词能命中的条目
+    const keywordItems = await this.collectRelatedIssues(octokit, owner, repo, pr);
+    const merged = new Map();
+    screenedItems.forEach(item => merged.set(`${item.kind}:${item.number}`, item));
+    keywordItems.forEach(item => merged.set(`${item.kind}:${item.number}`, item));
+
+    return [...merged.values()].slice(0, Math.max(this.gov.maxRelatedIssues, screened.length));
+  }
+
+  /**
+   * 取共享索引：优先用调用方传入的 ctx（F3 单次拉取），否则经 HistoryContextService 自建。
+   */
+  async obtainIndex(octokit, owner, repo, ctx = null) {
+    if (ctx && ctx.historyContext && Array.isArray(ctx.index)) {
+      return ctx.index;
+    }
+    const HistoryContextService = require('./historyContextService');
+    const historyContext = new HistoryContextService(octokit, this.config, this.gov, this.ops);
+    return historyContext.buildIndex(owner, repo);
+  }
+
+  /**
+   * 两段式路径的深补全（F3）：经 HistoryContextService.enrich（issue+PR 通用，C10）。
+   * ctx 携带共享实例时直接复用，否则临时构建 —— 语义与 enrichRelatedIssues 保持一致
+   * （单条失败跳过、全失败返回 []）。
+   */
+  async enrichViaHistoryContext(octokit, owner, repo, ctx, related) {
+    const historyContext = ctx && ctx.historyContext
+      ? ctx.historyContext
+      : new (require('./historyContextService'))(octokit, this.config, this.gov, this.ops);
+    return historyContext.enrich(owner, repo, related.map(r => ({ number: r.number, kind: r.kind || 'issue' })));
+  }
+
+  /**
+   * 引用校验（F3）：AI 评审评论里出现的每个 #N 必须真实存在于补全后的语境集合。
+   * 与 verifyEvidence 同族的确定性防线：草稿引用幻觉编号 → 整条草稿作废回落，
+   * 不让幻觉编号出现在公开评论里。
+   */
+  validateCitations(comment, related) {
+    const realNumbers = new Set(related.map(item => item.number));
+    const cited = String(comment || '').match(/#(\d+)/g) || [];
+    if (cited.length === 0) {
+      return true; // 未引用编号不构成幻觉
+    }
+    return cited.every(m => realNumbers.has(parseInt(m.slice(1), 10)));
   }
 
   /**
@@ -126,13 +211,15 @@ class PrReviewService {
         if (item.state !== 'closed') {
           return; // 只关心已得出结论的历史 issue
         }
+        // R2：FIX-B 后 listCanonicalIssues 携带 state 字段，这里如实透传
+        // （此前硬编码 null 会把 canonical 结论的 state_reason 证据抹掉，饿死 R13 证据闸门）
         candidates.set(item.number, {
           number: item.number,
           title: item.title,
           body: item.body || '',
           state: 'closed',
-          state_reason: null,
-          closed_at: null,
+          state_reason: item.state_reason || null,
+          closed_at: item.closed_at || null,
           source: 'canonical'
         });
       });
@@ -176,8 +263,10 @@ class PrReviewService {
   }
 
   /**
-   * 从 PR 标题/正文提取检索关键词：标题按分隔符切词 + 正文取前几个有意义的词组。
-   * 纯启发式，目标是让 search API 命中同主题的历史 issue，不追求精确。
+   * 从 PR 标题/正文提取检索关键词：标题按分隔符切词 + 正文取前几个有意义的词组
+   * （R16/C16：正文此前从未被真正读取——注释与实现不符；现在补上）。
+   * 纯启发式，仅作为两段式筛选的回落通道（enableTwoStage 开启时）或主通道（关闭时），
+   * 目标是让 search API 命中同主题的历史条目，不追求精确。
    */
   extractKeywords(pr) {
     const words = new Set();
@@ -190,7 +279,15 @@ class PrReviewService {
         words.add(t);
       }
     });
-    return [...words].slice(0, 4);
+    // 正文补词（R16）：取正文里较长的词/短语片段，标题词优先（Set 保序：标题词在前）
+    const body = String(pr.body || '');
+    body.split(/[\n\r\t\s,，。:：;；/|()（）\-_*#>`]+/).forEach(w => {
+      const t = w.trim();
+      if (t.length > 1) {
+        words.add(t);
+      }
+    });
+    return [...words].slice(0, 6);
   }
 
   /**
@@ -245,6 +342,7 @@ class PrReviewService {
       },
       related_issues: related.map(item => ({
         number: item.number,
+        kind: item.kind || 'issue',
         title: item.title,
         state: item.state,
         state_reason: item.state_reason,
@@ -295,21 +393,44 @@ class PrReviewService {
   }
 
   /**
-   * 确定性证据闸门：AI 给出的 evidence 必须引用语境包里真实存在的 issue 编号。
-   * 防止模型幻觉编造「历史 issue #999 说过…」式证据骗过关闭动作。
+   * 确定性证据闸门（R13/C13 加固版）：AI 给出的 evidence 必须引用语境包里真实存在的编号，
+   * 且满足以下之一才允许关闭：
+   *   a) ≥2 条有效证据行（每行至少含一个真实 #N）；
+   *   b) 恰好 1 条有效证据行，且该行文本与被引用条目的状态关键词有确定性重叠
+   *      （白名单：wontfix, not_planned, duplicate, completed, merged）。
+   * 防止「幻觉理由 + 一个碰巧存在的编号」骗过关闭动作 —— 引用真实性之外再要求
+   * 证据内容与被引条目的结论方向一致。
    * KEEP / UNCERTAIN 不需要过闸门（它们本来就不关 PR）。
    */
   verifyEvidence(verdict, related) {
     if (verdict.decision !== PR_REVIEW_DECISIONS.CLOSE) {
       return true;
     }
-    const realNumbers = new Set(related.map(item => item.number));
-    const cited = verdict.evidence
-      .map(e => (String(e).match(/#(\d+)/g) || [])
-        .map(m => parseInt(m.slice(1), 10)))
-      .flat();
-    const valid = cited.filter(n => realNumbers.has(n));
-    if (valid.length === 0) {
+    const byNumber = new Map(related.map(item => [item.number, item]));
+    // 逐行拆解：只保留含至少一个真实编号的行（无效行剔除）
+    const validLines = [];
+    for (const line of verdict.evidence || []) {
+      const citedNumbers = (String(line).match(/#(\d+)/g) || [])
+        .map(m => parseInt(m.slice(1), 10))
+        .filter(n => byNumber.has(n));
+      if (citedNumbers.length > 0) {
+        validLines.push({ text: String(line), numbers: citedNumbers });
+      }
+    }
+    if (validLines.length === 0) {
+      core.warning(this.config.logging.pr_review_evidence_rejected);
+      return false;
+    }
+    if (validLines.length >= 2) {
+      return true;
+    }
+    // 单行证据：要求文本与被引条目的结论关键词重叠（确定性字符串包含，白名单口径）
+    const line = validLines[0];
+    const corroborated = line.numbers.some(n => {
+      const item = byNumber.get(n);
+      return this.evidenceKeywords(item).some(kw => line.text.toLowerCase().includes(kw));
+    });
+    if (!corroborated) {
       core.warning(this.config.logging.pr_review_evidence_rejected);
       return false;
     }
@@ -317,7 +438,35 @@ class PrReviewService {
   }
 
   /**
-   * 执行关闭：生成中文评审评论 → 先评论后关闭（与 issueGovernanceService 的安全写序一致）。
+   * 被引条目的结论关键词（R13 白名单）：state_reason + 时间线事件。
+   * 确定性小集合，不做语义判断。同义词归并：not_planned ≡ wontfix
+   * （GitHub 同一关闭理由的新旧命名），互为佐证词。
+   */
+  evidenceKeywords(item) {
+    const ALIASES = {
+      wontfix: ['wontfix', 'not_planned'],
+      not_planned: ['not_planned', 'wontfix'],
+      duplicate: ['duplicate'],
+      completed: ['completed'],
+      merged: ['merged']
+    };
+    const haystack = [
+      item.state_reason,
+      ...(item.timeline || []).map(e => e.event),
+      item.state === 'merged' ? 'merged' : null
+    ].filter(Boolean);
+    const matched = new Set();
+    for (const h of haystack) {
+      const key = String(h).toLowerCase();
+      (ALIASES[key] || []).forEach(kw => matched.add(kw));
+    }
+    return [...matched];
+  }
+
+
+  /**
+   * 执行关闭：生成中文评审评论（过引用校验）→ 打 history-rejected 标签（R6）→
+   * 先评论后关闭（与 issueGovernanceService 的安全写序一致）。
    * 关闭失败容忍（warning 留痕，不重试不回滚）。不创建 canonical、不打 duplicate 标签。
    */
   async executeClose(octokit, owner, repo, pr, verdict, related) {
@@ -332,11 +481,30 @@ class PrReviewService {
       return null;
     }
 
+    // 引用闸门（F3）：草稿引用的每个 #N 必须真实存在于语境集合，幻觉引用整条作废回落
+    if (!this.validateCitations(comment, related)) {
+      core.warning(logMessage(this.config.logging.pr_review_citation_rejected, { number }));
+      return null;
+    }
+
+    // 有引用历史时服务端确定性追加一行指引（不依赖模型自觉）
+    if ((String(comment).match(/#(\d+)/g) || []).length > 0) {
+      comment = `${comment}\n\n${this.config.responses.governance_history_reference_note}`;
+    }
+
     if (this.gov.dryRun) {
       const intro = this.config.responses.governance_dry_run;
-      const body = `${intro}\n\n**本应执行**：关闭 PR（历史语境评审判定 CLOSE，证据已校验）\n\n---\n\n${comment}`;
+      const body = `${intro}\n\n**本应执行**：关闭 PR（历史语境评审判定 CLOSE，证据已校验；打标签 ${this.gov.historyRejectedLabel}）\n\n---\n\n${comment}`;
       await this.safeComment(octokit, owner, repo, number, body);
       return { decision: PR_REVIEW_DECISIONS.CLOSE, dryRun: true };
+    }
+
+    // history-rejected 标签（R6/C6）：PR 不支持 state_reason，标签是唯一可查的关闭理由标记。
+    // 失败容忍（不阻断评论与关闭）。
+    try {
+      await this.ops.addLabels(octokit, owner, repo, number, [this.gov.historyRejectedLabel], this.config.logging.label_add_api_failed);
+    } catch (error) {
+      core.warning(logMessage(this.config.logging.pr_review_label_failed, { error: error.message }));
     }
 
     // 先评论，后关闭
@@ -368,7 +536,13 @@ class PrReviewService {
         decision: verdict.decision,
         reasons: verdict.reasons,
         evidence: verdict.evidence,
-        related_issues: related.map(item => ({ number: item.number, title: item.title, state_reason: item.state_reason }))
+        related_issues: related.map(item => ({
+          number: item.number,
+          kind: item.kind || 'issue',
+          title: item.title,
+          state: item.state,
+          state_reason: item.state_reason
+        }))
       })
     };
     const configForDraft = {

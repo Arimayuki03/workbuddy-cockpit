@@ -204,4 +204,63 @@ describe('prHandler', () => {
     expect(PrReviewService).toHaveBeenCalled();
     expect(PrGovernanceService).toHaveBeenCalled();
   });
+
+  // ---- F3：两段式共享历史语境接线 ----
+
+  test('两段式开启：构建共享索引一次，评审与治理拿到同一 ctx（C5/R5 单次拉取）', async () => {
+    const config = buildConfig();
+    const pr = makePR();
+    const octokit = makeOctokit();
+    const gov = { ...govDefaults, enableTwoStage: true, prReviewClose: true };
+
+    const reviewCalls = [];
+    const governCalls = [];
+    PrReviewService.mockImplementation(() => ({
+      review: jest.fn(async (...args) => {
+        reviewCalls.push(args);
+        return null;
+      })
+    }));
+    PrGovernanceService.mockImplementation(() => ({
+      govern: jest.fn(async (...args) => {
+        governCalls.push(args);
+        return {};
+      })
+    }));
+
+    await handleNewPR(octokit, {}, makeContext(pr), 'o', 'r', 'model', config, ['enhancement'], [], gov);
+
+    // 评审与治理都收到 ctx，且是同一引用（index 只拉一次）
+    expect(reviewCalls[0][5]).toBeTruthy();
+    expect(governCalls[0][5]).toBe(reviewCalls[0][5]);
+    expect(Array.isArray(reviewCalls[0][5].index)).toBe(true);
+    expect(reviewCalls[0][5].historyContext).toBeTruthy();
+  });
+
+  test('两段式关闭（默认）：不构建索引，评审/治理 ctx 为 null（byte-identical 旧行为）', async () => {
+    const config = buildConfig();
+    const pr = makePR();
+    const octokit = makeOctokit();
+    const gov = { ...govDefaults, prReviewClose: true };
+
+    const reviewCalls = [];
+    const governCalls = [];
+    PrReviewService.mockImplementation(() => ({
+      review: jest.fn(async (...args) => {
+        reviewCalls.push(args);
+        return null;
+      })
+    }));
+    PrGovernanceService.mockImplementation(() => ({
+      govern: jest.fn(async (...args) => {
+        governCalls.push(args);
+        return {};
+      })
+    }));
+
+    await handleNewPR(octokit, {}, makeContext(pr), 'o', 'r', 'model', config, ['enhancement'], [], gov);
+
+    expect(reviewCalls[0][5]).toBeNull();
+    expect(governCalls[0][5]).toBeNull();
+  });
 });

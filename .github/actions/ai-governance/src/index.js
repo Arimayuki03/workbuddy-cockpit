@@ -40,6 +40,11 @@ async function run() {
       enablePrGovernance,
       maxCanonicalIndex,
       canonicalBodyTruncate,
+      // 统一历史语境层（F1）与两段式流水线（F2）
+      maxHistoryIndex,
+      enableTwoStage,
+      maxScreenedCandidates,
+      screeningModel,
       config
     } = parseInputs(baseConfig);
 
@@ -103,6 +108,11 @@ async function run() {
       maxRelatedIssues,
       relatedCommentsPerIssue,
       relatedBodyTruncate,
+      // 统一历史语境层（F1）与两段式流水线（F2）
+      maxHistoryIndex,
+      enableTwoStage,
+      maxScreenedCandidates,
+      screeningModel,
       governanceToken
     };
 
