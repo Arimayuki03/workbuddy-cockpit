@@ -16,9 +16,14 @@ import (
 // Config 顶层配置。
 type Config struct {
 	Listen    string `json:"listen"`     // ":7863"
-	APIKey    string `json:"api_key"`    // 空 = 不鉴权
+	APIKey    string `json:"api_key"`    // 必填（normalize fail-fast）：网关/面板/admin 共用鉴权密钥
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
+
+	// MaxBodyMB 请求体大小上限（MB）：chatCompletions 用 http.MaxBytesReader 包裹
+	// 请求体，超限就地 413，不再无上限读入内存（audit：无上限的全量读可被超大 body
+	// 拖垮进程）。<=0 回落默认 64；WB2A_MAX_BODY_MB 环境变量覆盖。
+	MaxBodyMB int `json:"max_body_mb"`
 
 	Server struct{} `json:"server"` // 已退役段：max_body_mb 移除后无字段；旧配置该段下任意键因 JSON 未知字段而自然忽略
 
@@ -197,6 +202,7 @@ func Default() *Config {
 		APIKey:    "",
 		AuthDir:   "./auths",
 		StateFile: "./data/state.json",
+		MaxBodyMB: 64,
 	}
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
@@ -277,6 +283,11 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_STATE_FILE"); v != "" {
 		c.StateFile = v
+	}
+	if v := os.Getenv("WB2A_MAX_BODY_MB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.MaxBodyMB = n
+		}
 	}
 	if v := os.Getenv("WB2A_SOFT_RATE"); v != "" {
 		c.Cooldown.SoftRate = v
@@ -421,6 +432,11 @@ func (c *Config) normalize() error {
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120
 	}
+	// 请求体上限：0/负数视为未设置回落默认 64MB（不给"配错=禁用上限"留口子；
+	// max_body_mb 历史键已并回本字段，无需 server 段兼容）。
+	if c.MaxBodyMB <= 0 {
+		c.MaxBodyMB = 64
+	}
 	// header 缺省回落 timeout（保"首字节前换号"既有语义）；idle 缺省走内置大值。
 	// 任务书约定：0 一律视为"未设置"走默认，真正的"禁用"留待后续（避免歧义）。
 	if c.Upstream.HeaderTimeoutSeconds <= 0 {
@@ -437,12 +453,15 @@ func (c *Config) normalize() error {
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen
 	}
-	// fail-fast（设计 supplement §4.1）：admin.enabled=true 且 api_key 为空 = 未鉴权的
-	// mutation 端点（disable/revive 是可用性操作，风险高于 /status 读泄漏），拒绝启动。
-	// 校验放 applyEnv 之后：env 覆盖（WB2A_ADMIN_ENABLED / WB2A_API_KEY）与 config
-	// 两条入口最终状态一致拦截。
-	if c.Admin.Enabled && strings.TrimSpace(c.APIKey) == "" {
-		return fmt.Errorf("admin.enabled=true 但 api_key 为空：请设置 api_key 或将 admin.enabled 置 false")
+	// fail-fast（README「至少设置 api_key」）：api_key 无条件必填。它同时是网关
+	// /v1/*、面板、admin 三方的鉴权密钥——空 api_key 时 withAuth 对匿名请求一律放行，
+	// 开启 admin/panel 而不配 key 等于把管理端点裸奔在监听地址上（缺省 :7863 全网卡）；
+	// 即便都关着，/v1/* 网关端点也是匿名可用的（此前「admin/panel 未开」配置被静默
+	// 放行，与 README 承诺不符）。校验放 applyEnv 之后：env（WB2A_API_KEY）与 config
+	// 两条入口最终状态一致拦截。原 admin/panel 各自的专项 fail-fast 由本条覆盖
+	// （同口径先行拦截，main 的 log.Fatalf 分支保留为防御性兜底）。
+	if strings.TrimSpace(c.APIKey) == "" {
+		return fmt.Errorf("api_key 为空：请先在 config.json 设置 api_key（网关/面板/admin 共用的鉴权密钥，必填）")
 	}
 	// panel 的同类 fail-fast（v1.2.0 设计文档 §8：enabled 且 api_key 空拒启）
 	// 在 main 落地（log.Fatalf，对齐设计文档文案）——normalize 层不做，

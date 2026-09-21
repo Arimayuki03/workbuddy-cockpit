@@ -22,6 +22,7 @@ func TestGrowthStreakParsesDays(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	days, err := c.GrowthStreak(&auth.Auth{AccessToken: "at", UID: "u1"})
 	if err != nil {
 		t.Fatalf("GrowthStreak: %v", err)
@@ -39,6 +40,7 @@ func TestGrowthStreakDefaultZero(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	days, err := c.GrowthStreak(&auth.Auth{AccessToken: "at", UID: "u1"})
 	if err != nil {
 		t.Fatalf("GrowthStreak: %v", err)
@@ -57,6 +59,7 @@ func TestGrowthStreakServerError(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	if _, err := c.GrowthStreak(&auth.Auth{AccessToken: "at", UID: "u1"}); err == nil {
 		t.Fatal("want error on 500")
 	}
@@ -71,6 +74,7 @@ func TestGrowthStreakBusinessCode(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	if _, err := c.GrowthStreak(&auth.Auth{AccessToken: "at", UID: "u1"}); err == nil {
 		t.Fatal("want error on non-zero business code")
 	}

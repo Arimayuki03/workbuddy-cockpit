@@ -40,6 +40,7 @@ func TestDeviceTokenInjected_WhenSet(t *testing.T) {
 				ChatBaseCN:    srv.URL,
 				BillingBaseCN: srv.URL,
 			}
+			c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 			req, _ := http.NewRequest(http.MethodPost, srv.URL+tc.wantPath, nil)
 			tc.apply(c, req)
 			resp, err := c.HTTP.Do(req)
@@ -71,6 +72,7 @@ func TestDeviceTokenNotInjected_WhenEmpty(t *testing.T) {
 		BillingBaseCN: srv.URL,
 		// DeviceToken / DeviceTokenFile 皆空
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v2/chat/completions", nil)
 	c.ChatHeaders(req, a, "", ChatMeta{})
 	resp, err := c.HTTP.Do(req)
@@ -123,6 +125,7 @@ func TestDeviceTokenFromConfigOrFile_Overrides(t *testing.T) {
 				DeviceToken:    tc.cfg,
 				DeviceTokenFile: fp,
 			}
+			c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v2/chat/completions", nil)
 			c.ChatHeaders(req, a, "", ChatMeta{})
 			resp, err := c.HTTP.Do(req)
@@ -148,6 +151,7 @@ func TestDeviceTokenFileTooLarge(t *testing.T) {
 	defer save()
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	c := &Client{DeviceTokenFile: fp}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	if tok := c.resolveDeviceToken(a); tok != "" {
 		t.Errorf("resolveDeviceToken() = %q want empty (file too large)", tok)
 	}

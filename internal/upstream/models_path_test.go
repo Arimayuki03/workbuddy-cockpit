@@ -89,6 +89,7 @@ func TestModelsPathGlobalV2(t *testing.T) {
 		ChatBaseGlobal: strings.TrimSuffix(srv.URL, "/"),
 		GlobalEnabled:  true,
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	if _, err := c.FetchModels(globalAcct()); err != nil {
 		t.Fatalf("global fetch models: %v", err)
 	}

@@ -91,6 +91,7 @@ func TestGrowthStreakWithCards(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	a := &auth.Auth{UID: "u1", AccessToken: "at"}
 	st, err := c.GrowthStreakWithCards(a)
 	if err != nil {
@@ -108,6 +109,7 @@ func TestGrowthHeatmapYesterdayMissed(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	a := &auth.Auth{UID: "u1", AccessToken: "at"}
 	cells, err := c.GrowthHeatmap(a)
 	if err != nil {
@@ -139,6 +141,7 @@ func TestUseMakeupCard(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	a := &auth.Auth{UID: "u1", AccessToken: "at"}
 	if err := c.UseMakeupCard(a, "2026-09-15"); err != nil {
 		t.Fatalf("UseMakeupCard: %v", err)
@@ -156,6 +159,7 @@ func TestUseMakeupCardBusinessError(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	a := &auth.Auth{UID: "u1", AccessToken: "at"}
 	if err := c.UseMakeupCard(a, "2026-09-15"); err == nil {
 		t.Fatal("无卡应返回业务错误")
@@ -169,6 +173,7 @@ func TestClaimGiftAndCompensation(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	a := &auth.Auth{UID: "u1", AccessToken: "at"}
 
 	credit, err := c.ClaimGift(a)
@@ -196,6 +201,7 @@ func TestClaimGiftBusinessError(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	a := &auth.Auth{UID: "u1", AccessToken: "at"}
 	credit, err := c.ClaimGift(a)
 	if err == nil || credit != 0 {

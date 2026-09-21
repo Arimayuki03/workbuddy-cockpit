@@ -12,6 +12,7 @@ import (
 func TestCommonHeadersCodeBuddyRequest(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 
 	// chat 路径
 	req := mustRequest(t)
@@ -41,6 +42,7 @@ func TestRefreshHeadersAuthRefreshSource(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1", RefreshToken: "rt"}
 	req := mustRequest(t)
 	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	c.RefreshHeaders(req, a)
 
 	if got := req.Header.Get("X-Auth-Refresh-Source"); got != "plugin" {
@@ -52,6 +54,7 @@ func TestRefreshHeadersAuthRefreshSource(t *testing.T) {
 // CN 账号 zh-CN，global 账号 en-US。chat/refresh 路径（走 CommonHeaders）均覆盖。
 func TestCommonHeadersAcceptLanguageByRealm(t *testing.T) {
 	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 
 	// CN 账号 chat
 	cnA := &auth.Auth{AccessToken: "at", UID: "c1"}
@@ -89,6 +92,7 @@ func TestCommonHeadersAcceptLanguageByRealm(t *testing.T) {
 // （去掉宽松的 text/plain, */*）。
 func TestAcceptHeaderStreamVsNonStream(t *testing.T) {
 	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	a := &auth.Auth{AccessToken: "at", UID: "u1", RefreshToken: "rt"}
 
 	// chat 流式：application/json, text/event-stream

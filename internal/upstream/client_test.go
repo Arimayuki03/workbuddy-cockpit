@@ -713,6 +713,7 @@ func TestResourceSummaryGlobalRealm(t *testing.T) {
 		BillingBaseGlobal: strings.TrimSuffix(billSrv.URL, "/"),
 		GlobalEnabled:     true,
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	a := &auth.Auth{AccessToken: "at", UID: "g1", Domain: "www.workbuddy.ai"}
 	remain, used, size, packs, err := c.ResourceSummary(a)
 	if err != nil {

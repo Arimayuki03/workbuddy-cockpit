@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -17,11 +18,11 @@ type requestLogEntry struct {
 	Nick      string    `json:"nick,omitempty"`
 	Mode      string    `json:"mode"` // "stream" | "sync"
 	Status    int       `json:"status"`
-	Tokens    int     `json:"tokens"`    // <0 = usage 缺失（观测缺失，非 0 token）
-	TTFBMS    int64   `json:"ttfb_ms"`   // 首字延迟（非流式/无帧 = 0）
-	Credit    float64 `json:"credit"`    // 扣费（hasCredit=false 时无观测）
-	HasCredit bool    `json:"has_credit"`
-	Error     string  `json:"error,omitempty"` // 非 200 的原因摘要
+	Tokens    int       `json:"tokens"`  // <0 = usage 缺失（观测缺失，非 0 token）
+	TTFBMS    int64     `json:"ttfb_ms"` // 首字延迟（非流式/无帧 = 0）
+	Credit    float64   `json:"credit"`  // 扣费（hasCredit=false 时无观测）
+	HasCredit bool      `json:"has_credit"`
+	Error     string    `json:"error,omitempty"` // 非 200 的原因摘要
 }
 
 // requestLogCap 环形缓冲容量（设计文档 §4.3.2：~1000 条，重启即清）。
@@ -29,13 +30,15 @@ type requestLogEntry struct {
 const requestLogCap = 1000
 
 // requestLogStore 请求日志环形缓冲：单写（chatStat.done() 单一埋点）多读
-// （/api/request_logs 轮询）。mutex 保护切片+游标；无锁竞争热点（写频率=请求频率）。
+// （/api/request_logs 轮询）。mutex 保护切片+游标；dropped 只在 handleRequestLogs
+// （读路径）被锁外读取，故用 atomic.Int64 与写锁内的写操作解耦（audit：此前
+// 锁外读 + 锁内写构成数据竞争，-race 可复现）。
 type requestLogStore struct {
 	mu      sync.Mutex
 	buf     []requestLogEntry // 定长环形
 	next    int               // 下一个写位置
 	seq     int64             // 全局递增序号（跨重启清零，仅运行期单调）
-	dropped int64             // 被覆盖的旧条数（观测用）
+	dropped atomic.Int64      // 被覆盖的旧条数（观测用）
 }
 
 var requestLog = &requestLogStore{buf: make([]requestLogEntry, requestLogCap)}
@@ -52,7 +55,7 @@ func appendRequestLog(e requestLogEntry) {
 	requestLog.buf[requestLog.next] = e
 	requestLog.next = (requestLog.next + 1) % len(requestLog.buf)
 	if requestLog.seq > int64(len(requestLog.buf)) {
-		requestLog.dropped = requestLog.seq - int64(len(requestLog.buf))
+		requestLog.dropped.Store(requestLog.seq - int64(len(requestLog.buf)))
 	}
 }
 
@@ -89,7 +92,7 @@ func (h *Handler) handleRequestLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items":   requestLogsSnapshot(limit),
-		"dropped": requestLog.dropped,
+		"dropped": requestLog.dropped.Load(),
 		"cap":     requestLogCap,
 	})
 }

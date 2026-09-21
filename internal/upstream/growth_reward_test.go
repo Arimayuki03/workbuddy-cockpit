@@ -90,6 +90,7 @@ func (s *rewardStub) server(t *testing.T) (*httptest.Server, *Client) {
 	srv := httptest.NewServer(s.handler())
 	t.Cleanup(srv.Close)
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	return srv, c
 }
 
@@ -183,6 +184,7 @@ func TestGrowthRedeemOtherError(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 
 	_, err := c.GrowthRedeem(&auth.Auth{AccessToken: "at", UID: "u1"}, "7d", "t")
 	if err == nil {
@@ -264,6 +266,7 @@ func TestGrowthLotteryDrawServer500(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 
 	_, err := c.GrowthLotteryDraw(&auth.Auth{AccessToken: "at", UID: "u1"}, "t")
 	if err == nil {
@@ -297,6 +300,7 @@ func TestGrowthRedeemSendsBillingHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 
 	if _, err := c.GrowthRedeem(&auth.Auth{AccessToken: "at", UID: "u1", Domain: "www.codebuddy.cn"}, "7d", "t"); err != nil {
 		t.Fatalf("GrowthRedeem: %v", err)

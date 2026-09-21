@@ -12,6 +12,7 @@ import (
 // TestCostExploreIntervalDefault 键缺席 → 默认 30m（探索缺省开启）。
 func TestCostExploreIntervalDefault(t *testing.T) {
 	c := Default()
+	c.APIKey = "k" // api_key 无条件必填：normalize 校验需要非空 key
 	if err := c.normalize(); err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
@@ -24,7 +25,7 @@ func TestCostExploreIntervalDefault(t *testing.T) {
 func TestCostExploreIntervalParsedFromFile(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"pool":{"cost_explore_interval":"45m"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","pool":{"cost_explore_interval":"45m"}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
@@ -38,7 +39,7 @@ func TestCostExploreIntervalParsedFromFile(t *testing.T) {
 func TestCostExploreIntervalZeroDisables(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"pool":{"cost_explore_interval":"0"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","pool":{"cost_explore_interval":"0"}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
@@ -52,7 +53,7 @@ func TestCostExploreIntervalZeroDisables(t *testing.T) {
 func TestCostExploreIntervalEmptyFallsBackToDefault(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"pool":{"cost_explore_interval":""}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","pool":{"cost_explore_interval":""}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +67,7 @@ func TestCostExploreIntervalEmptyFallsBackToDefault(t *testing.T) {
 func TestBadCostExploreInterval(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"pool":{"cost_explore_interval":"oops"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","pool":{"cost_explore_interval":"oops"}}`), 0o600)
 	if _, err := Load(fp); err == nil {
 		t.Fatal("want error for bad cost_explore_interval")
 	}

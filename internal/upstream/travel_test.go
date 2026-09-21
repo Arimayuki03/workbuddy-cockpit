@@ -141,6 +141,36 @@ func TestBuddyInfoPresent(t *testing.T) {
 	}
 }
 
+// TestBuddyInfoEmptyObjectMeansNoBuddy data.buddy 为 {} 空对象（上游「无猫」的
+// 另一种下发形态）→ 返回 nil 表示无猫，调用方不得误判「已有猫」。
+func TestBuddyInfoEmptyObjectMeansNoBuddy(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":0,"msg":"ok","data":{"buddy":{}}}`), nil
+	})
+	b, err := c.BuddyInfo(&auth.Auth{AccessToken: "at", UID: "u1"})
+	if err != nil {
+		t.Fatalf("buddy info: %v", err)
+	}
+	if b != nil {
+		t.Errorf("buddy=%+v want nil (空对象=无猫)", b)
+	}
+}
+
+// TestBuddyInfoZeroIDMeansNoBuddy 带 name 但 id==0 的畸形档案同样按无猫处理
+// （id 是猫的唯一标识，0 即无有效档案）。
+func TestBuddyInfoZeroIDMeansNoBuddy(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":0,"msg":"ok","data":{"buddy":{"id":0,"name":"幽灵猫"}}}`), nil
+	})
+	b, err := c.BuddyInfo(&auth.Auth{AccessToken: "at", UID: "u1"})
+	if err != nil {
+		t.Fatalf("buddy info: %v", err)
+	}
+	if b != nil {
+		t.Errorf("buddy=%+v want nil (id==0=无猫)", b)
+	}
+}
+
 func TestBuddyAgreementIdempotent(t *testing.T) {
 	var got []byte
 	c := testClient(func(r *http.Request) (*http.Response, error) {

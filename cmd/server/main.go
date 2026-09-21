@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"io"
 	"log"
@@ -81,8 +82,10 @@ func main() {
 
 	cfg, err := Load(*cfgPath)
 	if err != nil {
-		// 配置文件不存在时给一次机会用纯默认 + env
-		if os.IsNotExist(err) {
+		// 配置文件不存在时给一次机会用纯默认 + env。必须用 errors.Is（不是 os.IsNotExist）：
+		// Load 把 os.ReadFile 的错误包了一层 fmt.Errorf %w，os.IsNotExist 只对裸
+		// *PathError 生效、对包装错误恒 false，原写法该分支实际不可达。
+		if errors.Is(err, os.ErrNotExist) {
 			log.Printf("config %s not found, using defaults+env", *cfgPath)
 			cfg, err = Load("")
 		}
@@ -91,8 +94,9 @@ func main() {
 		}
 	}
 
-	// fail-fast：admin.enabled=true 时 api_key 必填。withAuth 对空 api_key 一律放行，
-	// 开启 admin 而不配 key 等于把 /admin 管理端点裸奔在监听地址上（缺省 :7863 全网卡）。
+	// fail-fast：api_key 无条件必填（normalize 已先拦一次；admin/panel 开启时文案
+	// 更具体的双保险兜底）。withAuth 对空 api_key 一律放行，等于把 /admin 管理端点
+	// 裸奔在监听地址上（缺省 :7863 全网卡）。
 	if cfg.Admin.Enabled && strings.TrimSpace(cfg.APIKey) == "" {
 		log.Fatalf("admin.enabled=true 但 api_key 为空：请先在 config.json 配置 api_key 再开启 admin（否则管理端点无鉴权暴露）")
 	}
@@ -193,6 +197,9 @@ func main() {
 
 	// live 承载可热改字段（api_key/soft_rate/脱敏开关），面板保存配置时在线替换
 	// （v1.2.0 panel 移植件；withAuth/会话签名经 Holder 快照读，改 key 免重启生效）。
+	// live 启动期构建（panel.enabled=false 也构建）：网关 withAuth 同样经 Live 读
+	// 密钥与软冷却基数——配置文件只写盘不喂运行态，运行态以 live 快照为单一事实来源，
+	// 下次启动时 api_key 仍从 config.json 读入（live 初始值），无漂移。
 	live := livecfg.New(livecfg.Snapshot{
 		APIKey:               cfg.APIKey,
 		SoftCooldown:         cfg.SoftRateDur,
@@ -227,6 +234,11 @@ func main() {
 	up.ChatBaseGlobal = cfg.Global.ChatBase
 	up.BillingBaseGlobal = cfg.Global.BillingBase
 	up.GlobalEnabled = cfg.Global.Enabled
+
+	// 装配期收尾：把上述直赋值物化进热改快照（upstream.SyncHot）。此后运行期读侧
+	// （headers.go/prepareBody）恒走 HotFields() 快照，面板热改走 SetHotFields——
+	// 普通字段的并发读写数据竞争从根上消除（audit P0）。
+	up.SyncHot()
 
 	sch := scheduler.New(scheduler.Config{
 		Pool:                p,
@@ -359,6 +371,11 @@ func main() {
 		SoftCooldown: cfg.SoftRateDur,
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
+		// api_key / soft_rate 热改通道（使用指南 §5.5：面板改 api_key 后网关端点
+		// 即时生效，免重启）：Live 非 nil 时 withAuth 的鉴权密钥与软冷却基数经
+		// live 快照读取（面板保存配置 → live.Store → 下一个请求生效）；
+		// 静态 APIKey/SoftCooldown 字段保留为回落（测试/无面板形态无 Holder）。
+		Live: live,
 		// global realm 开关（handler 侧第三道闸：modelList 据此决定是否列 global 名单）。
 		GlobalEnabled: cfg.Global.Enabled,
 		// /admin 管理面（本地 tasks/credits/shutdown + 上游 accounts 运维端点共用
@@ -387,9 +404,9 @@ func main() {
 		Addr:              cfg.Listen,
 		Handler:           h,
 		ReadHeaderTimeout: 30 * time.Second,
-		// ReadTimeout 覆盖整个请求读取（含 body）：防慢速 body 拖死连接。
-		// max_body_mb 已移除（请求体无上限，交由上游自然响应），超大 body 成为
-		// 唯一的自然约束：60s 内传不完会得到连接错误（read timeout）而非 413。
+		// ReadTimeout 覆盖整个请求读取（含 body）：防慢速 body 拖死连接。超大
+		// body 由 max_body_mb（http.MaxBytesReader → 413）先行拦截，60s 内传不完
+		// 的剩余兜底是本项（连接错误）。
 		ReadTimeout: 60 * time.Second,
 		// IdleTimeout keep-alive 空闲连接回收：配合 ctx 传播（FIX-2）防连接泄漏堆积。
 		// 注意：SSE 流式响应期间连接非空闲，不受此项掐断；不设全局 WriteTimeout

@@ -24,6 +24,7 @@ func TestChatHeadersGlobalRealm(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "g1", Domain: "www.workbuddy.ai"} // global 账号
 	req := mustRequest(t)
 	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	c.ChatHeaders(req, a, "", ChatMeta{})
 
 	if got := req.Header.Get("User-Agent"); got != globalUAString {
@@ -48,6 +49,7 @@ func TestChatHeadersCNRealm(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "c1", EnterpriseID: "e1"} // CN 企业账号 + 无 domain
 	req := mustRequest(t)
 	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	c.ChatHeaders(req, a, "", ChatMeta{})
 
 	if got := req.Header.Get("User-Agent"); strings.Contains(got, "WorkBuddy AI") {
@@ -78,6 +80,7 @@ func TestChatHeadersGlobalStrongOverride(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "g2", EnterpriseID: "should-be-ignored", Domain: "www.workbuddy.ai"}
 	req := mustRequest(t)
 	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	c.ChatHeaders(req, a, "", ChatMeta{})
 
 	if got := req.Header.Get("X-No-Enterprise-Id"); got != "1" {
@@ -100,6 +103,7 @@ func TestChatHeadersGlobalWithConfiguredDomain(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "g3", Domain: "login.workbuddy.ai"}
 	req := mustRequest(t)
 	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	c.ChatHeaders(req, a, "", ChatMeta{})
 
 	if got := req.Header.Get("X-Domain"); got != "www.workbuddy.ai" {
@@ -113,6 +117,7 @@ func TestChatHeadersCNNoEnterpriseZeroRegression(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "c2"}
 	req := mustRequest(t)
 	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	c.ChatHeaders(req, a, "", ChatMeta{})
 
 	if got := req.Header.Get("X-No-Enterprise-Id"); got != "1" {
@@ -130,6 +135,7 @@ func TestChatHeadersCNNoEnterpriseZeroRegression(t *testing.T) {
 // global → 第二段 `WorkBuddy AI`；CN → 第二段 `WorkBuddy`。
 func TestDefaultWorkBuddyUAForGlobal(t *testing.T) {
 	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	if got := c.defaultWorkBuddyUAFor(&auth.Auth{}); got != defaultUAString {
 		t.Errorf("defaultWorkBuddyUAFor(cn) = %q want %q", got, defaultUAString)
 	}
@@ -138,6 +144,7 @@ func TestDefaultWorkBuddyUAForGlobal(t *testing.T) {
 	}
 	// version 覆盖仍生效：global 平台段跟随 clientVersion。
 	c2 := &Client{ClientVersion: "6.0.0"}
+	c2.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	if got := c2.defaultWorkBuddyUAFor(&auth.Auth{Domain: "www.workbuddy.ai"}); got != "WorkBuddy/6.0.0 WorkBuddy AI/6.0.0 CLI/2.137.1" {
 		t.Errorf("defaultWorkBuddyUAFor(global, v6) = %q", got)
 	}

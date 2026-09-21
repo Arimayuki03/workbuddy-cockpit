@@ -119,6 +119,7 @@ func TestGlobalEffortDowngradeStatic(t *testing.T) {
 		ChatBaseGlobal: strings.TrimSuffix(srv.URL, "/"),
 		GlobalEnabled:  true,
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	c.FetchGlobalModels(globalAcct()) // models endpoint 返回 code:500 → 解析失败 → 负缓存，桶空
 
 	rc, status, _, err := c.ChatStream(globalAcct(), []byte(`{"model":"deepseek-v4.1-flash","reasoning_effort":"low","messages":[]}`), "", ChatMeta{})
@@ -153,6 +154,7 @@ func TestGlobalEffortDowngradeRemote(t *testing.T) {
 		ChatBaseGlobal: strings.TrimSuffix(srv.URL, "/"),
 		GlobalEnabled:  true,
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	c.FetchGlobalModels(globalAcct()) // 探测成功写桶
 
 	rc, status, _, err := c.ChatStream(globalAcct(), []byte(`{"model":"gpt-5.4","reasoning_effort":"max","messages":[]}`), "", ChatMeta{})

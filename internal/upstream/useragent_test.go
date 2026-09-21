@@ -58,6 +58,7 @@ func TestUserAgentDefaultEmptyKeepsClientUA(t *testing.T) {
 				ChatBaseCN:    "https://chat.example",
 				BillingBaseCN: "https://billing.example",
 			}
+			c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 			if err := tc.call(c); err != nil {
 				t.Fatalf("call: %v", err)
 			}
@@ -90,6 +91,7 @@ func TestUserAgentOverrideAllOutbound(t *testing.T) {
 		BillingBaseCN: "https://billing.example",
 		UserAgent:     ua,
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	// chat
 	if rc, status, _, err := c.ChatStream(a, []byte(`{"model":"deepseek-v4-flash","messages":[]}`), "", ChatMeta{}); status != 200 || err != nil {
 		t.Errorf("chat: status=%d err=%v", status, err)
@@ -122,6 +124,7 @@ func TestUserAgentOverrideBilling(t *testing.T) {
 		BillingBaseCN: "https://billing.example",
 		UserAgent:     "CustomAgent/1",
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	if _, err := c.UserResource(a); err != nil {
 		t.Errorf("userResource: %v", err)
 	}
@@ -146,6 +149,7 @@ func TestFetchModelsUsesConfiguredUA(t *testing.T) {
 		BillingBaseCN: "https://billing.example",
 		UserAgent:     "FetchAgent/2",
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	if _, err := c.FetchModels(a); err != nil {
 		t.Errorf("fetchModels: %v", err)
 	}
@@ -172,6 +176,7 @@ func TestUserAgentDefaultWorkBuddyShape(t *testing.T) {
 		ChatBaseCN:    "https://chat.example",
 		BillingBaseCN: "https://billing.example",
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	rc, status, _, err := c.ChatStream(a, []byte(`{"model":"deepseek-v4-flash","messages":[]}`), "", ChatMeta{})
 	if status != 200 || err != nil {
 		t.Fatalf("chat: status=%d err=%v", status, err)
@@ -207,6 +212,7 @@ func TestUserAgentExplicitOverride(t *testing.T) {
 		BillingBaseCN: "https://billing.example",
 		UserAgent:     explicitString,
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	if rc, status, _, err := c.ChatStream(a, []byte(`{"model":"deepseek-v4-flash","messages":[]}`), "", ChatMeta{}); status != 200 || err != nil {
 		t.Errorf("chat: status=%d err=%v", status, err)
 	} else if rc != nil {
@@ -231,6 +237,7 @@ func TestUserAgentClientVersionOverride(t *testing.T) {
 		BillingBaseCN: "https://billing.example",
 		ClientVersion: "6.0.0",
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	rc, status, _, err := c.ChatStream(a, []byte(`{"model":"deepseek-v4-flash","messages":[]}`), "", ChatMeta{})
 	if status != 200 || err != nil {
 		t.Fatalf("chat: status=%d err=%v", status, err)
@@ -259,6 +266,7 @@ func TestBillingUA_WhenClientNameSet(t *testing.T) {
 		BillingBaseCN: "https://billing.example",
 		ClientName:    "WorkBuddy",
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	if _, err := c.UserResource(a); err != nil {
 		t.Errorf("userResource: %v", err)
 	}
@@ -275,6 +283,7 @@ func TestBillingUA_WhenClientNameSet(t *testing.T) {
 		ClientName:    "WorkBuddy",
 		ClientVersion: "6.0.0",
 	}
+	c2.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	if _, err := c2.UserResource(a); err != nil {
 		t.Errorf("userResource v2: %v", err)
 	}
@@ -291,6 +300,7 @@ func TestBillingUA_WhenClientNameSet(t *testing.T) {
 		ClientName:    "WorkBuddy",
 		UserAgent:     billingUAAgentString,
 	}
+	c3.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	if _, err := c3.UserResource(a); err != nil {
 		t.Errorf("userResource v3: %v", err)
 	}
@@ -312,6 +322,7 @@ func TestBillingUA_WhenClientNameSaaS(t *testing.T) {
 		ClientName:    "SaaS",  // 显式退出指纹伪造
 		ClientVersion: "6.0.0", // 配置了版本但 client_name=SaaS → 仍不设 UA
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	if _, err := c.UserResource(a); err != nil {
 		t.Errorf("userResource: %v", err)
 	}

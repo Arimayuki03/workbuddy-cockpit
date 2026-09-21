@@ -55,6 +55,7 @@ func TestClaimTrialSuccess(t *testing.T) {
 		BillingBaseGlobal: srv.URL,
 		GlobalEnabled:     true,
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	a := &auth.Auth{UID: "g1", AccessToken: "at", RefreshToken: "rt",
 		Domain: "www.workbuddy.ai"} // global realm
 
@@ -89,6 +90,7 @@ func TestClaimTrialAlreadyClaimed(t *testing.T) {
 		BillingBaseGlobal: srv.URL,
 		GlobalEnabled:     true,
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	a := &auth.Auth{UID: "g1", AccessToken: "at", RefreshToken: "rt",
 		Domain: "www.workbuddy.ai"}
 
@@ -116,6 +118,7 @@ func TestClaimTrialAlreadyClaimedHttpError(t *testing.T) {
 		BillingBaseGlobal: srv.URL,
 		GlobalEnabled:     true,
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	a := &auth.Auth{UID: "g1", AccessToken: "at", RefreshToken: "rt",
 		Domain: "www.workbuddy.ai"}
 
@@ -141,6 +144,7 @@ func TestClaimTrialHitsGlobalBaseOnly(t *testing.T) {
 		BillingBaseGlobal: srv.URL,
 		GlobalEnabled:     true,
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	// CN 账号（无 global domain）调 ClaimTrial：工具层会拦，这里直接证明
 	// 即便误调也不应把请求发给 global base（走到这里 hits 必为 0）。
 	if _, err := c.ClaimTrial(&auth.Auth{UID: "cn1", AccessToken: "at", Domain: ""}); err == nil {
@@ -163,6 +167,7 @@ func TestClaimTrialBadRequest(t *testing.T) {
 		BillingBaseGlobal: srv.URL,
 		GlobalEnabled:     true,
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	a := &auth.Auth{UID: "g1", AccessToken: "at", RefreshToken: "rt",
 		Domain: "www.workbuddy.ai"}
 

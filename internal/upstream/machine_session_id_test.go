@@ -51,6 +51,7 @@ func TestCommonHeadersInjectsMachineSessionID(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	req := mustRequest(t)
 	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	c.CommonHeaders(req, a)
 
 	machine := req.Header.Get("X-Machine-ID")
@@ -76,6 +77,7 @@ func TestCommonHeadersInjectsMachineSessionID(t *testing.T) {
 func TestCommonHeadersEmptyUIDSkipsInjection(t *testing.T) {
 	req := mustRequest(t)
 	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	c.CommonHeaders(req, nil)
 
 	if got := req.Header.Get("X-Machine-ID"); got != "" {
@@ -100,6 +102,7 @@ func TestChatHeadersCarriesMachineSessionID(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u9"}
 	req := mustRequest(t)
 	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	c.ChatHeaders(req, a, "", ChatMeta{})
 
 	if got := req.Header.Get("X-Machine-ID"); got != deriveAccountStableID("u9", "machine") {
