@@ -33,9 +33,20 @@ _URL_RE = re.compile(r'https?://\S+')
 
 RULES: list[tuple[str, re.Pattern[str]]] = [
     # 「外部输入不能信」在这里的具体形态：函数名、模块路径、字段名、内部接口路径、提交哈希
+    #
+    # **环境变量不算内部标识符**：规范里明写「用户要动手的东西：环境变量、配置项、命令
+    # 可以写」——把 `WB_GATEWAY_RATE_PER_MIN` 拦下来，等于逼着回复省掉用户真正需要的
+    # 那一步。环境变量的书写约定是全大写（`[A-Z][A-Z0-9_]*`），而内部标识符是
+    # 小写蛇形/点号路径，按形状区分得开。
+    #
+    # 残留风险：内部的全大写常量（如 RATE_MAX_PER_MIN）会因此放行。代价可接受——
+    # 它极少出现在回复里，且那也不是这套规矩要治的毛病；反过来误拦环境变量的代价
+    # 更实在（用户拿不到配置步骤）。真实靠这条守卫拦下的依然是小写标识符。
     ('内部标识符', re.compile(
         r'`[^`\n]*\(\)`'                                  # 反引号里的调用：`foo()`
-        r'|`[A-Za-z_][A-Za-z0-9_]*_[A-Za-z0-9_]+`'         # 反引号里的 snake_case：`_scope_models`
+        r'|`(?![A-Z][A-Z0-9_]{3,}`)[A-Za-z_][A-Za-z0-9_]*_[A-Za-z0-9_]+`'
+                                                            # 反引号里的 snake_case：`_scope_models`
+                                                            # （同上：`WB_XXX` 这类环境变量除外）
         r'|`[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)+`'      # 反引号里的点号路径：`keysvc.model_allowed`
         r'|`[^`\n]*/[^`\n]*\.(?:py|go|ts|tsx|json)(?![a-z])`'  # 反引号里的代码文件路径
         r'|`(?:GET|POST|PUT|PATCH|DELETE)\s+/api/[^`\n]*`'  # 反引号里的内部接口路径
@@ -43,8 +54,9 @@ RULES: list[tuple[str, re.Pattern[str]]] = [
         r'|\b[0-9a-f]{7,40}\b'                             # 提交哈希（真实英文词不含这种形态）
         r'|\bcommit\s+[0-9a-f]{4,}\b'
         r'|[\w/\\]+\.(?:py|go|ts|tsx)\b'                    # 裸代码文件名：server/main.py
-        r'|\b[A-Za-z_]\w*_\w+\b'                            # 裸 snake_case：key['realm'] /
+        r'|\b(?![A-Z][A-Z0-9_]{3,}\b)[A-Za-z_]\w*_\w+\b'    # 裸 snake_case：key['realm'] /
                                                             # not is_model_list / prompt_cache_key
+                                                            # （全大写的环境变量除外）
         r'|\b[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\b'   # 裸点号路径 a.b.c
     )),
     ('测试/验收清单', re.compile(
