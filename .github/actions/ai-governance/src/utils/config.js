@@ -208,8 +208,9 @@ function parseInputs(config) {
     ? skipUsersInput.split(',').map(u => u.trim().toLowerCase()).filter(u => u.length > 0)
     : [];
 
-  // 治理身份令牌（可选）：提供后所有 GitHub 写操作（评论/关闭/打标/建 issue）以该令牌
-  // 对应的账号身份发布（如 Claude Code 的 PAT），缺省回落 github-token（github-actions[bot]）。
+  // 治理身份令牌：传入后所有 GitHub 写操作（评论/关闭/打标/建 issue）以该令牌
+  // 对应的账号身份发布。workflow 侧由 claude-identity 换票步骤提供（claude[bot]），
+  // 缺省回落 github-token（github-actions[bot]）。
   // 注意：走 GitHub Models 时 AI 鉴权仍优先用 github-token（依赖 models:read），不强制要求本令牌具备。
   const governanceToken = core.getInput('governance-token') || process.env.INPUT_GOVERNANCE_TOKEN || '';
 

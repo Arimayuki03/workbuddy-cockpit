@@ -37,9 +37,10 @@ GitHub Action：把 NoMore Spam 改造成面向本仓库（workbuddy2api）的 *
      issue / 评审评论草稿失败 / 检索故障 → 一律回落旧的 canonical 关联链路，绝不误关。
    - 配置项：`pr-review-close`（开关，默认 `false`——会关 PR 的新能力必须显式开启）、`max-related-issues`、
      `related-comments-per-issue`、`related-body-truncate`。
-7. **治理身份（`governance-token`，可选）**：提供 PAT 后，所有治理写操作（评论/关闭/打标/建 issue）以该
-   令牌账号的身份发布——REST 写入的作者由令牌身份决定。配置 Claude Code 账号的 PAT 后，治理评论/关闭将显示为
-   「Claude Code <noreply@anthropic.com>」。缺省回落 `github.token`（github-actions[bot]），行为与原先完全一致。
+7. **治理身份（`governance-token`）**：无需配置任何 PAT。workflow 里的 `claude-identity` 换票步骤用 runner
+   的 OIDC token（`id-token: write`）向 Anthropic 换来 Claude GitHub App 的 installation token，传入本输入后，
+   所有治理写操作（评论/关闭/打标/建 issue）以 **claude[bot]** 身份发布。换票失败时回落 `github.token`
+   （github-actions[bot]），治理不中断。
 8. **统一历史语境层（F1）**：`historyContextService` 是「取回并组织仓库历史 issue 与 PR 作为参考经验」的唯一入口：
    - `buildIndex`：紧凑索引（每条一行，编号/类型/标题/标签/状态/关闭理由，上限 `max-history-index` 默认 100），
      双通道并集去重——search API 全量 issue+PR（不分状态，历史 PR 也是参考经验）∪ canonical 标签列表（保证入选）；
@@ -111,13 +112,26 @@ permissions:
 jobs:
   governance:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
     steps:
       - uses: actions/checkout@v4
+      # claude[bot] 身份：runner OIDC → Anthropic 换票（无需任何 PAT/secret）
+      - name: Exchange OIDC for Claude App token
+        id: claude-identity
+        run: |
+          OIDC=$(curl -sf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=claude-code-github-action" | jq -r .value)
+          APP_TOKEN=$(curl -sf -X POST \
+            -H "Authorization: Bearer $OIDC" \
+            https://api.anthropic.com/api/github/github-app-token-exchange \
+            | jq -r '.token // .app_token // empty')
+          echo "token=$APP_TOKEN" >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/ai-governance
         with:
           github-token: ${{ github.token }}
-          # 治理身份 PAT（可选）：治理写操作以该账号身份发布
-          governance-token: ${{ secrets.GOVERNANCE_TOKEN }}
+          # 治理身份：换票输出，写操作以 claude[bot] 署名；换票失败自动回落 github-actions[bot]
+          governance-token: ${{ steps.claude-identity.outputs.token }}
           ai-base-url: ${{ secrets.AI_BASE_URL }}
           ai-api-key: ${{ secrets.AI_API_KEY }}
           ai-model: ${{ secrets.AI_MODEL }}
@@ -134,7 +148,7 @@ jobs:
 | input | 默认 | 说明 |
 |-------|------|------|
 | `github-token` | `${{ github.token }}` | issues:write 足够；PR 治理改写标题/正文需 pull-requests:write；走 GitHub Models 还需 models:read |
-| `governance-token` | 空 | 治理身份 PAT（可选）：治理写操作以该令牌账号身份发布（如 Claude Code），缺省 github-actions[bot] |
+| `governance-token` | 空 | 治理身份令牌：传 `claude-identity` 换票步骤的输出，治理写操作以 claude[bot] 署名；空值回落 github-actions[bot] |
 | `pr-review-close` | `false` | PR 历史语境评审开关（详见上文第 6 点；关闭时走旧 canonical 关联链路） |
 | `max-related-issues` | `3` | 历史语境评审纳入的相关 issue 数量上限 |
 | `related-comments-per-issue` | `10` | 每条相关 issue 读取的评论数量上限 |
@@ -161,11 +175,9 @@ jobs:
 ### 3. Secrets
 
 - `AI_MODEL` / `AI_BASE_URL` / `AI_API_KEY`：可选，自定义 AI 端点。**缺省三者都可以不配**——action 回落到 GitHub Models（用 `github.token` 做鉴权，靠 workflow 的 `models: read` 权限）。
-- `GOVERNANCE_TOKEN`：可选，治理身份 PAT。配置后治理写操作以该令牌账号身份发布（如「Claude Code <noreply@anthropic.com>」）。创建方式：
-  1. 用目标身份对应的 GitHub 账号（如 [claude-code](https://github.com/claude-code)）创建 PAT（Settings → Developer settings → Personal access tokens → Fine-grained tokens）；
-  2. Repository access 限定到本仓库，权限勾 `Issues: Read and write` + `Pull requests: Read and write`（Content 不需要）；
-  3. 在本仓库 `Settings → Secrets and variables → Actions` 添加 secret `GOVERNANCE_TOKEN`，workflow 已接线（`governance-token: ${{ secrets.GOVERNANCE_TOKEN }}`）。
-  4. 注意：AI 鉴权仍优先用 `github-token`（GitHub Models 依赖 `models:read`），两者职责分离；该 PAT 不需要 models 权限。
+- **治理身份无需任何 secret**：claude[bot] 署名靠 runner OIDC 向 Anthropic 换票实现（见上文第 7 点），不依赖 PAT。
+  换票要求：workflow 的 `permissions` 含 `id-token: write`、repo 已安装 Claude Code GitHub App、
+  workflow 定义在默认分支上。任一不满足时自动回落 github-actions[bot]，治理不中断。
 - 标签 `canonical` 与 `duplicate` 需在仓库 `Settings > Labels` 里预先建好（`canonical` 不存在时归并匹配退化：找不到索引 → 视为新主题，不会报错）。 标签 `history-rejected` 同理（评审关闭的 PR 打标用；不存在时打标失败仅留痕，不阻断关闭）。
 
 ### 4. 行为流程
@@ -217,7 +229,7 @@ PR 历史语境评审在 `src/services/prReviewService.js`（取数 → 语境�
 ├── LICENSE                    # MIT（保留上游版权）
 ├── locales/{en,zh-CN}.json    # 评论模板（zh-CN 扩展治理评论）
 ├── src/
-│   ├── index.js               # 入口 + 参数接线（含 governance-token 双客户端）
+│   ├── index.js               # 入口 + 参数接线（含 governance-token 双客户端，OIDC 换票接入点）
 │   ├── handlers/              # issueHandler / prHandler（治理接线）/ issueProcessor
 │   ├── services/              # issueGovernanceService + prGovernanceService + prReviewService（新增）+ 上游复用模块
 │   └── utils/                 # config / constants / helpers / errors

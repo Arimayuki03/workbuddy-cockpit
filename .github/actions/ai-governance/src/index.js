@@ -54,8 +54,9 @@ async function run() {
     const octokit = github.getOctokit(token);
     const context = github.context;
 
-    // 治理身份令牌（可选）：写操作改用该令牌的客户端 —— REST 写入的作者头像/账号由令牌身份决定，
-    // 配置 Claude Code 的 PAT 后治理评论/关闭将以「Claude Code <noreply@anthropic.com>」发布。
+    // 治理身份令牌：写操作改用该令牌的客户端 —— REST 写入的作者头像/账号由令牌身份决定。
+    // 接 workflow 的 claude-identity 换票输出（runner OIDC 向 Anthropic 换来的 Claude App
+    // installation token）后，治理评论/关闭将以 claude[bot] 署名。
     // 无该令牌时与原来完全一致（github-actions[bot]），纯增量、不破坏既有行为。
     let governanceOctokit = null;
     if (governanceToken) {
@@ -65,7 +66,7 @@ async function run() {
 
     // 确定使用的API配置
     // 注意：AI 鉴权优先用 github-token —— GitHub Models 依赖 workflow 的 models:read 权限，
-    // 治理令牌（PAT）不一定具备，两者职责分离。
+    // 治理令牌（installation token）不一定具备，两者职责分离。
     const apiBaseUrl = customBaseUrl || config.defaults.api_base_url;
     const apiKey = customApiKey || token;
 

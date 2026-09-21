@@ -11,7 +11,7 @@ inputs:
     required: true
     default: '${{ github.token }}'
   governance-token:
-    description: '治理身份令牌（可选 PAT）：提供后所有治理写操作（评论/关闭/打标/建 issue）以该令牌账号身份发布（如 Claude Code），缺省回落 github-token（github-actions[bot]）'
+    description: '治理身份令牌：传入 claude-identity 换票步骤的输出（runner OIDC 向 Anthropic 换来的 Claude App installation token），治理写操作以 claude[bot] 署名；缺省回落 github-token（github-actions[bot]）'
     required: false
     default: ''
   ai-model:
