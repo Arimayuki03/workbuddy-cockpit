@@ -247,7 +247,7 @@ class PrGovernanceService {
     const block = [
       PR_LINK_ANCHOR,
       '',
-      '> 本段由 AI 治理机器人自动维护，请勿手工删除上面这行锚点注释。',
+      '> 本段由 Claude Code 自动维护，请勿手工删除上面这行锚点注释。',
       '',
       '- **要点**：',
       `> ${keyText}`,
