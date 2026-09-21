@@ -40,6 +40,36 @@ GitHub Action：把 NoMore Spam 改造成面向本仓库（workbuddy2api）的 *
 7. **治理身份（`governance-token`，可选）**：提供 PAT 后，所有治理写操作（评论/关闭/打标/建 issue）以该
    令牌账号的身份发布——REST 写入的作者由令牌身份决定。配置 Claude Code 账号的 PAT 后，治理评论/关闭将显示为
    「Claude Code <noreply@anthropic.com>」。缺省回落 `github.token`（github-actions[bot]），行为与原先完全一致。
+8. **统一历史语境层（F1）**：`historyContextService` 是「取回并组织仓库历史 issue 与 PR 作为参考经验」的唯一入口：
+   - `buildIndex`：紧凑索引（每条一行，编号/类型/标题/标签/状态/关闭理由，上限 `max-history-index` 默认 100），
+     双通道并集去重——search API 全量 issue+PR（不分状态，历史 PR 也是参考经验）∪ canonical 标签列表（保证入选）；
+   - `enrich`：为筛出的候选深补全——正文（截断）+ 评论（每条截断 500）+ 时间线（白名单过滤）；PR 额外含
+     文件变更摘要与提交列表。单条失败跳过（容忍语义），全失败返回空、调用方回落旧行为；
+   - 每次治理运行只拉一次索引，评审与关联层共享（`ctx` 传递）。
+9. **两段式 AI 流水线（F2，`enable-two-stage`，默认关闭）**：开启后「先廉价筛选、再深加工」：
+   - **阶段一（筛选）**：廉价筛选 AI 只看主题元信息 + 紧凑索引（永远不喂正文全文/评论/时间线），
+     选出候选编号；确定性闸门剔除幻觉编号（number+kind 必须命中索引），空/失败回落关键词启发式（绝不硬失败）；
+     可用 `screening-model` 配更廉价的模型；
+   - **阶段二（深加工）**：只看筛出候选的深补全材料。三类消费者——PR 历史语境评审（语料扩展到历史 PR，
+     C10）、canonical 归并匹配（候选含评论历史，R9）、规范 issue 评审评论（`related_history` 输入段，
+     空数组时提示词要求不引用任何编号，防幻觉）；
+   - **确定性防线**：评审证据闸门加固（R13）——逐行校验引用真实性，≥2 条有效行，或单行且与被引条目的
+     结论关键词（wontfix/not_planned/duplicate/completed/merged，同义归并）确定性重叠；归并匹配
+     DUPLICATE(#N) 的 N 必须在候选语料里，否则降级 UNCERTAIN 放行；两类 AI 起草的公开评论
+     均过引用校验（草稿引用语境集合外编号 → 整条作废回落固定模板/旧链路）；
+   - **上线纪律**：默认 `false` 暗发；dry-run 观察期后仅由 owner 在 workflow yml 翻转（与
+     `pr-review-close` 同纪律）。
+10. **评审关闭的确定性标记（R6）**：历史语境评审关闭的 PR 在关闭前先打 `history-rejected` 标签
+    （PR 不支持 `state_reason`，标签是唯一可查的关闭理由标记，供历史检索与未来筛选阶段做语料信号）；
+    失败容忍，不阻断评论与关闭。引用了真实历史的评审评论尾部由服务端确定性追加
+    「以上引用的历史条目见各编号原帖。」指引行（不依赖模型自觉）。
+11. **提交规范确定性校验（R11）**：PR 标题的 INVALID_COMMIT 判定改用确定性 Conventional Commits 正则
+    （与治理层标题改写同口径），去掉此前这一次 AI 调用——每个 PR 省 1 次 AI 调用；AI 只保留给
+    「起草新标题」。
+
+> **R12 成本决策（2026-09）**：`analyze-file-changes` 三处默认值（action.yml / config.json / workflow）
+> 统一为 `true`。diff 是垃圾/质量检测与历史语境评审的核心证据（MALICIOUS/TRIVIAL 对标题+正文的判读
+> 近乎盲猜），成本可接受。若后续成本敏感，可只在 `pr-review-close: true` 时启用。
 
 ## 安全阀（设计要点）
 
@@ -123,6 +153,10 @@ jobs:
 | `enable-pr-governance` | `false` | PR 治理开关（垃圾检测 + 要点提炼 + canonical 关联，永不关闭合法 PR） |
 | `max-canonical-index` | `50` | canonical 索引上限 |
 | `canonical-body-truncate` | `1500` | 索引正文截断长度 |
+| `max-history-index` | `100` | 历史语境索引拉取的 issue+PR 总量上限（紧凑索引，供筛选与归并匹配共用） |
+| `enable-two-stage` | `false` | 两段式流水线开关：开启后先廉价筛选 AI 选候选再深加工；关闭时行为与原先完全一致（上线纪律：默认暗发，观察期后翻转） |
+| `max-screened-candidates` | `5` | 两段式第二阶段纳入的候选数量上限 |
+| `screening-model` | 空 | 筛选阶段专用模型（可选，缺省用 `ai-model`） |
 
 ### 3. Secrets
 
@@ -132,7 +166,7 @@ jobs:
   2. Repository access 限定到本仓库，权限勾 `Issues: Read and write` + `Pull requests: Read and write`（Content 不需要）；
   3. 在本仓库 `Settings → Secrets and variables → Actions` 添加 secret `GOVERNANCE_TOKEN`，workflow 已接线（`governance-token: ${{ secrets.GOVERNANCE_TOKEN }}`）。
   4. 注意：AI 鉴权仍优先用 `github-token`（GitHub Models 依赖 `models:read`），两者职责分离；该 PAT 不需要 models 权限。
-- 标签 `canonical` 与 `duplicate` 需在仓库 `Settings > Labels` 里预先建好（`canonical` 不存在时归并匹配退化：找不到索引 → 视为新主题，不会报错）。
+- 标签 `canonical` 与 `duplicate` 需在仓库 `Settings > Labels` 里预先建好（`canonical` 不存在时归并匹配退化：找不到索引 → 视为新主题，不会报错）。 标签 `history-rejected` 同理（评审关闭的 PR 打标用；不存在时打标失败仅留痕，不阻断关闭）。
 
 ### 4. 行为流程
 
