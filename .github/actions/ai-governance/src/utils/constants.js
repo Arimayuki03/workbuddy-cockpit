@@ -104,7 +104,9 @@ const GOVERNANCE_DEFAULTS = {
   // 标签是唯一可查的关闭理由标记（is:label 历史检索口径，供未来筛选阶段做语料信号）
   historyRejectedLabel: 'history-rejected',
   // 永远豁免的账号（bot 自环防护）
-  SKIP_USERS: ['github-actions[bot]', 'github-actions']
+  // claude[bot]：治理令牌（Claude App installation token）创建的 canonical/评论作者
+  // 是 claude[bot]，不豁免会再次触发本工作流自我处理（最坏递归建 canonical）
+  SKIP_USERS: ['github-actions[bot]', 'github-actions', 'claude[bot]']
 };
 
 module.exports = {

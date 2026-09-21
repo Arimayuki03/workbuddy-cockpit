@@ -109,6 +109,17 @@ describe('issueHandler 路由（C17 缺口 + FIX-D）', () => {
     expect(IssueGovernanceService).not.toHaveBeenCalled();
   });
 
+  test('skipUsers 含 claude[bot]（治理令牌自环）：治理令牌创建的 canonical issue 不再自我处理', async () => {
+    const config = buildConfig();
+    const octokit = makeOctokit();
+    const issue = makeIssue({ user: { login: 'claude[bot]' } });
+
+    await handleNewIssue(octokit, {}, makeContext(issue), 'o', 'r', 'model', config, ['enhancement'], [], { dryRun: false });
+
+    expect(IssueWorkflowService).not.toHaveBeenCalled();
+    expect(IssueGovernanceService).not.toHaveBeenCalled();
+  });
+
   test('triage.closed（BASIC 已处理）：不进治理（FIX-A 修复后路径可达）', async () => {
     const config = buildConfig();
     mockWorkflow({ triage: { classification: 'bug', closed: true } });

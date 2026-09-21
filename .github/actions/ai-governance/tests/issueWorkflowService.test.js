@@ -101,3 +101,50 @@ describe('IssueWorkflowService.classifyAndHandleIssue', () => {
     expect(result.classification).toBeNull();
   });
 });
+
+describe('IssueWorkflowService 构造函数与 fetchReadmeContent', () => {
+  test('构造函数保存 this.octokit（此前缺失，getReadme 必抛 TypeError 被吞成 null）', () => {
+    const config = buildConfig();
+    const octokit = makeOctokit();
+    const svc = new IssueWorkflowService(octokit, {}, 'model', config);
+
+    expect(svc.octokit).toBe(octokit);
+  });
+
+  test('UNCLEAR 分支：fetchReadmeContent 真正取回 README 并用于智能回答', async () => {
+    const config = buildConfig();
+    const readmeText = '# 使用文档\n\n如何配置网关：……';
+    const openai = makeOpenai(['BUG', 'UNCLEAR', 'HELPFUL_ANSWER: 请参考 README 的配置章节']);
+    const octokit = makeOctokit();
+    octokit.rest.repos.getReadme = jest.fn().mockResolvedValue({
+      data: { content: Buffer.from(readmeText, 'utf8').toString('base64') }
+    });
+    const svc = new IssueWorkflowService(octokit, openai, 'model', config);
+
+    const result = await svc.classifyAndHandleIssue('o', 'r', issue, qualityAnalysis, labelsList);
+
+    expect(result.needsInfo).toBe(true);
+    // getReadme 被真实调用（修复前 this.octokit 为 undefined，必然 TypeError）
+    expect(octokit.rest.repos.getReadme).toHaveBeenCalledWith({ owner: 'o', repo: 'r' });
+    // 智能回答评论带 unclear_answer_prefix（而非回落标准提示 issue_unclear）
+    const comment = octokit.rest.issues.createComment.mock.calls[0][0].body;
+    expect(comment).toContain('根据项目文档');
+    expect(comment).toContain('请参考 README 的配置章节');
+  });
+
+  test('无 README（getReadme 404）：fetchReadmeContent 返回 null，回落标准提示', async () => {
+    const config = buildConfig();
+    const openai = makeOpenai(['BUG', 'UNCLEAR']);
+    const octokit = makeOctokit(); // getReadme mockRejectedValue
+    const svc = new IssueWorkflowService(octokit, openai, 'model', config);
+
+    const readme = await svc.fetchReadmeContent('o', 'r');
+    expect(readme).toBeNull();
+
+    const result = await svc.classifyAndHandleIssue('o', 'r', issue, qualityAnalysis, labelsList);
+    expect(result.needsInfo).toBe(true);
+    // 回落标准提示（issue_unclear）
+    const comment = octokit.rest.issues.createComment.mock.calls[0][0].body;
+    expect(comment).toContain('缺少足够信息');
+  });
+});

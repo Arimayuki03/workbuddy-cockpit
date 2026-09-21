@@ -96,6 +96,18 @@ describe('prHandler', () => {
     expect(PrGovernanceService).not.toHaveBeenCalled();
   });
 
+  test('跳过名单含 claude[bot]（治理令牌自环）：claude[bot] 的 PR 不自我处理', async () => {
+    const config = buildConfig();
+    const pr = makePR({ user: { login: 'claude[bot]' } });
+    const octokit = makeOctokit();
+    const gov = { ...govDefaults };
+
+    await handleNewPR(octokit, {}, makeContext(pr), 'o', 'r', 'model', config, ['enhancement'], [], gov);
+
+    expect(PrWorkflowService).not.toHaveBeenCalled();
+    expect(PrGovernanceService).not.toHaveBeenCalled();
+  });
+
   test('AI 失败放行：治理抛错时只评论放行，不关闭 PR', async () => {
     const config = buildConfig();
     const pr = makePR();

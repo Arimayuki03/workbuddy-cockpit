@@ -1,5 +1,5 @@
 const core = require('@actions/core');
-const { logMessage, handleApiCall } = require('../utils/helpers');
+const { logMessage, handleApiCall, sanitizeLogText } = require('../utils/helpers');
 const PrWorkflowService = require('../services/prWorkflowService');
 const PrGovernanceService = require('../services/prGovernanceService');
 const PrReviewService = require('../services/prReviewService');
@@ -40,7 +40,8 @@ async function handleNewPR(octokit, openai, context, owner, repo, aiModel, confi
     const prTitle = pr.title;
     const prAuthor = pr.user.login.toLowerCase();
 
-    core.info(logMessage(config.logging.pr_check_start, { title: prTitle }));
+    // 标题是不可信输入：先中和换行与 workflow-command 序列，防日志注入（::error:: 等）
+    core.info(logMessage(config.logging.pr_check_start, { title: sanitizeLogText(prTitle) }));
 
     // bot 自环豁免：治理自身创建的 canonical 又触发 PR 治理的死循环防护
     if (gov.skipUsers.includes(prAuthor)) {
@@ -240,6 +241,27 @@ async function failOpenComment(octokit, owner, repo, pr, config) {
 }
 
 /**
+ * 从 Link 响应头解析 rel="last" 的末页页码（GitHub 分页语义：仅结果超过一页时出现）。
+ * Link 头形如 <url?page=2&per_page=100>; rel="next", <url?page=3&per_page=100>; rel="last"：
+ * 先取 rel="last" 的分节，再从中提取 page 参数（参数顺序无关）。
+ * @param {Object} headers 响应头（octokit 归一化后的对象，可空）
+ * @returns {number} 末页页码；无 rel="last" 时为 1（单页）
+ */
+function getLastPageNumber(headers) {
+  const link = headers && headers.link;
+  if (!link) {
+    return 1;
+  }
+  const lastSegment = link.split(',').find(segment => segment.includes('rel="last"'));
+  if (!lastSegment) {
+    return 1;
+  }
+  const match = lastSegment.match(/[?&]page=(\d+)/);
+  const page = match ? parseInt(match[1], 10) : NaN;
+  return Number.isFinite(page) && page >= 1 ? page : 1;
+}
+
+/**
  * 分析PR的文件变更
  * @param {Object} octokit GitHub API客户端
  * @param {string} owner 仓库所有者
@@ -254,17 +276,41 @@ async function analyzeFileChanges(octokit, owner, repo, pr, config) {
     return config.logging.file_analysis_disabled;
   }
 
+  // per_page 默认 30：>30 文件的 PR 证据会静默丢失，显式拉到单页上限 100
+  const perPage = 100;
+
   try {
     const filesResponse = await handleApiCall(
       () => octokit.rest.pulls.listFiles({
         owner,
         repo,
-        pull_number: pr.number
+        pull_number: pr.number,
+        per_page: perPage
       }),
       config.logging.pr_files_fetch_failed
     );
 
     if (filesResponse.data && filesResponse.data.length > 0) {
+      // listFiles 无总数响应头，data.length 被 per_page 截断。首页满页时按 Link 头
+      // rel="last" 的页码取末页一次（>100 文件的 PR 才发生），得到精确总数
+      let total = filesResponse.data.length;
+      const lastPage = getLastPageNumber(filesResponse.headers);
+      if (filesResponse.data.length === perPage && lastPage > 1) {
+        try {
+          const lastResponse = await octokit.rest.pulls.listFiles({
+            owner,
+            repo,
+            pull_number: pr.number,
+            page: lastPage,
+            per_page: perPage
+          });
+          total = (lastPage - 1) * perPage + lastResponse.data.length;
+        } catch (error) {
+          // 容忍：末页取数失败时退回已知值（至少 per_page 个）
+          core.warning(logMessage(config.logging.file_changes_error, { error: error.message }));
+        }
+      }
+
       const maxFiles = config.ai_settings.max_files_to_analyze || 5;
       const filesToAnalyze = filesResponse.data.slice(0, maxFiles);
 
@@ -291,14 +337,14 @@ async function analyzeFileChanges(octokit, owner, repo, pr, config) {
       }).join('\n---\n');
 
       let result = fileChanges;
-      if (filesResponse.data.length > maxFiles) {
+      if (total > maxFiles) {
         result += '\n' + logMessage(config.logging.file_changes_truncated, {
-          total: filesResponse.data.length,
+          total,
           shown: maxFiles
         });
       }
 
-      core.info(logMessage(config.logging.file_changes_count, { count: filesResponse.data.length }));
+      core.info(logMessage(config.logging.file_changes_count, { count: total }));
       return result;
     } else {
       return config.logging.no_file_changes;
@@ -311,5 +357,7 @@ async function analyzeFileChanges(octokit, owner, repo, pr, config) {
 
 module.exports = {
   handleNewPR,
-  isCollaborator
+  isCollaborator,
+  analyzeFileChanges,
+  getLastPageNumber
 };

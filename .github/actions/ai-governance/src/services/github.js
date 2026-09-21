@@ -308,8 +308,10 @@ async function listCanonicalIssues(octokit, owner, repo, label, maxResults = 50,
 /**
  * 历史语境索引检索（F1）：一次性拉取仓库的 issue 与 PR（不分状态），
  * 按 updated 倒序，作为「仓库全部历史经验」的紧凑索引来源。
- * @returns {Promise<Array>} 形如 [{ number, kind, title, labels, state, state_reason, closed_at }] 的数组
+ * @returns {Promise<Array>} 形如 [{ number, kind, title, body, labels, state, state_reason, closed_at }] 的数组
  *   state: 'open'|'closed'|'merged'（pull_request.merged_at 存在 → merged，C10）
+ *   body: search 通道的截断正文 —— historyContextService.buildIndex 的归并语料依赖它，
+ *   缺失会被 truncate(String(undefined)) 固化为空串，检索通道条目永远不带正文
  */
 async function searchIssuesAndPRs(octokit, owner, repo, maxResults = 100) {
   const response = await handleApiCall(
@@ -326,6 +328,7 @@ async function searchIssuesAndPRs(octokit, owner, repo, maxResults = 100) {
     number: item.number,
     kind: item.pull_request ? 'pr' : 'issue',
     title: item.title,
+    body: item.body || '',
     labels: (item.labels || []).map(l => l.name || l),
     state: item.pull_request && item.pull_request.merged_at ? 'merged'
       : (item.state === 'closed' ? 'closed' : 'open'),
