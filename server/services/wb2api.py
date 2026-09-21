@@ -494,6 +494,38 @@ async def set_manual_disabled(uid: str, disabled: bool, reason: str = '') -> tup
                   else '已通过上游状态位启用'), 'ok'
 
 
+def admin_enabled_in_config() -> tuple[bool | None, str]:
+    """本面板读到的上游配置里 `admin.enabled` 是否为真。返回 `(值, 说明)`。
+
+    值 `None` = 读不到，`说明` 里带原因与路径；否则 `说明` 是配置文件的路径。
+
+    为什么需要它（issue #45 的追问）：状态位路径拿到 `no_route` 时有两种成因，
+    处理方式完全相反，而用户从界面上看不出是哪一种：
+
+      · 配置里**没开** → 去「设置 → 账号管理接口」打开；
+      · 配置里**已开** → 说明**运行中的上游没加载到它**。上游只在启动时读这个
+        开关，改完配置必须重启容器；若已重启仍如此，说明上游镜像早于
+        2026-09-19（那版还没有这组接口）。实测有用户手改了配置文件里的一处，
+        面板读到的却是另一处，于是「明明开了却还是不行」——所以这条文案里
+        必须带上**面板实际读的那个路径**，用户一对就知道是不是同一个文件。
+    """
+    path = config.UPSTREAM_CONFIG
+    try:
+        raw = path.read_text(encoding='utf-8')
+    except FileNotFoundError:
+        return None, f'未找到上游配置文件 {path}'
+    except OSError as exc:
+        return None, f'读取上游配置文件失败 {path}：{exc}'
+    try:
+        cfg = json.loads(raw)
+    except Exception as exc:  # noqa: BLE001
+        return None, f'上游配置文件不是合法 JSON（{path}）：{exc}'
+    if not isinstance(cfg, dict):
+        return None, f'上游配置文件不是 JSON 对象（{path}）'
+    admin = cfg.get('admin')
+    return bool(isinstance(admin, dict) and admin.get('enabled')), str(path)
+
+
 async def get_models() -> tuple[bool, list | dict]:
     try:
         async with config.http_client(15, connect=3) as client:

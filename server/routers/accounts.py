@@ -504,6 +504,14 @@ def checkin_logs(
     # 各表都取到 start+size，保证合并后第 start..start+size 条一定在候选里
     want = start + size
 
+    # 版本筛选是**按行**做的（日志表没有 realm 列），被筛掉的往往是窗口里的大多数
+    # 行——另一个版本的记录。候选量因此要放大到单表上限，与 /task-logs 重算 stats
+    # 时同一做法。不放大会有两个后果：本版的记录被另一版挤出窗口（页面上「本版
+    # 一条都没有」），以及下面按窗口统计的 total 偏小（issue #51 的次要问题）。
+    realm_map = _realm_uid_filter(realm)
+    if realm_map is not None:
+        want = max(want, 2000)
+
     local = db.list_checkin_logs(limit=want, uid=uid, offset=0, days=days)
     local_total = db.count_checkin_logs(uid=uid, days=days)
     local_items = [{**r, 'auto': False} for r in local]
@@ -532,9 +540,14 @@ def checkin_logs(
     merged = sorted(local_items + auto_items, key=lambda x: x['ts'], reverse=True)
 
     # 按版本过滤（realm 为空则不过滤，保持既有调用行为）
-    realm_map = _realm_uid_filter(realm)
     if realm_map is not None:
         merged = [it for it in merged if _uid_matches_realm(str(it.get('uid') or ''), realm_map, realm)]
+
+    # total 必须与**列表同一口径**（issue #51 次要问题）：此前它统计在版本过滤之前，
+    # 界面上「共 6 条 · 仅显示最近 2 条」而列表只有 2 条，用户以为记录丢了。
+    # 过滤生效时用过滤后的条数（窗口已放大到单表上限，见上），未过滤时保持原值。
+    total = len(merged) if realm_map is not None else local_total + auto_total
+    unfiltered_total = local_total + auto_total
 
     # 自动侧的行也要解析昵称（上游只带 uid 前 8 位）；本端的已有昵称
     resolve_nick = _nickname_resolver()
@@ -546,10 +559,12 @@ def checkin_logs(
     end = start + min(500, max(1, int(limit)))
     return {
         'items': merged[start:end],
-        'total': local_total + auto_total,
+        'total': total,
         # 分别给出，便于界面说明「本端 N 条 / 自动 M 条」
         'local_total': local_total,
         'auto_total': auto_total,
+        # 两个版本合计的条数（版本筛选生效时，`total` 只数当前版本）
+        'unfiltered_total': unfiltered_total,
     }
 
 
@@ -620,12 +635,21 @@ def _realm_uid_filter(realm: str | None) -> dict[str, str] | None:
 
 
 def _uid_matches_realm(uid: str, realm_map: dict[str, str] | None, realm: str) -> bool:
-    """该日志行的 uid 是否属于指定版本（realm_map 为 None 时恒 True）。"""
+    """该日志行的 uid 是否属于指定版本（realm_map 为 None 时恒 True）。
+
+    **uid 为空的行属于所有版本**（issue #51）：轮次汇总行（`checkin done:
+    total=.. ok=..`）与脚本行不属于任何账号，是「这一轮跑没跑」的唯一凭据。
+    按「空 uid 不属于任何版本」处理会让它们在**每个**版本视图下都被筛掉——
+    用户看到的现象是「自动签到没跑」，而实际是记录被藏了。
+
+    与下面那段「删号的历史日志宁可不显示」不冲突：那种行的 uid **非空**
+    （属于某个真实账号，只是账号已不在表里），仍按前缀匹配的老规矩处理。
+    """
     if realm_map is None:
         return True
     u = str(uid or '')
     if not u:
-        return False
+        return True
     want = 'global' if str(realm).strip().lower() == 'global' else 'cn'
     full = realm_map.get(u)
     if full is not None:
@@ -906,6 +930,34 @@ async def restart(user: dict = Depends(security.require_admin)) -> dict:
     return {'ok': ok, 'message': message}
 
 
+def _fallback_why(bit_code: str) -> str:
+    """回退到改名方式时，把「为什么没走状态位」说到可操作（issue #45 追问）。
+
+    `no_route` 有两种成因，界面上必须分得开：
+
+      · 配置里**没开** → 给出开关位置；
+      · 配置里**已开** → 说明运行中的上游没加载到它：上游只在启动时读这个开关，
+        改完必须**重启容器**；若已重启仍如此，就是镜像太旧（早于 2026-09-19）。
+        这条文案里带上**面板实际读的配置路径**——用户手改的常常是另一个文件
+        （实测反馈：「明明上游已经打开了 admin.enabled 还是不行」）。
+    """
+    if bit_code != 'no_route':
+        return ''
+    tail = '已改用改名方式：账号将完全退出账号池，签到与保活也会一并停止。'
+    enabled, where = wb2api.admin_enabled_in_config()
+    if enabled:
+        return (f'（上游配置里已开启管理接口（{where}），但运行中的上游没有提供它：'
+                '上游只在启动时读这个开关，改完配置需要重启上游容器才生效；'
+                '若已重启仍如此，说明上游镜像早于 2026-09-19。' + tail + '）')
+    if enabled is None:
+        return (f'（{where}。' + tail
+                + '若要保留签到与保活，请到「设置 → 账号管理接口」开启后重启上游容器，'
+                  '再重新停用）')
+    return ('（该上游未启用管理接口，' + tail
+            + '若要保留签到与保活，请到「设置 → 账号管理接口」开启后重启上游容器，'
+              '再重新停用）')
+
+
 @router.post('/accounts/{filename}/disabled')
 async def account_set_disabled(
     filename: str,
@@ -1012,10 +1064,7 @@ async def account_set_disabled(
             # 回退路径要如实说清代价，并给出**可操作的下一步**：「该上游未启用管理
             # 接口」只说了现状，用户不知道去哪儿开（实测反馈正是这个——看到提示后
             # 只能来问）。所以带上开关位置与生效条件。
-            + ('（该上游未启用管理接口，已改用改名方式：账号将完全退出账号池，'
-               '签到与保活也会一并停止。若要保留签到与保活，请到「设置 → 账号管理'
-               '接口」开启后重启上游容器，再重新停用）'
-               if bit_code == 'no_route' else '')
+            + _fallback_why(bit_code)
             + ('，正在重载上游使其生效' if reloaded
                else ('；请手动重启上游以生效' if result.get('changed') else ''))
         ),
