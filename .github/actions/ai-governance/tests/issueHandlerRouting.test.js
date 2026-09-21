@@ -118,4 +118,30 @@ describe('issueHandler 路由（C17 缺口 + FIX-D）', () => {
 
     expect(IssueGovernanceService).not.toHaveBeenCalled();
   });
+
+  // ---- F3：两段式共享历史语境接线（issue 路径）----
+
+  test('两段式开启：构建共享索引一次并传给治理层；两段式关闭时传 null', async () => {
+    const config = buildConfig();
+    const governCalls = [];
+
+    IssueGovernanceService.mockImplementation(() => ({
+      govern: jest.fn(async (...args) => {
+        governCalls.push(args);
+        return {};
+      })
+    }));
+
+    // 开启
+    const octokit = makeOctokit();
+    await handleNewIssue(octokit, {}, makeContext(makeIssue()), 'o', 'r', 'model', config, ['enhancement'], [], { dryRun: false, enableTwoStage: true });
+    expect(governCalls[0][5]).toBeTruthy();
+    expect(Array.isArray(governCalls[0][5].index)).toBe(true);
+    expect(governCalls[0][5].historyContext).toBeTruthy();
+
+    // 关闭（默认）
+    const octokit2 = makeOctokit();
+    await handleNewIssue(octokit2, {}, makeContext(makeIssue()), 'o', 'r', 'model', config, ['enhancement'], [], { dryRun: false });
+    expect(governCalls[1][5]).toBeNull();
+  });
 });

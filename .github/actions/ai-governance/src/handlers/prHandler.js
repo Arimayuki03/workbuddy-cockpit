@@ -88,11 +88,21 @@ async function handleNewPR(octokit, openai, context, owner, repo, aiModel, confi
       }
     }
 
-    // 历史语境评审层（可选，pr-review-close 开启时）：AI 对照相关历史 issue 的关闭结论评审本 PR。
+    // 历史语境评审层（可选，pr-review-close 开启时）：AI 对照相关历史 issue/PR 的关闭结论评审本 PR。
     // 返回 null（未触发/证据不足/回落）时继续走下方旧关联链路；已处理（含 dry-run）则直接结束。
+    // F3：两段式开启时，评审与治理共享同一份历史索引（单次拉取，C5/R5）；
+    //      两段式关闭时 ctx=null，各服务行为与原先完全一致（byte-identical）。
+    let sharedCtx = null;
+    if (gov.enableTwoStage) {
+      const HistoryContextService = require('../services/historyContextService');
+      const historyContext = new HistoryContextService(octokit, config, gov);
+      const index = await historyContext.buildIndex(owner, repo);
+      sharedCtx = { historyContext, index };
+    }
+
     if (gov.prReviewClose) {
       const reviewService = new PrReviewService(openai, aiModel, config, gov);
-      const reviewResult = await reviewService.review(octokit, owner, repo, pr, fileChanges);
+      const reviewResult = await reviewService.review(octokit, owner, repo, pr, fileChanges, sharedCtx);
       if (reviewResult) {
         return;
       }
@@ -100,7 +110,7 @@ async function handleNewPR(octokit, openai, context, owner, repo, aiModel, confi
 
     // 治理层：要点提炼 + canonical 关联（永不关闭 PR）
     const governanceService = new PrGovernanceService(openai, aiModel, config, gov);
-    await governanceService.govern(octokit, owner, repo, pr, classification);
+    await governanceService.govern(octokit, owner, repo, pr, classification, sharedCtx);
 
   } catch (error) {
     core.error(logMessage(config.logging.pr_process_error, { error: error.message }));
