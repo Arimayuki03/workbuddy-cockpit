@@ -319,7 +319,7 @@ class IssueGovernanceService {
     try {
       const review = await this.draftWellFormedReview(issue);
       if (review) {
-        return this.withLogLine(review, 'governance_well_formed_comment');
+        return this.withLogLine(this.withBotPrefix(review), 'governance_well_formed_comment');
       }
     } catch (error) {
       core.warning(logMessage(this.config.logging.governance_review_failed, {
@@ -335,6 +335,15 @@ class IssueGovernanceService {
    */
   withLogLine(text, action) {
     return `${text}\n\n${logMessage(this.config.responses.governance_log_prefix, { action })}`;
+  }
+
+  /**
+   * 确保 AI 评审评论以 🤖 开头（与固定模板一致）：
+   * 机器人身份标记由服务端确定性保证，不依赖模型自觉。
+   */
+  withBotPrefix(text) {
+    const trimmed = String(text || '').trim();
+    return trimmed.startsWith('🤖') ? trimmed : `🤖 ${trimmed}`;
   }
 
   async routeNormalize(octokit, owner, repo, issue, summary, keyPoints, classification) {
