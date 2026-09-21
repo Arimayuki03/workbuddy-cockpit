@@ -93,7 +93,7 @@ describe('PrReviewService', () => {
     expect(commentCall[4]).toContain('## 历史结论');
     expect(commentCall[4]).toContain('#57');
     expect(commentCall[4].startsWith('🤖')).toBe(true);
-    expect(commentCall[4]).toContain('✅ 机器人操作日志：');
+    expect(commentCall[4]).toContain('✅ Claude Code 操作日志：');
 
     // 后关闭
     const closeCall = ops.updatePullRequest.mock.calls.find(c => c[4] && c[4].state === 'closed');

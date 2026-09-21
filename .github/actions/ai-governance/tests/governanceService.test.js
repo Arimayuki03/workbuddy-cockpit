@@ -206,7 +206,7 @@ describe('IssueGovernanceService', () => {
     expect(commentCall[4]).toContain('@someone');
     // 机器人身份标记由服务端确定性补上（开头 🤖 + 结尾操作日志行）
     expect(commentCall[4].startsWith('🤖')).toBe(true);
-    expect(commentCall[4]).toContain('✅ 机器人操作日志：');
+    expect(commentCall[4]).toContain('✅ Claude Code 操作日志：');
   });
 
   test('WELL_FORMED 但 AI 评审生成失败：回落固定模板评论，流程不中断', async () => {
@@ -229,7 +229,7 @@ describe('IssueGovernanceService', () => {
     const commentCall = ops.addComment.mock.calls.find(c => c[3] === 22);
     expect(commentCall).toBeTruthy();
     expect(commentCall[4]).toContain('已按模板规范填写');
-    expect(commentCall[4]).toContain('✅ 机器人操作日志：');
+    expect(commentCall[4]).toContain('✅ Claude Code 操作日志：');
   });
 
   test('WELL_FORMED + dry-run：仍生成 AI 评审评论并演练发布，不做任何写操作', async () => {
