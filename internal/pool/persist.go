@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -19,6 +20,46 @@ var flushInterval = 5 * time.Second
 // persistLogEvery 连续落盘失败每 N 次打一条提醒（flusher 5s 一把 ≈ 1 分钟一次），
 // 避免磁盘持续满/权限丢失时日志刷屏。
 const persistLogEvery = 100
+
+// persistWriter 单池「锁外写盘」的同步原语：独立保存互斥（写盘串行）+ 代数序
+// （最后写者胜）+ 在途写等待组（Flush/Close 收尾）。磁盘 IO 已整体移出 p.mu
+// （每 5s flush 不再阻塞 pick 热路径），p.mu 只负责内存快照的一致性。
+type persistWriter struct {
+	// seqMu/seq 快照代数源。分配点均在 p.mu 临界区内（快照与取号同临界区，
+	// 代数序 == 快照序），seqMu 只是显式同步边界，防未来出现锁外取号的误用。
+	seqMu sync.Mutex
+	seq   uint64
+	// mu 串行化本池的实际写盘（tmp+fsync+rename 只有一个执行者），completed
+	// 记录已落盘的最大代数：代数更小的迟到写直接跳过（旧快照不得覆盖新快照）。
+	mu        sync.Mutex
+	completed uint64
+	// wg 在途异步写计数：saveLocked 锁内 Add，写盘 goroutine Done；
+	// Flush（持 p.mu）Wait——Add 同样必须先拿 p.mu，故不存在 Add 与 Wait
+	// 竞争「计数已归零」的窗口（sync.WaitGroup 的重用红线不触及）。
+	wg sync.WaitGroup
+}
+
+// nextSeq 分配下一个快照代数。调用方必须已持 p.mu（见 seqMu 注释）。
+func (w *persistWriter) nextSeq() uint64 {
+	w.seqMu.Lock()
+	defer w.seqMu.Unlock()
+	w.seq++
+	return w.seq
+}
+
+// persistWriters 池 → 锁外写盘原语的注册表。persist.go 不在 pool.go 的本次
+// 改动白名单内（不能给 Pool 结构体加字段），按 *Pool 键控懒创建承载；
+// 池实例数量级极小（生产 1 个 + 测试若干），不回收的开销可忽略。
+var persistWriters sync.Map // *Pool → *persistWriter
+
+// persistWriterOf 返回本池的锁外写盘原语（懒创建，LoadOrStore 防并发重复建）。
+func (p *Pool) persistWriterOf() *persistWriter {
+	if v, ok := persistWriters.Load(p); ok {
+		return v.(*persistWriter)
+	}
+	actual, _ := persistWriters.LoadOrStore(p, &persistWriter{})
+	return actual.(*persistWriter)
+}
 
 // snapshot 池状态快照（Redis 镜像用）。与本地 state.json 同源（stateFile），
 // 额外带 savedAt 时间戳供"择新恢复"（比较本地与 Redis 快照的新旧）。
@@ -87,6 +128,8 @@ func (p *Pool) RestoreFromSnapshot() {
 // startFlusher 启动后台周期落盘 goroutine（每 flushInterval 检查 dirty 标志）。
 // goroutine 在 p.Close 关闭 stopCh 时退出；此前若无人 Close，goroutine 会持续运行
 // （issue:goroutine 泄漏——New 每调一次泄漏一个，且无停止机制）。
+// 落盘执行体 saveLocked 已把磁盘 IO 移到 p.mu 之外：持锁窗口只剩快照+取代数，
+// 5s 一轮的 flush 不再阻塞 pick 热路径。
 func (p *Pool) startFlusher() {
 	interval := flushInterval // 在启动 goroutine 前同步读取，避免与测试对 flushInterval 的恢复写竞争
 	p.stopCh = make(chan struct{})
@@ -110,7 +153,8 @@ func (p *Pool) startFlusher() {
 
 // Close 停止后台落盘 goroutine 并做最后一次落盘（幂等）。
 // 进程退出前应调用（main 的优雅停机路径），替代裸 Flush——既停 goroutine 又补落盘。
-// stateFp 为空（未起 flusher）时仅做一次 Flush。
+// stateFp 为空（未起 flusher）时仅做一次 Flush。落盘已异步化：本函数等在途写收尾
+// 后返回，进程退出时 state.json 不缺最后一次快照。
 func (p *Pool) Close() {
 	p.closeOnce.Do(func() {
 		if p.stopCh != nil {
@@ -121,16 +165,24 @@ func (p *Pool) Close() {
 }
 
 // Flush 同步把内存状态落盘（幂等：无变更不写盘）。供进程退出前调用。
+// 持 p.mu 只做快照+取代数，磁盘 IO（可能慢数百 ms）在锁外由 saveLocked 完成，
+// 并等在途写收尾——返回时 state.json 已反映本次快照（同步语义不变，测试
+// Flush→New 重载可依赖）。
 func (p *Pool) Flush() {
 	p.mu.Lock()
 	if p.dirty.Swap(false) {
 		p.saveLocked()
 	}
 	p.mu.Unlock()
+	p.persistWriterOf().wg.Wait()
 }
 
 // load 从本地 state.json 读回持久化状态（无文件/解析失败静默跳过，零状态启动）。
 // New 构造时调用；恢复用 placeholder 凭证，Add/SyncToDir 时换全。
+//
+// 并发契约：本函数**未持 p.mu** 却调用 applyAccountsLocked（其注释要求持锁）——
+// 仅限 New 构造期、池尚未发布给任何调用方（单 goroutine 独占）时调用，无并发
+// 访问故豁免持锁；池发布后严禁再调（RestoreFromSnapshot 走 adoptSnapshot 持锁路径）。
 func (p *Pool) load() {
 	raw, err := os.ReadFile(p.stateFp)
 	if err != nil {
@@ -256,8 +308,18 @@ func (p *Pool) applySnapshotLocked(s snapshot) {
 	p.applyAccountsLocked(s.Accounts)
 }
 
-// saveLocked 把内存状态原子落盘（tmp + rename），并 fire-and-forget 镜像一份快照
-// 到 Redis（择新恢复备份）。失败走 notePersistFail 节流日志。调用方必须已持 p.mu。
+// saveLocked 把内存状态原子落盘（tmp + fsync + rename），并 fire-and-forget 镜像
+// 一份快照到 Redis（择新恢复备份）。失败走 notePersistFail 节流日志。调用方必须已持 p.mu。
+//
+// 锁窗口拆分（磁盘 IO 移出 p.mu）：本函数在持锁窗口内**只做**两件事——
+//  1. stateOverviewLocked() 取内存一致性快照 + json 序列化（CPU 密集但纯内存）；
+//  2. 向 persistWriter 领取快照代数（代数序 == 快照序）。
+//
+// MkdirAll/WriteFile/fsync/Rename 全部在 p.mu **之外**的独立 goroutine 执行
+// （writeStateFileAt），由独立保存互斥串行化、代数序保证「最后写者胜」：
+// 磁盘满/慢/掉速只阻塞后台 flusher，不再阻塞 pick 热路径（每 5s 一次的旧
+// 代价）。代数更小的迟到写直接跳过——旧快照不得覆盖新快照。异步写失败仍
+// 经 notePersistFail 回挂 dirty（持自身互斥），下一轮 flusher 必然重试。
 func (p *Pool) saveLocked() {
 	if p.stateFp == "" {
 		return
@@ -268,41 +330,90 @@ func (p *Pool) saveLocked() {
 		p.notePersistFail(err)
 		return
 	}
-	if dir := filepath.Dir(p.stateFp); dir != "" {
+	w := p.persistWriterOf()
+	seq := w.nextSeq()
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if seq <= w.completed {
+			return // 已有更新代数落盘：本写作废（最后写者胜）
+		}
+		if err := writeStateFileSync(p.stateFp, raw); err != nil {
+			p.notePersistFail(err)
+			return
+		}
+		w.completed = seq
+		p.notePersistOK()
+		// 同步镜像一份快照到 Redis（fire-and-forget），与本地 state.json 并存作恢复备份。
+		// Redis 侧无本地 tmp+rename 的原子性，但其择新恢复以 saved_at 比较，
+		// 乱序到达只影响 SavedAt 精度（同一序列化窗口内时间戳近似），不破坏语义。
+		if p.store != nil {
+			snapRaw, err := json.Marshal(snapshot{stateFile: sf, SavedAt: time.Now()})
+			if err == nil {
+				p.store.SaveState(snapRaw)
+			}
+		}
+	}()
+}
+
+// writeStateFileSync 原子写 state.json：MkdirAll → WriteFile(tmp) → f.Sync()
+// （防掉电产生 0 长度/半截 state.json，Windows 上文件 Sync 落到 FlushFileBuffers
+// 同样有效）→ Rename(tmp → 正式)。目录 fsync 在 Windows 无对应 API，best-effort
+// 跳过（Linux 上 rename 的持久性由文件系统日志兜底，非本函数职责）。
+func writeStateFileSync(stateFp string, raw []byte) error {
+	if dir := filepath.Dir(stateFp); dir != "" {
 		_ = os.MkdirAll(dir, 0o755)
 	}
-	tmp := p.stateFp + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		p.notePersistFail(err)
-		return
+	tmp := stateFp + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
 	}
-	if err := os.Rename(tmp, p.stateFp); err != nil {
-		p.notePersistFail(err)
-		return
+	if _, err := f.Write(raw); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
 	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, stateFp); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// notePersistOK 记录一次落盘恢复（从连续失败中恢复时打一条日志，避免
+// "错误打完却无人知道已恢复"）。锁外写盘 goroutine 调用；persistFails 由
+// persistWriter.mu 串行化的写路径独占读写（notePersistFail 同一临界区），
+// 无并发写者，仅 Flush 可能并发读——竞态窗口只影响一条日志，可接受。
+func (p *Pool) notePersistOK() {
 	if p.persistFails > 0 {
-		// 从连续失败中恢复：打一条恢复日志，避免"错误打完却无人知道已恢复"。
 		log.Printf("[pool] state.json 落盘恢复（此前连续失败 %d 次）", p.persistFails)
 		p.persistFails = 0
-	}
-	// 同步镜像一份快照到 Redis（fire-and-forget），与本地 state.json 并存作恢复备份。
-	if p.store != nil {
-		snapRaw, err := json.Marshal(snapshot{stateFile: sf, SavedAt: time.Now()})
-		if err == nil {
-			p.store.SaveState(snapRaw)
-		}
 	}
 }
 
 // notePersistFail 记录一次本地 state.json 落盘失败，并按节流规则决定是否打日志：
 // 首败（状态成功→失败）打一条详细 WARN：包含路径、err、目录权限/属主、当前 uid/gid、
 // 修复建议（chown 或改用 named volume）；随后每 persistLogEvery 次再复报一条，避免刷屏。
-// 恢复成功的日志由 saveLocked 在成功路径统一打。与 redisstore 三处异步写的
+// 恢复成功的日志由 notePersistOK 在写盘 goroutine 统一打。与 redisstore 三处异步写的
 // "失败仅打日志、不向上抛"范式对齐，但落盘失败对运维是盲区，故多一层节流（notification）。
 //
 // 回挂 dirty：调用方（flusher/Flush）都是先 dirty.Swap(false) 再 saveLocked，失败若不
 // 回挂，本轮变更的重试信号就丢了（下轮 tick 看到 clean 直接跳过）。置回 true 让下一轮
 // flusher tick 必然重试；saveLocked 是全量内存快照语义，重复写安全。
+// 并发性：本函数现由锁外写盘 goroutine 调用（persistWriter.mu 串行化，同一时刻
+// 至多一个写者），persistFails 的读改写无并发竞争。
 func (p *Pool) notePersistFail(err error) {
 	p.dirty.Store(true)
 	if p.persistFails == 0 {

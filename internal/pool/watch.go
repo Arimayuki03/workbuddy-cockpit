@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -49,7 +50,7 @@ func (p *Pool) StartAuthDirWatch(dir string) (stop func()) {
 	log.Printf("[watch] auths 目录监听已启用（每 %s 检查一次，新增账号自动加载，无需重启）", watchInterval)
 
 	done := make(chan struct{})
-	var stopped bool
+	var stopOnce sync.Once
 	go func() {
 		t := time.NewTicker(watchInterval)
 		defer t.Stop()
@@ -70,11 +71,9 @@ func (p *Pool) StartAuthDirWatch(dir string) (stop func()) {
 	}()
 
 	return func() {
-		if stopped {
-			return
-		}
-		stopped = true
-		close(done)
+		// sync.Once 幂等：并发/重复调用只 close 一次（裸 bool 守卫在并发下有
+		// check-then-act 竞态，二次 close 会 panic）。
+		stopOnce.Do(func() { close(done) })
 	}
 }
 

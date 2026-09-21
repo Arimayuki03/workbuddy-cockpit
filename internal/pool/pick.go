@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"sort"
+	"sync"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -225,6 +226,16 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	return e.a
 }
 
+// pickLogEvery 全冷却兜底选中日志的节流步长（首条必打 + 此后每 N 条打一条）：
+// 全池冷却期每次请求都兜底选中，打锁内 WARN 会形成日志洪峰（与 persist.go 的
+// persistLogEvery 同风格）。计数器经 fallbackLogCounters 按 *Pool 键控（pick.go
+// 不能给 Pool 结构体加字段；池数量级极小，不回收开销可忽略）。计数读写恒在
+// p.mu 写锁内（pickEarliestExpiryLocked 唯一调用方），本身无并发竞争。
+const pickLogEvery = 50
+
+// fallbackLogCounters 池 → 兜底选中累计次数（节流用）。
+var fallbackLogCounters sync.Map // *Pool → *uint64
+
 // pickEarliestExpiryLocked 全冷却兜底：在非禁用的软冷却/熔断账号中选截止最早的一个。
 // 分级：disabled 永不参与；CoolHard（余额耗尽，等签到的号）同样排除——调了必 402，浪费轮换并产生噪音日志；
 // CoolSoft 与熔断号允许参与（可能已恢复，失败成本仅一轮换）。
@@ -258,7 +269,22 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 	if best == nil {
 		return nil
 	}
-	log.Printf("WARN: [pool] fallback_earliest_expiry acct=%s until=%s kind=%s", logfmt.Label(best.a.UID, best.a.Nickname), best.expiry(now).Format(time.RFC3339), best.fallbackKind(now))
+	// 兜底选中日志节流（首条 + 每 pickLogEvery 条）：全池冷却期（如上游整体限流）
+	// 本路径每次请求都走，无节流时每条 WARN 都在 p.mu 写锁内打——日志洪峰拖慢
+	// 全部 pick。首条保留详报（何时开始兜底、选了谁），后续按步长采样提醒。
+	// 计数器按 *Pool 键控取指针，自增与读取恒在本函数（p.mu 写锁）内完成。
+	var cnt *uint64
+	if v, ok := fallbackLogCounters.Load(p); ok {
+		cnt = v.(*uint64)
+	} else {
+		cnt = new(uint64)
+		fallbackLogCounters.Store(p, cnt)
+	}
+	*cnt++
+	if *cnt == 1 || *cnt%pickLogEvery == 0 {
+		log.Printf("WARN: [pool] fallback_earliest_expiry (第 %d 次) acct=%s until=%s kind=%s",
+			*cnt, logfmt.Label(best.a.UID, best.a.Nickname), best.expiry(now).Format(time.RFC3339), best.fallbackKind(now))
+	}
 	best.lastUsed = time.Now()
 	// 兜底同样是「选中」，必须与 pick() 正常路径、粘性命中路径（PickByUIDForModel）
 	// 一样推进 usedSeq/pickSeq：否则被兜底反复选中的账号 usedSeq 恒为 0，在 pick 的

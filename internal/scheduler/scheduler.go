@@ -93,13 +93,8 @@ type Scheduler struct {
 	lastRun [kindCount]atomic.Int64
 	lastOut [kindCount]atomic.Value // string
 
-	// rearmBalance 是「余额刷新间隔已变，立即重算」通知（panel 移植件，
-	// balance_refresh.go）：StartBalanceRefresh 循环与 SetBalanceInterval 共用，
-	// 容量 1（重复通知合并，重算幂等）。
-	rearmBalance chan struct{}
-	// balanceInterval 余额刷新间隔（纳秒，0=暂停）。atomic 读写：执行循环每轮读
-	// 当前值，SetBalanceInterval 可任意时刻热改（面板保存配置）。
-	balanceInterval atomic.Int64
+	// （原 rearmBalance/balanceInterval 字段已删：StartBalanceRefresh/SetBalanceInterval
+	// 是无调用方的死代码，随 balance_refresh.go 的清理一并移除，见该文件头注释。）
 
 	// queueRunner 任务中心执行队列的执行体（panel 的队列实现，main 装配期经
 	// SetQueueRunner 注入；internal/scheduler 不能 import internal/panel——依赖
@@ -149,7 +144,7 @@ func New(cfg Config) *Scheduler {
 	if cfg.ActivityReportCount <= 0 {
 		cfg.ActivityReportCount = 1
 	}
-	s := &Scheduler{cfg: cfg, adoptTried: make(map[string]string), rewardClaimed: make(map[string]string), wake: make(chan struct{}, 1), rearmBalance: make(chan struct{}, 1)}
+	s := &Scheduler{cfg: cfg, adoptTried: make(map[string]string), rewardClaimed: make(map[string]string), wake: make(chan struct{}, 1)}
 	// 排程开关初始化自 Config 的 Disabled 标志：零值 Config = 全部启用，与引入前逐字一致。
 	s.enabled[taskCheckin].Store(!cfg.CheckinDisabled)
 	s.enabled[taskTravel].Store(!cfg.TravelDisabled)
