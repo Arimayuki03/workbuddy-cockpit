@@ -147,6 +147,12 @@ function parseInputs(config) {
   const enablePrGovernance = (core.getInput('enable-pr-governance') || process.env.INPUT_ENABLE_PR_GOVERNANCE || String(config.defaults.enable_pr_governance)).toLowerCase() === 'true';
   const maxCanonicalIndex = parseIntInput(core.getInput('max-canonical-index') || process.env.INPUT_MAX_CANONICAL_INDEX || String(config.defaults.max_canonical_index), config.defaults.max_canonical_index);
   const canonicalBodyTruncate = parseIntInput(core.getInput('canonical-body-truncate') || process.env.INPUT_CANONICAL_BODY_TRUNCATE || String(config.defaults.canonical_body_truncate), config.defaults.canonical_body_truncate);
+
+  // 统一历史语境层（F1）与两段式流水线（F2）
+  const maxHistoryIndex = parseIntInput(core.getInput('max-history-index') || process.env.INPUT_MAX_HISTORY_INDEX || String(config.defaults.max_history_index), config.defaults.max_history_index);
+  const enableTwoStage = (core.getInput('enable-two-stage') || process.env.INPUT_ENABLE_TWO_STAGE || String(config.defaults.enable_two_stage)).toLowerCase() === 'true';
+  const maxScreenedCandidates = parseIntInput(core.getInput('max-screened-candidates') || process.env.INPUT_MAX_SCREENED_CANDIDATES || String(config.defaults.max_screened_candidates), config.defaults.max_screened_candidates);
+  const screeningModel = core.getInput('screening-model') || process.env.INPUT_SCREENING_MODEL || config.defaults.screening_model || '';
   
   // 解析分析深度参数，使用配置文件中的设置
   const analysisDepth = core.getInput('max-analysis-depth') || process.env.INPUT_MAX_ANALYSIS_DEPTH || config.defaults.analysis_depth;
@@ -191,6 +197,10 @@ function parseInputs(config) {
     enablePrGovernance,
     maxCanonicalIndex,
     canonicalBodyTruncate,
+    maxHistoryIndex,
+    enableTwoStage,
+    maxScreenedCandidates,
+    screeningModel,
     config
   };
 }

@@ -95,6 +95,11 @@ const GOVERNANCE_DEFAULTS = {
   maxRelatedIssues: 3,
   relatedCommentsPerIssue: 10,
   relatedBodyTruncate: 1500,
+  // 统一历史语境层（F1）：紧凑索引上限（issue+PR 全量语料）
+  maxHistoryIndex: 100,
+  // 两段式 AI 流水线（F2）：默认关闭，先暗发观察再翻转（与 pr-review-close 同上线纪律）
+  enableTwoStage: false,
+  maxScreenedCandidates: 5,
   // 永远豁免的账号（bot 自环防护）
   SKIP_USERS: ['github-actions[bot]', 'github-actions']
 };
