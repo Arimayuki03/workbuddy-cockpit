@@ -115,7 +115,8 @@ async function handleNewPR(octokit, openai, context, owner, repo, aiModel, confi
         pr,
         config,
         'pr_content_filtered',
-        'pr_content_filtered_log'
+        'pr_content_filtered_log',
+        false // 不锁定：回应承诺「编辑内容后重新提交」，与 issue 路径对齐（C4）
       );
       return;
     }
@@ -135,15 +136,18 @@ async function handleNewPR(octokit, openai, context, owner, repo, aiModel, confi
  * @param {Object} config 配置对象
  * @param {string} responseKey 响应消息键名
  * @param {string} logKey 日志消息键名
+ * @param {boolean} shouldLock 是否锁定（C4：内容过滤与 TRIVIAL 不锁，保留「编辑后重提」出路；
+ *   SPAM/MALICIOUS/黑名单维持锁定 —— 防御性决策，见 conflicts C4 / R4）
  */
-async function closePRWithType(octokit, owner, repo, pr, config, responseKey, logKey) {
+async function closePRWithType(octokit, owner, repo, pr, config, responseKey, logKey, shouldLock = true) {
   await closePR(
     octokit,
     owner,
     repo,
     pr.number,
     config.responses[responseKey],
-    config
+    config,
+    shouldLock
   );
 
   core.info(logMessage(config.logging[logKey], { number: pr.number }));
@@ -165,8 +169,11 @@ async function handleLowQualityPR(octokit, owner, repo, pr, config, reason) {
 
   const responseKey = responseMap[reason] || 'pr_closed';
   const logKey = logMap[reason] || 'pr_closed_log';
+  // TRIVIAL 不锁定：pr_trivial 回应要求作者「确保提供有意义的改进」后重提（C4）；
+  // MALICIOUS 维持锁定（防御性）。
+  const shouldLock = reason !== 'TRIVIAL';
 
-  await closePRWithType(octokit, owner, repo, pr, config, responseKey, logKey);
+  await closePRWithType(octokit, owner, repo, pr, config, responseKey, logKey, shouldLock);
 }
 
 /**
