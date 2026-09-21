@@ -73,9 +73,10 @@ LOOP.md
 PLAN.md
 SPEC.md
 
-# 设计/计划文档（README.md 与 docs/ 定稿设计文档必须进版本库）
+# 设计/计划文档（README.md、使用指南.md 与 docs/ 定稿设计文档必须进版本库）
 *.md
 !README.md
+!使用指南.md
 !docs/DESIGN-v1.2.0-panel-manager.md
 
 web/node_modules/
