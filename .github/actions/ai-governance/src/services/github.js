@@ -278,7 +278,9 @@ async function getPinnedIssuesContent(octokit, owner, repo, config) {
  * 拉取带 canonical 标签的 issue 列表，作为归并匹配的索引。
  * 使用 search API 按仓库 + 状态(is:issue is:open/closed) + label 过滤，
  * 上限由 maxCanonicalIndex 限制，避免索引膨胀导致 token 超限。
- * @returns {Promise<Array>} 形如 [{ number, title, body }] 的数组
+ * @returns {Promise<Array>} 形如 [{ number, title, body, state, state_reason, closed_at }] 的数组
+ *   （C2 修复：此前不返回 state，下游 prReviewService 的 canonical 通道
+ *    以 item.state !== 'closed' 过滤，字段恒为 undefined → 通道永远饿死）
  */
 async function listCanonicalIssues(octokit, owner, repo, label, maxResults = 50, bodyTruncate = 1500, shouldIncludeClosed = true) {
   const stateFilter = shouldIncludeClosed ? 'is:issue' : 'is:issue is:open';
@@ -296,7 +298,10 @@ async function listCanonicalIssues(octokit, owner, repo, label, maxResults = 50,
   return items.map(item => ({
     number: item.number,
     title: item.title,
-    body: (item.body || '').slice(0, bodyTruncate)
+    body: (item.body || '').slice(0, bodyTruncate),
+    state: item.state,
+    state_reason: item.state_reason || null,
+    closed_at: item.closed_at || null
   }));
 }
 
