@@ -13,6 +13,7 @@
 package panel
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"io"
@@ -34,7 +35,8 @@ const loginBodyLimit = 1 << 16
 
 // handleLogin POST /api/login {username,password}。
 // username 忽略（单凭证语义，manager 登录页保留输入框只是形态）；
-// password 与 api_key 常量时间比较，成功换发签名 cookie，失败 401。
+// password 与 api_key 经 SHA-256 摘要后常量时间比较（与 httpauth.VerifyBearer
+// 同口径，不泄露长度），成功换发签名 cookie，失败 401。
 func (p *Panel) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Username string `json:"username"`
@@ -51,12 +53,23 @@ func (p *Panel) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "username": "admin", "role": "admin"})
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(body.Password), []byte(key)) != 1 {
+	// 口令比较与 httpauth.VerifyBearer 同口径：先 SHA-256 摘要再常量时间比较。
+	// 直接对原文 ConstantTimeCompare 会在长度不等时立即返回（泄露长度信息）；
+	// 摘要把任意长度吸收进定长 32 字节，比较耗时与输入长度、相等与否都无关。
+	if subtle.ConstantTimeCompare(sha256Sum(body.Password), sha256Sum(key)) != 1 {
 		writeErr(w, http.StatusUnauthorized, "invalid_password")
 		return
 	}
 	p.issueSession(w, key)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "username": "admin", "role": "admin"})
+}
+
+// sha256Sum 返回 s 的 SHA-256 摘要（定长 32 字节，供常量时间比较）。
+// httpauth.digest 未导出（该文件不在本次修改范围），此处按同法实现，
+// 语义与 VerifyBearer 的比较口径一致。
+func sha256Sum(s string) []byte {
+	sum := sha256.Sum256([]byte(s))
+	return sum[:]
 }
 
 // issueSession 签发会话 cookie（payload 以当前时刻 + TTL 计算 exp）。

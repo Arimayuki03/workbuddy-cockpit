@@ -75,6 +75,9 @@ export function AuthProvider({children}: {children: ReactNode}) {
     setMe(next);
     writeCachedMe(next);
     setLoading(false);
+    // 先清上一会话的数据缓存再预热：换账号登录不能看到上一个会话的
+    // 池/统计快照（logout 已这么做；「登出→换号登录」路径两侧都清）。
+    clearAllCache();
     warmCache(WARM_TARGETS);
   }, []);
 

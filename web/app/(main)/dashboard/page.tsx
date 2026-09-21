@@ -86,28 +86,35 @@ export default function DashboardPage() {
 
   // 上游健康与用量时序：这两个端点都很快，不进缓存，保持原有的一次性拉取。
   // 心跳沿用原 load：同时刷上游状态、usage 与两个缓存条目，全部数据同帧续命。
-  const load = useCallback(async () => {
-    const results = await Promise.allSettled([
-      accountApi.status(),
-      statsApi.usage(168),
-      overviewCache.refresh(),
-      packagesCache.refresh(),
-    ]);
-    if (results[0].status === 'fulfilled') setUpstream(results[0].value);
-    if (results[1].status === 'fulfilled') setUsage(results[1].value);
-    if (results.some((r) => r.status === 'rejected')) {
-      const failed = results.find((r) => r.status === 'rejected');
-      notify.err(errText((failed as PromiseRejectedResult).reason));
-    }
+  // silent=true（心跳路径）时失败不弹错：30s 一轮的后台刷新弹错误雨毫无价值，
+  // 等下一轮自愈即可；错误提示只留给手动路径（本页无手动按钮，仅首载 effect）。
+  const load = useCallback(
+    async (silent = false) => {
+      const results = await Promise.allSettled([
+        accountApi.status(),
+        statsApi.usage(168),
+        overviewCache.refresh(),
+        packagesCache.refresh(),
+      ]);
+      if (results[0].status === 'fulfilled') setUpstream(results[0].value);
+      if (results[1].status === 'fulfilled') setUsage(results[1].value);
+      if (!silent && results.some((r) => r.status === 'rejected')) {
+        const failed = results.find((r) => r.status === 'rejected');
+        notify.err(errText((failed as PromiseRejectedResult).reason));
+      }
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [overviewCache.refresh, packagesCache.refresh]);
+    [overviewCache.refresh, packagesCache.refresh],
+  );
 
   useEffect(() => {
     load();
   }, [load]);
 
-  // 账号健康度与用量持续变化：心跳刷新全部数据源（含两个缓存条目）
-  useHeartbeat(load, 30000);
+  // 账号健康度与用量持续变化：心跳静默刷新全部数据源（含两个缓存条目）
+  useHeartbeat(() => {
+    void load(true);
+  }, 30000);
 
   /**
    * 池快照按当前版本过滤。

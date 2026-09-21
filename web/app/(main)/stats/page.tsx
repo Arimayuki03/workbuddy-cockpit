@@ -72,11 +72,13 @@ export default function StatsPage() {
   const usage = usageCache.data;
   const native = nativeCache.data;
 
-  // 心跳同时刷两个缓存条目（用量持续累计，保持接近实时）
+  // 心跳同时刷两个缓存条目（用量持续累计，保持接近实时）。
+  // 周期心跳失败静默（与 logs 页同设计）：60s 一轮的后台刷新弹错误雨毫无
+  // 价值，等下一轮自愈；错误提示只留给用户手动操作（下方「立即落盘」）。
   useHeartbeat(
     () => {
-      usageCache.refresh().catch((e) => notify.err(errText(e)));
-      nativeCache.refresh().catch((e) => notify.err(errText(e)));
+      usageCache.refresh().catch(() => {/* 静默，等下一轮心跳 */});
+      nativeCache.refresh().catch(() => {/* 静默，等下一轮心跳 */});
     },
     60000,
   );

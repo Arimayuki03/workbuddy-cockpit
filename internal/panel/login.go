@@ -209,6 +209,23 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 原子认领（防 TOCTOU）：开头的 known 检查与流程末尾的 delete 之间隔着
+	// 数秒上游调用，双开标签页并发 poll 时两边都通过检查，会重复执行
+	// SaveAtomic/签到/领奖。改为进入副作用段前锁内 check-and-delete 一次性
+	// 认领：抢到的一方执行完成流程，抢不到的按未完成返回（对方正在完成，
+	// 本页随后的轮询会以 unknown state 收敛到重新发起）。认领后的失败不回滚
+	// state——落盘失败即要求重新发起，避免半完成态被并发重放。
+	p.loginMu.Lock()
+	_, claimable := p.logins[state]
+	if claimable {
+		delete(p.logins, state)
+	}
+	p.loginMu.Unlock()
+	if !claimable {
+		writeJSON(w, http.StatusOK, map[string]any{"done": false, "message": "登录已由其它窗口认领，正在完成"})
+		return
+	}
+
 	// 凭证落盘（嵌套形，与 auths/ 目录既有格式一致）→ 热加载进池。
 	if err := os.MkdirAll(p.cfg.AuthDir, 0o755); err != nil {
 		writeErr(w, http.StatusInternalServerError, "mkdir auth dir: "+err.Error())
@@ -274,9 +291,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		p.cfg.Pool.ReenableIfCredits(acct.UID, rm)
 	}
 
-	p.loginMu.Lock()
-	delete(p.logins, state)
-	p.loginMu.Unlock()
+	// state 已在开头原子认领时删除（无 TOCTOU 窗口），这里直接进入收尾日志。
 	log.Printf("panel: 新账号已热加载 uid=%s nickname=%q realm=%s（免重启生效）", acct.UID, acct.Nickname, sess.realm)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"done":            true,
