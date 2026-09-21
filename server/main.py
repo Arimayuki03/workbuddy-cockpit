@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 import logging
@@ -261,6 +261,45 @@ def _safe_static_path(full_path: str) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+def _is_document_request(request: Request) -> bool:
+    """这次请求是不是「把结果当页面显示」的文档型导航。
+
+    浏览器的地址栏导航会带 `Accept: text/html,...`；而客户端路由抓 RSC 数据
+    用的是 `fetch`（`Accept: */*` 或 `text/x-component`）并带 `RSC: 1` 头。
+    两者必须分开：前者拿到的若是 flight 文本，用户看到的就是满屏原始数据。
+    """
+    if request.headers.get('rsc'):
+        return False
+    return 'text/html' in (request.headers.get('accept') or '').lower()
+
+
+def _rsc_page_for(full_path: str) -> str | None:
+    """文档型请求命中 Next 静态导出的 RSC 数据文件时，返回它对应的页面路径。
+
+    `output: 'export'` 会把每个页面的 RSC（flight）数据写成
+    `<页>/index.txt`（实测：`dashboard/index.txt`、`settings/index.txt`…）。
+    正常客户端拿它做客户端路由的数据源；但 router 的兜底分支
+    （`Failed to fetch RSC payload … Falling back to browser navigation`）
+    会把浏览器**整页导航**到这个地址，于是浏览器按 `text/plain` 渲染那份
+    flight 数据、地址栏也变成 `.txt`，刷新只会继续显示它（issue #48）。
+
+    **只有对应页面确实存在时才返回**：`.txt` 也可能是真实静态文件
+    （如 `robots.txt`），那种没有同名页面，不能一并重定向。
+    """
+    p = (full_path or '').strip('/')
+    if not p.endswith('.txt'):
+        return None
+    stem = p[:-4]
+    if stem.endswith('/index'):
+        stem = stem[: -len('/index')]
+    elif stem == 'index':
+        stem = ''
+    candidate = f'{stem}/index.html' if stem else 'index.html'
+    if _safe_static_path(candidate) is None:
+        return None          # 没有同名页面 → 是真实文件，按普通静态资源处理
+    return f'/{stem}' if stem else '/'
+
+
 if config.STATIC_DIR.is_dir():
     app.mount('/_next', StaticFiles(directory=str(config.STATIC_DIR / '_next')), name='next-assets')
     if (config.STATIC_DIR / 'favicon.ico').exists():
@@ -273,7 +312,7 @@ if config.STATIC_DIR.is_dir():
         return FileResponse(config.STATIC_DIR / 'index.html')
 
     @app.get('/{full_path:path}', include_in_schema=False)
-    def spa(full_path: str):
+    def spa(full_path: str, request: Request):
         # 优先命中导出的静态页面 / 资源，否则回退到 404 页面。
         # 所有路径都必须先通过 _safe_static_path（越界即 None → 404）。
         #
@@ -281,6 +320,14 @@ if config.STATIC_DIR.is_dir():
         # 之前不记录任何痕迹，出事后无从追溯。日志只写路径，不含内容。
         if _looks_like_traversal(full_path):
             logger.warning('拦截疑似路径穿越请求: %r', full_path[:300])
+        # ① 文档型请求命中 RSC 数据文件 → 送回对应页面（issue #48）。
+        # 见 `_rsc_page_for` 的说明：客户端路由的兜底分支会把浏览器整页导航到
+        # `<页>/index.txt`，那边返回的是 flight 文本，用户看到满屏原始数据、
+        # 地址栏也变成了 .txt，只能手动改回地址。
+        if _is_document_request(request):
+            page = _rsc_page_for(full_path)
+            if page is not None:
+                return RedirectResponse(page, status_code=302)
         target = _safe_static_path(full_path)
         if target is not None:
             return FileResponse(target)
