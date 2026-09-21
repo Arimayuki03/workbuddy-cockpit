@@ -515,6 +515,8 @@ journalctl -u workbuddy-web | grep -A3 '初始管理员'
 | `WB_SECURE_COOKIE` | `auto` | 会话 Cookie 的 `Secure` 标志：`auto` 依 `X-Forwarded-Proto` 判定、也可写死 `true`/`false` |
 | `WB_SESSION_DAYS` | `1` | 会话**总时长**上限（天），到点必须重新登录 |
 | `WB_SESSION_IDLE_HOURS` | `12` | 会话**空闲**上限（小时）：多久没操作就失效（滑动续期窗口） |
+| `WB_GATEWAY_RATE_PER_MIN` | `120` | 对外网关**每密钥**限流：60 秒内放行的请求数上限（`0` = 不限制） |
+| `WB_GATEWAY_MAX_BODY_MB` | `32` | 对外网关的请求体上限（MB） |
 | `WB_HTTP_PROXY` | 空 | 出口代理，留空 = 全部直连 |
 
 完整清单见 [`.env.example`](.env.example)。

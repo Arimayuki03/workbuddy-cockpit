@@ -593,6 +593,8 @@ Full deployment notes (Nginx config, hardening, FAQ) are in [deploy/README.md](d
 | `WB_STATIC_DIR` | `./web/out` | Static export directory |
 | `WB_ADMIN_PASSWORD` | random | Initial admin password |
 | `WB_SECURE_COOKIE` | `auto` | Decided from `X-Forwarded-Proto` |
+| `WB_GATEWAY_RATE_PER_MIN` | `120` | Outbound gateway per-key limit: admitted requests per 60s (`0` = unlimited) |
+| `WB_GATEWAY_MAX_BODY_MB` | `32` | Outbound gateway request body limit (MB) |
 | `WB_HTTP_PROXY` | empty | Outbound proxy; empty means direct |
 
 The full list is in [`.env.example`](.env.example).
