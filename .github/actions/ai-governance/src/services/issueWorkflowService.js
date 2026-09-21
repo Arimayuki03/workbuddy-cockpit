@@ -9,6 +9,9 @@ const IssueActionService = require('../services/issueActionService');
  */
 class IssueWorkflowService {
   constructor(octokit, openai, aiModel, config) {
+    // octokit 必须自存一份：fetchReadmeContent 依赖 this.octokit 调 repos.getReadme
+    // （此前只传给了 actionService，fetchReadmeContent 必抛 TypeError 被吞成 null）
+    this.octokit = octokit;
     this.analyzer = new IssueAnalyzer(openai, aiModel, config);
     this.classifier = new ClassificationService(openai, aiModel, config);
     this.actionService = new IssueActionService(octokit, config);

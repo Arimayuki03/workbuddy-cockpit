@@ -86,4 +86,18 @@ describe('github ops contract', () => {
     expect(result[0]).toMatchObject({ number: 12, state: 'closed', is_pr: false });
     expect(result[1]).toMatchObject({ number: 30, is_pr: true });
   });
+
+  test('searchIssuesAndPRs 映射携带截断正文（body 缺失时 buildIndex 归并语料恒空串）', async () => {
+    const octokit = makeOctokit([
+      rawSearchItem({ number: 57, body: '加一层缓存的诉求' }),
+      rawSearchItem({ number: 63, body: null })
+    ]);
+
+    const result = await githubOps.searchIssuesAndPRs(octokit, 'o', 'r', 50);
+
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({ number: 57, kind: 'issue', body: '加一层缓存的诉求' });
+    // body 为 null 时回落空串（而非 undefined 被下游 truncate 固化为空）
+    expect(result[1].body).toBe('');
+  });
 });

@@ -165,6 +165,35 @@ describe('PrGovernanceService', () => {
     expect(ops.updatePullRequest.mock.calls.find(c => c[4] && c[4].body)).toBeUndefined();
   });
 
+  test('appendLinkBlock：空行压缩只作用于生成的关联块，作者原正文中的连续空行原样保留', () => {
+    const config = buildConfig();
+    const svc = new PrGovernanceService({}, 'model', config, {}, makeOps());
+    const authorBody = '首段\n\n\n\n紧随的段落（作者原文的空行不该被压掉）\n\n第二段';
+
+    const result = svc.appendLinkBlock(42, authorBody, '要点摘要', 'Related to #57');
+
+    // 关联块在顶部（含锚点）
+    expect(result.startsWith(PR_LINK_ANCHOR)).toBe(true);
+    expect(result).toContain('Related to #57');
+    // 作者正文原样跟在分隔线后：三连以上空行未被压缩
+    expect(result).toContain('首段\n\n\n\n紧随的段落');
+    expect(result).toContain('第二段');
+  });
+
+  test('appendLinkBlock：要点中的换行被引用化（> 前缀），关联块内部无 3 连以上空行', () => {
+    const config = buildConfig();
+    const svc = new PrGovernanceService({}, 'model', config, {}, makeOps());
+    const summary = '第一行要点\n第二行要点';
+
+    // relationBlock 尾部夹带多余空行：生成块内部的归一化仍要生效
+    const result = svc.appendLinkBlock(42, '正文', summary, 'Related to #57\n\n\n\n');
+
+    expect(result).toContain('> 第一行要点\n> 第二行要点');
+    // 拼接结果中不应残留 3 连以上空行（block 内部归一化 + 正文本身无多余空行）
+    expect(result.includes('\n\n\n\n')).toBe(false);
+    expect(result).toContain('\n\n---\n\n正文');
+  });
+
   test('dry-run：只评论不改写标题/正文、不创建 issue（匹配路径）', async () => {
     const config = buildConfig();
     const openai = makeOpenai([

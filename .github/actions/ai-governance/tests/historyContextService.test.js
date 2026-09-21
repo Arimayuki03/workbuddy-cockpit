@@ -69,6 +69,19 @@ describe('HistoryContextService.buildIndex', () => {
     expect(index.find(i => i.number === 31)).toMatchObject({ kind: 'pr', state: 'open' });
   });
 
+  test('search 通道条目携带正文：buildIndex 后 body 非空（归并语料依赖，C 修复）', async () => {
+    const ops = makeOps({
+      searchItems: [
+        { number: 10, kind: 'issue', title: '历史 issue', body: '这是检索通道的正文', labels: ['bug'], state: 'closed', state_reason: 'not_planned', closed_at: '2026-01-02T00:00:00Z' }
+      ]
+    });
+    const svc = makeService({}, ops);
+
+    const index = await svc.buildIndex('o', 'r');
+
+    expect(index.find(i => i.number === 10).body).toBe('这是检索通道的正文');
+  });
+
   test('去重：search 与 canonical 命中同一编号只保留一份（canonical 优先，带 canonical 标记）', async () => {
     const ops = makeOps({
       searchItems: [

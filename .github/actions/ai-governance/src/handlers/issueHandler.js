@@ -1,5 +1,5 @@
 const core = require('@actions/core');
-const { logMessage } = require('../utils/helpers');
+const { logMessage, sanitizeLogText } = require('../utils/helpers');
 const { getReadmeContent, getPinnedIssuesContent, addComment } = require('../services/github');
 const { analyzeIssueQuality, generateAnalysisReport } = require('../services/templateDetector');
 const IssueWorkflowService = require('../services/issueWorkflowService');
@@ -41,7 +41,8 @@ async function handleNewIssue(octokit, openai, context, owner, repo, aiModel, co
     const issueBody = issue.body || '';
     const issueAuthor = (issue.user && issue.user.login || '').toLowerCase();
 
-    core.info(logMessage(config.logging.issue_check_start, { title: issueTitle }));
+    // 标题是不可信输入：先中和换行与 workflow-command 序列，防日志注入（::error:: 等）
+    core.info(logMessage(config.logging.issue_check_start, { title: sanitizeLogText(issueTitle) }));
     core.info(logMessage(config.logging.target_repo, { owner, repo }));
 
     // bot 自环豁免

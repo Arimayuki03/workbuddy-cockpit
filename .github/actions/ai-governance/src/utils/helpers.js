@@ -2,6 +2,7 @@ const core = require('@actions/core');
 
 /**
  * 日志消息模板处理函数
+ * 使用函数替换，避免 value 中的 $&、$' 等被解释为正则替换模式
  * @param {string} template 消息模板
  * @param {Object} replacements 替换变量
  * @returns {string} 处理后的消息
@@ -9,9 +10,23 @@ const core = require('@actions/core');
 function logMessage(template, replacements = {}) {
   let message = template;
   for (const [key, value] of Object.entries(replacements)) {
-    message = message.replace(new RegExp(`{${key}}`, 'g'), value);
+    message = message.replace(new RegExp(`{${key}}`, 'g'), () => value);
   }
   return message;
+}
+
+/**
+ * 清理不可信文本（issue/PR 标题等）再输出到 workflow 日志：
+ * - 去掉 \r\n，防止攻击者用换行伪造多条日志行；
+ * - 中和 `::` 序列，防止伪造 GitHub Actions 的 workflow-command（::error:: 等）。
+ * @param {string} text 不可信文本
+ * @returns {string} 安全的日志文本
+ */
+function sanitizeLogText(text) {
+  return String(text ?? '')
+    .replace(/\r\n/g, ' ')
+    .replace(/[\r\n]/g, ' ')
+    .replace(/::/g, '：:');
 }
 
 /**
@@ -63,6 +78,7 @@ function isValidCommitTitle(title) {
 
 module.exports = {
   logMessage,
+  sanitizeLogText,
   handleApiCall,
   executeApiCalls,
   isValidCommitTitle

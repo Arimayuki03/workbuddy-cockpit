@@ -255,7 +255,9 @@ class PrGovernanceService {
       '',
       relationBlock.trim()
     ].join('\n');
-    return `${block}\n\n---\n\n${existing}`.replace(/\n{3,}/g, '\n\n');
+    // 压缩正则只作用于生成的 block：PR 作者原正文中的连续空行不能被改动（随后要写回）
+    const normalizedBlock = block.replace(/\n{3,}/g, '\n\n');
+    return `${normalizedBlock}\n\n---\n\n${existing}`;
   }
 
   /**

@@ -8,9 +8,19 @@ const { handleNewPR } = require('./handlers/prHandler');
 const { GOVERNANCE_DEFAULTS } = require('./utils/constants');
 
 /**
- * 主程序入口
+ * 动态加载 @actions/github（纯 ESM 包，exports 无 require 条件，CJS 侧必须走动态 import
+ * —— 顶层 require 会抛 ERR_PACKAGE_PATH_NOT_EXPORTED）。
+ * 提取为独立函数：测试可注入 mock，绕开 jest CJS 环境不支持动态 import 的限制。
  */
-async function run() {
+async function loadGithubModule() {
+  return await import('@actions/github');
+}
+
+/**
+ * 主程序入口
+ * @param {Object} [deps] 依赖注入（仅测试用）：loadGithub 返回 @actions/github 模块形状
+ */
+async function run({ loadGithub = loadGithubModule } = {}) {
   try {
     // 加载配置文件
     const baseConfig = loadConfig();
@@ -50,7 +60,7 @@ async function run() {
 
     // 初始化GitHub客户端（@actions/github v9 是纯 ESM 包，exports 无 require 条件，
     // CJS 侧必须走动态 import 加载——顶层 require 会抛 ERR_PACKAGE_PATH_NOT_EXPORTED）
-    const github = await import('@actions/github');
+    const github = await loadGithub();
     const octokit = github.getOctokit(token);
     const context = github.context;
 
@@ -67,7 +77,13 @@ async function run() {
     // 确定使用的API配置
     // 注意：AI 鉴权优先用 github-token —— GitHub Models 依赖 workflow 的 models:read 权限，
     // 治理令牌（installation token）不一定具备，两者职责分离。
+    // 安全红线：配置了第三方 AI 端点却漏配 ai-api-key 时，绝不把 GitHub 平台 token
+    // 静默当作 LLM key 发给第三方服务 —— 启动即抛明确配置错误。
     const apiBaseUrl = customBaseUrl || config.defaults.api_base_url;
+    if (customBaseUrl && !customApiKey) {
+      throw new Error('配置了 ai-base-url（第三方 AI 端点）但未配置 ai-api-key。' +
+        '为避免把 GITHUB_TOKEN 泄露给第三方服务，已拒绝启动；请补配 ai-api-key 或去掉 ai-base-url（走 GitHub Models）。');
+    }
     const apiKey = customApiKey || token;
 
     // 初始化OpenAI客户端
