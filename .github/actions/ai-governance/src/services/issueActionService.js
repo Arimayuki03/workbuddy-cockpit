@@ -1,5 +1,6 @@
 const core = require('@actions/core');
 const { logMessage } = require('../utils/helpers');
+const { sanitizeAiText } = require('../utils/sanitize');
 const { addLabels, addComment, closeIssue } = require('./github');
 
 /**
@@ -12,10 +13,11 @@ class IssueActionService {
   }
 
   /**
-   * 添加README回答评论
+   * 添加README回答评论。readmeAnswer 是 AI 基于 issue 内容生成的文本（输入不可信），
+   * 发布前净化（HTML/@提及/链接白名单）；前缀来自受控模板，不净化。
    */
   async addReadmeAnswer(owner, repo, issueNumber, readmeAnswer) {
-    const fullAnswer = this.config.responses.readme_answer_prefix + readmeAnswer;
+    const fullAnswer = this.config.responses.readme_answer_prefix + sanitizeAiText(readmeAnswer);
     
     await addComment(
       this.octokit, 
@@ -30,10 +32,11 @@ class IssueActionService {
   }
 
   /**
-   * 添加UNCLEAR Issue的智能回答评论
+   * 添加UNCLEAR Issue的智能回答评论。smartAnswer 是 AI 生成的文本（输入不可信），
+   * 发布前净化；前缀来自受控模板，不净化。
    */
   async addUnclearSmartAnswer(owner, repo, issueNumber, smartAnswer) {
-    const fullAnswer = this.config.responses.unclear_answer_prefix + smartAnswer;
+    const fullAnswer = this.config.responses.unclear_answer_prefix + sanitizeAiText(smartAnswer);
     
     await addComment(
       this.octokit, 

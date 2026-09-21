@@ -1,5 +1,6 @@
 const core = require('@actions/core');
 const { logMessage } = require('../utils/helpers');
+const { sanitizeAiText, sanitizeAiTitle } = require('../utils/sanitize');
 const { callAI, callAIStructured } = require('./ai');
 const { analyzeIssueQuality } = require('./templateDetector');
 const { GOVERNANCE_DECISIONS, GOVERNANCE_DEFAULTS } = require('../utils/constants');
@@ -187,24 +188,36 @@ class IssueGovernanceService {
 
   /**
    * 把 AI 草稿切成「标题 + 正文」，标题兜底补上 [Feature]/[Bug] 前缀。
+   * AI 产物直接沉淀为公开的 canonical issue（并进入归并语料，存在注入自放大风险），
+   * 因此标题与正文在此统一净化（HTML/@提及/链接白名单）；#N 数字引用不改动，
+   * 「来源: #N」等闸门语义与 GitHub 关联语法保持完整。
    */
   splitCanonical(raw, fallbackTitle, classification) {
     const text = String(raw || '').trim();
     const lines = text.split('\n').map(l => l.trimEnd());
-    let title = (lines[0] || '').replace(/^#+\s*/, '').trim() || fallbackTitle;
+    // 净化 AI 标题（剥 HTML、去换行、中和 @提及、截断 120）
+    let title = sanitizeAiTitle((lines[0] || '').replace(/^#+\s*/, '').trim()) || fallbackTitle;
     if (!/^\[(Feature|Bug|Enhancement)\]/.test(title)) {
       const prefix = /bug|fix/i.test(classification || '') ? '[Bug] ' : '[Feature] ';
       title = prefix + title.replace(/^\[[^\]]*\]\s*/, '');
     }
-    const body = lines.slice(1).join('\n').trim();
+    // 净化 AI 正文（剥 HTML/@提及/链接白名单、截断 4000）
+    const body = sanitizeAiText(lines.slice(1).join('\n').trim());
     return { title, body };
   }
 
+  /**
+   * 汇总 AI 提炼的要点为评论文本段。要点内容源自不可信 issue/PR（经 LLM 转述），
+   * 会被模板拼进归并评论 / canonical 关联记录 / PR 正文关联块并沉淀进语料，
+   * 因此这里对 AI 生成段落统一净化（模板骨架「要点：/要做的事：」为受控部分，不净化）。
+   */
   formatSummary(key, todos) {
-    const lines = [`要点：${key || '(未提炼出明确要点)'}`];
+    // 只净化 AI 生成的「要点」一句话与每条待办项（模板行本身来自受控代码）
+    const safeKey = sanitizeAiText(key || '', { maxLength: 500 });
+    const lines = [`要点：${safeKey || '(未提炼出明确要点)'}`];
     if (todos.length > 0) {
       lines.push('要做的事：');
-      todos.forEach(item => lines.push(`- ${item}`));
+      todos.forEach(item => lines.push(`- ${sanitizeAiText(String(item ?? ''), { maxLength: 500 })}`));
     }
     return lines.join('\n');
   }
@@ -453,7 +466,12 @@ class IssueGovernanceService {
             cited: fabricated.join(' ')
           }));
         } else {
-          let text = this.withLogLine(this.withBotPrefix(review), 'governance_well_formed_comment');
+          // AI 正文在引用闸门之后、发布之前统一净化（HTML/@提及/链接白名单），
+          // 不碰 #N 数字引用，避免破坏闸门已校验的编号
+          let text = this.withLogLine(
+            this.withBotPrefix(sanitizeAiText(review)),
+            'governance_well_formed_comment'
+          );
           if (relatedHistory.length > 0) {
             // 有引用历史时服务端确定性追加一行指引（与 PR 评审评论同约定）
             text = `${text}\n\n${this.config.responses.governance_history_reference_note}`;

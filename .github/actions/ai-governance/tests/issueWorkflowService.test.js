@@ -2,6 +2,9 @@ const baseConfig = require('../config.json');
 const { applyLocale } = require('../src/utils/config');
 const IssueWorkflowService = require('../src/services/issueWorkflowService');
 
+// callAI 对 429/5xx/网络错误做指数退避重试；测试注入 0ms 延迟加速（见 tests/ai.test.js）
+process.env.AI_RETRY_DELAY_MS = '0';
+
 function buildConfig() {
   const config = JSON.parse(JSON.stringify(baseConfig));
   applyLocale(config, 'zh-CN');
@@ -130,6 +133,52 @@ describe('IssueWorkflowService 构造函数与 fetchReadmeContent', () => {
     const comment = octokit.rest.issues.createComment.mock.calls[0][0].body;
     expect(comment).toContain('根据项目文档');
     expect(comment).toContain('请参考 README 的配置章节');
+  });
+
+  test('UNCLEAR 智能回答注入：AI 回答带 <script> 与 @user 时发布前被净化（前缀保留）', async () => {
+    const config = buildConfig();
+    const readmeText = '# 使用文档\n\n如何配置网关：……';
+    const openai = makeOpenai([
+      'BUG',
+      'UNCLEAR',
+      'HELPFUL_ANSWER: 请参考 README <script>alert(1)</script>章节，紧急联系 @admin：[点我](https://evil.example.com/help)'
+    ]);
+    const octokit = makeOctokit();
+    octokit.rest.repos.getReadme = jest.fn().mockResolvedValue({
+      data: { content: Buffer.from(readmeText, 'utf8').toString('base64') }
+    });
+    const svc = new IssueWorkflowService(octokit, openai, 'model', config);
+
+    await svc.classifyAndHandleIssue('o', 'r', issue, qualityAnalysis, labelsList);
+
+    const comment = octokit.rest.issues.createComment.mock.calls[0][0].body;
+    // 前缀（受控模板）保留，AI 段落净化：script 删除、@提及中和、第三方链接降级
+    expect(comment).toContain(config.responses.unclear_answer_prefix.trim());
+    expect(comment).not.toContain('<script');
+    expect(comment).not.toContain('alert(1)');
+    expect(comment).toContain('@ admin');
+    expect(comment).not.toContain('](https://evil.example.com/help)');
+  });
+
+  test('README 覆盖回答注入：AI 回答带 @user 时发布前被中和（README_COVERED 路径）', async () => {
+    const config = buildConfig();
+    const readmeText = '# 使用文档\n\n支持 xxx。';
+    // handleReadmeRelatedIssue 只调一次 AI：generateReadmeAnswer
+    const openai = makeOpenai(['答案在此，详见 @maintainer 的说明']);
+    const octokit = makeOctokit();
+    octokit.rest.repos.getReadme = jest.fn().mockResolvedValue({
+      data: { content: Buffer.from(readmeText, 'utf8').toString('base64') }
+    });
+    const svc = new IssueWorkflowService(octokit, openai, 'model', config);
+
+    // README_COVERED：handleReadmeRelatedIssue → generateReadmeAnswer → addReadmeAnswer
+    const result = await svc.handleReadmeRelatedIssue('o', 'r', issue, readmeText);
+
+    expect(result).toBe(true);
+    const comment = octokit.rest.issues.createComment.mock.calls[0][0].body;
+    expect(comment).toContain(config.responses.readme_answer_prefix.trim());
+    expect(comment).toContain('@ maintainer');
+    expect(comment).not.toContain('@maintainer');
   });
 
   test('无 README（getReadme 404）：fetchReadmeContent 返回 null，回落标准提示', async () => {

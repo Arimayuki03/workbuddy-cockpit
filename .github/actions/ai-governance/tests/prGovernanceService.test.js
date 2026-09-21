@@ -5,6 +5,9 @@ const { PR_LINK_ANCHOR } = PrGovernanceService;
 const IssueGovernanceService = require('../src/services/issueGovernanceService');
 const { GOVERNANCE_DECISIONS } = require('../src/utils/constants');
 
+// callAI 对 429/5xx/网络错误做指数退避重试；测试注入 0ms 延迟加速（见 tests/ai.test.js）
+process.env.AI_RETRY_DELAY_MS = '0';
+
 function buildConfig() {
   const config = JSON.parse(JSON.stringify(baseConfig));
   applyLocale(config, 'zh-CN');
@@ -92,6 +95,28 @@ describe('PrGovernanceService', () => {
     expect(ops.updateIssueState).not.toHaveBeenCalled();
     const stateClose = ops.updatePullRequest.mock.calls.find(c => c[4] && c[4].state === 'closed');
     expect(stateClose).toBeUndefined();
+  });
+
+  test('PR 标题规范化注入：AI 起草的标题带 <script>/换行/@user 时写回前被净化', async () => {
+    const config = buildConfig();
+    // extract -> merge_match(NEW_TOPIC，语料为空跳过) -> draft canonical -> title 起草
+    const openai = makeOpenai([
+      '```json\n{"要点":"加缓存","要做的事":[]}\n```',
+      'DUPLICATE(#57)',
+      'feat: add caching\n\n<script>alert(1)</script>\nby @someone'
+    ]);
+    const ops = makeOps({ canonicalItems: [{ number: 57, title: '缓存', body: '...' }] });
+    const svc = new PrGovernanceService(openai, 'model', config, { dryRun: false }, ops);
+
+    await svc.govern({}, 'o', 'r', pr, 'enhancement');
+
+    // 写回 PR 的标题：去换行成单行、script 连内容删除、@提及中和
+    const titleCall = ops.updatePullRequest.mock.calls.find(c => c[4] && c[4].title);
+    expect(titleCall).toBeTruthy();
+    expect(titleCall[4].title).toBe('feat: add caching by @ someone');
+    expect(titleCall[4].title).not.toContain('<script');
+    expect(titleCall[4].title).not.toContain('alert');
+    expect(titleCall[4].title).not.toContain('\n');
   });
 
   test('匹配成功但标题已规范：不改标题，仅追加正文 + 评论', async () => {
@@ -231,9 +256,9 @@ describe('PrGovernanceService', () => {
 
   test('AI 失败（要点提炼抛错）：向上抛出，由 handler 兜底放行，不做任何写操作', async () => {
     const config = buildConfig();
-    const openai = makeOpenai([new Error('AI 挂了')]);
-    openai._create.mockReset();
-    openai._create.mockRejectedValueOnce(new Error('AI 挂了'));
+    const openai = makeOpenai();
+    // 持续失败（重试耗尽后原样抛出最后一次错误）：callAI 现在对无状态码错误重试 3 次
+    openai._create.mockRejectedValue(new Error('AI 挂了'));
     const ops = makeOps({ canonicalItems: [] });
     const svc = new PrGovernanceService(openai, 'model', config, { dryRun: false }, ops);
 

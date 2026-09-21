@@ -1,3 +1,6 @@
+// callAI 对 429/5xx/网络错误做指数退避重试；测试注入 0ms 延迟加速（见 tests/ai.test.js）
+process.env.AI_RETRY_DELAY_MS = '0';
+
 const baseConfig = require('../config.json');
 const { applyLocale } = require('../src/utils/config');
 const ScreeningService = require('../src/services/screeningService');

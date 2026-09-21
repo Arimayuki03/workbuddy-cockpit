@@ -1,5 +1,6 @@
 const core = require('@actions/core');
 const { logMessage } = require('../utils/helpers');
+const { sanitizeAiText } = require('../utils/sanitize');
 const { callAIStructured } = require('./ai');
 const { PR_REVIEW_DECISIONS, GOVERNANCE_DEFAULTS } = require('../utils/constants');
 const ScreeningService = require('./screeningService');
@@ -486,6 +487,10 @@ class PrReviewService {
       core.warning(logMessage(this.config.logging.pr_review_citation_rejected, { number }));
       return null;
     }
+
+    // AI 正文在引用闸门之后、发布之前统一净化（HTML/@提及/链接白名单）；
+    // sanitizeAiText 不改 #N 数字引用，闸门已校验的编号与下方追加指引的判断保持完整
+    comment = sanitizeAiText(comment);
 
     // 有引用历史时服务端确定性追加一行指引（不依赖模型自觉）
     if ((String(comment).match(/#(\d+)/g) || []).length > 0) {

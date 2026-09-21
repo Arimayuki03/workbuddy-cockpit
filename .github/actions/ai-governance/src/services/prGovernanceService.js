@@ -1,5 +1,6 @@
 const core = require('@actions/core');
 const { logMessage, isValidCommitTitle } = require('../utils/helpers');
+const { sanitizeAiTitle } = require('../utils/sanitize');
 const { callAI } = require('./ai');
 const { GOVERNANCE_DECISIONS, GOVERNANCE_DEFAULTS } = require('../utils/constants');
 const IssueGovernanceService = require('./issueGovernanceService');
@@ -211,7 +212,11 @@ class PrGovernanceService {
       })
     };
     try {
-      const newTitle = (await callAI(this.openai, this.aiModel, request, this.config, 'PR 标题规范化', false)).trim();
+      // AI 起草的标题直接写回 PR（公开字段）：过 sanitizeAiTitle 剥 HTML/去换行/中和 @提及
+      const newTitle = sanitizeAiTitle(
+        (await callAI(this.openai, this.aiModel, request, this.config, 'PR 标题规范化', false)),
+        { maxLength: 200 }
+      ).trim();
       if (newTitle && newTitle !== original) {
         core.info(logMessage(this.config.logging.governance_pr_title_rewrite, { number: pr.number, title: newTitle }));
         return newTitle;
