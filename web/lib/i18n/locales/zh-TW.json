@@ -188,6 +188,7 @@
   "stats": {
     "title": "用量統計",
     "description": "依時間、模型與金鑰維度統計 Token 消耗與請求量（每 60 秒自動重新整理；目前只統計{realm}）",
+    "today": "今日",
     "last7": "近 7 天",
     "last30": "近 30 天",
     "last90": "近 90 天",
@@ -216,6 +217,7 @@
     "topModel": "主力模型 {model}",
     "distributing": "分布中",
     "tokenTrend": "Token 消耗趨勢",
+    "dailyAggToday": "當日彙總",
     "dailyAgg": "依天彙總",
     "noUsageData": "暫無用量資料",
     "byModel": "依模型",

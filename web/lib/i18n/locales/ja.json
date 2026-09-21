@@ -188,6 +188,7 @@
   "stats": {
     "title": "使用量",
     "description": "期間・モデル・キー別に Token 消費量とリクエスト数を集計（60 秒ごとに自動更新。現在は{realm}のみ）",
+    "today": "今日",
     "last7": "直近 7 日",
     "last30": "直近 30 日",
     "last90": "直近 90 日",
@@ -216,6 +217,7 @@
     "topModel": "主力モデル {model}",
     "distributing": "分散中",
     "tokenTrend": "Token 消費の推移",
+    "dailyAggToday": "当日集計",
     "dailyAgg": "日次集計",
     "noUsageData": "使用量データがありません",
     "byModel": "モデル別",

@@ -26,6 +26,12 @@ def _clamp_days(days: int | None, default: int) -> int:
 
 
 def _since(days: int) -> str:
+    """这段时间范围的**起始日期**（本地时区，含首日）。
+
+    语义是「近 N 天」且**含今天**：`days=1` 正好就是「今天一天」（起始日 = 今天），
+    `days=7` 是今天与前 6 天。所以界面上的「今日」传 1 就够，不必另开参数——
+    趋势图、按模型、按密钥三处与时段选择器因此天然同一口径（issue #53）。
+    """
     d = _clamp_days(days, 30)
     return time.strftime('%Y-%m-%d', time.localtime(time.time() - (d - 1) * 86400))
 

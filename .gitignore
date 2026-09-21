@@ -73,6 +73,9 @@ dev/.admin-flow
 # 白名单校验验收（verify_whitelist_hint.py）的临时数据与截图
 dev/.wl-hint
 dev/.shots-wl
+# 用量页「默认今日」验收（verify_stats_today_ui.py）的临时数据与截图
+dev/.stats-today
+dev/.shots-stats
 
 # 安全测试脚本（临时）
 .sec*.py
