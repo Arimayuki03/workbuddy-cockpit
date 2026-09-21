@@ -138,6 +138,21 @@ class IssueGovernanceService {
   }
 
   /**
+   * 为规范 issue 生成 AI 评审评论：感谢 + 分析认可 + 实现方案 + 后续邀请 PR。
+   * 输入中的 title/body 均为不可信数据，作者与编号由服务端注入，避免模板被伪造。
+   * @returns {Promise<string|null>} AI 生成的评论文本，失败时返回 null 由调用方兜底
+   */
+  async draftWellFormedReview(issue) {
+    const { title, body } = splitTitleBody(issue);
+    const request = {
+      instructions: this.config.prompts.governance_well_formed_review,
+      input: JSON.stringify({ title, body, author: issue.user?.login || 'unknown', number: issue.number })
+    };
+    const raw = await callAI(this.openai, this.aiModel, request, this.config, '生成规范 issue 评审评论', false);
+    return String(raw || '').trim() || null;
+  }
+
+  /**
    * 第四步（仅新主题非规范时）：起草规范化 canonical issue。
    */
   async draftCanonical(issue, keyPoints, classification) {
@@ -281,7 +296,7 @@ class IssueGovernanceService {
     if (classification) {
       labels.push(classification);
     }
-    const comment = this.render('governance_well_formed_comment', { summary });
+    const comment = await this.buildWellFormedComment(issue, summary);
 
     if (this.gov.dryRun) {
       await this.postDryRun(octokit, owner, repo, issue, comment, `无需重开，仅打标 ${labels.join(',')}`);
@@ -293,6 +308,42 @@ class IssueGovernanceService {
 
     core.info(logMessage(this.config.logging.governance_well_formed, { number }));
     return { decision: 'WELL_FORMED', promoted: true };
+  }
+
+  /**
+   * 规范 issue 的评论内容：优先用 AI 生成「分析认可 + 实现方案 + 后续」的实质性评审；
+   * AI 失败时回落到既有固定模板，保证流程永不中断（宁可漏判、不可误关精神）。
+   * 两种路径都统一追加机器人操作日志行，用户仍能识别这是机器人评论。
+   */
+  async buildWellFormedComment(issue, summary) {
+    try {
+      const review = await this.draftWellFormedReview(issue);
+      if (review) {
+        return this.withLogLine(this.withBotPrefix(review), 'governance_well_formed_comment');
+      }
+    } catch (error) {
+      core.warning(logMessage(this.config.logging.governance_review_failed, {
+        number: issue.number,
+        error: error.message
+      }));
+    }
+    return this.render('governance_well_formed_comment', { summary });
+  }
+
+  /**
+   * 给 AI 生成的评论补上机器人操作日志行（与 render() 的尾部行为保持一致）。
+   */
+  withLogLine(text, action) {
+    return `${text}\n\n${logMessage(this.config.responses.governance_log_prefix, { action })}`;
+  }
+
+  /**
+   * 确保 AI 评审评论以 🤖 开头（与固定模板一致）：
+   * 机器人身份标记由服务端确定性保证，不依赖模型自觉。
+   */
+  withBotPrefix(text) {
+    const trimmed = String(text || '').trim();
+    return trimmed.startsWith('🤖') ? trimmed : `🤖 ${trimmed}`;
   }
 
   async routeNormalize(octokit, owner, repo, issue, summary, keyPoints, classification) {
