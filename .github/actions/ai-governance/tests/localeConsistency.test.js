@@ -115,6 +115,31 @@ describe('locale/config key consistency', () => {
     );
     expect(missing).toEqual([]);
   });
+
+  test('R7 死键守卫：config.json 的 prompts/logging 无「定义了但全库零引用」的键（漂移即失败）', () => {
+    const srcDir = path.join(__dirname, '..', 'src');
+    const files = walk(srcDir).filter(f => f.endsWith('.js'));
+    const allSrc = files.map(f => fs.readFileSync(f, 'utf8')).join('\n');
+    // 其它测试文件共同构成「有人在用」的证据（测试引用也算引用）
+    const testDir = path.join(__dirname);
+    const allTests = walk(testDir)
+      .filter(f => f.endsWith('.js') && !f.endsWith('localeConsistency.test.js'))
+      .map(f => fs.readFileSync(f, 'utf8')).join('\n');
+    const corpus = allSrc + '\n' + allTests;
+
+    const dead = [];
+    for (const key of Object.keys(baseConfig.prompts)) {
+      if (!corpus.includes(key)) {
+        dead.push(`prompts.${key}`);
+      }
+    }
+    for (const key of Object.keys(baseConfig.logging)) {
+      if (!corpus.includes(key)) {
+        dead.push(`logging.${key}`);
+      }
+    }
+    expect(dead).toEqual([]);
+  });
 });
 
 function walk(dir) {
