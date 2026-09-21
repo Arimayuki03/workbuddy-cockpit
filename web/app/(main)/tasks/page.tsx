@@ -427,10 +427,11 @@ export default function TasksPage() {
                         size="sm"
                         className="h-7 rounded-full text-[11px]"
                         onClick={() => {
-                          setSelectedUid(it.uid);
+                          // 再点一次同一账号视为收起：回到全部视图（与下拉选择器的行为互补）
+                          setSelectedUid((prev) => (prev === it.uid ? 'all' : it.uid));
                         }}
                       >
-                        {t('tasks.viewDetail')}
+                        {selectedUid === it.uid ? t('tasks.collapseDetail') : t('tasks.viewDetail')}
                       </Button>
                     </div>
                   )}

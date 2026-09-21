@@ -13,6 +13,7 @@
     "manualCopy": "Long-press to select and copy manually",
     "close": "Close",
     "loading": "Loading…",
+    "search": "Search",
     "listSeparator": ", ",
     "save": "Save",
     "yes": "Yes",
@@ -62,11 +63,13 @@
     "systemSettings": "System settings",
     "quickLinks": "Quick links",
     "uiReference": "UI reference",
+    "upstream": "Upstream project",
+    "upstreamTitle": "workbuddy2api: the upstream gateway project behind this panel",
     "community": "LINUX DO community",
     "communityTitle": "This project is published and discussed in the LINUX DO community",
     "help": "Help",
-    "about": "About WorkBuddy Manager",
-    "aboutDesc": "WorkBuddy Manager is an account-pool console and OpenAI-compatible gateway built for workbuddy2api, with QR onboarding for multiple accounts, automatic check-in, key distribution, IP control and usage statistics.",
+    "about": "About WorkBuddy Cockpit",
+    "aboutDesc": "WorkBuddy Cockpit is a self-hosted all-in-one solution: a multi-account OpenAI-compatible gateway with a built-in web management panel, supporting multi-account QR onboarding, automatic check-in, task automation, key distribution and usage statistics.",
     "versionFallback": " (runtime version unavailable)",
     "logout": "Sign out",
     "logoutTitle": "Sign out?",
@@ -76,7 +79,8 @@
     "light": "Light mode",
     "dark": "Dark mode",
     "switchToDark": "Switch to dark mode",
-    "switchToLight": "Switch to light mode"
+    "switchToLight": "Switch to light mode",
+    "movedToToolbar": "The theme switch has moved to the top-right corner, next to the language switch"
   },
   "dock": {
     "tipTitle": "Menu bar guide",
@@ -169,6 +173,8 @@
       "one": "{n} needs attention",
       "other": "{n} need attention"
     },
+    "manualDisabledHint": "{n} account(s) manually disabled",
+    "mixedHint": "Disabled {m} · Abnormal {n}",
     "waitingUpstream": "Waiting for upstream sync",
     "creditsLow": "{n} accounts below 200",
     "creditsCovered": "Across {n} accounts",
@@ -236,7 +242,13 @@
     "nativeNote": "From /v1/stats, cleared on restart; long-term trend lives in the buckets above",
     "cacheHit": "Cache hit",
     "byAccount": "By account",
-    "seriesNote": "{hours} hourly points; older data folded into days"
+    "seriesNote": "{hours} hourly points; older data folded into days",
+    "legendTokens": "Tokens",
+    "legendRequests": "Requests",
+    "legendErrors": "Failures",
+    "axisTokens": "Tokens (left axis)",
+    "axisRequests": "Requests (right axis)",
+    "chartEmptyRange": "No usage in the selected range"
   },
   "accounts": {
     "title": "Accounts",
@@ -434,7 +446,12 @@
     "sysEmptyDesc": "System logs are a ring buffer (last 500 lines) and are cleared on restart",
     "limitLabel": "Limit",
     "requestsNote": "Request logs are a ring buffer (about the last 1000 entries, cleared on restart); filter here. Long-term usage lives on the Usage page.",
-    "systemNote": "Three channels (task / chat / system), last 500 lines, oldest first."
+    "systemNote": "Three channels (task / chat / system), last 500 lines; filter by channel, search content, and toggle time order.",
+    "searchPlaceholder": "Search log content…",
+    "searchModel": "Search models…",
+    "sortTime": "Sort by time",
+    "sortAsc": "Oldest first",
+    "sortDesc": "Newest first"
   },
   "security": {
     "title": "Security & IP control",
@@ -524,6 +541,7 @@
     "loadFailed": "Failed to load",
     "noModels": "No models",
     "noModelsDesc": "No model came back from the Tencent model API or upstream. Check that the account is usable and the upstream container is running.",
+    "emptyForRealm": "No models available for the current realm ({realm}): the account pool needs a {realm} account, and (for the global realm) global.enabled must be turned on in the config",
     "noMatch": "No matching model",
     "noMatchDesc": "Try another keyword or clear the filters.",
     "colModel": "Model",
@@ -577,8 +595,8 @@
     "noModels": "No model available — check the Models page",
     "sessionCreditTitle": "Credits consumed in this session (each reply comes from upstream usage.credit)",
     "sessionCredit": "{v} used",
-    "footnote1": "The playground is for debugging only (uses the console session, bypassing keys and IP control)",
-    "footnote2": "For production use, issue a wbk_ key on the API keys page",
+    "footnote1": "The playground is for debugging only (uses the console session and really consumes account credits)",
+    "footnote2": "For production use, call the gateway with the api_key from config.json as the Bearer token",
     "footnote3": "Unsupported reasoning tiers are downgraded automatically upstream"
   },
   "effort": {
@@ -721,7 +739,8 @@
     "colResult": "Result",
     "colStatus": "Status",
     "kindSchool": "Campaign",
-    "viewDetail": "Details"
+    "viewDetail": "Details",
+    "collapseDetail": "Collapse details"
   },
   "addAccount": {
     "title": "Add Tencent account · {realm}",
@@ -732,7 +751,8 @@
     "regionOption": "{label} ({code})",
     "regionHint": "You can scan without picking one, but the account stays in “region not registered” state; come back and pick one if chat reports 14017.",
     "requesting": "Requesting an authorization link from Tencent…",
-    "waiting": "Waiting for authorisation (open the link and sign in with a browser, or scan the code; phone-number sign-in also works)…",
+    "waitingCn": "Waiting for authorisation (open the link and sign in in a browser, or scan the code; phone-number sign-in also works)…",
+    "waitingGlobal": "Waiting for authorisation (open the link and sign in with Google etc., or scan the code; new global accounts need to pick a region to finish registration)…",
     "success": "Account “{name}” authorized",
     "successUpdated": "Account “{name}” authorized (updated)",
     "successGlobal": "The Global-edition account joined the pool (no check-in there; credits come from the one-off trial)",

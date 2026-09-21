@@ -13,6 +13,7 @@
     "manualCopy": "長押しで選択して手動でコピーできます",
     "close": "閉じる",
     "loading": "読み込み中…",
+    "search": "検索",
     "listSeparator": "、",
     "save": "保存",
     "yes": "はい",
@@ -63,11 +64,13 @@
     "systemSettings": "システム設定",
     "quickLinks": "クイックリンク",
     "uiReference": "UI リファレンス",
+    "upstream": "上流プロジェクト",
+    "upstreamTitle": "workbuddy2api：本パネルの上流ゲートウェイプロジェクト",
     "community": "LINUX DO コミュニティ",
     "communityTitle": "本プロジェクトは LINUX DO コミュニティで公開・議論されています",
     "help": "ヘルプ",
-    "about": "WorkBuddy Manager について",
-    "aboutDesc": "WorkBuddy Manager は workbuddy2api 向けのアカウントプール管理と OpenAI 互換リバースプロキシゲートウェイです。複数アカウントの QR 取り込み、自動チェックイン、キー配布、IP 制御、使用量統計に対応します。",
+    "about": "WorkBuddy Cockpit について",
+    "aboutDesc": "WorkBuddy Cockpit はセルフホストのオールインワンソリューションです。マルチアカウントの OpenAI 互換ゲートウェイと内蔵 Web 管理パネルを備え、複数アカウントの QR 取り込み、自動チェックイン、タスク自動化、キー配布、使用量統計に対応します。",
     "versionFallback": "（実行中のバージョンを取得できませんでした）",
     "logout": "ログアウト",
     "logoutTitle": "ログアウトしますか？",
@@ -82,7 +85,8 @@
     "light": "ライトモード",
     "dark": "ダークモード",
     "switchToDark": "ダークモードに切り替え",
-    "switchToLight": "ライトモードに切り替え"
+    "switchToLight": "ライトモードに切り替え",
+    "movedToToolbar": "テーマ切り替えはページ右上（言語切り替えの隣）に移動しました"
   },
   "dock": {
     "tipTitle": "メニューバーの案内",
@@ -153,6 +157,8 @@
     "valid": "有効期限内",
     "allOk": "すべて正常",
     "abnormal": "{n} 件の異常",
+    "manualDisabledHint": "ほかに {n} 件のアカウントが手動で無効化されています",
+    "mixedHint": "無効 {m} 件 · 異常 {n} 件",
     "needRefresh": "1 時間未満・要更新",
     "noRisk": "リスクなし",
     "waitingUpstream": "上流の同期を待機中",
@@ -225,7 +231,13 @@
     "tokenHint": "{v} Token",
     "usageHealthTitle": "使用量統計が正しく累積されていない可能性があります",
     "usageHealthDetail": "本日すでに {n} 件の呼び出し記録がありますが、使用量統計は 0 です——統計が正しく書き込まれていない可能性があります。「統計を修復」を試し、それでも 0 ならサーバーログをご確認ください。",
-    "failedHint": "本日 {n} 件失敗（上のリクエスト数には含まれません）"
+    "failedHint": "本日 {n} 件失敗（上のリクエスト数には含まれません）",
+    "legendTokens": "Token 使用量",
+    "legendRequests": "リクエスト数",
+    "legendErrors": "失敗数",
+    "axisTokens": "Token（左軸）",
+    "axisRequests": "リクエスト（右軸）",
+    "chartEmptyRange": "選択した範囲の使用量はまだありません"
   },
   "accounts": {
     "title": "アカウント管理",
@@ -428,7 +440,13 @@
     "notCollected": "未取得（非ストリーミング）",
     "noCredit": "上流が返していません",
     "unbilled": "（課金なし）",
-    "copyField": "{field}をコピー"
+    "copyField": "{field}をコピー",
+    "searchPlaceholder": "ログ内容を検索…",
+    "searchModel": "モデルを検索…",
+    "sortTime": "時刻順",
+    "sortAsc": "古い順",
+    "sortDesc": "新しい順",
+    "systemNote": "タスク / チャット / システムの 3 チャンネル、直近 500 行。チャンネル絞り込み・内容検索・時刻昇順/降順の切り替えに対応。"
   },
   "security": {
     "title": "セキュリティと IP 制御",
@@ -523,6 +541,7 @@
     "loadFailed": "読み込みに失敗しました",
     "noModels": "モデルがありません",
     "noModelsDesc": "Tencent モデル API からも上流からもモデルを取得できませんでした。アカウントが利用可能で、上流コンテナが動作しているか確認してください。",
+    "emptyForRealm": "現在のバージョン（{realm}）で利用できるモデルがありません：アカウントプールに {realm} アカウントが必要で、（グローバル版では）config の global.enabled が有効になっている必要があります",
     "noMatch": "一致するモデルがありません",
     "noMatchDesc": "別のキーワードを試すか、絞り込みを解除してください。",
     "colModel": "モデル",
@@ -573,8 +592,8 @@
     "noModels": "モデルを取得できませんでした。「モデル」ページをご確認ください",
     "sessionCreditTitle": "このセッションの累計消費クレジット（各回答は上流 usage.credit より）",
     "sessionCredit": "今回の消費 {v}",
-    "footnote1": "テスト環境はデバッグ専用です（管理端のログイン状態を使い、キーと IP 制御を経由しません）",
-    "footnote2": "本番利用は「API キー」ページで発行した wbk_ キーをお使いください",
+    "footnote1": "テスト環境はデバッグ専用です（管理端のログイン状態を使い、アカウントのクレジットを実際に消費します）",
+    "footnote2": "本番利用では config.json の api_key を Bearer Token としてゲートウェイを呼び出してください",
     "footnote3": "未対応の推論ティアは上流が自動で降格します"
   },
   "effort": {
@@ -733,7 +752,8 @@
     "runLogMpQueryFailed": "[task_runner] {uid} {code}: mp 照会失敗: {err}",
     "runLogOnlyClaimNotCompleted": "[task_runner] {uid} {code}: only_claim スキップ（未 completed）",
     "runLogSchoolNotInPeriod": "[task_runner] {uid} school キャンペーン期間外（in_period=false）、school 区間をスキップ",
-    "runLogSchoolFetchFailed": "[task_runner] {uid} school/tasks 取得失敗: {err}"
+    "runLogSchoolFetchFailed": "[task_runner] {uid} school/tasks 取得失敗: {err}",
+    "collapseDetail": "詳細を折りたたむ"
   },
   "addAccount": {
     "title": "Tencent アカウント追加 · {realm}",
@@ -744,7 +764,8 @@
     "regionOption": "{label}（{code}）",
     "regionHint": "選択しなくてもスキャンできますが、アカウントは「地域未登録」のままになります。チャットで 14017 が出たら戻って選び直してください。",
     "requesting": "Tencent に認証リンクを要求しています…",
-    "waiting": "認証を待っています（リンクをブラウザで開いてログイン、またはスキャン。電話番号ログインも可）…",
+    "waitingCn": "認証を待っています（リンクをブラウザで開いてログイン、またはスキャン。電話番号ログインも可）…",
+    "waitingGlobal": "認証を待っています（リンクを開いて Google などのサードパーティアカウントでログイン、またはスキャン。国際版の新規アカウントは先に地域を選んで登録を完了する必要があります）…",
     "success": "アカウント「{name}」の認証に成功しました",
     "successUpdated": "アカウント「{name}」の認証に成功しました（更新）",
     "successGlobal": "グローバル版アカウントをプールに追加しました（グローバル版にチェックインはなく、クレジットは一度きりの trial のみ）",

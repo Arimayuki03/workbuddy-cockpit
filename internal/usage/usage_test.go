@@ -108,3 +108,41 @@ func TestLifecycleFlush(t *testing.T) {
 		t.Fatalf("Stop 后应有落盘文件: %v", err)
 	}
 }
+
+// series 与 by_model 按 realm 拆分：双域各自出点/出行，同天相邻。
+// 前端「今日 token / 模型表」靠这个维度区分国际版与国内版数据。
+func TestSnapshotRealmDimension(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	// cn 域今天 + 昨天；global 域仅今天。同一天两域各一个点。
+	r.Add(now, "cn", "u1", "glm-5.2", Delta{PromptTokens: 10, HasPromptTokens: true}, true)
+	r.Add(now.Add(-48*time.Hour), "cn", "u1", "glm-5.2", Delta{PromptTokens: 5, HasPromptTokens: true}, true)
+	r.Add(now, "global", "u2", "glm-5.2", Delta{PromptTokens: 7, HasPromptTokens: true}, true)
+
+	s := r.Snapshot(24, nil)
+	// 24h 窗口：昨天的点被折叠为日点（1），今天的两个域各一个小时点（2）。
+	if len(s.Series) != 3 {
+		t.Fatalf("series = %d 个点, want 3（日点 + 双域小时点）", len(s.Series))
+	}
+	if s.Series[0].Realm != "cn" || s.Series[0].Scope != "day" {
+		t.Fatalf("series[0] = %s/%s, want day/cn", s.Series[0].Scope, s.Series[0].Realm)
+	}
+	// 同一天的双域点相邻（realm 升序 cn < global），时间升序保持。
+	if s.Series[1].Realm != "cn" || s.Series[2].Realm != "global" {
+		t.Fatalf("双域小时点应相邻且按域升序: %s, %s", s.Series[1].Realm, s.Series[2].Realm)
+	}
+	if s.Series[1].PromptTokens != 10 || s.Series[2].PromptTokens != 7 {
+		t.Fatalf("series tokens = %d/%d, want 10/7", s.Series[1].PromptTokens, s.Series[2].PromptTokens)
+	}
+
+	// by_model 按 (realm, model) 拆行：同裸名两行，Key 是裸名、Realm 单独标注。
+	if len(s.ByModel) != 2 {
+		t.Fatalf("by_model = %d 行, want 2（双域各一行）", len(s.ByModel))
+	}
+	if s.ByModel[0].Key != "glm-5.2" || s.ByModel[0].Realm == "" {
+		t.Fatalf("by_model[0] = key=%q realm=%q, want 裸名 + realm 标注", s.ByModel[0].Key, s.ByModel[0].Realm)
+	}
+	if s.ByModel[0].Realm == s.ByModel[1].Realm {
+		t.Fatalf("by_model 两行应分属不同 realm: %q/%q", s.ByModel[0].Realm, s.ByModel[1].Realm)
+	}
+}

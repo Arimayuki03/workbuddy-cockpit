@@ -769,7 +769,12 @@ export default function SettingsPage() {
       const upstash = root.upstash as {url?: string; has_token?: boolean; token_masked?: string} | undefined;
       setUpstashForm({url: upstash?.url || '', token: ''});
     }
-    if (mm.status === 'fulfilled') setModelMap(mm.value ?? {});
+    if (mm.status === 'fulfilled') {
+      // 后端响应是 {ok, map} 信封（session.go handleGetModelMap）：
+      // 存整个信封会让「模型映射」表格把嵌套对象当行数据渲染，点击标签页即
+      // React 崩溃（Objects are not valid as a React child）——必须拆出 map。
+      setModelMap(mm.value?.map ?? {});
+    }
     if (up.status === 'fulfilled') setUpdate(up.value);
   }, []);
 
@@ -901,8 +906,10 @@ export default function SettingsPage() {
 
   async function saveModelMap(next: Record<string, string>) {
     try {
-      await settingsApi.saveModelMap(next);
-      setModelMap(next);
+      // 响应同为 {ok, map} 信封：以服务端回传的生效表为准（写盘失败时
+      // ok=false 且错误已由 errText 提示，但内存已生效——回显不撒谎）。
+      const res = await settingsApi.saveModelMap(next);
+      setModelMap(res?.map ?? next);
       notify.ok(t('settings.modelMapSaved'));
     } catch (e) {
       notify.err(errText(e));

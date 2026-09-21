@@ -19,7 +19,6 @@ import {
   FolderGit2,
   ChevronRight,
 } from 'lucide-react';
-import {useThemeUtils} from '@/hooks/use-theme-utils';
 import {useAuth} from '@/lib/auth-context';
 import {accountApi, settingsApi} from '@/lib/api';
 import {useT} from '@/lib/i18n/provider';
@@ -73,13 +72,7 @@ type StoredDockPosition = DockPosition & {
 
 type DockPositions = Partial<Record<DockViewport, StoredDockPosition>>;
 
-const SystemTheme = {
-  LIGHT: 'light',
-  DARK: 'dark',
-} as const;
-
 export function ManagementBar() {
-  const themeUtils = useThemeUtils();
   const {me, isAdmin, logout} = useAuth();
   const t = useT();
   const [mounted, setMounted] = useState(false);
@@ -591,18 +584,9 @@ export function ManagementBar() {
                           <div className="space-y-2">
                             <div className="text-[11px] font-medium text-muted-foreground">{t('profile.systemSettings')}</div>
                             <div className="flex flex-wrap items-center gap-2">
-                              <button
-                                type="button"
-                                onClick={themeUtils.toggle}
-                                className="inline-flex items-center gap-2 rounded-full bg-muted px-3 py-2 transition-colors hover:bg-muted/80"
-                              >
-                                <div className="flex items-center gap-2">
-                                  {themeUtils.getIcon('size-3.5 text-foreground/60')}
-                                  <span className="text-xs font-medium text-foreground">
-                                    {themeUtils.getSystemTheme() === SystemTheme.LIGHT ? t('theme.light') : t('theme.dark')}
-                                  </span>
-                                </div>
-                              </button>
+                              <span className="text-[11px] text-muted-foreground/70">
+                                {t('theme.movedToToolbar')}
+                              </span>
                             </div>
                           </div>
                         )}
@@ -629,11 +613,12 @@ export function ManagementBar() {
                         href="https://github.com/Sliverkiss/workbuddy2api"
                         target="_blank"
                         rel="noopener noreferrer"
+                        title={t('profile.upstreamTitle')}
                         className="inline-flex items-center gap-2 rounded-full bg-muted px-3 py-2 transition-colors hover:bg-muted/80"
                       >
                         <div className="flex items-center gap-2">
                           <FolderGit2 className="size-3.5 text-foreground/60" />
-                          <span className="text-xs font-medium text-foreground">workbuddy2api</span>
+                          <span className="text-xs font-medium text-foreground">{t('profile.upstream')}</span>
                         </div>
                       </Link>
                       <Link

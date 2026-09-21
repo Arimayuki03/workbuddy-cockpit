@@ -58,11 +58,31 @@ export default function AccountsPage() {
   /** 每账号的积分包明细（到期倒计时用） */
   const [creditPacks, setCreditPacks] = useState<Record<string, CreditPackage[]>>({});
 
+  /**
+   * 首次加载：overview（池快照）与 packages（实时余额）并行发、都落定后
+   * 一次性写入。分开写会让积分先渲染池快照值、约 1 秒后被实时值覆盖，
+   * 界面上数字闪一下——快照只是 packages 失败时的降级，不该先出来。
+   */
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await accountApi.overview();
-      setAccounts(r.accounts ?? []);
+      const [ov, pk] = await Promise.allSettled([accountApi.overview(), accountApi.packages()]);
+      // packages 拉取失败时静默降级：仍显示池快照的 credits（原始语义）
+      if (pk.status === 'fulfilled') {
+        const credits: Record<string, number> = {};
+        const packs: Record<string, CreditPackage[]> = {};
+        for (const row of pk.value.accounts) {
+          packs[row.uid] = row.packages ?? [];
+          if (typeof row.remain === 'number' && !row.error) credits[row.uid] = row.remain;
+        }
+        setLiveCredits(credits);
+        setCreditPacks(packs);
+      }
+      if (ov.status === 'fulfilled') {
+        setAccounts(ov.value.accounts ?? []);
+      } else {
+        throw ov.reason;
+      }
     } catch (e) {
       notify.err(errText(e));
     } finally {
@@ -74,32 +94,9 @@ export default function AccountsPage() {
     load();
   }, [load]);
 
-  // 打开页面时自动拉积分包明细：池快照的 credits 可能滞后数小时，
-  // 首次进入应展示真实余额。失败静默——退回池快照值。
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const r = await accountApi.packages();
-        if (!alive) return;
-        const credits: Record<string, number> = {};
-        const packs: Record<string, CreditPackage[]> = {};
-        for (const row of r.accounts) {
-          packs[row.uid] = row.packages ?? [];
-          if (typeof row.remain === 'number' && !row.error) credits[row.uid] = row.remain;
-        }
-        setLiveCredits(credits);
-        setCreditPacks(packs);
-      } catch {
-        /* 静默失败 */
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  // 池状态（冷却 / 成功计数等）会随时间变化，页面停留时定时刷新
+  // 池状态（冷却 / 成功计数等）会随时间变化，页面停留时定时刷新。
+  // 心跳沿用同一个 load：packages 会跟着重拉，accounts 与实时余额仍然
+  // 同帧落定，不会出现「先渲染旧积分再替换」的闪变路径。
   useHeartbeat(load, 30000);
 
   /** 全量刷新余额：同步等待（完成后池内 credits 即最新值） */
@@ -542,11 +539,6 @@ export default function AccountsPage() {
           <div className="py-16 text-center text-xs text-muted-foreground">{t('common.loading')}</div>
         )}
       </section>
-
-      {/* 任务中心入口 */}
-      <div className="flex flex-wrap items-center gap-2 px-1 text-[11px] text-muted-foreground">
-        <span>{t('accounts.movedTo')}</span>
-      </div>
 
       <AddAccountDialog open={addOpen} onOpenChange={setAddOpen} onSuccess={load} />
     </div>

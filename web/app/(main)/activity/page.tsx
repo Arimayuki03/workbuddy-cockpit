@@ -91,7 +91,11 @@ export default function ActivityPage() {
     setLoading(true);
     try {
       const r = await schoolApi.status();
-      setAccounts(r.accounts ?? []);
+      // 后端对 global 账号、任务查询出错的账号返回的 tasks 是 null（JSON 序列化成 null，
+      // 类型声明上仍是数组），先归一化成空数组，避免渲染层 a.tasks.every 抛 TypeError 崩页
+      setAccounts(
+        (r.accounts ?? []).map((a) => ({...a, tasks: a.tasks ?? [], chances: a.chances ?? 0})),
+      );
     } catch (e) {
       notify.err(errText(e));
     } finally {

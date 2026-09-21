@@ -149,19 +149,29 @@ export default function DashboardPage() {
     };
   }, [upstream, overview, realm]);
 
+  /**
+   * series 点按当前版本过滤。桶在后端按 (realm, scope) 聚合并带 realm 标注：
+   * 有标注按标注过滤；无标注只可能是历史存量（新数据恒有标注，后端 Add()
+   * 已把空 realm 回落为 cn），归入 cn——不能两边都算，否则双版本重复计数。
+   */
+  const realmSeries = useMemo(
+    () => (usage?.series ?? []).filter((p) => (p.realm ?? 'cn') === realm),
+    [usage, realm],
+  );
+
   // 时序图：近 14 个日点；今天已有小时点时改用逐小时点（更细）。
   // panel 的 series 是「日点升序 + 小时点升序」拼成的连续时序。
   const chartData = useMemo(() => {
     if (!usage) return [];
     const now = new Date();
     const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-    const dayPoints = usage.series.filter((p) => p.scope === 'day').slice(-14);
+    const dayPoints = realmSeries.filter((p) => p.scope === 'day').slice(-14);
     const dayData = dayPoints.map((p) => ({
       day: p.t.slice(5),
       requests: p.requests,
       tokens: p.total_tokens,
     }));
-    const hourPoints = usage.series.filter(
+    const hourPoints = realmSeries.filter(
       (p) => p.scope === 'hour' && p.t.startsWith(todayKey),
     );
     if (!hourPoints.length) return dayData;
@@ -171,14 +181,14 @@ export default function DashboardPage() {
       tokens: p.total_tokens,
     }));
     return [...dayData, ...todayHourly].slice(-24);
-  }, [usage]);
+  }, [usage, realmSeries]);
 
   /** 今日用量（日点或小时点聚合） */
   const todayUsage = useMemo(() => {
     if (!usage) return {requests: 0, tokens: 0, credit: 0};
     const now = new Date();
     const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-    const hourPoints = usage.series.filter((p) => p.scope === 'hour' && p.t.startsWith(todayKey));
+    const hourPoints = realmSeries.filter((p) => p.scope === 'hour' && p.t.startsWith(todayKey));
     if (hourPoints.length) {
       return hourPoints.reduce(
         (acc, p) => ({
@@ -189,13 +199,18 @@ export default function DashboardPage() {
         {requests: 0, tokens: 0, credit: 0},
       );
     }
-    const todayDay = usage.series.find((p) => p.scope === 'day' && p.t === todayKey);
+    const todayDay = realmSeries.find((p) => p.scope === 'day' && p.t === todayKey);
     return todayDay
       ? {requests: todayDay.requests, tokens: todayDay.total_tokens, credit: 0}
       : {requests: 0, tokens: 0, credit: 0};
-  }, [usage]);
+  }, [usage, realmSeries]);
 
   const valid = scoped.filter((a) => !a.disabled && !a.manual_disabled).length;
+  // 「非有效」的细分：manual_disabled 是运维手动停用——用户自己的决定，不算
+  // 异常（口径同 account-status 的分档）；disabled 且非手动停用才是真异常。
+  // 两集合恰好把差值切分干净，供 hint 分开说「停用」与「异常」。
+  const manualN = scoped.filter((a) => a.manual_disabled).length;
+  const abnormalN = scoped.filter((a) => a.disabled && !a.manual_disabled).length;
   // 积分余额合计（仅统计已同步到的账号）
   const credOf = (a: Account) => liveCredits[a.uid] ?? a.credits;
   const creditsKnown = scoped.filter((a) => typeof credOf(a) === 'number');
@@ -230,7 +245,13 @@ export default function DashboardPage() {
               ? t('dashboard.unusable', {count: unusable, n: unusable})
               : valid === scoped.length
                 ? t('dashboard.allOk')
-                : t('dashboard.abnormal', {count: scoped.length - valid, n: scoped.length - valid})
+                : manualN > 0 && abnormalN > 0
+                  ? // 停用与真实异常并存：合并成一条，明确各自数量
+                    t('dashboard.mixedHint', {m: manualN, n: abnormalN})
+                  : manualN > 0
+                    ? // 手动停用是用户自己的决定，明确说「停用」而不笼统说「异常」
+                      t('dashboard.manualDisabledHint', {n: manualN})
+                    : t('dashboard.abnormal', {count: abnormalN, n: abnormalN})
           }
           icon={CircleCheck}
           tone={unusable > 0 ? 'warning' : 'success'}

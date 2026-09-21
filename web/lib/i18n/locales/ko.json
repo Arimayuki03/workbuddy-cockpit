@@ -13,6 +13,7 @@
     "manualCopy": "길게 눌러 선택한 뒤 직접 복사할 수 있습니다",
     "close": "닫기",
     "loading": "불러오는 중…",
+    "search": "검색",
     "listSeparator": ", ",
     "save": "저장",
     "yes": "예",
@@ -63,11 +64,13 @@
     "systemSettings": "시스템 설정",
     "quickLinks": "빠른 링크",
     "uiReference": "UI 참고",
+    "upstream": "업스트림 프로젝트",
+    "upstreamTitle": "workbuddy2api: 이 패널의 업스트림 게이트웨이 프로젝트",
     "community": "LINUX DO 커뮤니티",
     "communityTitle": "이 프로젝트는 LINUX DO 커뮤니티에서 공개되고 논의됩니다",
     "help": "도움말",
-    "about": "WorkBuddy Manager 정보",
-    "aboutDesc": "WorkBuddy Manager는 workbuddy2api를 위한 계정 풀 관리 및 OpenAI 호환 리버스 프록시 게이트웨이로, 여러 계정의 QR 등록, 자동 출석, 키 배포, IP 제어, 사용량 통계를 지원합니다.",
+    "about": "WorkBuddy Cockpit 정보",
+    "aboutDesc": "WorkBuddy Cockpit은 셀프호스팅 올인원 솔루션입니다. 다중 계정 OpenAI 호환 게이트웨이와 내장 웹 관리 패널을 갖추고, 여러 계정의 QR 등록, 자동 출석, 작업 자동화, 키 배포, 사용량 통계를 지원합니다.",
     "versionFallback": " (실행 중인 버전을 가져오지 못했습니다)",
     "logout": "로그아웃",
     "logoutTitle": "로그아웃하시겠습니까?",
@@ -82,7 +85,8 @@
     "light": "라이트 모드",
     "dark": "다크 모드",
     "switchToDark": "다크 모드로 전환",
-    "switchToLight": "라이트 모드로 전환"
+    "switchToLight": "라이트 모드로 전환",
+    "movedToToolbar": "테마 전환은 페이지 오른쪽 위(언어 전환 옆)로 이동했습니다"
   },
   "dock": {
     "tipTitle": "메뉴 바 안내",
@@ -153,6 +157,8 @@
     "valid": "유효 기간 내",
     "allOk": "모두 정상",
     "abnormal": "{n}개 이상",
+    "manualDisabledHint": "다른 {n}개의 계정이 수동으로 비활성화되었습니다",
+    "mixedHint": "비활성화 {m} · 비정상 {n}개",
     "needRefresh": "1시간 미만 · 갱신 필요",
     "noRisk": "위험 없음",
     "waitingUpstream": "업스트림 동기화 대기 중",
@@ -225,7 +231,13 @@
     "tokenHint": "{v} Token",
     "usageHealthTitle": "사용량 통계가 정상적으로 누적되지 않았을 수 있습니다",
     "usageHealthDetail": "오늘 이미 {n}건의 호출 기록이 있지만 사용량 통계는 0입니다. 통계가 정상적으로 기록되지 않았을 수 있습니다. '통계 복구'를 시도하고, 계속 0이면 서버 로그를 확인하세요.",
-    "failedHint": "오늘 {n}건 실패 (위 요청 수에 포함되지 않음)"
+    "failedHint": "오늘 {n}건 실패 (위 요청 수에 포함되지 않음)",
+    "legendTokens": "Token 사용량",
+    "legendRequests": "요청 수",
+    "legendErrors": "실패 수",
+    "axisTokens": "Token(왼쪽 축)",
+    "axisRequests": "요청(오른쪽 축)",
+    "chartEmptyRange": "선택한 기간에 사용량이 없습니다"
   },
   "accounts": {
     "title": "계정 관리",
@@ -428,7 +440,13 @@
     "notCollected": "수집되지 않음 (비스트리밍 요청)",
     "noCredit": "업스트림 미반환",
     "unbilled": " (과금 없음)",
-    "copyField": "{field} 복사"
+    "copyField": "{field} 복사",
+    "searchPlaceholder": "로그 내용 검색…",
+    "searchModel": "모델 검색…",
+    "sortTime": "시간 정렬",
+    "sortAsc": "오래된 순",
+    "sortDesc": "최신 순",
+    "systemNote": "작업 / 대화 / 시스템 3채널, 최근 500줄; 채널 필터, 내용 검색, 시간 순서 전환을 지원합니다."
   },
   "security": {
     "title": "보안 및 IP 제어",
@@ -523,6 +541,7 @@
     "loadFailed": "불러오기 실패",
     "noModels": "모델이 없습니다",
     "noModelsDesc": "Tencent 모델 API와 업스트림 모두에서 모델을 가져오지 못했습니다. 계정이 사용 가능하고 업스트림 컨테이너가 실행 중인지 확인하세요.",
+    "emptyForRealm": "현재 버전({realm})에서 사용 가능한 모델이 없습니다: 계정 풀에 {realm} 계정이 필요하고, (글로벌 버전의 경우) config에서 global.enabled가 켜져 있어야 합니다",
     "noMatch": "일치하는 모델이 없습니다",
     "noMatchDesc": "다른 키워드를 입력하거나 필터를 해제해 보세요.",
     "colModel": "모델",
@@ -573,8 +592,8 @@
     "noModels": "모델을 가져오지 못했습니다. 모델 페이지를 확인하세요",
     "sessionCreditTitle": "이 세션에서 누적 소모한 크레딧 (각 답변은 업스트림 usage.credit 기준)",
     "sessionCredit": "이번 소모 {v}",
-    "footnote1": "테스트 환경은 디버깅 전용입니다 (관리 콘솔 로그인 상태를 사용하며 키와 IP 제어를 거치지 않습니다)",
-    "footnote2": "실제 연동에는 'API 키' 페이지에서 발급한 wbk_ 키를 사용하세요",
+    "footnote1": "테스트 환경은 디버깅 전용입니다 (관리 콘솔 로그인 상태를 사용하며 계정 크레딧을 실제로 소모합니다)",
+    "footnote2": "실제 연동에는 config.json의 api_key를 Bearer Token으로 사용해 게이트웨이를 호출하세요",
     "footnote3": "지원하지 않는 추론 단계는 업스트림이 자동으로 낮춥니다"
   },
   "effort": {
@@ -733,7 +752,8 @@
     "runLogMpQueryFailed": "[task_runner] {uid} {code}: mp 조회 실패: {err}",
     "runLogOnlyClaimNotCompleted": "[task_runner] {uid} {code}: only_claim 건너뜀(completed 아님)",
     "runLogSchoolNotInPeriod": "[task_runner] {uid} school 이벤트 기간 아님(in_period=false), school 구간 건너뜀",
-    "runLogSchoolFetchFailed": "[task_runner] {uid} school/tasks 가져오기 실패: {err}"
+    "runLogSchoolFetchFailed": "[task_runner] {uid} school/tasks 가져오기 실패: {err}",
+    "collapseDetail": "상세 접기"
   },
   "addAccount": {
     "title": "Tencent 계정 추가 · {realm}",
@@ -744,7 +764,8 @@
     "regionOption": "{label}({code})",
     "regionHint": "선택하지 않아도 스캔할 수 있지만 계정은 '지역 미등록' 상태로 남습니다. 채팅에서 14017이 나오면 돌아와 다시 선택하세요.",
     "requesting": "Tencent에 인증 링크를 요청하는 중…",
-    "waiting": "인증 대기 중입니다(링크를 브라우저에서 열어 로그인하거나 스캔하세요. 휴대폰 번호 로그인도 가능)…",
+    "waitingCn": "인증 대기 중입니다(링크를 브라우저에서 열어 로그인하거나 스캔하세요. 휴대폰 번호 로그인도 가능)…",
+    "waitingGlobal": "인증 대기 중입니다(링크를 열어 Google 등 서드파티 계정으로 로그인하거나 스캔하세요. 글로벌 신규 계정은 먼저 지역을 선택해 등록을 완료해야 합니다)…",
     "success": "계정 '{name}' 인증 성공",
     "successUpdated": "계정 '{name}' 인증 성공 (갱신됨)",
     "successGlobal": "글로벌 버전 계정이 풀에 추가되었습니다 (글로벌 버전에는 출석이 없고 크레딧은 일회성 trial에서만 제공됩니다)",

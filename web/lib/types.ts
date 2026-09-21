@@ -463,7 +463,8 @@ export interface UsageAgg {
 /** 按维度聚合的一行（key + 可选 realm / 昵称） */
 export interface UsageKeyedAgg extends UsageAgg {
   key: string;
-  realm?: string;
+  /** 该行所属域（by_model / by_account 标注）；缺失 = 历史存量数据（按 cn 处理） */
+  realm?: RealmType;
   /** 账号行放昵称 */
   extra?: string;
 }
@@ -473,6 +474,8 @@ export interface UsageSeriesPoint extends UsageAgg {
   t: string;
   /** hour | day */
   scope: string;
+  /** 该点所属域；缺失 = 历史存量数据（按 cn 处理，与后端 Add() 回落口径一致） */
+  realm?: RealmType;
 }
 
 /** GET /api/usage?hours=（panel usage.Snapshot 原样） */
@@ -604,6 +607,17 @@ export interface UpstashTestResponse {
 
 /** GET /api/settings/model-map（后端 server.ModelMapView：生效映射表副本） */
 export type ModelMap = Record<string, string>;
+
+/**
+ * GET/POST /api/settings/model-map 的响应信封（panel session.go）：
+ * POST 失败（写盘出错）时 ok=false，map 仍回内存已生效的表。
+ */
+export interface ModelMapResponse {
+  ok: boolean;
+  /** 错误信息（仅失败时出现） */
+  error?: string;
+  map: ModelMap;
+}
 
 /**
  * GET /api/system/check-update（后端 internal/server/version.go）。

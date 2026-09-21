@@ -361,9 +361,13 @@ type KeyedAgg struct {
 }
 
 // Point 时序上的一个点。
+// Realm 标注该点属于哪个域（cn/global），前端据此把「今日 token / 趋势图」
+// 按版本拆分——没有它，国际版和国内版会看到同一份聚合（桶本身带 realm，
+// 但 series 聚合时丢掉了这个维度）。omitted（旧消费方/历史数据）= 无标注。
 type Point struct {
 	T     string `json:"t"`
 	Scope string `json:"scope"` // "hour" | "day"
+	Realm string `json:"realm,omitempty"`
 	Agg
 }
 
@@ -401,7 +405,11 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 	realmAgg := map[string]*aggAcc{}
 	acctAgg := map[string]*aggAcc{}
 	acctRealm := map[string]string{}
+	// 模型行按时序同样要分域：同一裸模型名在两个域是两份用量，
+	// 内部键用 realm|model 拆桶，输出时 Key=裸名、Realm=域（见 keyed 调用处）。
 	modelAgg := map[string]*aggAcc{}
+	// series 与桶同构地按 (realm, scope) 分桶：key = realm|scope。
+	// 同一时刻两个域各有一个点，输出时相邻（先按 key 排序天然满足）。
 	hourSeries := map[string]*aggAcc{}
 	daySeries := map[string]*aggAcc{}
 
@@ -427,10 +435,10 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 			acctRealm[b.UID] = b.Realm
 		}
 
-		if modelAgg[b.Model] == nil {
-			modelAgg[b.Model] = &aggAcc{}
+		if modelAgg[b.Realm+"|"+b.Model] == nil {
+			modelAgg[b.Realm+"|"+b.Model] = &aggAcc{}
 		}
-		modelAgg[b.Model].add(b)
+		modelAgg[b.Realm+"|"+b.Model].add(b)
 
 		scope := strings.TrimPrefix(b.Scope, "h:")
 		isHour := strings.HasPrefix(b.Scope, "h:")
@@ -440,23 +448,23 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 				continue
 			}
 			if !ts.Before(hourFrom) {
-				if hourSeries[scope] == nil {
-					hourSeries[scope] = &aggAcc{}
+				if hourSeries[b.Realm+"|"+scope] == nil {
+					hourSeries[b.Realm+"|"+scope] = &aggAcc{}
 				}
-				hourSeries[scope].add(b)
+				hourSeries[b.Realm+"|"+scope].add(b)
 			} else {
 				// 超出小时窗口的细粒度数据并入其所在日，避免时序出现空洞。
 				d := ts.Format(dayLayout)
-				if daySeries[d] == nil {
-					daySeries[d] = &aggAcc{}
+				if daySeries[b.Realm+"|"+d] == nil {
+					daySeries[b.Realm+"|"+d] = &aggAcc{}
 				}
-				daySeries[d].add(b)
+				daySeries[b.Realm+"|"+d].add(b)
 			}
 		} else {
-			if daySeries[scope] == nil {
-				daySeries[scope] = &aggAcc{}
+			if daySeries[b.Realm+"|"+scope] == nil {
+				daySeries[b.Realm+"|"+scope] = &aggAcc{}
 			}
-			daySeries[scope].add(b)
+			daySeries[b.Realm+"|"+scope].add(b)
 		}
 	}
 
@@ -466,7 +474,15 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 		ByAccount: keyed(acctAgg, func(k string) (string, string) {
 			return k, nicks[k]
 		}),
-		ByModel:   keyed(modelAgg, func(k string) (string, string) { return k, "" }),
+		// 内部键是 realm|model：Key 输出裸模型名（与旧口径一致，不破坏消费方），
+		// realm 单独放 Realm 字段（omitempty，前端 (realm ?? 'cn') 过滤）。
+		ByModel: keyedRealm(modelAgg, func(k string) (string, string) {
+			_, model := modelRealmOf(k)
+			return model, ""
+		}, func(k string) string {
+			rlm, _ := modelRealmOf(k)
+			return rlm
+		}),
 		Buckets:   len(bs),
 		Generated: time.Now().Format(time.RFC3339),
 	}
@@ -474,14 +490,16 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 		snap.ByAccount[i].Realm = acctRealm[snap.ByAccount[i].Key]
 	}
 
-	// 日点（升序）+ 小时点（升序）拼成一条连续时序。
+	// 日点（升序）+ 小时点（升序）拼成一条连续时序；key 为 realm|时间片，
+	// 排序后同一天的相邻点即相邻 realm（同天同域相邻，跨域点穿插但不乱序）。
 	dayKeys := make([]string, 0, len(daySeries))
 	for k := range daySeries {
 		dayKeys = append(dayKeys, k)
 	}
 	sort.Strings(dayKeys)
 	for _, k := range dayKeys {
-		snap.Series = append(snap.Series, Point{T: k, Scope: "day", Agg: daySeries[k].finish()})
+		rlm, day := modelRealmOf(k)
+		snap.Series = append(snap.Series, Point{T: day, Scope: "day", Realm: rlm, Agg: daySeries[k].finish()})
 	}
 	hourKeys := make([]string, 0, len(hourSeries))
 	for k := range hourSeries {
@@ -489,7 +507,8 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 	}
 	sort.Strings(hourKeys)
 	for _, k := range hourKeys {
-		snap.Series = append(snap.Series, Point{T: k, Scope: "hour", Agg: hourSeries[k].finish()})
+		rlm, hour := modelRealmOf(k)
+		snap.Series = append(snap.Series, Point{T: hour, Scope: "hour", Realm: rlm, Agg: hourSeries[k].finish()})
 	}
 
 	if r.path != "" {
@@ -504,11 +523,28 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 	return snap
 }
 
+// modelRealmOf 拆开 realm|xxx 形态的内部聚合键，返回 (realm, xxx)。
+// 与桶键的分隔符同款：realm 名不含 "|"（取值仅 cn/global），无歧义。
+func modelRealmOf(key string) (string, string) {
+	rlm, rest, _ := strings.Cut(key, "|")
+	return rlm, rest
+}
+
 func keyed(m map[string]*aggAcc, label func(string) (string, string)) []KeyedAgg {
+	return keyedRealm(m, label, nil)
+}
+
+// keyedRealm 在 keyed 之上支持 realmOf：内部键含 realm 维度（如 realm|model）时，
+// 输出行按 realmOf 还原 Realm 字段——Key 仍走 label（裸名），Realm 单独透出。
+func keyedRealm(m map[string]*aggAcc, label func(string) (string, string), realmOf func(string) string) []KeyedAgg {
 	out := make([]KeyedAgg, 0, len(m))
 	for k, v := range m {
 		key, extra := label(k)
-		out = append(out, KeyedAgg{Key: key, Extra: extra, Agg: v.finish()})
+		row := KeyedAgg{Key: key, Extra: extra, Agg: v.finish()}
+		if realmOf != nil {
+			row.Realm = realmOf(k)
+		}
+		out = append(out, row)
 	}
 	// 按总量降序；同量按 key 升序，保证输出稳定（前端 diff 不抖）。
 	sort.Slice(out, func(i, j int) bool {

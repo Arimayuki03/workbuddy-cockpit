@@ -13,6 +13,7 @@
     "manualCopy": "可長按選取後手動複製",
     "close": "關閉",
     "loading": "載入中…",
+    "search": "搜尋",
     "listSeparator": "、",
     "save": "儲存",
     "yes": "是",
@@ -63,11 +64,13 @@
     "systemSettings": "系統設定",
     "quickLinks": "快速連結",
     "uiReference": "UI 參考",
+    "upstream": "上游專案",
+    "upstreamTitle": "workbuddy2api：本面板的上游閘道專案",
     "community": "LINUX DO 社群",
     "communityTitle": "本專案在 LINUX DO 社群發布與交流",
     "help": "說明",
-    "about": "關於 WorkBuddy Manager",
-    "aboutDesc": "WorkBuddy Manager 是為 workbuddy2api 打造的帳號池管理與 OpenAI 相容反向代理閘道，支援多帳號掃碼納管、自動簽到、金鑰派發、IP 管控與用量統計。",
+    "about": "關於 WorkBuddy Cockpit",
+    "aboutDesc": "WorkBuddy Cockpit 是自架的一體化方案：多帳號 OpenAI 相容閘道 + 內嵌 Web 管理面板，支援多帳號掃碼納管、自動簽到、任務自動化、金鑰派發與用量統計。",
     "versionFallback": "（未取得執行版本）",
     "logout": "登出",
     "logoutTitle": "確定要登出嗎？",
@@ -82,7 +85,8 @@
     "light": "淺色模式",
     "dark": "深色模式",
     "switchToDark": "切換深色模式",
-    "switchToLight": "切換淺色模式"
+    "switchToLight": "切換淺色模式",
+    "movedToToolbar": "深淺色切換已移至頁面右上角（語言切換旁）"
   },
   "dock": {
     "tipTitle": "選單列引導",
@@ -153,6 +157,8 @@
     "valid": "有效期內",
     "allOk": "全部正常",
     "abnormal": "{n} 個異常",
+    "manualDisabledHint": "另有 {n} 個帳號已手動停用",
+    "mixedHint": "停用 {m} 個 · 異常 {n} 個",
     "needRefresh": "<1h 需重新整理",
     "noRisk": "暫無風險",
     "waitingUpstream": "等待上游同步",
@@ -225,7 +231,13 @@
     "tokenHint": "{v} Token",
     "usageHealthTitle": "用量統計可能沒有正常累計",
     "usageHealthDetail": "今天已有 {n} 次呼叫記錄，但用量統計為 0——統計可能沒有正常寫入。可嘗試「修復統計」；若仍為 0，請查看伺服器日誌。",
-    "failedHint": "今日失敗 {n} 次（不計入上方請求數）"
+    "failedHint": "今日失敗 {n} 次（不計入上方請求數）",
+    "legendTokens": "Token 用量",
+    "legendRequests": "請求數",
+    "legendErrors": "失敗數",
+    "axisTokens": "Token（左軸）",
+    "axisRequests": "請求（右軸）",
+    "chartEmptyRange": "所選時間範圍內暫無用量"
   },
   "accounts": {
     "title": "帳號管理",
@@ -428,7 +440,13 @@
     "notCollected": "未擷取（非串流請求）",
     "noCredit": "上游未回傳",
     "unbilled": "（未計費）",
-    "copyField": "複製{field}"
+    "copyField": "複製{field}",
+    "searchPlaceholder": "搜尋日誌內容…",
+    "searchModel": "搜尋模型…",
+    "sortTime": "時間排序",
+    "sortAsc": "時間正序（舊→新）",
+    "sortDesc": "時間倒序（新→舊）",
+    "systemNote": "任務 / 對話 / 系統三頻道，最近 500 行；支援頻道篩選、內容搜尋與時間正/倒序切換。"
   },
   "security": {
     "title": "安全與 IP 管控",
@@ -523,6 +541,7 @@
     "loadFailed": "讀取失敗",
     "noModels": "暫無模型",
     "noModelsDesc": "未從騰訊模型介面或上游取得任何模型，請確認帳號可用且上游容器正在執行。",
+    "emptyForRealm": "目前版本（{realm}）暫無可用模型：需帳號池裡有 {realm} 帳號，且（國際版）config 已開啟 global.enabled",
     "noMatch": "沒有符合的模型",
     "noMatchDesc": "換個關鍵字或清除篩選條件試試。",
     "colModel": "模型",
@@ -573,8 +592,8 @@
     "noModels": "未取得模型，請檢查「模型中心」",
     "sessionCreditTitle": "本次工作階段累計消耗的積分（每則回答來自上游 usage.credit）",
     "sessionCredit": "本次消耗 {v}",
-    "footnote1": "測試台僅用於除錯（走管理端登入狀態，不經金鑰與 IP 管控）",
-    "footnote2": "正式接入請用「API 金鑰」頁簽發的 wbk_ 金鑰",
+    "footnote1": "測試台僅用於除錯（走管理端登入狀態，真實消耗帳號點數）",
+    "footnote2": "正式接入請用 config.json 的 api_key 作為 Bearer Token 呼叫閘道",
     "footnote3": "不支援的推理檔位上游會自動降級"
   },
   "effort": {
@@ -733,7 +752,8 @@
     "runLogMpQueryFailed": "[task_runner] {uid} {code}: mp 查詢失敗: {err}",
     "runLogOnlyClaimNotCompleted": "[task_runner] {uid} {code}: only_claim 跳過（未 completed）",
     "runLogSchoolNotInPeriod": "[task_runner] {uid} school 活動非進行期（in_period=false），school 段跳過",
-    "runLogSchoolFetchFailed": "[task_runner] {uid} school/tasks 拉取失敗: {err}"
+    "runLogSchoolFetchFailed": "[task_runner] {uid} school/tasks 拉取失敗: {err}",
+    "collapseDetail": "收起明細"
   },
   "addAccount": {
     "title": "新增騰訊帳號 · {realm}",
@@ -744,7 +764,8 @@
     "regionOption": "{label}（{code}）",
     "regionHint": "不選也可掃碼，但帳號會停留在「未註冊地區」狀態，聊天回報 14017 時需回來重選。",
     "requesting": "正在向騰訊申請授權連結…",
-    "waiting": "等待授權完成（打開連結在瀏覽器裡登入，或掃碼；手機號登入也可以）…",
+    "waitingCn": "等待授權完成（打開連結在瀏覽器裡登入，或掃碼；手機號登入也可以）…",
+    "waitingGlobal": "等待授權完成（打開連結用 Google 等第三方帳號登入，或掃碼；國際版新號需先選地區完成註冊）…",
     "success": "帳號「{name}」授權成功",
     "successUpdated": "帳號「{name}」授權成功（已更新）",
     "successGlobal": "國際版帳號已加入帳號池（國際版無簽到，積分來自一次性 trial）",
