@@ -18,8 +18,10 @@ func TestAdminEnabledWithoutKeyFailsFast(t *testing.T) {
 	if err == nil {
 		t.Fatal("admin.enabled=true + 空 api_key 应拒绝启动（fail-fast）")
 	}
-	if !strings.Contains(err.Error(), "admin") || !strings.Contains(err.Error(), "api_key") {
-		t.Errorf("错误文案应同时点到 admin 与 api_key, got %q", err.Error())
+	// api_key 无条件必填（README「至少设置 api_key」）后，空 key 在 normalize 的
+	// 无条件校验先被拦（错误文案点名 api_key）；admin 专项文案保留为启动入口兜底。
+	if !strings.Contains(err.Error(), "api_key") {
+		t.Errorf("错误文案应点到 api_key, got %q", err.Error())
 	}
 }
 
@@ -33,13 +35,14 @@ func TestAdminEnabledWithKeyOK(t *testing.T) {
 	}
 }
 
-// TestAdminDisabledWithoutKeyOK 对照组：admin 未开时空 api_key 仍合法（现状语义不变）。
-func TestAdminDisabledWithoutKeyOK(t *testing.T) {
+// TestAdminDisabledWithKeyOK 对照组：admin 未开且 key 非空 → 正常加载。
+// （api_key 无条件必填后「admin 关 + 空 key」组合已不合法，原对照用例随之退役。）
+func TestAdminDisabledWithKeyOK(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"api_key":"","admin":{"enabled":false}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","admin":{"enabled":false}}`), 0o600)
 	if _, err := Load(fp); err != nil {
-		t.Fatalf("admin 关 + 空 key 应通过: %v", err)
+		t.Fatalf("admin 关 + key 非空应通过: %v", err)
 	}
 }
 

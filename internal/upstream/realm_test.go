@@ -294,6 +294,8 @@ func TestEffortsKeyedByRealm(t *testing.T) {
 		GlobalEnabled:      true,
 		SanitizeFingerprints: true,
 	}
+	// 清洗开关读侧走 HotFields 快照：结构体直赋后需 SyncHot 物化。
+	c.SyncHot()
 	cn := &auth.Auth{AccessToken: "at", UID: "cn1", Domain: "www.codebuddy.cn"}
 
 	// step 1：CN 探测写 cn 桶（glm-5.2 → [low, medium]）。

@@ -9,6 +9,7 @@ import (
 
 func TestDefault(t *testing.T) {
 	c := Default()
+	c.APIKey = "k" // api_key 无条件必填：normalize 校验需要非空 key
 	if c.Listen != ":7863" {
 		t.Errorf("listen=%s", c.Listen)
 	}
@@ -48,7 +49,7 @@ func TestEnvOverride(t *testing.T) {
 func TestBadDuration(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"cooldown":{"soft_rate":"not-a-duration"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","cooldown":{"soft_rate":"not-a-duration"}}`), 0o600)
 	if _, err := Load(fp); err == nil {
 		t.Fatal("want error for bad duration")
 	}
@@ -58,7 +59,7 @@ func TestHardCreditKeyIgnored(t *testing.T) {
 	// 退役的 hard_credit 键作为 JSON 未知字段被自然忽略，不报错。
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"cooldown":{"hard_credit":"not-a-duration","soft_rate":"30s"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","cooldown":{"hard_credit":"not-a-duration","soft_rate":"30s"}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatalf("hard_credit must be ignored (not validated): %v", err)
@@ -70,6 +71,7 @@ func TestHardCreditKeyIgnored(t *testing.T) {
 
 func TestNewPoolConfigDefaults(t *testing.T) {
 	c := Default()
+	c.APIKey = "k" // api_key 无条件必填：normalize 校验需要非空 key
 	if err := c.normalize(); err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
@@ -108,7 +110,7 @@ func TestNewPoolConfigDefaults(t *testing.T) {
 func TestPoolConfigParsedFromFile(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{
+	os.WriteFile(fp, []byte(`{"api_key":"k",
 		"upstash":{"url":"https://foo.upstash.io","token":"tok"},
 		"pool":{
 			"max_in_flight":5,
@@ -151,7 +153,7 @@ func TestPoolConfigParsedFromFile(t *testing.T) {
 func TestSoftRateMaxParsedFromFile(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"cooldown":{"soft_rate":"5m","soft_rate_max":"45m"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","cooldown":{"soft_rate":"5m","soft_rate_max":"45m"}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +170,7 @@ func TestSoftRateMaxEmptyFallsBackToDefault(t *testing.T) {
 	// 键缺席 → Default() 的 2h 保留（空串无法 ParseDuration）。
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"cooldown":{"soft_rate":"90s"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","cooldown":{"soft_rate":"90s"}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +183,7 @@ func TestSoftRateMaxEmptyFallsBackToDefault(t *testing.T) {
 func TestBadSoftRateMax(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"cooldown":{"soft_rate_max":"oops"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","cooldown":{"soft_rate_max":"oops"}}`), 0o600)
 	if _, err := Load(fp); err == nil {
 		t.Fatal("want error for bad soft_rate_max")
 	}
@@ -190,7 +192,7 @@ func TestBadSoftRateMax(t *testing.T) {
 func TestBadBreakerCooldown(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"pool":{"breaker_cooldown":"oops"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","pool":{"breaker_cooldown":"oops"}}`), 0o600)
 	if _, err := Load(fp); err == nil {
 		t.Fatal("want error for bad breaker_cooldown")
 	}
@@ -199,6 +201,7 @@ func TestBadBreakerCooldown(t *testing.T) {
 func TestUpstreamTimeoutDefaults(t *testing.T) {
 	// 默认：header 回落 timeout，idle 回落 300。
 	c := Default()
+	c.APIKey = "k" // api_key 无条件必填：normalize 校验需要非空 key
 	if err := c.normalize(); err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
@@ -217,7 +220,7 @@ func TestUpstreamHeaderFallsBackToTimeout(t *testing.T) {
 	// 只设 timeout_seconds：header 回落同值，idle 回落 300。
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"upstream":{"timeout_seconds":60}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","upstream":{"timeout_seconds":60}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
@@ -233,7 +236,7 @@ func TestUpstreamHeaderFallsBackToTimeout(t *testing.T) {
 func TestUpstreamExplicitHeaderIdle(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"upstream":{"timeout_seconds":120,"header_timeout_seconds":30,"idle_timeout_seconds":600}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","upstream":{"timeout_seconds":120,"header_timeout_seconds":30,"idle_timeout_seconds":600}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
@@ -247,6 +250,7 @@ func TestUpstreamExplicitHeaderIdle(t *testing.T) {
 }
 
 func TestUpstreamEnvOverride(t *testing.T) {
+	t.Setenv("WB2A_API_KEY", "k") // api_key 无条件必填：纯默认加载也需非空 key
 	t.Setenv("WB2A_HEADER_TIMEOUT_SECONDS", "45")
 	t.Setenv("WB2A_IDLE_TIMEOUT_SECONDS", "900")
 	c, err := Load("")
@@ -265,7 +269,7 @@ func TestUpstreamEnvOverride(t *testing.T) {
 func TestRetiredTravelIntervalKeyIgnored(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"schedule":{"travel_interval_minutes":15,"checkin_hours":[9]}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","schedule":{"travel_interval_minutes":15,"checkin_hours":[9]}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatalf("retired key should not fail load: %v", err)
@@ -279,6 +283,7 @@ func TestRetiredTravelIntervalKeyIgnored(t *testing.T) {
 // 老 config 不写这些键，行为必须与从前完全一致。
 func TestScheduleEnabledByDefault(t *testing.T) {
 	c := Default()
+	c.APIKey = "k" // api_key 无条件必填：normalize 校验需要非空 key
 	if err := c.normalize(); err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
@@ -313,7 +318,7 @@ func TestScheduleEnabledByDefault(t *testing.T) {
 func TestScheduleLegacyConfigKeepsRunning(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"schedule":{"checkin_hours":[9,21],"keepalive_hours":[22]}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","schedule":{"checkin_hours":[9,21],"keepalive_hours":[22]}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
@@ -350,7 +355,7 @@ func TestScheduleLegacyConfigKeepsRunning(t *testing.T) {
 func TestScheduleExplicitDisable(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"schedule":{"checkin_enabled":false,"keepalive_enabled":false}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","schedule":{"checkin_enabled":false,"keepalive_enabled":false}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
@@ -371,7 +376,7 @@ func TestScheduleExplicitDisable(t *testing.T) {
 func TestScheduleTravelActivityExplicitDisable(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"schedule":{"travel_enabled":false,"activity_enabled":false}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","schedule":{"travel_enabled":false,"activity_enabled":false}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
@@ -395,10 +400,10 @@ func TestScheduleTravelActivityExplicitDisable(t *testing.T) {
 // TestScheduleTravelActivityInvalidHoursRejected 旅行/活跃非法小时报错并指向正确开关。
 func TestScheduleTravelActivityInvalidHoursRejected(t *testing.T) {
 	cases := []struct{ body, wantSwitch string }{
-		{`{"schedule":{"travel_hours":[25]}}`, "travel_enabled"},
-		{`{"schedule":{"travel_hours":[-1]}}`, "travel_enabled"},
-		{`{"schedule":{"activity_hours":[24]}}`, "activity_enabled"},
-		{`{"schedule":{"activity_hours":[-1]}}`, "activity_enabled"},
+		{`{"api_key":"k","schedule":{"travel_hours":[25]}}`, "travel_enabled"},
+		{`{"api_key":"k","schedule":{"travel_hours":[-1]}}`, "travel_enabled"},
+		{`{"api_key":"k","schedule":{"activity_hours":[24]}}`, "activity_enabled"},
+		{`{"api_key":"k","schedule":{"activity_hours":[-1]}}`, "activity_enabled"},
 	}
 	for _, tc := range cases {
 		dir := t.TempDir()
@@ -418,7 +423,7 @@ func TestScheduleTravelActivityInvalidHoursRejected(t *testing.T) {
 func TestScheduleTravelActivityExplicitHours(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"schedule":{"travel_hours":[9,21],"activity_hours":[11]}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","schedule":{"travel_hours":[9,21],"activity_hours":[11]}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
@@ -435,7 +440,7 @@ func TestScheduleTravelActivityExplicitHours(t *testing.T) {
 func TestScheduleDisableKeepsExplicitHours(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"schedule":{"checkin_enabled":false,"checkin_hours":[10,14]}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","schedule":{"checkin_enabled":false,"checkin_hours":[10,14]}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
@@ -451,10 +456,10 @@ func TestScheduleDisableKeepsExplicitHours(t *testing.T) {
 // TestScheduleEmptyHoursFallsBackToDefault 空数组 / null / 缺省都视同「未配置」→ 回落默认。
 func TestScheduleEmptyHoursFallsBackToDefault(t *testing.T) {
 	cases := map[string]string{
-		"absent":   `{}`,
-		"empty":    `{"schedule":{}}`,
-		"null":     `{"schedule":{"checkin_hours":null,"keepalive_hours":null,"travel_hours":null,"activity_hours":null}}`,
-		"emptyarr": `{"schedule":{"checkin_hours":[],"keepalive_hours":[],"travel_hours":[],"activity_hours":[]}}`,
+		"absent":   `{"api_key":"k"}`,
+		"empty":    `{"api_key":"k","schedule":{}}`,
+		"null":     `{"api_key":"k","schedule":{"checkin_hours":null,"keepalive_hours":null,"travel_hours":null,"activity_hours":null}}`,
+		"emptyarr": `{"api_key":"k","schedule":{"checkin_hours":[],"keepalive_hours":[],"travel_hours":[],"activity_hours":[]}}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -491,9 +496,9 @@ func TestScheduleEmptyHoursFallsBackToDefault(t *testing.T) {
 // 猜测哨兵值（[-1] 之类）被静默当成"改到别的整点"。
 func TestScheduleInvalidHourRejected(t *testing.T) {
 	cases := []struct{ body, wantSwitch string }{
-		{`{"schedule":{"checkin_hours":[25]}}`, "checkin_enabled"},
-		{`{"schedule":{"checkin_hours":[-1]}}`, "checkin_enabled"},
-		{`{"schedule":{"keepalive_hours":[-1]}}`, "keepalive_enabled"},
+		{`{"api_key":"k","schedule":{"checkin_hours":[25]}}`, "checkin_enabled"},
+		{`{"api_key":"k","schedule":{"checkin_hours":[-1]}}`, "checkin_enabled"},
+		{`{"api_key":"k","schedule":{"keepalive_hours":[-1]}}`, "keepalive_enabled"},
 	}
 	for _, tc := range cases {
 		dir := t.TempDir()
@@ -512,7 +517,7 @@ func TestScheduleInvalidHourRejected(t *testing.T) {
 func TestBadSessionTTL(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"session_sticky":{"ttl":"oops"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","session_sticky":{"ttl":"oops"}}`), 0o600)
 	if _, err := Load(fp); err == nil {
 		t.Fatal("want error for bad session_sticky.ttl")
 	}
@@ -525,7 +530,7 @@ func TestMaxBodyLegacyKeyIgnored(t *testing.T) {
 	for _, v := range []string{"8", "16", "0", "-1"} {
 		dir := t.TempDir()
 		fp := filepath.Join(dir, "c.json")
-		os.WriteFile(fp, []byte(`{"server":{"max_body_mb":`+v+`}}`), 0o600)
+		os.WriteFile(fp, []byte(`{"api_key":"k","server":{"max_body_mb":`+v+`}}`), 0o600)
 		if _, err := Load(fp); err != nil {
 			t.Fatalf("legacy max_body_mb=%s must not fail startup: %v", v, err)
 		}
@@ -534,6 +539,7 @@ func TestMaxBodyLegacyKeyIgnored(t *testing.T) {
 
 // TestPromptDefaultMode 默认 prompt.mode=passthrough 且不加载 PromptText（透传客户端原始 system）。
 func TestPromptDefaultMode(t *testing.T) {
+	t.Setenv("WB2A_API_KEY", "k") // api_key 无条件必填：纯默认加载也需非空 key
 	c, err := Load("")
 	if err != nil {
 		t.Fatal(err)
@@ -550,7 +556,7 @@ func TestPromptDefaultMode(t *testing.T) {
 func TestPromptExplicitPassthrough(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"prompt":{"mode":"passthrough"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","prompt":{"mode":"passthrough"}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
@@ -567,7 +573,7 @@ func TestPromptExplicitPassthrough(t *testing.T) {
 func TestPromptInvalidMode(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"prompt":{"mode":"bogus"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","prompt":{"mode":"bogus"}}`), 0o600)
 	if _, err := Load(fp); err == nil {
 		t.Fatal("want error for invalid prompt.mode")
 	}
@@ -577,7 +583,7 @@ func TestPromptInvalidMode(t *testing.T) {
 func TestPromptFileMissing(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"prompt":{"mode":"custom","file":"/nonexistent/p.md"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","prompt":{"mode":"custom","file":"/nonexistent/p.md"}}`), 0o600)
 	if _, err := Load(fp); err == nil {
 		t.Fatal("want error for missing prompt file")
 	}
@@ -592,7 +598,7 @@ func TestPromptFileOverride(t *testing.T) {
 	cf := filepath.Join(dir, "c.json")
 	// 路径写进 JSON 字符串需转义反斜杠：Windows 下 filepath.Join 生成 C:\Users\...，
 	// 原样拼接会让 \U 成为非法 JSON 转义。ToSlash 统一为正斜杠（跨平台可解析）。
-	os.WriteFile(cf, []byte(`{"prompt":{"mode":"custom","file":"`+filepath.ToSlash(pf)+`"}}`), 0o600)
+	os.WriteFile(cf, []byte(`{"api_key":"k","prompt":{"mode":"custom","file":"`+filepath.ToSlash(pf)+`"}}`), 0o600)
 	c, err := Load(cf)
 	if err != nil {
 		t.Fatal(err)
@@ -604,6 +610,7 @@ func TestPromptFileOverride(t *testing.T) {
 
 // TestPromptEnvOverride env 覆盖 prompt.mode 与 prompt.file。
 func TestPromptEnvOverride(t *testing.T) {
+	t.Setenv("WB2A_API_KEY", "k") // api_key 无条件必填：纯默认加载也需非空 key
 	t.Setenv("WB2A_PROMPT_MODE", "passthrough")
 	c, err := Load("")
 	if err != nil {
@@ -634,9 +641,10 @@ func TestPromptLegacyConfigNoImpact(t *testing.T) {
 // TestUpstreamVersionConfig 配置 upstream.client_version / cli_version 与 env
 // WB2A_CLIENT_VERSION / WB2A_CLI_VERSION 均生效；缺省空串 = headers 层回落内置默认。
 func TestUpstreamVersionConfig(t *testing.T) {
+	t.Setenv("WB2A_API_KEY", "k") // api_key 无条件必填：纯默认加载也需非空 key
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"upstream":{"client_version":"6.0.0","cli_version":"3.0.0"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","upstream":{"client_version":"6.0.0","cli_version":"3.0.0"}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
@@ -663,10 +671,11 @@ func TestUpstreamVersionConfig(t *testing.T) {
 // TestUpstreamUserAgentConfig 配置 upstream.user_agent 与 env WB2A_USER_AGENT 均生效，
 // 缺省空串保持现状（headers 层回落到 clientUA）。
 func TestUpstreamUserAgentConfig(t *testing.T) {
+	t.Setenv("WB2A_API_KEY", "k") // api_key 无条件必填：纯默认加载也需非空 key
 	// JSON 配置
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"upstream":{"user_agent":"WorkBuddy/1.2.3"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","upstream":{"user_agent":"WorkBuddy/1.2.3"}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
@@ -696,7 +705,7 @@ func TestUpstreamUserAgentConfig(t *testing.T) {
 func TestPromptAppendModeAccepted(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"prompt":{"mode":"append"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","prompt":{"mode":"append"}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
@@ -716,7 +725,7 @@ func TestPromptAppendFileOverride(t *testing.T) {
 	want := "我的 append 模式人格"
 	os.WriteFile(pf, []byte(want), 0o600)
 	cf := filepath.Join(dir, "c.json")
-	os.WriteFile(cf, []byte(`{"prompt":{"mode":"append","file":"`+filepath.ToSlash(pf)+`"}}`), 0o600)
+	os.WriteFile(cf, []byte(`{"api_key":"k","prompt":{"mode":"append","file":"`+filepath.ToSlash(pf)+`"}}`), 0o600)
 	c, err := Load(cf)
 	if err != nil {
 		t.Fatal(err)
@@ -730,7 +739,7 @@ func TestPromptAppendFileOverride(t *testing.T) {
 func TestPromptAppendFileMissingFailsFast(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"prompt":{"mode":"append","file":"/nonexistent/p.md"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","prompt":{"mode":"append","file":"/nonexistent/p.md"}}`), 0o600)
 	if _, err := Load(fp); err == nil {
 		t.Fatal("want error for missing prompt file in append mode")
 	}
@@ -738,14 +747,82 @@ func TestPromptAppendFileMissingFailsFast(t *testing.T) {
 
 // TestPromptInvalidModeStillErrors B4：非法值报错文案含三值说明。
 func TestPromptInvalidModeStillErrors(t *testing.T) {
+	t.Setenv("WB2A_API_KEY", "k") // api_key 无条件必填：纯默认加载也需非空 key
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"prompt":{"mode":"replace"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","prompt":{"mode":"replace"}}`), 0o600)
 	_, err := Load(fp)
 	if err == nil {
 		t.Fatal("want error for invalid prompt.mode")
 	}
 	if !strings.Contains(err.Error(), "custom / append / passthrough") {
 		t.Errorf("error should mention (custom / append / passthrough): %v", err)
+	}
+}
+
+// TestAPIKeyRequiredUnconditionally api_key 无条件必填（audit：normalize 原只对
+// admin.enabled=true 拦截空 key，纯网关模式下空 api_key 被 withAuth「空串即放行」
+// 静默允许，与 README「至少设置 api_key」承诺不符）。Load("") 纯默认形态（无 env）
+// 也必须拒载——Default() 的 APIKey 零值不再放行。
+func TestAPIKeyRequiredUnconditionally(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"listen":":9999","api_key":""}`), 0o600)
+	_, err := Load(fp)
+	if err == nil {
+		t.Fatal("空 api_key 应无条件拒绝启动（fail-fast）")
+	}
+	if !strings.Contains(err.Error(), "api_key") {
+		t.Errorf("错误文案应点到 api_key, got %q", err.Error())
+	}
+	// 纯空白同样拦截（TrimSpace 口径）。
+	os.WriteFile(fp, []byte(`{"api_key":"   "}`), 0o600)
+	if _, err := Load(fp); err == nil {
+		t.Fatal("纯空白 api_key 应拒绝启动")
+	}
+}
+
+// TestMaxBodyMBConfigured max_body_mb 配置生效 + 非正数回落默认 64 + env 覆盖
+// （WB2A_MAX_BODY_MB，Atoi 非法值忽略；审计 HIGH：请求体上限重新落地）。
+func TestMaxBodyMBConfigured(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"api_key":"k","max_body_mb":8}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MaxBodyMB != 8 {
+		t.Errorf("MaxBodyMB=%d want 8", c.MaxBodyMB)
+	}
+	// 0/负数回落默认（normalize 兜底，Default 已置 64）。
+	for _, v := range []string{"0", "-1"} {
+		os.WriteFile(fp, []byte(`{"api_key":"k","max_body_mb":`+v+`}`), 0o600)
+		c, err = Load(fp)
+		if err != nil {
+			t.Fatalf("max_body_mb=%s should fall back to default, got err: %v", v, err)
+		}
+		if c.MaxBodyMB != 64 {
+			t.Errorf("max_body_mb=%s → MaxBodyMB=%d want default 64", v, c.MaxBodyMB)
+		}
+	}
+	// env 覆盖。
+	t.Setenv("WB2A_MAX_BODY_MB", "16")
+	c, err = Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MaxBodyMB != 16 {
+		t.Errorf("MaxBodyMB=%d want env 16", c.MaxBodyMB)
+	}
+	// 非法 env 值忽略（保持文件值）。
+	t.Setenv("WB2A_MAX_BODY_MB", "not-a-number")
+	os.WriteFile(fp, []byte(`{"api_key":"k","max_body_mb":8}`), 0o600)
+	c, err = Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MaxBodyMB != 8 {
+		t.Errorf("MaxBodyMB=%d want 8 (invalid env ignored; file set 8)", c.MaxBodyMB)
 	}
 }

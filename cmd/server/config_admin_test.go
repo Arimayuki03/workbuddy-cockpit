@@ -9,6 +9,7 @@ import (
 
 func TestAdminConfigDefaultsAndNormalize(t *testing.T) {
 	c := Default()
+	c.APIKey = "k" // api_key 无条件必填：normalize 校验需要非空 key
 	if c.Admin.Enabled {
 		t.Fatal("admin 必须缺省关闭")
 	}

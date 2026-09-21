@@ -74,13 +74,26 @@ func (c *Client) globalRegisterReq(method, url, token string, body any) (*http.R
 }
 
 // globalRegisterJSON 发注册链路请求并解外层信封（code/msg）。
+//
+// 错误语义对齐共享底座 doJSON：HTTP ≥400 的响应走 Classify 归类（*Error 携带
+// Kind/Status），不再被吞成普通解析路径——否则 HTTP 500 之类会被误读为
+// 「code!=0 的业务答复」，GlobalRegisterStatus 会把服务端故障误判成
+// needsRegion / 未激活。body 读失败（连接中断/截断）上抛为普通错误（半截
+// body 不进 Classify，与 doJSON 同口径，不参与账号惩罚）。
 func (c *Client) globalRegisterJSON(req *http.Request) (code int, msg string, raw json.RawMessage, err error) {
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return 0, "", nil, err
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return 0, "", nil, fmt.Errorf("read body: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		kind := Classify(resp.StatusCode, string(data))
+		return 0, "", nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(data), 200)}
+	}
 	var env struct {
 		Code int             `json:"code"`
 		Msg  string          `json:"msg"`

@@ -38,19 +38,25 @@ func originRefererFor(a *auth.Auth) string {
 	return originRefererCN
 }
 
-// clientVersion 生效的 WorkBuddy 客户端版本：Client.ClientVersion 非空则取之，
-// 否则内置默认 defaultClientVersion。
+// clientVersion 生效的 WorkBuddy 客户端版本：热改快照 ClientVersion 非空则取之
+// （panel 热改即时生效），否则内置默认 defaultClientVersion。
+// 读侧一律走 HotFields() 快照：panel_config.go 保存配置时经 SetHotFields 整体替换，
+// 普通字段直读与写侧并发构成数据竞争（audit P0）。
 func (c *Client) clientVersion() string {
-	if c != nil && c.ClientVersion != "" {
-		return c.ClientVersion
+	if c != nil {
+		if v := c.HotFields().ClientVersion; v != "" {
+			return v
+		}
 	}
 	return defaultClientVersion
 }
 
-// cliVersion 生效的 CLI 版本：Client.CliVersion 非空则取之，否则内置默认 defaultCliVersion。
+// cliVersion 生效的 CLI 版本：热改快照 CliVersion 非空则取之，否则内置默认 defaultCliVersion。
 func (c *Client) cliVersion() string {
-	if c != nil && c.CliVersion != "" {
-		return c.CliVersion
+	if c != nil {
+		if v := c.HotFields().CliVersion; v != "" {
+			return v
+		}
 	}
 	return defaultCliVersion
 }
@@ -73,12 +79,14 @@ func (c *Client) defaultWorkBuddyUAFor(a *auth.Auth) string {
 }
 
 // userAgent 返回当前出站 UA（客户端出站路径：chat/refresh/FetchModels）。
-// 优先级：Client.UserAgent（config user_agent）显式覆盖 > 按账号 realm 的默认 WorkBuddy 三段式。
-// 显式覆盖兼容既有覆盖逻辑：用户配了即以用户值为准（自定义品牌/版本），
-// 未配则走官方桌面端默认形态（global 换 `WorkBuddy AI` 平台段）。
+// 优先级：热改快照 UserAgent（config user_agent）显式覆盖 > 按账号 realm 的默认
+// WorkBuddy 三段式。显式覆盖兼容既有覆盖逻辑：用户配了即以用户值为准（自定义品牌/
+// 版本），未配则走官方桌面端默认形态（global 换 `WorkBuddy AI` 平台段）。
 func (c *Client) userAgent(a *auth.Auth) string {
-	if c != nil && c.UserAgent != "" {
-		return c.UserAgent
+	if c != nil {
+		if v := c.HotFields().UserAgent; v != "" {
+			return v
+		}
 	}
 	return c.defaultWorkBuddyUAFor(a)
 }
@@ -105,11 +113,14 @@ func (c *Client) resolveDeviceToken(a *auth.Auth) string {
 	if a != nil && a.DeviceToken != "" {
 		return a.DeviceToken
 	}
-	if c != nil && c.DeviceToken != "" {
-		return c.DeviceToken
-	}
-	if c != nil && c.DeviceTokenFile != "" {
-		return readDeviceTokenFile(c.DeviceTokenFile)
+	if c != nil {
+		f := c.HotFields()
+		if f.DeviceToken != "" {
+			return f.DeviceToken
+		}
+		if f.DeviceTokenFile != "" {
+			return readDeviceTokenFile(f.DeviceTokenFile)
+		}
 	}
 	return ""
 }
@@ -325,11 +336,13 @@ func validTraceID(s string) bool {
 	return true
 }
 
-// attributionClientName 生效的用量归属名：ClientName 非空取之；
+// attributionClientName 生效的用量归属名：热改快照 ClientName 非空取之；
 // 空默认 "WorkBuddy"（伪造官方桌面端指纹；显式配 "SaaS" 可还原旧行为）。
 func (c *Client) attributionClientName() string {
-	if c != nil && c.ClientName != "" {
-		return c.ClientName
+	if c != nil {
+		if v := c.HotFields().ClientName; v != "" {
+			return v
+		}
 	}
 	return "WorkBuddy"
 }
@@ -359,7 +372,7 @@ func (c *Client) injectAttribution(req *http.Request) {
 // 三个等价头（X-Forwarded-For/X-Real-IP/X-Client-IP）一并设，与桌面端透传一致。
 // 按**参数传递**而非读共享字段：避免并发请求交叉污染对方 IP（issue：ClientIP 竞态）。
 func (c *Client) injectClientIP(req *http.Request, clientIP string) {
-	if c == nil || !c.PassthroughIP || clientIP == "" {
+	if c == nil || !c.HotFields().PassthroughIP || clientIP == "" {
 		return
 	}
 	req.Header.Set("X-Forwarded-For", clientIP)
@@ -391,7 +404,7 @@ func ExtractClientIP(r *http.Request) string {
 
 // BillingHeaders billing 接口请求头。
 // UA 语义（对齐官方白名单头组，application-manifest.js:27590-27601）：
-//  1. 显式配置 c.UserAgent 优先（用户自定义值，全路径生效）；
+//  1. 显式配置 user_agent 优先（热改快照，用户自定义值，全路径生效）；
 //  2. 未配且归属名非 SaaS（含默认 WorkBuddy）→ 单段 `WorkBuddy/<clientVersion>`
 //     （官方 banner/check-in 显式覆写 UA 的形态，不带 CLI 段）；
 //  3. 显式 client_name="SaaS" → 不设置（Go 客户端自带默认 UA，还原旧行为）。
@@ -403,8 +416,9 @@ func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	c.injectCodeBuddyRequest(req)
 	// Accept-Language 按 realm 切（D5）：billing 域未走 CommonHeaders，单独注入。
 	req.Header.Set("Accept-Language", acceptLanguageFor(a))
-	if c != nil && c.UserAgent != "" {
-		req.Header.Set("User-Agent", c.UserAgent)
+	hot := c.HotFields()
+	if hot.UserAgent != "" {
+		req.Header.Set("User-Agent", hot.UserAgent)
 	} else if ua := c.billingUA(); ua != "" {
 		req.Header.Set("User-Agent", ua)
 	}

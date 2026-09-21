@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/logfmt"
+	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/usage"
 )
 
@@ -37,6 +38,7 @@ type chatStat struct {
 	mode   string // "stream" | "sync"
 	uid    string // 完整 uid，展示时只取前 8 位
 	nick   string // 账号昵称（auth.Auth.Nickname，登录时落盘）；空则只显示 uid8
+	realm  string // 请求账号归属域（cn/global，DESIGN §3.5 分桶维度）；handler 选号后覆盖
 	ttfb   time.Duration
 	toks   int // <0 表示 usage 缺失 → 显示 "-"
 	status int
@@ -59,12 +61,19 @@ type chatStat struct {
 }
 
 // newChatStat 以请求进入 handler 的时刻为起点构造统计对象；toks 默认 -1（usage 缺失）。
-func newChatStat(now time.Time, body []byte, stream bool) *chatStat {
+// realm 取请求模型域（cn/global；裸名 → cn，零回归）；handler 每次选号成功后以
+// 账号实际 Realm() 覆盖（分桶按账号归属域，DESIGN §3.5）。
+// model 空值（坏 body / 未带 model 字段）标 "-"，与 parseModelFromBody 旧口径一致。
+func newChatStat(now time.Time, parsed session.Parsed, realm string) *chatStat {
 	mode := "sync"
-	if stream {
+	if parsed.Stream {
 		mode = "stream"
 	}
-	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1}
+	model := parsed.Model
+	if model == "" {
+		model = "-"
+	}
+	return &chatStat{start: now, model: model, mode: mode, realm: realm, toks: -1}
 }
 
 // setError 记录非 200 出口的错误摘要（面板请求日志 Error 列）。
@@ -101,27 +110,43 @@ func (s *chatStat) done() {
 // recordUsageBucket 用量分桶记录（usage.Enabled=true 时由 main 注入）。
 // ok 以「上游是否给了 usage」判定：hasUsage=false 的尝试（传输错误/>=400/解析失败）
 // 计为失败——失败也计入请求数，否则重试放大在用量视图里看不见。
+//
+// 缺省值归 0、靠 Has* 标志表达缺失（audit：旧实现把 toks=-1 哨兵写进
+// CompletionTokens 并参与 TotalTokens=prompt+(-1) 算术——HasCompletion/HasTotal
+// 为 true 时 usage.Add 会把 -1 与 prompt-1 真的累计进桶）。hasUsage=true 时
+// toks 必 >=0（handler 流式路径只在 hasUsage 时覆盖 st.toks，非流式
+// completionTokens 缺失时保持 -1 且不置 hasUsage），但此处仍显式钳 0 防御。
 func recordUsageBucket(s *chatStat) {
-	if globalUsageRecorder == nil || !s.hasUsage {
-		if globalUsageRecorder != nil {
-			globalUsageRecorder.Add(time.Now(), s.realmOf(), s.uid, s.model, usage.Delta{}, false)
-		}
+	if globalUsageRecorder == nil {
 		return
+	}
+	if !s.hasUsage {
+		globalUsageRecorder.Add(time.Now(), s.realmOf(), s.uid, s.model, usage.Delta{}, false)
+		return
+	}
+	compl := s.toks
+	if compl < 0 {
+		compl = 0 // 防御：hasUsage 时 toks 不应为 -1 哨兵；万一出现按缺失归 0 处理
 	}
 	globalUsageRecorder.Add(time.Now(), s.realmOf(), s.uid, s.model, usage.Delta{
 		PromptTokens:     int64(s.prompt),
-		HasPromptTokens:  s.hasUsage,
-		CompletionTokens: int64(s.toks),
+		HasPromptTokens:  true,
+		CompletionTokens: int64(compl),
 		HasCompletion:    s.toks >= 0,
-		TotalTokens:      int64(s.prompt + s.toks),
-		HasTotal:         s.hasUsage && s.toks >= 0,
+		TotalTokens:      int64(s.prompt + compl),
+		HasTotal:         s.toks >= 0,
 		LatencyMs:        s.ttfb.Milliseconds(),
 		HasLatency:       s.ttfb > 0,
 	}, s.toks >= 0)
 }
 
-// realmOf 请求账号的 realm（cn/global；uid 未知时回落 cn——与 usage 包缺省一致）。
+// realmOf 请求账号的 realm（cn/global；未选号即失败的请求回落请求模型域——
+// newChatStat 以 realm 前缀初始化，账号归属域由 handler 选号处覆盖；未知/空回落
+// cn，与 usage 包缺省一致）。
 func (s *chatStat) realmOf() string {
+	if s.realm == "global" {
+		return "global"
+	}
 	return "cn"
 }
 

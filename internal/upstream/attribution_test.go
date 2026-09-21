@@ -25,6 +25,8 @@ func chatHeadersReq(t *testing.T, c *Client, a *auth.Auth, clientIP string) http
 	c.ChatBaseCN = srv.URL
 	c.ChatHTTP = srv.Client()
 	c.HTTP = srv.Client()
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
+
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v2/chat/completions", nil)
 	if err != nil {
 		t.Fatalf("new req: %v", err)
@@ -42,6 +44,7 @@ func chatHeadersReq(t *testing.T, c *Client, a *auth.Auth, clientIP string) http
 func TestAgentPurposeHeadersSet(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	c := &Client{ClientName: "WorkBuddy"}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	h := chatHeadersReq(t, c, a, "")
 	for _, tc := range []struct {
 		header string
@@ -63,6 +66,7 @@ func TestAgentPurposeHeadersSet(t *testing.T) {
 func TestAttributionIncludesIDEVersion(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	c := &Client{ClientName: "WorkBuddy", ClientVersion: "6.0.0"}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	h := chatHeadersReq(t, c, a, "")
 	for _, tc := range []struct {
 		header string
@@ -80,12 +84,14 @@ func TestAttributionIncludesIDEVersion(t *testing.T) {
 	}
 	// X-IDE-Version 缺省（client_version 空）= 内置默认 5.5.4，且四头齐全。
 	c2 := &Client{ClientName: "WorkBuddy"}
+	c2.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	h2 := chatHeadersReq(t, c2, a, "")
 	if got := h2.Get("X-IDE-Version"); got != "5.5.4" {
 		t.Errorf("X-IDE-Version = %q want %q (default)", got, "5.5.4")
 	}
 	// 显式 ClientName="SaaS" 时 X-IDE-Version 不设（还原旧行为：只有 X-Product=SaaS）。
 	c3 := &Client{ClientName: "SaaS"}
+	c3.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	h3 := chatHeadersReq(t, c3, a, "")
 	if got := h3.Get("X-IDE-Version"); got != "" {
 		t.Errorf("X-IDE-Version = %q want empty (client_name=SaaS)", got)
@@ -97,6 +103,7 @@ func TestAttributionIncludesIDEVersion(t *testing.T) {
 func TestProductDefaultWorkBuddyFingerprint(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	c := &Client{} // ClientName 空 → 默认 WorkBuddy 指纹
+	c.SyncHot()    // 热改快照与结构体字段同步（读侧走 HotFields）
 	h := chatHeadersReq(t, c, a, "")
 	for hdr, want := range map[string]string{
 		"X-Product":       "WorkBuddy",
@@ -115,6 +122,7 @@ func TestProductDefaultWorkBuddyFingerprint(t *testing.T) {
 func TestProductSaaSOptOut(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	c := &Client{ClientName: "SaaS"} // 显式退出指纹伪造
+	c.SyncHot()                      // 热改快照与结构体字段同步（读侧走 HotFields）
 	h := chatHeadersReq(t, c, a, "")
 	if got := h.Get("X-Product"); got != "SaaS" {
 		t.Errorf("X-Product = %q want %q", got, "SaaS")
@@ -131,12 +139,14 @@ func TestProductSaaSOptOut(t *testing.T) {
 func TestProductWorkBuddy_WhenConfigured(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	c := &Client{ClientName: "WorkBuddy"}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	h := chatHeadersReq(t, c, a, "")
 	if got := h.Get("X-Product"); got != "WorkBuddy" {
 		t.Errorf("X-Product = %q want %q", got, "WorkBuddy")
 	}
 	// client_name 其他值也应跟随。
 	c2 := &Client{ClientName: "MyEditor"}
+	c2.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	h2 := chatHeadersReq(t, c2, a, "")
 	if got := h2.Get("X-Product"); got != "MyEditor" {
 		t.Errorf("X-Product = %q want %q", got, "MyEditor")
@@ -148,6 +158,7 @@ func TestIPNotForwarded_ByDefault(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	// 即使 clientIP 参数非空，PassthroughIP 关闭也不透传。
 	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	h := chatHeadersReq(t, c, a, "10.0.0.1")
 	for _, hdr := range []string{"X-Forwarded-For", "X-Real-IP", "X-Client-IP"} {
 		if got := h.Get(hdr); got != "" {
@@ -160,6 +171,7 @@ func TestIPNotForwarded_ByDefault(t *testing.T) {
 func TestIPForwarded_WhenEnabled(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	c := &Client{PassthroughIP: true}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	h := chatHeadersReq(t, c, a, "203.0.113.5")
 	for _, hdr := range []string{"X-Forwarded-For", "X-Real-IP", "X-Client-IP"} {
 		if got := h.Get(hdr); got != "203.0.113.5" {
@@ -172,6 +184,7 @@ func TestIPForwarded_WhenEnabled(t *testing.T) {
 func TestIPForwarded_NoLeakWhenClientIPEmpty(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	c := &Client{PassthroughIP: true}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	h := chatHeadersReq(t, c, a, "")
 	for _, hdr := range []string{"X-Forwarded-For", "X-Real-IP", "X-Client-IP"} {
 		if got := h.Get(hdr); got != "" {
@@ -186,6 +199,7 @@ func TestIPForwarded_NoLeakWhenClientIPEmpty(t *testing.T) {
 func TestClientIPConcurrentNoCrossTalk(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	c := &Client{PassthroughIP: true}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 
 	// 共享一个测试 server：所有 goroutine 打到同一 server，各自捕获请求头。
 	var mu sync.Mutex

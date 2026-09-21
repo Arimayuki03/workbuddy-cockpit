@@ -26,6 +26,7 @@ package upstream
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -34,6 +35,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -415,10 +417,34 @@ func (c *Client) MarketExpertList(a *auth.Auth, expertType string) ([]MarketExpe
 	return out.Experts, nil
 }
 
+// desktopChatTotalTimeout DesktopChatWithExpert 的 SSE 总时长上限。该路径只为抓
+// 服务端 requestId（通常首帧即含），远短于真实 chat 会话；上游建流后停流时
+// 由总超时兜底掐断，不再永久占用连接与调用方 goroutine。
+const desktopChatTotalTimeout = 30 * time.Minute
+
+// desktopSSEIdleTimeout 流中空闲上限（复用 ChatStreamContext 的 monitorBody 基础设施，
+// 与 config upstream.idle_timeout_seconds 同语义量级）。
+const desktopSSEIdleTimeout = 5 * time.Minute
+
+// sanitizeDebugHeader 打印请求头前脱敏：Authorization/token/cookie 类头只透出
+// 「<redacted len=N>」，防止 WB2A_DEBUG_CHAT 把 Bearer 凭证打到日志。
+func sanitizeDebugHeader(key, val string) string {
+	lk := strings.ToLower(key)
+	if strings.Contains(lk, "authorization") || strings.Contains(lk, "token") || strings.Contains(lk, "cookie") {
+		return fmt.Sprintf("<redacted len=%d>", len(val))
+	}
+	return val
+}
+
 // DesktopChatWithExpert 发一条真实桌面指纹 chat 请求（可带 X-Expert-Id），从 SSE 流
 // 解析**服务端返回的 requestId**（data.id，如 cmb-xxxx / 32hex）并返回。
 // expert_actual_use 等 JOIN 事件的 requestId 必须是该服务端 id——自造 UUID 不计数
 // （客户端 resolveRealRequestId 同款语义，Sunny row 2113 实证）。
+//
+// 超时与空闲监控：请求经 context.WithTimeout（desktopChatTotalTimeout）派生 ctx，
+// 建流后逐块 Read 由 monitorBody 包上空闲监控（desktopSSEIdleTimeout）——上游建流
+// 后停流时先掐空闲、总超时兜底，goroutine 与连接不再泄漏（调用方 panel/autotask、
+// scheduler/school_api 每次触发泄漏一个的旧缺陷已修）。函数签名保持不变。
 func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversationID, requestID string, err error) {
 	conversationID = fmt.Sprintf("wb2api-conv-%d", time.Now().UnixNano())
 	body := map[string]any{
@@ -436,7 +462,11 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	if err != nil {
 		return "", "", err
 	}
-	req, err := http.NewRequest(http.MethodPost, c.chatBase(a)+"/v2/chat/completions", bytes.NewReader(raw))
+	// 总超时 ctx：上游建流后停流（不关也不吐）时由总超时兜底 cancel，逐块 Read
+	// 的阻塞被中断，连接归还 Transport 池、调用方不再永久挂起。
+	ctx, cancel := context.WithTimeout(context.Background(), desktopChatTotalTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.chatBase(a)+"/v2/chat/completions", bytes.NewReader(raw))
 	if err != nil {
 		return "", "", err
 	}
@@ -461,8 +491,9 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	}
 	if os.Getenv("WB2A_DEBUG_CHAT") != "" {
 		fmt.Printf("[dbg] URL=%s\n", req.URL)
+		// 打印前脱敏：Authorization/token/cookie 类头不透出值（防凭证进日志）。
 		for k := range req.Header {
-			fmt.Printf("[dbg] %s: %s\n", k, req.Header.Get(k))
+			fmt.Printf("[dbg] %s: %s\n", k, sanitizeDebugHeader(k, req.Header.Get(k)))
 		}
 	}
 	resp, err := c.chatHTTP().Do(req)
@@ -478,10 +509,14 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 		return "", "", fmt.Errorf("chat http %d: %s", resp.StatusCode, b)
 	}
 	// 从 SSE 流抓第一个 data.id 作为服务端 requestId（读干流避免残留连接）。
+	// 空闲监控与 ChatStreamContext 同款：monitorBody 在静默超限时 cancel 本请求 ctx
+	// （中断阻塞中的 Read），Close 停后台 goroutine。defer 关闭保证所有出口无泄漏。
+	sse := monitorBody(resp.Body, desktopSSEIdleTimeout, cancel)
+	defer sse.Close()
 	buf := make([]byte, 0, 1<<20)
 	tmp := make([]byte, 8192)
 	for {
-		n, rerr := resp.Body.Read(tmp)
+		n, rerr := sse.Read(tmp)
 		if n > 0 {
 			buf = append(buf, tmp[:n]...)
 			if os.Getenv("WB2A_DEBUG_CHAT") != "" {

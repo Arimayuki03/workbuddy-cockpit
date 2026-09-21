@@ -95,7 +95,7 @@ func (c *Client) TravelClaim(a *auth.Auth, recordID int64) (int64, error) {
 	return resp.RewardCredit, nil
 }
 
-// BuddyInfo 查询当前猫档案；返回 (nil, nil) 表示无猫（data.buddy 为 null）。
+// BuddyInfo 查询当前猫档案；返回 (nil, nil) 表示无猫（data.buddy 为 null 或空对象）。
 func (c *Client) BuddyInfo(a *auth.Auth) (*Buddy, error) {
 	data, err := c.growthJSON(a, http.MethodGet, buddyInfoPath, nil)
 	if err != nil {
@@ -115,6 +115,11 @@ func (c *Client) BuddyInfo(a *auth.Auth) (*Buddy, error) {
 	var b Buddy
 	if err := json.Unmarshal(resp.Buddy, &b); err != nil {
 		return nil, err
+	}
+	// 空对象形态（{} 或 id==0）：上游在「无猫」时也可能下发空 JSON 对象而非 null，
+	// 与注释语义一致按无猫返回 nil，否则调用方会误判「已有猫」而跳过领养。
+	if b.ID == 0 {
+		return nil, nil
 	}
 	return &b, nil
 }

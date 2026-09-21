@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"workbuddy2api/internal/session"
 )
 
 // TestRequestLogRing 环形覆盖：容量外旧条目被覆盖，快照最新优先。
@@ -60,7 +62,7 @@ func TestHandleRequestLogs(t *testing.T) {
 
 // TestRequestLogPayloadFromStat chatStat → 条目字段映射（含 error 摘要与 -1 哨兵保留）。
 func TestRequestLogPayloadFromStat(t *testing.T) {
-	st := newChatStat(time.Now(), []byte(`{"model":"cn:glm-5.2"}`), true)
+	st := newChatStat(time.Now(), session.ParseRequest([]byte(`{"model":"cn:glm-5.2","stream":true}`)), "cn")
 	st.uid = "u-1234"
 	st.nick = "昵称"
 	st.status = 503
@@ -84,7 +86,7 @@ func TestVersionLess(t *testing.T) {
 		{"v1.1.1", "v1.2.0", true},
 		{"v1.2.0", "v1.2.0", false},
 		{"v2.0.0", "v1.9.9", false},
-		{"dev", "v9.9.9", false},  // 非法形态不提示更新
+		{"dev", "v9.9.9", false}, // 非法形态不提示更新
 		{"v1.2.0-rc1", "v1.2.1", true},
 		{"", "v1.0.0", false},
 	}

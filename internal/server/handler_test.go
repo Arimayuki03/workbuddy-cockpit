@@ -2161,8 +2161,10 @@ func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
 			}, nil
 		})},
 		ChatBaseCN:           "https://fake.example",
-		SanitizeFingerprints: true, // 开启清洗层（与生产一致）
+		SanitizeFingerprints: true, // 开启清洗层（与生产一致；读侧走 HotFields 快照）
 	}
+	// 清洗开关的运行期读侧走 HotFields 快照：结构体直赋后需 SyncHot 物化（main 生产路径同款）。
+	up.SyncHot()
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	const customSys = "我是网关自有提示词"
 	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "custom", PromptText: customSys})

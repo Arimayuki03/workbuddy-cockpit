@@ -9,6 +9,7 @@ import (
 // TestGlobalDefaults 断言 global 段缺省：enabled=true（默认开启）、base 空（回落默认）。
 func TestGlobalDefaults(t *testing.T) {
 	c := Default()
+	c.APIKey = "k" // api_key 无条件必填：normalize 校验需要非空 key
 	if err := c.normalize(); err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
@@ -25,7 +26,7 @@ func TestGlobalDefaults(t *testing.T) {
 func TestGlobalParsedFromFile(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{
+	os.WriteFile(fp, []byte(`{"api_key":"k",
 		"global":{
 			"enabled":true,
 			"chat_base":"https://workbuddy-api-qa.workbuddy.ai",
@@ -51,7 +52,7 @@ func TestGlobalParsedFromFile(t *testing.T) {
 func TestGlobalEnabledAbsentIsTrue(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"listen":":9999"}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","listen":":9999"}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +66,7 @@ func TestGlobalEnabledAbsentIsTrue(t *testing.T) {
 func TestGlobalEnabledExplicitOffEscapeHatch(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"global":{"enabled":false}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"api_key":"k","global":{"enabled":false}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)

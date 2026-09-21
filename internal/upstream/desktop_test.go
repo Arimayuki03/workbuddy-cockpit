@@ -35,6 +35,7 @@ func TestReportDesktopEventFingerprint(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	err := c.ReportDesktopEvent(&auth.Auth{AccessToken: "at", UID: "u-dt", Nickname: "RenJie"},
 		DesktopEvent{"eventCode": "agent_task_created", "mode": "craft"})
 	if err != nil {
@@ -112,6 +113,7 @@ func TestSetAppearanceTheme(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	if err := c.SetAppearanceTheme(&auth.Auth{AccessToken: "at", UID: "u1"}, "theme-tkmw7j"); err != nil {
 		t.Fatalf("set theme: %v", err)
 	}

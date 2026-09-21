@@ -180,6 +180,7 @@ func TestChatStreamContextFallbackCancelsEachAttempt(t *testing.T) {
 		ChatBaseGlobal: "https://chat-global.example",
 		GlobalEnabled:  true,
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	auth.SetGlobalEnabled(true)
 	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
 	// IdleTimeout>0：monitorBody 才包流持有 cancel（Close → cancel）；=0 是发现 20 的
@@ -213,6 +214,7 @@ func TestChatStreamContextCompileGuarantee(t *testing.T) {
 		ChatBaseGlobal: "https://chat-global.example",
 		GlobalEnabled:  true,
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	auth.SetGlobalEnabled(true)
 	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
 

@@ -28,6 +28,7 @@ func TestClaimRewardWebEndpoint(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, WebBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 
 	credit, energy, err := c.ClaimReward(a, "Model_chat_GLM5.2")
@@ -62,6 +63,7 @@ func TestClaimRewardAlreadyClaimed(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := &Client{HTTP: srv.Client(), WebBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	credit, energy, err := c.ClaimReward(&auth.Auth{AccessToken: "at", UID: "u1"}, "chat_5")
 	if err != nil {
 		t.Fatalf("already_claimed should not error: %v", err)
@@ -79,6 +81,7 @@ func TestClaimRewardNotCompleted(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := &Client{HTTP: srv.Client(), WebBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	if _, _, err := c.ClaimReward(&auth.Auth{AccessToken: "at", UID: "u1"}, "chat_5"); err == nil {
 		t.Fatal("want error for not-completed task")
 	}

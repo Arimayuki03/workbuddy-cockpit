@@ -28,6 +28,7 @@ func TestV3MergeE2EGlobal(t *testing.T) {
 		HTTP:          &http.Client{Timeout: 60 * time.Second},
 		GlobalEnabled: true,
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 
 	names := c.FetchGlobalModels(a)
 	if len(names) == 0 {
@@ -87,6 +88,7 @@ func TestV3MergeE2EEndpointsReachable(t *testing.T) {
 		HTTP:          &http.Client{Timeout: 60 * time.Second},
 		GlobalEnabled: true,
 	}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	for _, path := range []string{v3ConfigPath, globalModelsPath} {
 		names, infos, _, _, err := c.globalModelsOnce(a, path)
 		if err != nil {

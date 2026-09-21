@@ -82,11 +82,19 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		SoftCooldown:         newCfg.SoftRateDur,
 		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
 	})
-	up.SanitizeFingerprints = newCfg.Features.SanitizeBlacklistFingerprints
-	up.UserAgent = newCfg.Upstream.UserAgent
-	up.ClientVersion = newCfg.Upstream.ClientVersion
-	up.CliVersion = newCfg.Upstream.CliVersion
-	up.ClientName = newCfg.Upstream.ClientName
+	// upstream.Client 热改普通字段（UA/版本段/归属名/脱敏/IP 透传）经 SetHotFields
+	// 整体替换快照：headers.go 读侧走 HotFields() 同步读——直接写普通字段与出站
+	// 路径的并发读构成数据竞争（audit P0），快照整体替换无半新半旧窗口。
+	up.SetHotFields(upstream.HotFields{
+		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
+		UserAgent:            newCfg.Upstream.UserAgent,
+		ClientName:           newCfg.Upstream.ClientName,
+		ClientVersion:        newCfg.Upstream.ClientVersion,
+		CliVersion:           newCfg.Upstream.CliVersion,
+		DeviceToken:          newCfg.Upstream.DeviceToken,
+		DeviceTokenFile:      newCfg.Upstream.DeviceTokenFile,
+		PassthroughIP:        newCfg.Upstream.PassthroughIP,
+	})
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
 	p.SetMaxInFlight(newCfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(newCfg.Pool.MaxInFlightGlobal)

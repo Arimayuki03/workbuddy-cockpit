@@ -3,7 +3,6 @@ package server
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +16,7 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/httpauth"
+	"workbuddy2api/internal/livecfg"
 	"workbuddy2api/internal/logfmt"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/prompt"
@@ -76,9 +76,19 @@ type Config struct {
 	Panel http.Handler
 	// SessionKey 会话通道密钥供应商（v1.2.0，main 注入 livecfg 读取闭包）：
 	// 面板登录换发的 HMAC 会话 cookie 与本 handler 的 Bearer 等价——
-	// dashboard 调原生 /status、/v1/stats 只带 cookie，无此通道会 401 触发
-	// 前端硬跳登录页。nil = 不开会话通道（panel 未启用，行为与引入前一致）。
+	// dashboard 调原生 /status、/v1/stats 只带 cookie，无此通道会 401，被前端
+	// 拦截器硬跳回登录页。nil = 不开会话通道（panel 未启用，行为与引入前一致）。
 	SessionKey func() string
+	// Live 可热改配置快照（v1.2.0，main 注入 livecfg.Holder；nil = 无热改形态，
+	// 回落静态字段）：非 nil 时 withAuth 的鉴权密钥与 applyErrorPolicy 的软冷却
+	// 基数经 Live.Load() 读取——面板改 api_key / cooldown.soft_rate 后网关端点
+	// 即时生效（使用指南 §5.5 承诺的语义），无需重启。静态 APIKey/SoftCooldown
+	// 字段仅在 Live==nil 时生效（测试与最小装配形态）。
+	Live *livecfg.Holder
+	// MaxBodyBytes 请求体大小上限（字节，config max_body_mb × 1MB）：chatCompletions
+	// 用 http.MaxBytesReader 包裹请求体，超限就地 413，不再无上限读入内存。
+	// <=0 回落默认 64MB。
+	MaxBodyBytes int64
 	// Static 前端静态托管 FS（v1.2.0，manager 壳 go:embed 产物；nil = 不注册）。
 	// 非 nil 时挂载到根 "/"：ServeMux 最长前缀匹配保证既有路由（/v1/*、/admin/*、
 	// /status、/api/* 已注册路径）优先，静态 handler 只兜住其余路径。
@@ -109,6 +119,40 @@ const ServiceName = "workbuddy2api"
 // 小探针（{"input":"hi"} 之类）不落盘，避免覆盖真正要看的对话请求。
 const dumpReqMinBytes = 4 << 20
 
+// defaultMaxBodyBytes 请求体默认上限（64MB）。config max_body_mb 换算后经
+// Config.MaxBodyBytes 注入，<=0 回落本值——防超大 body 无上限读入内存拖垮进程
+// （audit HIGH：此前唯一约束是 60s ReadTimeout）。
+const defaultMaxBodyBytes = int64(64) << 20
+
+// apiKey 当前生效的鉴权密钥：Live 快照优先（面板热改即时生效，使用指南 §5.5），
+// 无 Holder（测试/最小装配）回落静态字段。空串 = 未配置鉴权（调用方自行处理）。
+func (h *Handler) apiKey() string {
+	if h.cfg.Live != nil {
+		return h.cfg.Live.Load().APIKey
+	}
+	return h.cfg.APIKey
+}
+
+// softCooldown 当前生效的软冷却基数：Live 快照优先（面板热改 cooldown.soft_rate
+// 即时生效），无 Holder 回落静态字段。
+func (h *Handler) softCooldown() time.Duration {
+	if h.cfg.Live != nil {
+		if d := h.cfg.Live.Load().SoftCooldown; d > 0 {
+			return d
+		}
+	}
+	return h.cfg.SoftCooldown
+}
+
+// maxBodyBytes 当前生效的请求体上限（字节）。max_body_mb 不在面板热改范围
+// （面板热改范围注释见 panel_config.go），恒取静态值；防御性兜底非正值回落默认。
+func (h *Handler) maxBodyBytes() int64 {
+	if h.cfg.MaxBodyBytes > 0 {
+		return h.cfg.MaxBodyBytes
+	}
+	return defaultMaxBodyBytes
+}
+
 // Handler 主路由。
 type Handler struct {
 	cfg     Config
@@ -134,6 +178,9 @@ func NewHandler(cfg Config) *Handler {
 	}
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "passthrough" // 缺省 passthrough：透传客户端原始 system
+	}
+	if cfg.MaxBodyBytes <= 0 {
+		cfg.MaxBodyBytes = defaultMaxBodyBytes
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
@@ -182,13 +229,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if h.cfg.APIKey != "" {
-			authz := r.Header.Get("Authorization")
-			// 常量时间比较（发现 7）：!= 短路时序随前缀长度变化，公网暴露下
-			// 理论上可逐字节探测 key 前缀；ConstantTimeCompare 消除该信号。
-			provided := strings.TrimPrefix(authz, "Bearer ")
-			bearerOK := strings.HasPrefix(authz, "Bearer ") &&
-				subtle.ConstantTimeCompare([]byte(provided), []byte(h.cfg.APIKey)) == 1
+		// 密钥经 apiKey() 读取：Live 非 nil 时走 livecfg 快照——面板改 api_key 后
+		// 下一个请求即用新值（免重启，与 panel 侧 apiKey() 同语义同口径）。
+		if key := h.apiKey(); key != "" {
+			// Bearer 校验统一走 httpauth.VerifyBearer（SHA-256 摘要 + 常量时间比较，
+			// 先摘要再比较把长度差异吸收进摘要；与 panel 侧同一份实现，消除此前
+			// handler 手写 subtle.ConstantTimeCompare 的双份口径漂移）。
+			bearerOK := httpauth.VerifyBearer(r, key)
 			// 会话 cookie 通道（v1.2.0）：面板登录换发的 HMAC 签名 cookie 与
 			// Bearer 等价——dashboard 同源 fetch 只带 cookie（withCredentials），
 			// 缺此通道 /status、/v1/stats、/api/request_logs 会 401，被前端
@@ -534,12 +581,19 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
-	// 请求体无大小上限（max_body_mb 已移除）：完整读入，超限类问题交由上游自然返回
-	// 错误（其响应经既有错误分类链路透出，信息量更大）。#41 的截断防御语义保留在
-	// 读错误路径——移除预拦截后，截断只可能来自客户端自己断流，读 body 出错就地 400，
-	// 不把半截 JSON 喂上游 unmarshal 报 unexpected EOF 冤枉罚号。
-	body, err := io.ReadAll(r.Body)
+	// 请求体上限（max_body_mb，audit HIGH）：http.MaxBytesReader 包裹后全量读入。
+	// 超限 → *http.MaxBytesError，就地 413（OpenAI 兼容错误信封，明确指向 body
+	// 大小），不再无上限读入内存或把半截 JSON 喂上游。其余读错误保持原 400 路径
+	// （#41 截断防御语义：客户端断流不把半截 JSON 冤枉罚号）。
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, h.maxBodyBytes()))
 	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large",
+				fmt.Sprintf("request body exceeds limit (%d MB); reduce context/messages or raise max_body_mb",
+					h.maxBodyBytes()>>20))
+			return
+		}
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
 	}
@@ -552,19 +606,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			log.Printf("ERR: [server] dump req: %v", err)
 		}
 	}
-	var peek struct {
-		Stream bool   `json:"stream"`
-		Model  string `json:"model"`
-	}
-	_ = json.Unmarshal(body, &peek)
+	// 热路径单次解析（audit：此前对同一 body 依次做 peek / ExtractKey /
+	// StickyFallbackKey / TurnKey / hasImagePart / ResolveConversationID 六轮全量
+	// JSON 解码，MB 级请求体上每轮都是完整 unmarshal）。session.ParseRequest 一次
+	// 解码填齐全部派生字段，字段值与旧独立函数逐字段等价（行为契约不变）。
+	parsed := session.ParseRequest(body)
 
 	// realm 前缀解析（D6）：model 名可能带 "[realm:]" 前缀。剥出 realm + bareModel，
 	// bareModel 用于选号/粘性/账本/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
-	realm, bareModel := resolveModel(peek.Model)
+	realm, bareModel := resolveModel(parsed.Model)
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
-	st := newChatStat(time.Now(), body, peek.Stream)
+	// realm 先记请求模型域（cn/global；global: 前缀请求若最终由 CN 号兜底服务，
+	// 选号成功处会以账号实际 Realm() 覆盖——用量分桶按账号归属域计）。
+	st := newChatStat(time.Now(), parsed, realm)
 	defer st.done()
 
 	tried := map[string]bool{}
@@ -573,18 +629,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
 	// 按模型解析：同一个会话可能换模型，绑定号若在当前模型上被 6004 限额（对其他模型
 	// 仍可用），必须重分配——否则会被钉在这个号上反复失败。
-	// 提取与下方会话头族的聚合键共用同一结果，故**不受粘性开关影响**：粘性未启用
-	// （Session==nil）时聚合键仍应是会话级，而不是退化成轮级。
-	sessKey := session.ExtractKey(body)
+	// 提取与下方会话头族的聚合键共用同一结果（ParseRequest 一次解析带出），故
+	// **不受粘性开关影响**：粘性未启用（Session==nil）时聚合键仍应是会话级，
+	// 而不是退化成轮级。
+	sessKey := parsed.SessKey
 	// stickyKey 是**粘性专用**键，与 sessKey（会话头族聚合用）分开：
 	// sessKey 为空时（OpenAI 兼容客户端——dsh / Codex 等既无 conversationId 也无
 	// metadata）用首条 user 消息派生会话级 fallback 键，使粘性仍能生效。
 	// 不能直接改 sessKey：那会连带改变上游头族轮级复合键（sessKey 入键）的聚合
 	// 语义，属于另一条链路的契约。
-	stickyKey := sessKey
-	if stickyKey == "" {
-		stickyKey = session.StickyFallbackKey(body)
-	}
+	stickyKey := parsed.StickyKey
 	stickyUID := ""
 	if h.cfg.Session != nil && stickyKey != "" {
 		// 传给 ResolveForModel 的是**完整**模型名（peek.Model，含 realm 前缀）。
@@ -593,7 +647,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 恒剥出 realm=cn，跨 realm 粘性会话会被错误钉回 CN 集合；完整前缀才能让
 		// 闭包正确过滤到 global 集合（见 cmd/server/wiring.go realmAwareAvailableForModel）。
 		// 模型名也参与成本账本与选号过滤，不能用 "-" 占位污染模型键。
-		if uid, ok := h.cfg.Session.ResolveForModel(stickyKey, peek.Model); ok {
+		if uid, ok := h.cfg.Session.ResolveForModel(stickyKey, parsed.Model); ok {
 			stickyUID = uid
 		}
 	}
@@ -603,11 +657,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// X-Conversation-Request-ID 轮级语义对齐），故不再限 sessKey=="" 才计算；
 	// sessKey 由调用侧以复合键方式入键（防不同会话同轮文本互撞）。
 	// 必须在下方 prompt.Rewrite / rewriteModel 之前取——改写会动 messages 内容。
-	turnKey := session.TurnKey(body)
+	turnKey := parsed.TurnKey
 
 	// gateway_hint 判定所需的请求形态（image_url part）：在改写前取（与 turnKey
 	// 同理）。11133「模型不支持图片」指向的前提。
-	reqHasImage := hasImagePart(body)
+	reqHasImage := parsed.HasImage
 
 	// 在途租约：成功选中即占名额；函数出口（含成功 return 与 panic）统一释放。
 	// heldModel 记录租约对应的 bareModel（每模型在途台账的归账键；与 heldUID
@@ -660,8 +714,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// outbound model 名重写为 bareModel（D6）：realm 前缀是网关侧路由协议，
-	// 上游不认前缀（global 账号也请求裸模型名）。裸名时 bareModel==peek.Model 恒等。
-	if bareModel != peek.Model {
+	// 上游不认前缀（global 账号也请求裸模型名）。裸名时 bareModel==parsed.Model 恒等。
+	if bareModel != parsed.Model {
 		body = rewriteModel(body, bareModel)
 	}
 
@@ -690,28 +744,44 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 单请求最多污染 MaxRotate 个账号的出站尝试——就地丢弃改用服务端生成的 32 hex
 	// ID（session.NewMessageID，与既有生成 ID 同形态）；客户端未提供（空串）保持
 	// 「不伪造、不发」语义不变（ResolveConversationID 契约）。
-	convID := session.ResolveConversationID(body)
+	convID := parsed.ConversationID
 	if convID != "" && !validConversationID(convID) {
 		log.Printf("DEBUG: [server] chat: invalid client conversationId %q (len=%d), using generated id", convID, len(convID))
 		convID = session.NewMessageID()
 	}
 	chatMeta := upstream.ChatMeta{ConversationID: convID}
+	// 入站 X-Conversation-Request-ID / X-Trace-ID 透传前同口径校验（audit：客户端
+	// 可控值无校验直接写出站头）：合法值透传（客户端已有自己的对话轮/链路 ID 则
+	// 以客户端为准，既有语义）；**非法值丢弃该头**（不转发、不报错）——派生链在
+	// else-if 分支，丢弃即自然回落到服务端派生/兜底 ID，与客户端未提供同路径。
 	if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
-		chatMeta.ConversationRequestID = v
-	} else if turnKey != "" && sessKey != "" {
-		// 轮级复合键：sessKey 入键防跨会话同轮文本互撞。
-		chatMeta.ConversationRequestID = session.TurnRequestID(sessKey + ":" + turnKey)
-	} else if turnKey != "" {
-		// 无会话键客户端：纯轮级键（既有兜底语义不变，存量会话键值零漂移）。
-		chatMeta.ConversationRequestID = session.TurnRequestID(turnKey)
-	} else if sessKey != "" {
-		// 残留空态兜底：无轮可聚合时维持会话级聚合（同会话恒同值）。
-		chatMeta.ConversationRequestID = session.RequestIDForKey(sessKey)
-	} else {
-		// 无会话键也无轮级键：请求级随机（轮转内捕获一次即共享）。
-		chatMeta.ConversationRequestID = session.TurnRequestID("")
+		if validConversationID(v) {
+			chatMeta.ConversationRequestID = v
+		} else {
+			log.Printf("DEBUG: [server] chat: invalid inbound X-Conversation-Request-ID %q (len=%d), dropping header", v, len(v))
+		}
 	}
-	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
+	if v := r.Header.Get("X-Trace-ID"); v != "" && !validConversationID(v) {
+		log.Printf("DEBUG: [server] chat: invalid inbound X-Trace-ID %q (len=%d), dropping header", v, len(v))
+	} else if v != "" {
+		chatMeta.TraceID = v
+	}
+	// 派生兜底（仅在客户端未提供合法 X-Conversation-Request-ID 时走到）：
+	if chatMeta.ConversationRequestID == "" {
+		if turnKey != "" && sessKey != "" {
+			// 轮级复合键：sessKey 入键防跨会话同轮文本互撞。
+			chatMeta.ConversationRequestID = session.TurnRequestID(sessKey + ":" + turnKey)
+		} else if turnKey != "" {
+			// 无会话键客户端：纯轮级键（既有兜底语义不变，存量会话键值零漂移）。
+			chatMeta.ConversationRequestID = session.TurnRequestID(turnKey)
+		} else if sessKey != "" {
+			// 残留空态兜底：无轮可聚合时维持会话级聚合（同会话恒同值）。
+			chatMeta.ConversationRequestID = session.RequestIDForKey(sessKey)
+		} else {
+			// 无会话键也无轮级键：请求级随机（轮转内捕获一次即共享）。
+			chatMeta.ConversationRequestID = session.TurnRequestID("")
+		}
+	}
 
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
@@ -736,6 +806,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.uid = acct.UID
 		// 同步昵称：请求流水行只写 uid8 时无法直观看是哪一号，昵称随本次选号带入日志行。
 		st.nick = acct.Nickname
+		// 用量分桶按账号实际归属域记账（DESIGN §3.5 按 realm 分桶）：请求模型带
+		// global: 前缀但最终由 CN 号兜底服务（或反之）时，以账号 Realm() 为准覆盖
+		// 请求域初值。每次选号覆盖，done() 以最终值为准。
+		st.realm = acct.Realm()
 		tried[acct.UID] = true
 
 		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。
@@ -916,7 +990,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if stickyKey != "" && h.cfg.Session != nil {
 			h.cfg.Session.Bind(stickyKey, acct.UID)
 		}
-		if peek.Stream {
+		if parsed.Stream {
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
 			st.status = http.StatusOK
 			stats := newChatStatsReaderSince(rc, st.start)
@@ -1244,6 +1318,8 @@ func writeOpenAIErrorHint(w http.ResponseWriter, status int, code, msg, hint str
 // hasImagePart 报告聊天请求体是否携带多模态 image_url part（OpenAI 兼容形态
 // messages[].content[] {type:"image_url"}）。畸形/其他形态一律 false（hint 侧
 // 宁缺勿滥：判不出带图就不给「模型不支持图片」指向）。
+// 热路径已由 session.ParseRequest 单次解析带出（parsed.HasImage）；本函数保留
+// 供既有测试与hint 单独判定复用。
 func hasImagePart(body []byte) bool {
 	var peek struct {
 		Messages []struct {

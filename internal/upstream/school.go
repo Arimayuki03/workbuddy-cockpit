@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -70,16 +71,18 @@ func (c *Client) SchoolShareComplete(a *auth.Auth) error {
 
 // SchoolTaskViewed 标记任务已查看（pending → in_progress）。desktop_chat_1_time
 // 等任务的计数前置：必须先激活（in_progress）后的行为才计数（三账号实测）。
+// taskCode 经 PathEscape 拼进 URL 路径段（与 tasks.go 同类处理对齐），防止含
+// 保留字符的任务码构造出畸形路径。
 func (c *Client) SchoolTaskViewed(a *auth.Auth, taskCode string) error {
-	return c.schoolJSON(a, http.MethodPost, "/tasks/"+taskCode+"/viewed", map[string]any{}, nil)
+	return c.schoolJSON(a, http.MethodPost, "/tasks/"+url.PathEscape(taskCode)+"/viewed", map[string]any{}, nil)
 }
 
-// SchoolClaimTask 领取任务奖励（返回获得的抽奖次数）。
+// SchoolClaimTask 领取任务奖励（返回获得的抽奖次数）。taskCode 同 PathEscape。
 func (c *Client) SchoolClaimTask(a *auth.Auth, taskCode string) (chanceGranted int, err error) {
 	var out struct {
 		ChanceGranted int `json:"chance_granted"`
 	}
-	if err := c.schoolJSON(a, http.MethodPost, "/tasks/"+taskCode+"/claim", map[string]any{}, &out); err != nil {
+	if err := c.schoolJSON(a, http.MethodPost, "/tasks/"+url.PathEscape(taskCode)+"/claim", map[string]any{}, &out); err != nil {
 		return 0, err
 	}
 	return out.ChanceGranted, nil

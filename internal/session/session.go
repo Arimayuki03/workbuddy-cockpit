@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -200,11 +201,20 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 }
 
 // touch 滚动 lastActive 并异步镜像（只在快路径命中时写最后一次）。
+// CAS 语义：写覆盖前比对 entries[key].uid == uid——并发窗口内该绑定可能刚被
+// Unbind（粘性号失败）或被 Bind 改绑到别的号，无条件覆盖会把旧 uid "复活"回去
+// （复活后该会话继续打失败号/旧号，直到 TTL 或下次 Unbind 才纠正）。uid 已变
+// 则放弃 touch（lastActive 略旧无害，TTL 30m 兜底）。
 func (r *Router) touch(key, uid string, now time.Time) {
 	r.mu.Lock()
-	r.entries[key] = entry{uid: uid, lastActive: now}
+	// 仅当绑定仍存在且 uid 未变才写（键缺失 = 刚被 Unbind，不复活）。
+	if cur, ok := r.entries[key]; ok && cur.uid == uid {
+		r.entries[key] = entry{uid: uid, lastActive: now}
+		r.mu.Unlock()
+		r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
+		return
+	}
 	r.mu.Unlock()
-	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
 }
 
 // Bind 显式把会话 key 绑定到 uid（幂等覆盖旧值），并异步镜像到 redisstore。
@@ -305,11 +315,11 @@ func hashIndex(key string, n int) int {
 //  5. prompt_cache_key（第 5 项，见下）
 //
 // 前四项均为 conversation 维度（对话级）。metadata.user_id 不再作为粘性键
-//（P1-anti-monopoly 剔除，issue118-deep-review §3）：user 维度粒度过粗——一个
+// （P1-anti-monopoly 剔除，issue118-deep-review §3）：user 维度粒度过粗——一个
 // user 的全部并行对话会钉同一账号（粘性范围远大于上游 prompt cache 的对话级边界），
 // 且曾抢占顶层 conversation_id 的优先级。剔除后发 user_id 的客户端回落加权轮换
-//（与无标识客户端同路径），旧 user_id 绑定靠 TTL（30m 滚动）与 Redis 镜像 TTL
-//（7d 兜底）自然过期，键消失不产生脏绑定。
+// （与无标识客户端同路径），旧 user_id 绑定靠 TTL（30m 滚动）与 Redis 镜像 TTL
+// （7d 兜底）自然过期，键消失不产生脏绑定。
 //
 // issue #35：客户端实际发 camelCase 的 conversationId，此前只识别 snake_case，
 // 导致粘性路由不命中、同对话轮转不同账号、上游上下文缓存 miss。现两种命名均识别，
@@ -439,4 +449,158 @@ func firstUserText(body []byte) string {
 func strOrEmpty(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+// Parsed 一次解析请求体得到的全部派生值（handler 热路径的"解析一次、多处复用"）：
+// 此前 handler 对同一 body 依次做 peek + ExtractKey + StickyFallbackKey + TurnKey +
+// hasImagePart + ResolveConversationID 六轮全量 JSON 解码（MB 级请求体上每轮都是
+// 一遍完整 unmarshal）。ParseRequest 单次解码出顶层 map 与 messages 骨架后，
+// 各字段在同一份结果上求值，字段值与旧独立函数**逐字段等价**（每个字段委托
+// 既有实现或同口径复刻，行为契约不变）。
+type Parsed struct {
+	// Stream / Model 出站路由需要的顶层形态（旧 peek 结构）。
+	Stream bool
+	Model  string
+	// SessKey 会话键（ExtractKey 契约：metadata/顶层 conversation 维度 +
+	// prompt_cache_key 兜底，找不到为空）。
+	SessKey string
+	// StickyKey 粘性专用键（SessKey 非空取 SessKey；空时 StickyFallbackKey——
+	// 首条 user 消息派生，user_id 在场恒空）。
+	StickyKey string
+	// TurnKey 轮级聚合键（最后一条 user 消息"序号+内容签名"，无轮为空）。
+	TurnKey string
+	// ConversationID 会话头族 conversationId（只认 conversation 维度，缺省空）。
+	ConversationID string
+	// HasImage 请求是否携带 image_url part（hint 判定，畸形/其他形态 false）。
+	HasImage bool
+}
+
+// ParseRequest 解析请求体一次并填充 Parsed。畸形 JSON（顶层非对象/语法错误）时
+// 各字段取旧函数路径的同款零值：Stream=false、Model=""、SessKey/StickyKey/
+// TurnKey/ConversationID=""、HasImage=false（与各函数逐个喂坏 body 的行为一致）。
+func ParseRequest(body []byte) Parsed {
+	var p Parsed
+	if len(body) == 0 {
+		return p
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return p
+	}
+	// 顶层形态：与旧 peek struct { Stream bool; Model string } 同口径——
+	// 类型断言失败（非 bool/非 string）取零值，与 json.Unmarshal 到 bool/string
+	// 字段失败时整体报错、字段留零值的行为一致。
+	if v, ok := obj["stream"].(bool); ok {
+		p.Stream = v
+	}
+	p.Model = strOrEmpty(obj["model"])
+
+	// 会话键：与 ExtractKey 完全同序同口径（metadata 优先、snake 优先于 camel、
+	// prompt_cache_key 兜底）。
+	if meta, ok := obj["metadata"].(map[string]any); ok {
+		if v := strOrEmpty(meta["conversation_id"]); v != "" {
+			p.SessKey = v
+		} else if v := strOrEmpty(meta["conversationId"]); v != "" {
+			p.SessKey = v
+		}
+	}
+	if p.SessKey == "" {
+		p.SessKey = strOrEmpty(obj["conversation_id"])
+	}
+	if p.SessKey == "" {
+		p.SessKey = strOrEmpty(obj["conversationId"])
+	}
+	if p.SessKey == "" {
+		p.SessKey = strOrEmpty(obj["prompt_cache_key"])
+	}
+
+	// 会话头族 conversationId：与 ResolveConversationID 同序（metadata/snake/camel，
+	// 不回落 prompt_cache_key 与 user 维度）。
+	if meta, ok := obj["metadata"].(map[string]any); ok {
+		if v := strOrEmpty(meta["conversation_id"]); v != "" {
+			p.ConversationID = v
+		} else if v := strOrEmpty(meta["conversationId"]); v != "" {
+			p.ConversationID = v
+		}
+	}
+	if p.ConversationID == "" {
+		p.ConversationID = strOrEmpty(obj["conversation_id"])
+	}
+	if p.ConversationID == "" {
+		p.ConversationID = strOrEmpty(obj["conversationId"])
+	}
+
+	// messages 骨架：一次解出 role/content 原始字节，供轮级键/粘性兜底键/图片
+	// 判定共用（三者在旧路径各解一遍 messages）。
+	var skel struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	_ = json.Unmarshal(body, &skel)
+
+	// 轮级键：TurnKey 同口径（末条 user、无可签名内容即空、不往前找）。
+	for i := len(skel.Messages) - 1; i >= 0; i-- {
+		if skel.Messages[i].Role != "user" {
+			continue
+		}
+		if sig := contentSignature(skel.Messages[i].Content); sig != "" {
+			p.TurnKey = fmt.Sprintf("u%d:%s", i, sig)
+		}
+		break
+	}
+
+	// 粘性兜底键：StickyFallbackKey 同口径——user 维度标识在场恒空；
+	// 首条 user 消息签名（纯文本与 contentText 一致 + 图片轮可签名），
+	// 首条 user 无可签名内容不往后找。
+	if !hasUserIDIn(obj) {
+		for i := range skel.Messages {
+			if skel.Messages[i].Role != "user" {
+				continue
+			}
+			if text := strings.TrimSpace(contentSignature(skel.Messages[i].Content)); text != "" {
+				sum := sha256.Sum256([]byte(text))
+				p.StickyKey = "fb:" + hex.EncodeToString(sum[:16])
+			}
+			break
+		}
+	}
+	if p.SessKey != "" {
+		p.StickyKey = p.SessKey
+	}
+
+	// 图片形态：与 hasImagePart 同口径（messages[].content[] 的 type=="image_url"）。
+	// hasImagePart 的 peek struct 要求所有 content 都是数组：任一消息 content 为
+	// 字符串/null 会导致整体 unmarshal 失败 → false。这里复刻该口径：任意一条
+	// 消息 content 解不出 parts 数组即视为"判不出带图"，停止检测。
+	for _, m := range skel.Messages {
+		var parts []struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(m.Content, &parts); err != nil {
+			break
+		}
+		for _, part := range parts {
+			if part.Type == "image_url" {
+				p.HasImage = true
+				break
+			}
+		}
+		if p.HasImage {
+			break
+		}
+	}
+	return p
+}
+
+// hasUserIDIn 已解析顶层 map 的 user 维度判定（hasUserID 的 map 形态复刻，
+// 口径一致：metadata.user_id 或顶层 user_id 存在且为非空字符串）。
+func hasUserIDIn(obj map[string]any) bool {
+	if meta, ok := obj["metadata"].(map[string]any); ok {
+		if strOrEmpty(meta["user_id"]) != "" {
+			return true
+		}
+	}
+	return strOrEmpty(obj["user_id"]) != ""
 }

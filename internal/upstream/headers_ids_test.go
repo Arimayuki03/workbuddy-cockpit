@@ -19,6 +19,7 @@ func TestChatHeadersConversationFullMeta(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	req := mustRequest(t)
 	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	meta := ChatMeta{
 		ConversationID:        "conv-1",
 		ConversationRequestID: "0123456789abcdef0123456789abcdef",
@@ -66,6 +67,7 @@ func TestChatHeadersConversationNoConvID(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	req := mustRequest(t)
 	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	c.ChatHeaders(req, a, "", ChatMeta{ConversationRequestID: "convreq-1"})
 
 	if got := req.Header.Get("X-Conversation-ID"); got != "" {
@@ -85,6 +87,7 @@ func TestChatHeadersConversationEmptyMeta(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	req := mustRequest(t)
 	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	c.ChatHeaders(req, a, "", ChatMeta{})
 
 	convReqID := req.Header.Get("X-Conversation-Request-ID")
@@ -109,6 +112,7 @@ func TestChatHeadersConversationInvalidTraceConvReqID(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	req := mustRequest(t)
 	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
 	bad := "convreq-abc-123" // 非 hex：长度 13、含横线
 	c.ChatHeaders(req, a, "", ChatMeta{ConversationRequestID: bad})
 

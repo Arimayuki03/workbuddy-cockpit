@@ -263,6 +263,7 @@ func TestChatStreamWireBodySanitized(t *testing.T) {
 
 	c := New()
 	c.SanitizeFingerprints = true
+	c.SyncHot()
 	c.ChatBaseCN = ts.URL
 	acct := &auth.Auth{AccessToken: "test-token", Domain: "copilot.tencent.com", UID: "u1"}
 
@@ -306,6 +307,7 @@ func TestChatStreamWireBodyCodexInstructionsSanitized(t *testing.T) {
 
 	c := New()
 	c.SanitizeFingerprints = true
+	c.SyncHot()
 	c.ChatBaseCN = ts.URL
 	acct := &auth.Auth{AccessToken: "test-token", Domain: "copilot.tencent.com", UID: "u1"}
 
@@ -350,6 +352,7 @@ func TestChatStreamWireBodySanitizeDisabled(t *testing.T) {
 
 	c := New()
 	c.SanitizeFingerprints = false
+	c.SyncHot()
 	c.ChatBaseCN = ts.URL
 	acct := &auth.Auth{AccessToken: "test-token", Domain: "copilot.tencent.com", UID: "u1"}
 
@@ -431,8 +434,8 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		"You are Claude Code",        // 身份句（截断前缀即可命中）
 		"Main branch (",              // 注入指令句（截断前缀即可命中）
 		"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
-		"github.com/anthropics/",     // 反馈句里的 Anthropic 仓库链接
-		"11128",                      // 上游反探测：裸数字错误码
+		"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
+		"11128",                                           // 上游反探测：裸数字错误码
 	}
 	if len(sanitizeFeatures) != len(features) {
 		t.Fatalf("sanitizeFeatures 项数=%d want %d（快照与实现不同步，见测试头注释的验证步骤）", len(sanitizeFeatures), len(features))

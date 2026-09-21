@@ -320,7 +320,7 @@ const softRateResetPatternEN = `(?i)reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2
 // 错误风暴（429 轰炸）时尤甚。模式串均为纯常量，与 sanitize.go 的包级
 // 预编译先例保持一致。regexp 并发安全（匹配只读），无需额外锁。
 var (
-	reModelRateLimit = regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCode + `"?`)
+	reModelRateLimit  = regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCode + `"?`)
 	reSoftRateResetCN = regexp.MustCompile(softRateResetPatternCN)
 	reSoftRateResetEN = regexp.MustCompile(softRateResetPatternEN)
 )
@@ -700,6 +700,16 @@ type apiEnvelope struct {
 type Client struct {
 	HTTP *http.Client
 
+	// hotMu 保护面板热改的普通字段（SanitizeFingerprints/UserAgent/ClientName/
+	// ClientVersion/CliVersion；audit：panel_config.go 保存配置时无同步写入，而
+	// headers.go/prepareBody 等读侧并发读构成数据竞争）。写侧走 SetHotFields
+	// （整体替换，panel saveConfig 单一写入点），读侧走 HotFields 快照；main 启动期
+	// 直接赋值（无并发）仍合法——字段未导出锁不改变字段本身可见性，go 惯例允许
+	// 装配期单线程写。DeviceToken/DeviceTokenFile 不在热改范围，但同属普通字段，
+	// 一并纳入快照避免读口径分裂。
+	hotMu sync.RWMutex
+	hot   HotFields
+
 	// ChatHTTP 聊天 SSE 专用 client：无总时长上限（Timeout=0），首字节由
 	// Transport.ResponseHeaderTimeout 约束，流中空闲由 IdleTimeout 约束。
 	// 与 HTTP 共享同一个 *http.Transport 实例，连接池不重复。
@@ -726,6 +736,7 @@ type Client struct {
 	globalModels fetchGlobalModelsCache
 
 	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
+	// 面板热改字段：运行期读侧一律走 HotFields 快照（见 hotMu），直读仅限启动期装配。
 	SanitizeFingerprints bool
 
 	// UserAgent 出站 User-Agent 显式覆盖（非空时全路径生效，优先于默认 WorkBuddy
@@ -787,17 +798,70 @@ type Client struct {
 	GlobalEnabled bool
 }
 
+// HotFields 面板可热改的普通字段集合（整体替换快照，读方拿到一致视图）。
+type HotFields struct {
+	SanitizeFingerprints bool
+	UserAgent            string
+	ClientName           string
+	ClientVersion        string
+	CliVersion           string
+	DeviceToken          string
+	DeviceTokenFile      string
+	PassthroughIP        bool
+}
+
+// SetHotFields 整体替换热改字段快照（panel saveConfig 单一写入点；整体替换而非
+// 逐字段赋值，读方经 HotFields() 拿到的是一致视图，无半新半旧窗口）。
+func (c *Client) SetHotFields(f HotFields) {
+	c.hotMu.Lock()
+	c.hot = f
+	c.hotMu.Unlock()
+}
+
+// HotFields 返回当前热改字段快照（读侧统一入口：headers.go 的 UA/版本段/归属名、
+// prepareBody 的脱敏开关、injectDeviceToken、injectClientIP 全部经此读取）。
+func (c *Client) HotFields() HotFields {
+	c.hotMu.RLock()
+	defer c.hotMu.RUnlock()
+	return c.hot
+}
+
 // New 生产默认值。Transport 由 newTransport() 集中构造（连接层加固：禁 h2 /
 // TLS 握手超时 / 短 keepalive 探测，参数见 transport.go）。
+// GlobalEnabled 缺省 true（与字段注释「config global.enabled，缺省 true」一致；
+// cmd/activity 等工具曾因零值 false 被迫显式补 true——现在 New 自带默认，显式
+// 赋值语句保持兼容无副作用，config 侧仍可显式关闭逃生门）。
 func New() *Client {
 	tr := newTransport()
-	return &Client{
+	c := &Client{
 		HTTP:                 &http.Client{Timeout: 120 * time.Second, Transport: tr},
 		ChatHTTP:             &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
 		SanitizeFingerprints: true,
+		GlobalEnabled:        true,
 		ChatBaseCN:           "https://copilot.tencent.com",
 		BillingBaseCN:        "https://www.codebuddy.cn",
 	}
+	// 热改快照与字段同值初始化：运行期读侧恒走快照（headers.go），快照必须从
+	// 零值起就与字段同步，否则看不到 New 预置的默认值。
+	c.hot = HotFields{SanitizeFingerprints: true}
+	return c
+}
+
+// SyncHot 把当前普通字段的值物化进热改快照（main 装配期收尾调用一次：config 直赋
+// 全部完成后同步，此后运行期读侧恒走快照、写侧走 SetHotFields。幂等，重复调用无害）。
+func (c *Client) SyncHot() {
+	c.hotMu.Lock()
+	c.hot = HotFields{
+		SanitizeFingerprints: c.SanitizeFingerprints,
+		UserAgent:            c.UserAgent,
+		ClientName:           c.ClientName,
+		ClientVersion:        c.ClientVersion,
+		CliVersion:           c.CliVersion,
+		DeviceToken:          c.DeviceToken,
+		DeviceTokenFile:      c.DeviceTokenFile,
+		PassthroughIP:        c.PassthroughIP,
+	}
+	c.hotMu.Unlock()
 }
 
 // chatHTTP 返回聊天专用 client；未设置（如测试只注入 HTTP）时回落 HTTP。
@@ -852,7 +916,8 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []b
 		// （issue #84：往 WorkBuddy 上游发 low/max 非法，须降级到 high）。
 		efforts, defs = globalEffortMap(efforts, defs)
 	}
-	body = PrepareBodyOptWithEffortsAndDefault(body, c.SanitizeFingerprints, efforts, defs)
+	// 脱敏开关走热改快照（panel 热改 SanitizeFingerprints 后新请求立即生效）。
+	body = PrepareBodyOptWithEffortsAndDefault(body, c.HotFields().SanitizeFingerprints, efforts, defs)
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
 	body = InjectPromptCacheKey(body, uid, conversationID)

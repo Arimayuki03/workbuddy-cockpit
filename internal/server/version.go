@@ -33,11 +33,11 @@ var versionCheck versionCheckState
 
 // UpdateCheck 版本检查响应（面板 settings 页「版本检查提示」契约）。
 type UpdateCheck struct {
-	Current      string `json:"current"`        // 当前版本（dev = 开发版）
-	Latest       string `json:"latest"`         // 上游最新 release tag
-	HasUpdate    bool   `json:"has_update"`     // 语义化比较 current < latest
-	ChangelogURL string `json:"changelog_url"`  // 上游 release 页链接
-	Cached       bool   `json:"cached"`         // 命中缓存（force=false 且未过期）
+	Current      string `json:"current"`              // 当前版本（dev = 开发版）
+	Latest       string `json:"latest"`               // 上游最新 release tag
+	HasUpdate    bool   `json:"has_update"`           // 语义化比较 current < latest
+	ChangelogURL string `json:"changelog_url"`        // 上游 release 页链接
+	Cached       bool   `json:"cached"`               // 命中缓存（force=false 且未过期）
 	CheckedAt    string `json:"checked_at,omitempty"` // 本次/上次检查时间
 }
 
@@ -49,6 +49,11 @@ const upstreamReleaseAPI = "https://api.github.com/repos/Arimayuki03/workbuddy-c
 // versionCacheTTL 检查结果缓存时长。
 const versionCacheTTL = 6 * time.Hour
 
+// versionForceMinInterval force=true 强制检查的最小间隔（audit：force 绕过 6h
+// 缓存且无速率限制——恶意/失控轮询可借 force 每请求打一次 GitHub API，匿名限额
+// 60 req/h 立即耗尽并拖累正常检查）。间隔内 force 直接返回缓存值（Cached=true）。
+const versionForceMinInterval = 60 * time.Second
+
 // versionHTTPClient GitHub API 客户端超时（独立于上游 client；只读、低频）。
 var versionHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
@@ -57,13 +62,23 @@ var versionRe = regexp.MustCompile(`^v(\d+)\.(\d+)\.(\d+)`)
 
 // handleCheckUpdate GET /api/system/check-update?force=true
 // 只读端点：查 GitHub latest release 与当前版本比较，**不做自更新**（设计文档 §5）。
-// force=true 绕过缓存；失败回退缓存值（有则用），无缓存时返回 current+错误说明而非 500——
-// 网络受限（无外网部署）是常态而非异常，面板应照常可用。
+// force=true 绕过 6h 缓存，但受 versionForceMinInterval 最小间隔约束（间隔内直接
+// 返回缓存，防匿名请求打爆 GitHub 限额）；失败回退缓存值（有则用），无缓存时返回
+// current+错误说明而非 500——网络受限（无外网部署）是常态而非异常，面板应照常可用。
+// 端点保持无鉴权（登录页就要用它提示新版本）。
 func (h *Handler) handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 	force := r.URL.Query().Get("force") == "true"
 
 	versionCheck.mu.Lock()
 	cached, cacheTime, lastErr := versionCheck.snapshot, versionCheck.fetched, versionCheck.lastError
+	if force && !cacheTime.IsZero() && time.Since(cacheTime) < versionForceMinInterval {
+		// force 最小间隔：60s 内重复 force 直接回缓存（Cached=true 标注），不外发请求。
+		cached.Cached = true
+		cached.CheckedAt = cacheTime.Format(time.RFC3339)
+		versionCheck.mu.Unlock()
+		writeJSON(w, http.StatusOK, cached)
+		return
+	}
 	versionCheck.mu.Unlock()
 
 	if !force && cacheTime.Add(versionCacheTTL).After(time.Now()) {
