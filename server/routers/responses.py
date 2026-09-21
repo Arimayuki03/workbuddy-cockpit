@@ -1280,7 +1280,7 @@ async def _handle(request: Request) -> JSONResponse | StreamingResponse:
     try:
         payload = to_chat_request(body, custom_tool_names, bridge)
     except Exception as exc:  # noqa: BLE001
-        gateway._record(key, ip, model, '', 400, 0, 0, 0, ua, str(exc), False)
+        gateway._record(key, ip, model, mapped or '', 400, 0, 0, 0, ua, str(exc), False)
         return _failed(f'请求转换失败：{exc}', 400)
 
     if not payload.get('messages'):

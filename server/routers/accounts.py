@@ -560,7 +560,11 @@ def checkin_logs(
     return {
         'items': merged[start:end],
         'total': total,
-        # 分别给出，便于界面说明「本端 N 条 / 自动 M 条」
+        # 分别给出，便于界面说明「本端 N 条 / 自动 M 条」。
+        #
+        # **这两个数故意不按版本过滤**（与上面的 `total` 不同）：界面用它说明
+        # 「清空会删掉多少条」，而清空是整表操作、不分版本——按版本过滤会让提示
+        # 少说数量。两个口径各有用途，别把它们「统一」掉。
         'local_total': local_total,
         'auto_total': auto_total,
         # 两个版本合计的条数（版本筛选生效时，`total` 只数当前版本）
@@ -930,7 +934,7 @@ async def restart(user: dict = Depends(security.require_admin)) -> dict:
     return {'ok': ok, 'message': message}
 
 
-def _fallback_why(bit_code: str) -> str:
+def _fallback_why(bit_code: str, disabled: bool) -> str:
     """回退到改名方式时，把「为什么没走状态位」说到可操作（issue #45 追问）。
 
     `no_route` 有两种成因，界面上必须分得开：
@@ -940,22 +944,29 @@ def _fallback_why(bit_code: str) -> str:
         改完必须**重启容器**；若已重启仍如此，就是镜像太旧（早于 2026-09-19）。
         这条文案里带上**面板实际读的配置路径**——用户手改的常常是另一个文件
         （实测反馈：「明明上游已经打开了 admin.enabled 还是不行」）。
+
+    `disabled` 决定文案的落点：**停用**要说清代价并给出「重新停用」的下一步；
+    **启用**时账号已经恢复，再说「再重新停用」是说不通的（用户点的是启用），
+    只提示「以后想让它保留签到与保活，去哪儿开开关」。
     """
     if bit_code != 'no_route':
         return ''
-    tail = '已改用改名方式：账号将完全退出账号池，签到与保活也会一并停止。'
+    if disabled:
+        tail = '已改用改名方式：账号将完全退出账号池，签到与保活也会一并停止。'
+        next_step = ('若要保留签到与保活，请到「设置 → 账号管理接口」开启后'
+                     '重启上游容器，再重新停用')
+    else:
+        tail = '已改用改名方式启用（该方式下账号退出账号池，任务也不执行）。'
+        next_step = ('若希望以后停用时保留签到与保活，请到「设置 → 账号管理接口」'
+                     '开启后重启上游容器')
     enabled, where = wb2api.admin_enabled_in_config()
     if enabled:
         return (f'（上游配置里已开启管理接口（{where}），但运行中的上游没有提供它：'
                 '上游只在启动时读这个开关，改完配置需要重启上游容器才生效；'
                 '若已重启仍如此，说明上游镜像早于 2026-09-19。' + tail + '）')
     if enabled is None:
-        return (f'（{where}。' + tail
-                + '若要保留签到与保活，请到「设置 → 账号管理接口」开启后重启上游容器，'
-                  '再重新停用）')
-    return ('（该上游未启用管理接口，' + tail
-            + '若要保留签到与保活，请到「设置 → 账号管理接口」开启后重启上游容器，'
-              '再重新停用）')
+        return f'（{where}。' + tail + next_step + '）'
+    return '（该上游未启用管理接口，' + tail + next_step + '）'
 
 
 @router.post('/accounts/{filename}/disabled')
@@ -1064,7 +1075,7 @@ async def account_set_disabled(
             # 回退路径要如实说清代价，并给出**可操作的下一步**：「该上游未启用管理
             # 接口」只说了现状，用户不知道去哪儿开（实测反馈正是这个——看到提示后
             # 只能来问）。所以带上开关位置与生效条件。
-            + _fallback_why(bit_code)
+            + _fallback_why(bit_code, disabled)
             + ('，正在重载上游使其生效' if reloaded
                else ('；请手动重启上游以生效' if result.get('changed') else ''))
         ),
