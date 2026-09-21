@@ -204,6 +204,8 @@ describe('IssueGovernanceService', () => {
     expect(commentCall[4]).toContain('## 实现方案');
     expect(commentCall[4]).toContain('## 后续');
     expect(commentCall[4]).toContain('@someone');
+    // 机器人身份标记由服务端确定性补上（开头 🤖 + 结尾操作日志行）
+    expect(commentCall[4].startsWith('🤖')).toBe(true);
     expect(commentCall[4]).toContain('✅ 机器人操作日志：');
   });
 
@@ -249,5 +251,6 @@ describe('IssueGovernanceService', () => {
     // dry-run 也走 AI 评审评论路径
     const commentCall = ops.addComment.mock.calls.find(c => c[3] === 22);
     expect(commentCall[4]).toContain('## 分析认可');
+    expect(commentCall[4].startsWith('🤖')).toBe(true);
   });
 });
