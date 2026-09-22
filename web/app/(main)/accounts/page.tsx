@@ -15,6 +15,7 @@ import {
   CalendarCheck,
   Coins,
   ChevronRight,
+  RotateCcw,
 } from 'lucide-react';
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
@@ -181,7 +182,12 @@ export default function AccountsPage() {
   );
 
   /** 执行单账号操作（签到 / 测活 / 刷新 / 删除），成功后同步底栏计数 */
-  async function run(file: string, fn: () => Promise<unknown>, okMsg: string) {
+  async function run(
+    file: string,
+    fn: () => Promise<unknown>,
+    okMsg: string,
+    preferOkMsg = false,
+  ) {
     setBusyFile(file);
     try {
       const res = (await fn()) as {
@@ -202,7 +208,7 @@ export default function AccountsPage() {
           }));
         }
       }
-      (ok ? notify.ok : notify.err)(res.message || okMsg);
+      (ok ? notify.ok : notify.err)(ok && preferOkMsg ? okMsg : (res.message || okMsg));
       await load();
       window.dispatchEvent(new Event('workbuddy-manager:accounts-changed'));
     } catch (e) {
@@ -541,6 +547,7 @@ export default function AccountsPage() {
     // 「停用把签到也停了」，正好把这条路与改名那条的区别抹掉了。
     const viaBit = a.manual_disabled === true;
     const off = paused || viaBit;
+    const hasClearableState = a.cooling === true || rateLimitedModels(a).length > 0;
     return (
       <div className="flex justify-end gap-1">
         {/* 临时停用 / 启用（issue #21、#45）。放在最前：它是最轻的「止血」动作——
@@ -563,6 +570,31 @@ export default function AccountsPage() {
               <KeyRound className="h-3.5 w-3.5" />
             </Button>
           </>
+        )}
+        {!paused && hasClearableState && (
+          <ConfirmDialog
+            title={t('accounts.forceClearCoolingTitle')}
+            description={t('accounts.forceClearCoolingDesc')}
+            confirmText={t('accounts.forceClearCoolingConfirm')}
+            destructive
+            onConfirm={() => run(
+              a.file,
+              () => accountApi.clearCooling(a.file),
+              t('accounts.forceClearCoolingDone'),
+              true,
+            )}
+            trigger={
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 rounded-md text-rose-600 hover:text-rose-700 dark:text-rose-400"
+                title={t('accounts.forceClearCooling')}
+                disabled={busy}
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+              </Button>
+            }
+          />
         )}
         <Button
           variant="ghost"
