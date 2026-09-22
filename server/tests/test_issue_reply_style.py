@@ -161,6 +161,30 @@ class ReplyCheckerBitesTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertTrue(self.mod.check(text), f'内部标识符漏放了：{text}')
 
+    def test_ai_boilerplate_is_flagged(self) -> None:
+        """客套与模板腔要拦下（维护者反馈：「回复口吻不要太 ai」）。
+
+        这类句子对用户零信息量，还会把真话稀释掉。判据写进
+        docs/release-process.md 的「口吻：像维护者本人在说话，别像客服」。
+        """
+        for text in ('感谢您的反馈！已修复。',
+                     '希望这能帮助到您。',
+                     '如有任何疑问，请随时与我们联系。',
+                     '需要注意的是，该行为已改变。',
+                     '首先列出结论，其次说明步骤。',
+                     '给您带来不便，敬请谅解。'):
+            with self.subTest(text=text):
+                self.assertTrue(self.mod.check(text), f'模板腔漏放了：{text}')
+
+    def test_plain_voice_passes(self) -> None:
+        """人话版要放行 —— 这条规则**不能**把正常的技术说明也一起拦掉。"""
+        for text in ('修好了，1.0.63 里。',
+                     '只读账号现在跟管理员看到的是同一份积分，查不到时标「上游快照」。',
+                     '有问题再开。',
+                     '设 WB_SYNC_DEPLOY=0 就保持不动。'):
+            with self.subTest(text=text):
+                self.assertEqual(self.mod.check(text), [], f'误拦了正常回复：{text}')
+
     def test_urls_are_not_mistaken_for_paths(self) -> None:
         """URL 里的点号/斜杠不能被当成模块路径，否则每条带链接的回复都误报。"""
         self.assertEqual(self.mod.check('详见 https://github.com/ithtelab/workbuddy-manager/issues/46'), [])
