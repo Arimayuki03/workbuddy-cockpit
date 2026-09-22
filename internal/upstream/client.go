@@ -1394,6 +1394,17 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 		Code int `json:"code"`
 		Data struct {
 			Models []dynModelEntry `json:"models"`
+			// 试用模型横幅：上游把「N 天免费试用」的模型放在这里，**不在 data.models 里**。
+			// 实测 global 侧 hy4-preview-f 只出现在此（modelId=hy4-preview-f、
+			// targetModelId=hy4-preview、trialDays=14），纯 data.models 解析会漏掉它。
+			ProductFeaturesConfig struct {
+				ModelTrialBanner struct {
+					Banners []struct {
+						ModelID       string `json:"modelId"`
+						TargetModelID string `json:"targetModelId"`
+					} `json:"banners"`
+				} `json:"ModelTrialBanner"`
+			} `json:"productFeaturesConfig"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -1408,6 +1419,35 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 			continue
 		}
 		out[m.ID] = m.modelInfo()
+	}
+	// 补入试用横幅模型（ModelTrialBanner）：上游把「N 天免费试用」的模型只放在这里，
+	// data.models 里没有，故纯目录解析会漏（实测 global 侧 hy4-preview-f 即如此，
+	// 但该模型**实际可调用**）。
+	//
+	// 元数据口径：能力字段（context/maxTokens/efforts/reasoning 等）从 targetModelId
+	// 的既有条目继承——试用版与其转正目标是同族模型，能力应当一致；
+	// 但 **Credits 与 Tags 显式清空**——它们描述的是"转正后"的计费与营销信息
+	// （如 hy4-preview 的 x0.29 与 badge），用在免费试用版上会误导下游展示。
+	//
+	// firstUseTimeKey / trialDays 属**账号级**试用状态，不透出给下游。
+	for _, b := range env.Data.ProductFeaturesConfig.ModelTrialBanner.Banners {
+		id := strings.TrimSpace(b.ModelID)
+		if id == "" {
+			continue
+		}
+		if _, exists := out[id]; exists {
+			continue
+		}
+		mi := ModelInfo{ID: id}
+		if tgt := strings.TrimSpace(b.TargetModelID); tgt != "" {
+			if base, ok := out[tgt]; ok {
+				mi = base
+				mi.ID = id
+			}
+		}
+		mi.Credits = ""
+		mi.Tags = nil
+		out[id] = mi
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("v3/config returned empty models")
