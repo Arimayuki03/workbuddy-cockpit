@@ -505,6 +505,34 @@ docker pull ghcr.io/ithtelab/workbuddy-manager:latest
 > cloud hosts can pull it directly, with no QEMU emulation). `docker pull` picks the
 > right one for your machine automatically.
 
+**Want an image you built yourself? Just fork the repo** — the one above is built by the
+maintainer on each release. If you need to change something for your own use (different
+defaults, an extra dependency, or you simply prefer not to depend on someone else's
+registry), fork this repository, drop the fork-only workflow into `.github/workflows/`
+and push once:
+
+```bash
+mkdir -p .github/workflows
+cp deploy/fork-image/build-image.yml .github/workflows/
+git add .github/workflows/build-image.yml && git commit -m "ci: build my own image" && git push
+```
+
+The workflow needs **no edits at all**: the image's namespace, the branch it watches, and
+the provenance labels baked into the image are all derived from your fork at run time
+(whoever forks publishes under their own name, and renaming the default branch does not
+break it). Once the build finishes (a few minutes), pull your own copy — the run summary
+prints the real username:
+
+```bash
+docker pull ghcr.io/<your-username>/workbuddy-manager-multiarch:latest
+```
+
+> The extra `-multiarch` suffix is **not a typo**: the `workbuddy-manager` package name
+> may already be taken in the namespace by a package that is not linked to your repo, and
+> a fork has no write access to that one, so the push would fail. You can also publish to
+> Docker Hub at the same time (two secrets enable it automatically). Full details in
+> [deploy/fork-image/README.md](deploy/fork-image/README.md).
+
 **The container build has the same capabilities as a host install** — the compose file
 mounts three things to make that true:
 
