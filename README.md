@@ -62,7 +62,7 @@ WorkBuddy Cockpit 是一个自托管的一体化项目：**后端**是多账号 
 - **成本分层条件探索** — tier 0 垄断时搭车改道探索未知号，承接真实请求零新增上游调用，成功即毕业
 - **分级熔断与冷却** — 429 软冷却指数退避、402 硬冷却至次日 04:00、连败熔断、模型级限流独立冷却（切模型豁免）、WAF IP 级 fail-fast
 - **会话粘性** — conversation 四键 → prompt_cache_key → 首条 user 消息派生，多轮上下文不跳号；粘性按模型判活
-- **双域适配** — 国内版（copilot.tencent.com）与国际版（www.workbuddy.ai）共享一池，按 realm 或模型名前缀路由
+- **双域适配** — 国内版（`copilot.tencent.com`）与国际版（`www.workbuddy.ai`）共享一池，按 realm 或模型名前缀路由
 
 ### ⏰ 定时积分任务
 

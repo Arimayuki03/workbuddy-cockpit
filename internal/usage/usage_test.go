@@ -146,3 +146,29 @@ func TestSnapshotRealmDimension(t *testing.T) {
 		t.Fatalf("by_model 两行应分属不同 realm: %q/%q", s.ByModel[0].Realm, s.ByModel[1].Realm)
 	}
 }
+
+// TestSnapshotEmptySeriesNotNull 零桶契约：刚启动无流量时 Snapshot.Series 必须是
+// 空数组而非 nil——Go nil 切片序列化为 JSON null，面板 /stats/ 页 usage.series.filter()
+// 直接 TypeError 白屏（2026-09-22 双击发行 exe 首启后打开 /stats/ 即崩的根因）。
+func TestSnapshotEmptySeriesNotNull(t *testing.T) {
+	for name, snap := range map[string]func() Snapshot{
+		"empty-recorder": func() Snapshot { return New("").Snapshot(72, nil) },
+		"nil-recorder":   func() Snapshot { return (*Recorder)(nil).Snapshot(72, nil) },
+	} {
+		s := snap()
+		if s.Series == nil {
+			t.Fatalf("%s: Series = nil, want 非 nil 空片", name)
+		}
+		raw, err := json.Marshal(s)
+		if err != nil {
+			t.Fatalf("%s: marshal: %v", name, err)
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatalf("%s: unmarshal: %v", name, err)
+		}
+		if decoded["series"] == nil {
+			t.Fatalf("%s: JSON series = null, 面板消费方会崩: %s", name, raw)
+		}
+	}
+}

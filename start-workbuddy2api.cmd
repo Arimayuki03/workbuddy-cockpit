@@ -16,7 +16,9 @@ set "WB2API_EXE=%CD%\wb2api.exe"
 set "WB2API_PID_FILE=%CD%\wb2api.pid"
 if exist "%WB2API_PID_FILE%" (
   set /p WB2API_PID=<"%WB2API_PID_FILE%"
-  powershell -NoProfile -Command "try { $p=Get-Process -Id ([int]$env:WB2API_PID) -ErrorAction Stop; if ([IO.Path]::GetFullPath($p.Path) -eq [IO.Path]::GetFullPath($env:WB2API_EXE)) { exit 0 } } catch {}; exit 1"
+  rem Image-name prefix check (not path equality): a renamed release exe
+  rem (wb2api-v1.2.0-windows-amd64.exe) recorded in the pid file is still ours.
+  powershell -NoProfile -Command "try { $p=Get-Process -Id ([int]$env:WB2API_PID) -ErrorAction Stop; if ($p.ProcessName -match '^wb2api') { exit 0 } } catch {}; exit 1"
   if not errorlevel 1 (
     echo WorkBuddy2API is already running. PID=!WB2API_PID!
     exit /b 0

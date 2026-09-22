@@ -101,7 +101,8 @@ export default function StatsPage() {
   const chartData = useMemo(() => {
     if (!usage) return [];
     // 先按当前版本过滤再出图：无 realm 标注 = 历史存量，按 cn 归属（与后端 Add() 回落口径一致）
-    return usage.series
+    // ?? [] 兜 series 为 null：后端零桶时的历史契约（现已修复恒空数组，此处纵深防御）
+    return (usage.series ?? [])
       .filter((p) => (p.realm ?? 'cn') === realm)
       .map((p) => {
         const isHour = p.scope === 'hour';
@@ -213,7 +214,7 @@ export default function StatsPage() {
     if (!usage) return {requests: 0, tokens: 0, errors: 0};
     const now = new Date();
     const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-    const realmSeries = usage.series.filter((p) => (p.realm ?? 'cn') === realm);
+    const realmSeries = (usage.series ?? []).filter((p) => (p.realm ?? 'cn') === realm);
     const hourPoints = realmSeries.filter((p) => p.scope === 'hour' && p.t.startsWith(todayKey));
     if (hourPoints.length) {
       return hourPoints.reduce(
@@ -233,7 +234,7 @@ export default function StatsPage() {
 
   // 域内汇总：totals 是全局口径无法按域拆，改取 by_realm 当前域那一行
   //（key 恒为 'cn'|'global'；realm 字段为空串的历史行用 key 兜底匹配）。
-  const realmAgg = usage?.by_realm.find((r) => (r.key || r.realm) === realm);
+  const realmAgg = (usage?.by_realm ?? []).find((r) => (r.key || r.realm) === realm);
 
   /**
    * 模型行按当前版本过滤：后端 ByModel 按 (realm, model) 拆分并带 realm 标注，
@@ -332,7 +333,7 @@ export default function StatsPage() {
           <div className="text-sm font-medium">{t('stats.tokenTrend')}</div>
           <div className="text-[11px] text-muted-foreground">
             {t('stats.seriesNote', {
-              hours: fmtNumber(usage?.series.filter((p) => p.scope === 'hour').length ?? 0),
+              hours: fmtNumber((usage?.series ?? []).filter((p) => p.scope === 'hour').length ?? 0),
             })}
           </div>
         </div>

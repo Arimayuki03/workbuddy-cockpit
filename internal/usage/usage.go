@@ -388,7 +388,7 @@ type Snapshot struct {
 // nicks 是 uid→昵称映射，仅用于展示。
 func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 	if r == nil {
-		return Snapshot{Generated: time.Now().Format(time.RFC3339)}
+		return Snapshot{Series: []Point{}, Generated: time.Now().Format(time.RFC3339)}
 	}
 	if hours <= 0 || hours > 24*60 {
 		hours = 72
@@ -471,6 +471,10 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 	snap := Snapshot{
 		Totals:  total.finish(),
 		ByRealm: keyed(realmAgg, func(k string) (string, string) { return k, "" }),
+		// Series 显式空片初始化：零桶（刚启动无流量）时 append 从不执行，
+		// nil 切片序列化成 JSON null，面板 /stats/ 页 usage.series.filter()
+		// 直接 TypeError 白屏（客户端异常）。契约：数组字段恒为数组。
+		Series: []Point{},
 		ByAccount: keyed(acctAgg, func(k string) (string, string) {
 			return k, nicks[k]
 		}),
