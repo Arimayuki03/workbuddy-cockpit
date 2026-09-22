@@ -1,7 +1,7 @@
 'use client';
 
 import {useCallback, useEffect, useState} from 'react';
-import {Activity, TrendingUp, KeyRound, Cpu, Wrench, RotateCcw, Coins, AlertTriangle} from 'lucide-react';
+import {Activity, TrendingUp, KeyRound, Cpu, Wrench, RotateCcw, Coins, AlertTriangle, Server} from 'lucide-react';
 import {
   Bar,
   CartesianGrid,
@@ -14,7 +14,7 @@ import {
 } from 'recharts';
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {statsApi, errText} from '@/lib/api';
-import type {StatsSummary, UsageBreakdown, UsagePoint} from '@/lib/types';
+import type {StatsSummary, UpstreamStats, UsageBreakdown, UsagePoint} from '@/lib/types';
 import {fmtCompact, fmtNumber, fmtCredit} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {StatCard} from '@/components/common/layout/StatCard';
@@ -94,6 +94,15 @@ export default function StatsPage() {
    * 见 `server/routers/stats.py` 的 `_since`），所以趋势图、按模型、按密钥三处
    * 与选择器天然同一口径，不需要各自翻译一遍。
    */
+  /**
+   * 上游自己那份统计（issue #59）。
+   *
+   * 单独取、单独摆：它**不跟时段与版本走**（是上游进程自启动以来的累计，且含
+   * 直连上游的调用），跟本页其它数字混在一起会让人以为「今日请求」包含了直连流量。
+   * 取不到时**不弹提示**——上游没起来、镜像太旧都会取不到，那是常态，就地写清原因
+   * 就够了；每次刷新弹一个错误反而吵。
+   */
+  const [upstream, setUpstream] = useState<UpstreamStats | null>(null);
   const [days, setDays] = useState('1');
   const load = useCallback(async () => {
     const d = Number(days) || 1;
@@ -108,6 +117,12 @@ export default function StatsPage() {
     if (results[2].status === 'fulfilled') setByModel(results[2].value);
     if (results[3].status === 'fulfilled') setByKey(results[3].value);
     if (results.some((r) => r.status === 'rejected')) notify.err(errText((results.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason));
+    // 上游统计单独拉，**不进 allSettled**：它失败不该弹提示（见上面说明）
+    try {
+      setUpstream(await statsApi.upstream());
+    } catch {
+      setUpstream({available: false});
+    }
   }, [days, realm, t]);
 
   useEffect(() => {
@@ -353,8 +368,90 @@ export default function StatsPage() {
         <BreakdownPanel title={t('stats.byModel')} icon={Cpu} items={byModel} />
         <BreakdownPanel title={t('stats.byKey')} icon={KeyRound} items={byKey} />
       </section>
+
+      {/* 上游自己那份统计（issue #59）。**单独一段、口径写明**：它含直连上游的
+          调用、且自上游进程启动累计，与上面的时段选择器无关——混着看会得出
+          「今日请求包含了直连流量」这种错误结论。取不到时只写原因，不弹提示。 */}
+      <section className="rounded-[20px] bg-muted p-4">
+        <div className="mb-3 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <Server className="h-4 w-4" />
+            {t('stats.upstreamTitle')}
+          </div>
+          <div className="text-[11px] text-muted-foreground">{t('stats.upstreamNote')}</div>
+        </div>
+        {upstream && (!upstream.available || upstream.enabled === false) ? (
+          <p className="text-xs leading-5 text-muted-foreground">
+            {t('stats.upstreamUnavailable')}
+            {upstream.error ? `：${upstream.error}` : ''}
+            {upstream.message ? `（${upstream.message}）` : ''}
+          </p>
+        ) : upstream?.total ? (
+          <>
+            <div className="mb-3 flex flex-wrap gap-x-6 gap-y-2 text-xs">
+              <UpstreamMetric label={t('metric.requests')} value={fmtNumber(upstream.total.requests)} />
+              <UpstreamMetric label={t('stats.upstreamSuccess')} value={fmtNumber(upstream.total.success)} />
+              <UpstreamMetric
+                label={t('dashboard.failedRequests')}
+                value={fmtNumber(upstream.total.failed)}
+                tone={upstream.total.failed ? 'warning' : undefined}
+              />
+              <UpstreamMetric label="Token" value={fmtCompact(upstream.total.total_tokens)} />
+              <UpstreamMetric label={t('metric.paid')} value={fmtCredit(upstream.total.credit)} />
+              <UpstreamMetric
+                label={t('stats.cacheHitRate')}
+                value={fmtPercent(upstream.total.cache_hit_rate)}
+              />
+            </div>
+            {(upstream.models?.length ?? 0) > 0 && (
+              <Table>
+                <TableHeader>
+                  <TableRow className="border-b border-border/60 hover:bg-transparent">
+                    <TableHead className="pl-0 text-[11px] text-muted-foreground">{t('metric.name')}</TableHead>
+                    <TableHead className="text-[11px] text-muted-foreground">{t('metric.requestsShort')}</TableHead>
+                    <TableHead className="text-[11px] text-muted-foreground">Token</TableHead>
+                    <TableHead className="text-[11px] text-muted-foreground">{t('metric.paid')}</TableHead>
+                    <TableHead className="pr-0 text-[11px] text-muted-foreground">{t('stats.cacheHitRate')}</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {upstream.models?.map((m, i) => (
+                    <TableRow key={`${m.model}-${i}`} className="border-b border-border/40">
+                      <TableCell className="pl-0">
+                        <span className="max-w-[220px] truncate text-xs font-medium">{m.model || t('metric.unknown')}</span>
+                      </TableCell>
+                      <TableCell className="text-xs tabular-nums">{fmtNumber(m.requests)}</TableCell>
+                      <TableCell className="text-xs tabular-nums">{fmtCompact(m.total_tokens)}</TableCell>
+                      <TableCell className="text-xs tabular-nums">{fmtCredit(m.credit)}</TableCell>
+                      <TableCell className="pr-0 text-xs tabular-nums">{fmtPercent(m.cache_hit_rate)}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </>
+        ) : null}
+      </section>
     </div>
   );
+}
+
+/** 上游统计里的一个数字（标签 + 值）。失败数用琥珀色标出来。 */
+function UpstreamMetric({label, value, tone}: {label: string; value: string; tone?: 'warning'}) {
+  return (
+    <div className="flex items-baseline gap-1.5">
+      <span className="text-muted-foreground">{label}</span>
+      <span className={`font-medium tabular-nums ${tone === 'warning' ? 'text-amber-600 dark:text-amber-400' : ''}`}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+/** 上游给的是 0~1 的比例；拿不到就显示占位符，不显示 0%（那是「一次没命中」的意思）。 */
+function fmtPercent(v: number | undefined | null): string {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return '—';
+  return `${Math.round(v * 100)}%`;
 }
 
 function BreakdownPanel({

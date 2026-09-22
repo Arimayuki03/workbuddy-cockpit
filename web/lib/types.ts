@@ -751,3 +751,34 @@ export interface AuditLogPage {
   items: AuditLog[];
   total: number;
 }
+
+/**
+ * 上游自己那份统计（`/v1/stats`，issue #59）。
+ *
+ * 字段名照上游 JSON。**口径与面板的用量统计不同**：这份含直连上游的调用，
+ * 且自上游进程启动累计——界面必须标注清楚，别与按时段统计的数字混着看。
+ */
+export interface UpstreamStatRow {
+  model?: string;
+  requests?: number;
+  success?: number;
+  failed?: number;
+  total_tokens?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  credit?: number;
+  cache_hit_rate?: number;
+}
+
+export interface UpstreamStats {
+  /** 取不到时为 false，此时只有 error */
+  available: boolean;
+  error?: string;
+  /** 上游可关闭统计采集；关闭时 enabled=false 且 message 说明原因 */
+  enabled?: boolean;
+  message?: string;
+  since?: string;
+  uptime_sec?: number;
+  total?: UpstreamStatRow;
+  models?: UpstreamStatRow[];
+}
