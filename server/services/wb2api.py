@@ -531,8 +531,14 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
             os.fsync(fh.fileno())
         os.chmod(tmp, st.st_mode & 0o777)
         try:
-            os.chown(tmp, st.st_uid, st.st_gid)
-        except PermissionError:
+            # Windows 上**没有** os.chown（该 API 仅 Unix 提供）——直接调用会抛
+            # AttributeError。原生模式部署在 Windows 上也会走到这里（评审实测：
+            # 在 Windows 跑本 PR 自带的测试，四条里三条就是这个错）。
+            # 权限模式已经 chmod 保留；属主在 Windows 上本来也没有 uid/gid 语义。
+            chown = getattr(os, 'chown', None)
+            if chown is not None:
+                chown(tmp, st.st_uid, st.st_gid)
+        except OSError:
             # 非 root 部署若本来就是文件属主，chown 到同一个 uid/gid 也可能在
             # 某些平台上被拒绝；权限模式已经保留，失败不应阻断写入。
             pass
@@ -577,7 +583,12 @@ def clear_account_cooling_state(uid: str) -> dict:
         'degrade_until': account.get('degrade_until'),
     }
     account['until'] = '0001-01-01T00:00:00Z'
-    account['cool_kind'] = 0
+    # `cool_kind` 要**删掉**而不是写 0（评审修正）：它在 state.json 里是 int 枚举
+    # （0 = hard_credit），而「没有冷却」的规范表示是**不写这个键** —— 上游自己的
+    # 落盘逻辑就这么做，其注释写明是为了避免「until 零值 + cool_kind」的不一致快照。
+    # 写 0 不会立刻出问题（until 是零值，上游下次 Flush 也会按规范抹掉），但没必要
+    # 在别人的文件里留一个自己造的非规范形态。
+    account.pop('cool_kind', None)
     account['soft_streak'] = 0
     account.pop('model_cooldowns', None)
     account.pop('breaker_until', None)
