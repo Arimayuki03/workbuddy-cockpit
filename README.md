@@ -435,6 +435,29 @@ docker pull ghcr.io/ithtelab/workbuddy-manager:latest
 > 镜像**同时提供 `linux/amd64` 与 `linux/arm64`**（Apple Silicon、ARM 云主机可直接拉取，
 > 无需 QEMU 模拟）。`docker pull` 会按你的机器架构自动选择对应的那一份。
 
+**想用自己构建的镜像？fork 一下就行** —— 上面那份是维护者发版时构建的。如果你要
+改点什么再自己用（换默认配置、加个依赖，或者只是不想依赖别人的镜像仓库），fork
+本仓库后把 fork 专用工作流放进 `.github/workflows/`，推一次代码就自动构建：
+
+```bash
+mkdir -p .github/workflows
+cp deploy/fork-image/build-image.yml .github/workflows/
+git add .github/workflows/build-image.yml && git commit -m "ci: 构建自己的镜像" && git push
+```
+
+工作流**不用改任何内容**：镜像归属、触发分支、镜像里记的来源信息都按你 fork 的实际
+情况自动决定（谁 fork 就推到谁名下，默认分支改了名也照常触发）。构建完成后（几分钟）
+拉取你自己那一份，真实用户名见那次运行的摘要：
+
+```bash
+docker pull ghcr.io/<你的用户名>/workbuddy-manager-multiarch:latest
+```
+
+> 镜像名比上游多一个 `-multiarch` 后缀，这**不是笔误**：`workbuddy-manager` 这个
+> 包名可能已被一个未链接到本仓库的同名包占用，那种包 fork 拿不到写权限、推送会
+> 失败。也可以顺便推一份到 Docker Hub（加两个 Secret 即自动启用）。完整说明见
+> [deploy/fork-image/README.md](deploy/fork-image/README.md)。
+
 **容器版与宿主版的能力是一致的** —— compose 里默认挂载了三样东西让它们对齐：
 
 | 挂载 | 作用 |

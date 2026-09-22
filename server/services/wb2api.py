@@ -728,6 +728,78 @@ def admin_enabled_in_config() -> tuple[bool | None, str]:
     return bool(isinstance(admin, dict) and admin.get('enabled')), str(path)
 
 
+# 上游统计里**允许下发**的字段（白名单）。为什么不整包透传：与
+# `load_upstream_config` 那条同源的理由（见那里的注释）——透传的失效模式是
+# 「上游给统计载荷加了新字段 → 原样下发给每个登录用户（含只读账号）」，
+# 而且**不会有任何报错**；白名单的失效模式相反：新字段不显示（界面少一列），
+# 这个方向的失效是可见、可控的。下面就是界面要显示的计数字段，多一个都不带。
+_STATS_ROW_FIELDS = ('requests', 'success', 'failed', 'streaming',
+                     'prompt_tokens', 'completion_tokens', 'total_tokens',
+                     'cache_hit_tokens', 'cache_miss_tokens', 'cache_write_tokens',
+                     'cache_hit_rate', 'credit', 'credit_per_req')
+_STATS_MODEL_FIELDS = ('model',) + _STATS_ROW_FIELDS
+
+
+def _pick_stats_row(row: object, fields: tuple[str, ...]) -> dict:
+    """从上游的统计行里只挑白名单字段。"""
+    if not isinstance(row, dict):
+        return {}
+    return {k: row[k] for k in fields if k in row}
+
+
+async def get_upstream_stats() -> dict:
+    """读上游自己的 `/v1/stats`（它按模型累计的官方统计，issue #59）。
+
+    **与面板自己的统计不是一回事，别混着看**：
+
+      · 面板的用量统计（`/api/stats/*`）统计的是**经过本网关**的调用，
+        按密钥归属、可按时段筛选；
+      · 上游这份是「上游进程自己看到的全部调用」——**直连 7863 的调用只在这里**，
+        而且它是**自上游进程启动以来**的累计，没有时段概念。
+
+    用户要的「原有密钥的用量」只能在后者里看到（那把密钥直连上游，面板看不见它），
+    所以如实说明口径比数字本身更重要。
+
+    返回 `{'available': False, 'error': ...}` 表示取不到（上游没起来、版本太旧没有
+    这个端点、或 api_key 不一致）——界面据此说明情况，而不是显示一片空白。
+    """
+    try:
+        async with config.http_client(10, connect=3) as client:
+            resp = await client.get(f'{config.WB2API_BASE}/v1/stats',
+                                    headers=_auth_headers())
+    except Exception as exc:  # noqa: BLE001
+        return {'available': False, 'error': _err_text(exc)}
+    if resp.status_code == 401:
+        return {'available': False, 'error': '上游拒绝了鉴权（api_key 不一致）'}
+    if resp.status_code == 404:
+        return {'available': False,
+                'error': '该上游版本没有这个端点（需要较新的上游镜像）'}
+    if resp.status_code >= 400:
+        return {'available': False, 'error': f'上游返回 {resp.status_code}'}
+    try:
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        return {'available': False, 'error': f'上游返回的不是 JSON：{_err_text(exc)}'}
+    if not isinstance(data, dict):
+        return {'available': False, 'error': '上游返回的结构无法识别'}
+    # 只挑白名单字段下发（见 _STATS_ROW_FIELDS 的说明）
+    out: dict = {
+        'available': True,
+        'enabled': data.get('enabled'),
+        'since': data.get('since'),
+        'uptime_sec': data.get('uptime_sec'),
+    }
+    if isinstance(data.get('message'), str):
+        out['message'] = data['message']
+    if isinstance(data.get('total'), dict):
+        out['total'] = _pick_stats_row(data['total'], _STATS_ROW_FIELDS)
+    models = data.get('models')
+    if isinstance(models, list):
+        out['models'] = [_pick_stats_row(m, _STATS_MODEL_FIELDS)
+                         for m in models if isinstance(m, dict)]
+    return out
+
+
 async def get_models() -> tuple[bool, list | dict]:
     try:
         async with config.http_client(15, connect=3) as client:
@@ -1083,6 +1155,37 @@ def _sanitize_section(section: str, incoming: dict) -> dict:
             if not _DURATION_RE.match(raw.strip()):
                 raise ValueError(f'{key} 时长格式有误，应为 30s / 10m / 2h / 1d')
             out[key] = raw.strip()
+        elif section == 'prompt' and key == 'mode':
+            # 上游对非法值是**启动报错**（cmd/server/config.go:429
+            # 「prompt.mode: %q 不是合法值」），所以这里必须拦——填错就保存成功、
+            # 然后上游起不来，正是本节注释里点名的最坏形态。
+            # 可达路径：`POST /api/settings/upstream` 直接透传 body，不经前端表单。
+            val = str(raw or '').strip().lower()
+            if val not in ('passthrough', 'custom', 'append'):
+                raise ValueError('系统提示词模式只能是 passthrough / custom / append')
+            out[key] = val
+        elif section == 'prompt' and key == 'file':
+            # 这是**文件路径**，不是提示词正文（issue #62）。上游对它是 fail-fast：
+            # 路径非空但读不到 → 启动直接报错退出（其 normalizePrompt 注释写明
+            # 「避免静默回落到内置默认」）。把正文粘进来会让上游进入 Restarting
+            # 崩溃循环，整个反代不可用——实测就有用户这么踩了。
+            #
+            # 两条判据都来自「文件名不是正文」这个事实：
+            #   · 含换行/控制字符 —— 路径不可能有；
+            #   · 超过 255 字节 —— 文件名的硬上限（用户看到的报错就是 file name too long）。
+            # 长度按**字节**算：中文一个字三字节，几十个字的提示词就超了。
+            val = str(raw or '')
+            if any(ch in val for ch in ('\n', '\r', '\x00')):
+                raise ValueError(
+                    '这一栏要填文件路径，不是提示词正文。正文请先写进一个文件，'
+                    '再填该文件在上游容器内的路径，例如 /app/data/prompt-custom.txt'
+                )
+            if len(val.encode('utf-8')) > 255:
+                raise ValueError(
+                    '文件路径不能超过 255 字节（文件名上限）——看起来是把提示词正文'
+                    '粘进来了。正文请先写进一个文件，再填它的路径'
+                )
+            out[key] = val.strip()
         elif section == 'pool' and key == 'cost_explore_interval':
             # 成本档位条件探索的周期（上游 2026-09-17 新增，默认 "30m"）。
             #
