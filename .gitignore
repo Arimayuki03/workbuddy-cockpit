@@ -82,3 +82,6 @@ dev/.shots-stats
 # 只读账号积分口径验收（verify_viewer_credits_ui.py）的临时数据与截图
 dev/.viewer-credits
 dev/.shots-viewer-credits
+# 复制链接验收（verify_copy_link_ui.py）的临时数据与截图
+dev/.copy-link
+dev/.shots-copy-link
