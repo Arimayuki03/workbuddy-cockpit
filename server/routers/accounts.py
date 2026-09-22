@@ -362,7 +362,7 @@ async def account_credits(
 @router.post('/accounts/refresh-credits')
 async def refresh_all_credits(
     force: bool = True,
-    user: dict = Depends(security.require_admin),
+    user: dict = Depends(security.current_user),
 ) -> dict:
     """并发查询所有账号的积分，返回 {uid: credits} 与每条是否来自缓存。
 
@@ -370,7 +370,22 @@ async def refresh_all_credits(
     本接口直接向腾讯查询。force=true（默认）用于「刷新积分」按钮，
     强制绕过 60 秒缓存；force=false 用于页面加载，命中缓存时不重复请求腾讯。
     无论哪种，都回传 cached / cache_age，前端据此标注「实时 / 缓存」。
+
+    ## 权限（issue #56）
+
+    `force=false`（页面加载那条路）**任何已登录用户都能调**：它读取的是
+    账号余额，属于只读信息，只读账号同样应当看到**同一份**数字。
+    此前整个接口都是 admin-only，于是只读账号的页面加载静默 403，界面
+    回退到上游 `/status` 的快照值——那是「上游上次调度这个账号时记下的」，
+    可能滞后数小时、也可能还是 0，用户看到的就是「积分不对 / 有两个显示 0」。
+
+    `force=true`（显式点「刷新积分」）仍然只有管理员能调：它会**强制**绕过
+    缓存、对所有账号发起一次真实查询，属于「主动触发外部调用」的动作，
+    不该由只读账号驱动。
     """
+    if force and str(user.get('role') or '') != 'admin':
+        raise HTTPException(status_code=403, detail='刷新积分需要管理员权限')
+
     accounts = wb2api.list_auth_accounts()
 
     async def one(

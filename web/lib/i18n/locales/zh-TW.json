@@ -294,6 +294,8 @@
     "modelLimitUntil": "預計 {at} 恢復",
     "modelMissing": "該帳號沒有這個模型",
     "creditsNoneTitle": "上游尚未回傳該帳號的積分（可能剛新增，或上游無法連線）",
+    "snapshot": "上游快照",
+    "snapshotTitle": "來自上游 /status 的快照值：上游上次排程該帳號時記下的餘額，可能落後數小時。點「重新整理積分」可查即時值。",
     "creditsTitle": "目前可花費積分餘額（所有方案剩餘額度合計）",
     "cacheTitle": "60 秒內已查過，直接使用伺服器快取；點「重新整理積分」可強制重新查詢",
     "cacheAge": "快取 {n}s 前",

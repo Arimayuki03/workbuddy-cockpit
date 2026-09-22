@@ -318,6 +318,8 @@
     "modelLimitUntil": "expected back at {at}",
     "modelMissing": "this account does not have this model",
     "creditsNoneTitle": "Upstream has not returned credits for this account yet (recently added, or upstream unreachable)",
+    "snapshot": "Upstream snapshot",
+    "snapshotTitle": "Snapshot from the upstream /status: the balance recorded when it last scheduled this account. It can lag by hours; click Refresh to query live.",
     "creditsTitle": "Current spendable credit balance (all plans combined)",
     "cacheTitle": "Queried within the last 60 seconds — served from the server cache. Use Refresh credits to force a fresh query.",
     "cacheAge": "cached {n}s ago",

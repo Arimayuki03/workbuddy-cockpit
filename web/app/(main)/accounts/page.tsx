@@ -423,10 +423,22 @@ export default function AccountsPage() {
   }
 
   /** 积分余额 + 数据来源标注。
-   *  明确区分「实时」与「缓存 x 秒前」，避免把滞后的数字当成刚查到的。 */
+   *  明确区分「实时」「缓存 x 秒前」与「上游快照」三种来源，避免把滞后的数字
+   *  当成刚查到的。
+   *
+   *  为什么要单独标出「上游快照」（issue #56）：实时值取不到时（查询失败，或
+   *  只读账号早先根本调不到该接口），界面会回退到上游 `/status` 的快照值 ——
+   *  那是**上游上次调度这个账号时记下的**，可能滞后数小时，也可能仍是 0。
+   *  实测只读账号看到两个账号显示 0（管理员视角是 6420 / 9353），而 0 会被当成
+   *  「余额耗尽」用红色渲染，看起来像账号出了故障。
+   *
+   *  所以快照值：① 打「上游快照」标签；② **不用红色** ——「快照说 0」不等于
+   *  「确实没积分」，不该报警。
+   */
   function renderCredits(a: Account) {
-    // 优先用刚查到的实时值，其次上游 /status 的缓存值
-    const value = liveCredits[a.uid] ?? a.credits;
+    // 优先用刚查到的实时值，其次上游 /status 的快照值
+    const live = liveCredits[a.uid];
+    const value = live ?? a.credits;
     if (value === null || value === undefined) {
       return (
         <span
@@ -438,8 +450,10 @@ export default function AccountsPage() {
       );
     }
     const meta = creditsMeta[a.uid];
-    const tone =
-      value <= 0
+    const fromSnapshot = live === undefined;
+    const tone = fromSnapshot
+      ? 'text-muted-foreground'
+      : value <= 0
         ? 'text-red-600 dark:text-red-400'
         : value < 200
           ? 'text-amber-600 dark:text-amber-400'
@@ -449,7 +463,15 @@ export default function AccountsPage() {
         <span className={`text-xs font-medium tabular-nums ${tone}`} title={t('accounts.creditsTitle')}>
           {fmtNumber(value)}
         </span>
-        {meta &&
+        {fromSnapshot ? (
+          <span
+            className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-3 text-muted-foreground"
+            title={t('accounts.snapshotTitle')}
+          >
+            {t('accounts.snapshot')}
+          </span>
+        ) : (
+          meta &&
           (meta.cached ? (
             <span
               className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] leading-3 text-amber-600 dark:text-amber-400"
@@ -464,8 +486,9 @@ export default function AccountsPage() {
             >
               {t('accounts.live')}
             </span>
-          ))}
-        <CreditCountdown expiries={meta?.expiries} />
+          ))
+        )}
+        <CreditCountdown expiries={fromSnapshot ? undefined : meta?.expiries} />
       </span>
     );
   }
@@ -610,6 +633,11 @@ export default function AccountsPage() {
                 }
               />
             )}
+            {/* 「刷新积分」= 强制查询（绕过 60 秒缓存），只有管理员能调。
+                只读账号页面加载时本来就会走缓存路径拿到实时值，所以这个按钮
+                对它们没有意义 —— 显示出来只会点了报 403（issue #56 之后权限
+                是明确的：force 仍限管理员）。与上面几个管理员操作同一个口径。 */}
+            {isAdmin && (
             <Button
               size="sm"
               variant="outline"
@@ -622,6 +650,7 @@ export default function AccountsPage() {
               <span className="hidden sm:inline">{t('accounts.refreshCredits')}</span>
               <span className="sm:hidden">{t('accounts.creditsShort')}</span>
             </Button>
+            )}
             {/* 「全部签到」仅国内版显示：国际版**没有签到体系**（上游调度器对
                 global 账号直接过滤，不发请求）。显示一个按下去只会得到「已跳过」
                 的按钮是误导，直接不给。 */}

@@ -79,3 +79,6 @@ dev/.shots-stats
 
 # 安全测试脚本（临时）
 .sec*.py
+# 只读账号积分口径验收（verify_viewer_credits_ui.py）的临时数据与截图
+dev/.viewer-credits
+dev/.shots-viewer-credits
