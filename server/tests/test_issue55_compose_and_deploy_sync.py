@@ -129,6 +129,18 @@ class ComposeCommandTest(unittest.TestCase):
             self.mod._compose_cmd(rep)
         self.assertIn('/usr/local/lib/docker/cli-plugins/docker-compose', rep.text())
 
+    def test_plugin_paths_survive_hostile_environment(self) -> None:
+        """诊断辅助函数**不能自己把更新带崩**（审核补漏）。
+
+        `Path.home()` 在 uid 没有 passwd 条目时会抛 RuntimeError（某些编排器以
+        任意 uid 跑容器），`is_file()` 也可能因权限抛 OSError。这个函数只是用来
+        **打印诊断信息**的，它抛错等于「想看日志的人反而把更新搞挂」。
+        """
+        with mock.patch.object(self.mod.Path, 'home',
+                               side_effect=RuntimeError('no home')):
+            paths = self.mod._compose_plugin_paths()
+        self.assertIsInstance(paths, list)
+
     def test_plugin_paths_shape(self) -> None:
         """插件路径探测返回字符串列表（本机没有则空列表，不能抛）。"""
         paths = self.mod._compose_plugin_paths()
@@ -150,7 +162,7 @@ class DeployRiskMessageTest(unittest.TestCase):
         text = rep.text()
         self.assertIn('更新器本身', text)
         self.assertIn('不同步', text)
-        self.assertIn('WB_SYNC_DEPLOY=1', text, '没给出可执行的下一步')
+        self.assertIn('WB_SYNC_DEPLOY', text, '没给出可执行的下一步')
         # 备份路径按本机分隔符渲染（Windows 上是反斜杠），只断言末段
         self.assertIn('backup-x', text, '没告诉用户备份在哪')
 
@@ -159,7 +171,7 @@ class DeployRiskMessageTest(unittest.TestCase):
         rep = _Rep()
         self.mod._explain_deploy_risk(rep, ['install.sh'], [], Path('/app/deploy/update.py'))
         self.assertNotIn('更新器本身', rep.text())
-        self.assertIn('WB_SYNC_DEPLOY=1', rep.text(), '任何差异都该给出同步办法')
+        self.assertIn('WB_SYNC_DEPLOY', rep.text(), '任何差异都该给出同步办法')
 
     def test_added_only_says_no_action_needed(self) -> None:
         rep = _Rep()
@@ -199,7 +211,7 @@ class DeploySyncTest(unittest.TestCase):
         self.assertTrue((self.inst / 'deploy' / 'check-upstream.sh').is_file())
         # 备份必须留下旧内容（出问题要能回退）
         self.assertEqual((self.backup / 'deploy' / 'update.py').read_text(encoding='utf-8'), 'OLD')
-        self.assertIn('WB_SYNC_DEPLOY=1', rep.text())
+        self.assertIn('WB_SYNC_DEPLOY=0', rep.text(), '没告诉用户怎么保持不变')
 
     def test_identical_files_are_a_no_op(self) -> None:
         self._write(self.pkg, 'x.sh', 'SAME')
@@ -207,11 +219,43 @@ class DeploySyncTest(unittest.TestCase):
         added, modified = self.mod._sync_deploy(self.pkg, self.inst, self.backup, _Rep())
         self.assertEqual((added, modified), ([], []))
 
-    def test_not_enabled_by_default(self) -> None:
-        """默认仍是「不同步」——这次只加了显式开关，没有改安全姿态。"""
-        mod = _load_update_mod(WB_SYNC_DEPLOY='')
-        self.assertNotEqual(os.environ.get('WB_SYNC_DEPLOY'), '1')
-        self.assertTrue(hasattr(mod, '_sync_deploy'))
+    def _enabled_with(self, val: str | None, mod) -> bool:
+        """在**调用时**设好环境变量再问一次。
+
+        为什么不能像别的用例那样靠 `_load_update_mod(WB_SYNC_DEPLOY=...)`：那个
+        加载器会在 exec_module 之后把 env 还原，而 `_deploy_sync_enabled()` 是
+        **调用时**读 env 的 —— 加载期设的值到调用时早就没了（第一版就是这么写的，
+        于是「设 0 也不生效」看起来像代码 bug）。
+        """
+        env = {} if val is None else {'WB_SYNC_DEPLOY': val}
+        with mock.patch.dict(os.environ, env, clear=False) as _:
+            if val is None:
+                os.environ.pop('WB_SYNC_DEPLOY', None)
+            return mod._deploy_sync_enabled()
+
+    def test_enabled_by_default(self) -> None:
+        """**默认同步**（维护者拍定）：发布包在解压前已验签，更新 deploy/ 与更新
+        server/ 同一性质；不更新的代价是「更新器永远是旧的」（#28 → #55 的根因）。"""
+        mod = _load_update_mod()
+        self.assertTrue(self._enabled_with(None, mod), '默认没开同步')
+
+    def test_can_be_disabled(self) -> None:
+        """手工维护 deploy/ 的部署可以关掉（给它们留退路）。"""
+        mod = _load_update_mod()
+        for val in ('0', ' 0 '):
+            with self.subTest(value=val):
+                self.assertFalse(self._enabled_with(val, mod))
+
+    def test_other_values_mean_enabled(self) -> None:
+        """只有 0 表示关闭：`1` / 其它值都按默认（同步）处理。
+
+        这样「用户没设」与「用户照旧设了 1」行为一致，不会因为一个历史值突然
+        变成「不同步」。
+        """
+        mod = _load_update_mod()
+        for val in ('1', 'true', 'yes'):
+            with self.subTest(value=val):
+                self.assertTrue(self._enabled_with(val, mod))
 
 
 if __name__ == '__main__':

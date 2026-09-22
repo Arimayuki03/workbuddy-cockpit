@@ -219,7 +219,9 @@ ideas belong in [this repository](https://github.com/ithtelab/workbuddy-manager/
 - **Release packages are always signature-verified** (supply-chain protection): the
   updater embeds the maintainer's public key and verifies before extracting. A missing,
   tampered or mismatched signature aborts the install. The panel shows a "verified" badge,
-  and `deploy/` (the verification logic itself) is never replaced from a package.
+  Once verification passes, `deploy/` is updated from the package too (the updater
+  itself lives there and needs to be upgradeable). Set `WB_SYNC_DEPLOY=0` to keep
+  your local `deploy/` untouched.
   See [docs/release-signing.md](docs/release-signing.md)
 
 ### Changelog
@@ -595,6 +597,7 @@ Full deployment notes (Nginx config, hardening, FAQ) are in [deploy/README.md](d
 | `WB_SECURE_COOKIE` | `auto` | Decided from `X-Forwarded-Proto` |
 | `WB_GATEWAY_RATE_PER_MIN` | `120` | Outbound gateway per-key limit: admitted requests per 60s (`0` = unlimited) |
 | `WB_GATEWAY_MAX_BODY_MB` | `32` | Outbound gateway request body limit (MB) |
+| `WB_SYNC_DEPLOY` | `1` | Update `deploy/` together with the manager (`0` = leave it untouched) |
 | `WB_HTTP_PROXY` | empty | Outbound proxy; empty means direct |
 
 The full list is in [`.env.example`](.env.example).

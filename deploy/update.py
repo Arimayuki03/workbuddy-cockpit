@@ -578,10 +578,19 @@ def _explain_deploy_risk(rep: Reporter, modified: list[str], added: list[str],
         rep.log('   ⚠️ 本次更新改动了**更新器本身**（deploy/update.py）。'
                 '不同步的话，从下一次起仍由旧更新器执行更新，本次修的问题不会生效。',
                 'warn')
-    rep.log('   想让它随包更新：设环境变量 WB_SYNC_DEPLOY=1 后重新运行本次更新'
-            '（会在覆盖前备份到数据目录），或按上面的「比对方法」人工比对后手动覆盖。')
+    rep.log('   想让它随包更新（默认就是）：去掉 WB_SYNC_DEPLOY=0 后重跑本次更新'
+            '（覆盖前会备份到数据目录），或按上面的「比对方法」人工比对后手动覆盖。')
     if backup is not None:
         rep.log(f'   本次备份目录：{backup}')
+
+
+def _deploy_sync_enabled() -> bool:
+    """更新管理端时，`deploy/` 是否随包更新。**默认更新**，`WB_SYNC_DEPLOY=0` 关闭。
+
+    见 `update_manager` 里那段说明：包在解压前已验签，覆盖 deploy/ 与覆盖 server/
+    同一性质；而**不**更新的代价是更新器永远是旧的（它本身就在 deploy/ 里）。
+    """
+    return os.environ.get('WB_SYNC_DEPLOY', '').strip() != '0'
 
 
 def _sync_deploy(new_deploy: Path, install_dir: Path, backup: Path,
@@ -594,6 +603,14 @@ def _sync_deploy(new_deploy: Path, install_dir: Path, backup: Path,
 
     抽成独立函数是为了可测：它决定「更新器自己能不能被更新」，而这段逻辑
     过去只存在于 `update_manager` 内联代码里，改错了没有测试会红。
+
+    两个刻意的取舍（审核时特意确认过，别当成疏漏）：
+      · **只增不删**：本地有、包里没有的文件不会被删掉。发布包不该替用户清理
+        目录，留着顶多是多余文件；
+      · 用 `copyfile` 而不是 `copy2`：不保留包内权限位，写出来的文件按 umask 取
+        默认权限（可预测）。deploy/ 下的脚本都以解释器调用（`bash xxx.sh`、
+        `python3 xxx.py`），不依赖可执行位；反过来说，保留包内 mode 反而会把
+        一个意外的 0777 一路带进安装目录。
     """
     dest = install_dir / 'deploy'
     added: list[str] = []
@@ -618,8 +635,8 @@ def _sync_deploy(new_deploy: Path, install_dir: Path, backup: Path,
             rel = src.relative_to(new_deploy)
             (dest / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, dest / rel)
-    rep.log('deploy/ 已按 WB_SYNC_DEPLOY=1 **同步到包内版本**'
-            f'（旧文件备份在 {backup / "deploy"}）', 'warn')
+    rep.log('deploy/ 已同步到包内版本（默认行为；旧文件备份在 '
+            f'{backup / "deploy"}，想保持不变可设 WB_SYNC_DEPLOY=0）', 'warn')
     if modified:
         rep.log('   同步（改动）：' + '、'.join(modified[:8])
                 + ('…' if len(modified) > 8 else ''), 'warn')
@@ -749,14 +766,29 @@ def _compose_plugin_paths() -> list[str]:
     只用于诊断输出：compose 用不了时，最需要知道的就是「插件到底装没装、装在哪」
     —— 否则只能对着 `docker-compose: No such file` 猜（issue #55 的报告在这里
     卡住了）。容器镜像按 Dockerfile 会把插件放在第一个路径。
+
+    `Path.home()` 与每个 `is_file()` 都单独兜住：uid 在 /etc/passwd 里没有条目时
+    `Path.home()` 会抛 RuntimeError（某些编排器以任意 uid 跑容器就是这种情形），
+    权限异常也可能让 `is_file()` 抛。这是**诊断**用的辅助函数，绝不该因为它自己
+    出错而把更新流程带崩。
     """
     cands = [
         Path('/usr/local/lib/docker/cli-plugins/docker-compose'),
         Path('/usr/lib/docker/cli-plugins/docker-compose'),
         Path('/usr/local/libexec/docker/cli-plugins/docker-compose'),
-        Path.home() / '.docker' / 'cli-plugins' / 'docker-compose',
     ]
-    return [str(p) for p in cands if p.is_file()]
+    try:
+        cands.append(Path.home() / '.docker' / 'cli-plugins' / 'docker-compose')
+    except Exception:  # noqa: BLE001
+        pass
+    out: list[str] = []
+    for p in cands:
+        try:
+            if p.is_file():
+                out.append(str(p))
+        except OSError:
+            continue
+    return out
 
 
 def _compose_cmd(rep: Reporter | None = None) -> list[str] | None:
@@ -885,18 +917,24 @@ def update_manager(rep: Reporter) -> None:
             shutil.rmtree(target_web, ignore_errors=True)
         shutil.copytree(new_web_out, target_web)
 
-        # deploy/ 里的脚本**不自动替换**——它含本次更新用的验签逻辑与公钥，
-        # 是整条信任链的锚点。若允许包内 deploy/ 覆盖它，攻击者只要在某次
-        # 更新里带一个改过的 update.py，之后所有更新就都不验签了
-        # （等于一次得手、永久失效）。
+        # deploy/ 里的脚本**默认随包更新**（`WB_SYNC_DEPLOY=0` 可关掉）。
         #
-        # 因此：包内带了 deploy/ 就在日志里提示差异，由管理员**手动**决定是否
-        # 覆盖（例如 systemd 单元确实需要更新时）。正常发版不会改这里。
+        # 为什么默认更新（issue #55）：发布包在**解压之前**就已经验签，所以包内的
+        # deploy/ 与 server/ 属于同一批「维护者签过名的内容」——覆盖它与覆盖
+        # server/ 是同一性质，不会降级信任链（验签用的是**本地**这一份的公钥，
+        # 只有验签通过之后才会走到这里）。
         #
-        # 提示要**分清轻重**：早先无论什么差异都只说「已跳过同步」，于是
-        # 「新增了一个无害的检查脚本」与「验签逻辑被改」看起来一模一样，
-        # 管理员无从判断该紧张还是该忽略（实测：有用户为此专门来问）。
-        # 现在逐文件标注新增/修改，并把安全关键文件单独点出来。
+        # 反过来不更新的代价很实在：**更新器本身就在 deploy/ 里**。不换它意味着
+        # 以后每次都还用旧逻辑，它修过的问题永远到不了用户机器上——#28 修过的
+        # compose 探测就是这样丢的，#55 又报了一次同一个毛病。
+        #
+        # 保留关闭开关，是给少数确实手工维护 deploy/ 的部署留退路（例如自己改过
+        # systemd 单元、或另有分发流程）。
+        #
+        # 提示仍要**分清轻重**：早先无论什么差异都只说「已跳过同步」，于是
+        # 「新增了一个无害的检查脚本」与「验签逻辑被改」看起来一模一样，管理员
+        # 无从判断该紧张还是该忽略（实测：有用户为此专门来问）。现在逐文件标注
+        # 新增/修改，并把安全关键文件单独点出来。
         new_deploy = new_root / 'deploy'
         if new_deploy.is_dir():
             here = Path(__file__).resolve()
@@ -917,22 +955,19 @@ def update_manager(rep: Reporter) -> None:
                     modified.append(str(rel))
             if not (added or modified):
                 rep.log('deploy/ 与包内一致，无需同步')
-            elif os.environ.get('WB_SYNC_DEPLOY') == '1':
-                # 显式选择同步：包已通过验签（在解压之前就验过），因此包内的
-                # deploy/ 与 server/ 同属「维护者签过名的内容」，覆盖它不会
-                # 降级信任链。仍然先备份、并逐文件列出改了什么。
+            elif _deploy_sync_enabled():
                 try:
                     _sync_deploy(new_deploy, INSTALL_DIR, backup, rep)
                 except OSError as exc:
                     rep.log(f'deploy/ 同步失败（继续完成本次更新）：{exc}', 'warn')
             else:
-                rep.log('⚠️ 新包内的 deploy/ 与本地不同，**已跳过同步**'
-                        '（deploy/ 含验签逻辑，是信任锚，不随包自动替换）', 'warn')
+                rep.log('⚠️ 新包内的 deploy/ 与本地不同，已按 WB_SYNC_DEPLOY=0 '
+                        '跳过同步', 'warn')
                 if modified:
-                    rep.log('   修改（需人工确认）：' + '、'.join(modified[:8])
+                    rep.log('   修改（未覆盖）：' + '、'.join(modified[:8])
                             + ('…' if len(modified) > 8 else ''), 'warn')
                 if added:
-                    rep.log('   新增（本地没有，多半无害）：' + '、'.join(added[:8])
+                    rep.log('   新增（未覆盖）：' + '、'.join(added[:8])
                             + ('…' if len(added) > 8 else ''), 'warn')
                 _explain_deploy_risk(rep, modified, added, here, backup)
 
