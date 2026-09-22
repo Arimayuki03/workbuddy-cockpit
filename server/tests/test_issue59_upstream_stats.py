@@ -136,6 +136,46 @@ class UpstreamStatsTest(unittest.TestCase):
             got = asyncio.run(stats_router.upstream_stats(user={'role': 'viewer'}))
         self.assertTrue(got['available'])
 
+    def test_unknown_fields_are_not_forwarded(self) -> None:
+        """**白名单下发**：上游统计里出现的新字段不能原样转给前端（审核补漏）。
+
+        与 `load_upstream_config` 同一条理由（那里的注释写得更细）：整包透传的
+        失效模式是「上游加了字段 → 下发给每个登录用户（含只读账号）」，而且不会
+        有任何报错；白名单的失效模式相反（界面少一列），可见可控。
+        """
+        payload = {
+            'enabled': True,
+            'since': 'x',
+            'uptime_sec': 1,
+            'total': {'requests': 5, 'credit': 1.0,
+                      'account_uid': 'secret-uid', 'api_key_hint': 'wbk_abc123'},
+            'models': [{'model': 'glm-5.2', 'requests': 5, 'internal_note': '不该下发'}],
+            'something_new': {'token': 'leak-me'},
+        }
+        out, _ = self._call(_Resp(200, payload))
+        self.assertTrue(out['available'])
+        self.assertEqual(out['total'], {'requests': 5, 'credit': 1.0})
+        self.assertEqual(out['models'], [{'model': 'glm-5.2', 'requests': 5}])
+        blob = json.dumps(out, ensure_ascii=False)
+        for secret in ('secret-uid', 'wbk_abc123', '不该下发', 'leak-me'):
+            with self.subTest(secret=secret):
+                self.assertNotIn(secret, blob)
+
+    def test_message_only_when_string(self) -> None:
+        """`message` 是给界面显示的原因文本；非字符串就不带（避免把对象塞给前端）。"""
+        out, _ = self._call(_Resp(200, {'enabled': False, 'message': {'nested': 1}}))
+        self.assertNotIn('message', out)
+        out2, _ = self._call(_Resp(200, {'enabled': False, 'message': '统计采集已关闭'}))
+        self.assertEqual(out2['message'], '统计采集已关闭')
+
+    def test_malformed_sections_degrade_without_crashing(self) -> None:
+        """上游把 total/models 写成别的形状时，不能整条失败（fail-soft）。"""
+        out, _ = self._call(_Resp(200, {'enabled': True, 'total': 'nope',
+                                        'models': [None, 5, {'model': 'ok'}]}))
+        self.assertTrue(out['available'])
+        self.assertNotIn('total', out)
+        self.assertEqual(out['models'], [{'model': 'ok'}])
+
     def test_no_api_key_configured_still_reaches(self) -> None:
         """上游没配 api_key 时不要自己造一个空 Authorization 头。"""
         with mock.patch.object(config, 'upstream_api_key', lambda: ''):

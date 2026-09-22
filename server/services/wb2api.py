@@ -526,6 +526,25 @@ def admin_enabled_in_config() -> tuple[bool | None, str]:
     return bool(isinstance(admin, dict) and admin.get('enabled')), str(path)
 
 
+# 上游统计里**允许下发**的字段（白名单）。为什么不整包透传：与
+# `load_upstream_config` 那条同源的理由（见那里的注释）——透传的失效模式是
+# 「上游给统计载荷加了新字段 → 原样下发给每个登录用户（含只读账号）」，
+# 而且**不会有任何报错**；白名单的失效模式相反：新字段不显示（界面少一列），
+# 这个方向的失效是可见、可控的。下面就是界面要显示的计数字段，多一个都不带。
+_STATS_ROW_FIELDS = ('requests', 'success', 'failed', 'streaming',
+                     'prompt_tokens', 'completion_tokens', 'total_tokens',
+                     'cache_hit_tokens', 'cache_miss_tokens', 'cache_write_tokens',
+                     'cache_hit_rate', 'credit', 'credit_per_req')
+_STATS_MODEL_FIELDS = ('model',) + _STATS_ROW_FIELDS
+
+
+def _pick_stats_row(row: object, fields: tuple[str, ...]) -> dict:
+    """从上游的统计行里只挑白名单字段。"""
+    if not isinstance(row, dict):
+        return {}
+    return {k: row[k] for k in fields if k in row}
+
+
 async def get_upstream_stats() -> dict:
     """读上游自己的 `/v1/stats`（它按模型累计的官方统计，issue #59）。
 
@@ -561,7 +580,22 @@ async def get_upstream_stats() -> dict:
         return {'available': False, 'error': f'上游返回的不是 JSON：{_err_text(exc)}'}
     if not isinstance(data, dict):
         return {'available': False, 'error': '上游返回的结构无法识别'}
-    return {'available': True, **data}
+    # 只挑白名单字段下发（见 _STATS_ROW_FIELDS 的说明）
+    out: dict = {
+        'available': True,
+        'enabled': data.get('enabled'),
+        'since': data.get('since'),
+        'uptime_sec': data.get('uptime_sec'),
+    }
+    if isinstance(data.get('message'), str):
+        out['message'] = data['message']
+    if isinstance(data.get('total'), dict):
+        out['total'] = _pick_stats_row(data['total'], _STATS_ROW_FIELDS)
+    models = data.get('models')
+    if isinstance(models, list):
+        out['models'] = [_pick_stats_row(m, _STATS_MODEL_FIELDS)
+                         for m in models if isinstance(m, dict)]
+    return out
 
 
 async def get_models() -> tuple[bool, list | dict]:
