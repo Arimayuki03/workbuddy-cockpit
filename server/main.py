@@ -332,7 +332,9 @@ if config.STATIC_DIR.is_dir():
         if _is_document_request(request):
             page = _rsc_page_for(full_path)
             if page is not None:
-                return RedirectResponse(page, status_code=302)
+                # 补上子路径前缀：反代剥掉前缀后才到这里，但 Location 是发回浏览器
+                # 的绝对地址，不带前缀就会跳到域名根（另一个站点）上。
+                return RedirectResponse(f'{config.BASE_PATH}{page}', status_code=302)
         target = _safe_static_path(full_path)
         if target is not None:
             return FileResponse(target)
