@@ -149,11 +149,20 @@ NEXT_PUBLIC_BASE_PATH=/workbuddy-manager npm run build:export
 
 **② 后端与反代对齐前缀**
 
-在 systemd unit 或 `.env` 里加上（取值与上面完全一致）：
+加到 **systemd unit 的 `Environment=`** 里（容器部署则写进 compose 的 `environment:`），
+取值与上面完全一致：
 
 ```
 WB_BASE_PATH=/workbuddy-manager
 ```
+
+> **别写进 `.env`。** 服务端只读进程环境变量：仓库里没有任何地方调用 `load_dotenv`，
+> `deploy/workbuddy-web.service` 没有 `EnvironmentFile=`，`docker-compose.yml` 用的是
+> 内联 `environment:` 而不是 `env_file:`——写进 `.env` 不会生效。
+> 这个坑的麻烦之处在于**症状很隐蔽**：配置看起来加了，但前缀没被剥掉，
+> 表现为「页面能打开、接口全 404」，容易误判成反代写错了。
+>
+> （唯一的例外是 Windows 原生部署：`start.ps1` 用 `uvicorn --env-file .env` 显式读取 `.env`。）
 
 Nginx 用**带尾斜杠**的 `proxy_pass` 把前缀剥掉再转发——服务端路由本身不认识前缀：
 
