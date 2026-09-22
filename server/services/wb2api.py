@@ -919,6 +919,37 @@ def _sanitize_section(section: str, incoming: dict) -> dict:
             if not _DURATION_RE.match(raw.strip()):
                 raise ValueError(f'{key} 时长格式有误，应为 30s / 10m / 2h / 1d')
             out[key] = raw.strip()
+        elif section == 'prompt' and key == 'mode':
+            # 上游对非法值是**启动报错**（cmd/server/config.go:429
+            # 「prompt.mode: %q 不是合法值」），所以这里必须拦——填错就保存成功、
+            # 然后上游起不来，正是本节注释里点名的最坏形态。
+            # 可达路径：`POST /api/settings/upstream` 直接透传 body，不经前端表单。
+            val = str(raw or '').strip().lower()
+            if val not in ('passthrough', 'custom', 'append'):
+                raise ValueError('系统提示词模式只能是 passthrough / custom / append')
+            out[key] = val
+        elif section == 'prompt' and key == 'file':
+            # 这是**文件路径**，不是提示词正文（issue #62）。上游对它是 fail-fast：
+            # 路径非空但读不到 → 启动直接报错退出（其 normalizePrompt 注释写明
+            # 「避免静默回落到内置默认」）。把正文粘进来会让上游进入 Restarting
+            # 崩溃循环，整个反代不可用——实测就有用户这么踩了。
+            #
+            # 两条判据都来自「文件名不是正文」这个事实：
+            #   · 含换行/控制字符 —— 路径不可能有；
+            #   · 超过 255 字节 —— 文件名的硬上限（用户看到的报错就是 file name too long）。
+            # 长度按**字节**算：中文一个字三字节，几十个字的提示词就超了。
+            val = str(raw or '')
+            if any(ch in val for ch in ('\n', '\r', '\x00')):
+                raise ValueError(
+                    '这一栏要填文件路径，不是提示词正文。正文请先写进一个文件，'
+                    '再填该文件在上游容器内的路径，例如 /app/data/prompt-custom.txt'
+                )
+            if len(val.encode('utf-8')) > 255:
+                raise ValueError(
+                    '文件路径不能超过 255 字节（文件名上限）——看起来是把提示词正文'
+                    '粘进来了。正文请先写进一个文件，再填它的路径'
+                )
+            out[key] = val.strip()
         elif section == 'pool' and key == 'cost_explore_interval':
             # 成本档位条件探索的周期（上游 2026-09-17 新增，默认 "30m"）。
             #
