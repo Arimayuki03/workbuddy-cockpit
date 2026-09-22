@@ -25,6 +25,7 @@ import type {
   TaskLogResponse,
   TaskRunStatus,
   UpstreamConfig,
+  UpstreamStats,
   UpstreamStatus,
   UsageBreakdown,
   UpdateCheck,
@@ -229,6 +230,11 @@ export const statsApi = {
     get<UsageBreakdown[]>('/api/stats/by-model', {days, realm}),
   byKey: (days = 30, realm?: Realm) =>
     get<UsageBreakdown[]>('/api/stats/by-key', {days, realm}),
+  /**
+   * 上游自己那份统计（issue #59）。口径与本页其它数字不同：含**直连上游**的调用，
+   * 且是自上游进程启动以来的累计（没有时段概念）。
+   */
+  upstream: () => get<UpstreamStats>('/api/stats/upstream'),
   /** 按请求日志回填用量缺口（幂等） */
   rebuildUsage: () =>
     post<{rows_before: number; rows_after: number; requests_delta: number; tokens_delta: number}>(

@@ -805,13 +805,18 @@ class MultiArchImageTest(unittest.TestCase):
         self.assertIn('exit 1', df, '不支持的架构应直接失败')
 
 
-_FORK_IMAGE_WF = _ROOT / '.github' / 'workflows' / 'build-image.yml'
+# 模板**随仓库分发**（PR #58）：用户 fork 之后把它复制进自己 fork 的
+# `.github/workflows/` 才会生效。这里直接测模板本身，而不是等它在
+# `.github/workflows/build-image.yml` 下出现 —— 后者在本仓库永远不会出现
+# （我们不跑它：本仓库由发版流程构建镜像），于是下面这几条约束曾经**一直
+# 在跳过**，模板写错也无人发现（实测就是这样：模板先落在 deploy/fork-image/，
+# 约束测试空转了）。
+_FORK_IMAGE_WF = _ROOT / 'deploy' / 'fork-image' / 'build-image.yml'
 
 
-@unittest.skipUnless(_FORK_IMAGE_WF.is_file(),
-                     'build-image.yml 是 fork 专用工作流；上游仓库没有它，故跳过')
+@unittest.skipUnless(_FORK_IMAGE_WF.is_file(), 'fork 镜像工作流模板不存在，跳过')
 class ForkImageWorkflowTest(unittest.TestCase):
-    """fork 专用镜像工作流的几条约束。
+    """fork 专用镜像工作流的几条约束（测的是 `deploy/fork-image/` 里的**模板**）。
 
     该工作流**只构建推送镜像**，不创建 Release、不签名 —— 因为签名信任链只覆盖
     正式发布包，在 fork 上造一个没有 .sig 的 Release 只会产出"看起来能装、实际
