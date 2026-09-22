@@ -526,6 +526,44 @@ def admin_enabled_in_config() -> tuple[bool | None, str]:
     return bool(isinstance(admin, dict) and admin.get('enabled')), str(path)
 
 
+async def get_upstream_stats() -> dict:
+    """读上游自己的 `/v1/stats`（它按模型累计的官方统计，issue #59）。
+
+    **与面板自己的统计不是一回事，别混着看**：
+
+      · 面板的用量统计（`/api/stats/*`）统计的是**经过本网关**的调用，
+        按密钥归属、可按时段筛选；
+      · 上游这份是「上游进程自己看到的全部调用」——**直连 7863 的调用只在这里**，
+        而且它是**自上游进程启动以来**的累计，没有时段概念。
+
+    用户要的「原有密钥的用量」只能在后者里看到（那把密钥直连上游，面板看不见它），
+    所以如实说明口径比数字本身更重要。
+
+    返回 `{'available': False, 'error': ...}` 表示取不到（上游没起来、版本太旧没有
+    这个端点、或 api_key 不一致）——界面据此说明情况，而不是显示一片空白。
+    """
+    try:
+        async with config.http_client(10, connect=3) as client:
+            resp = await client.get(f'{config.WB2API_BASE}/v1/stats',
+                                    headers=_auth_headers())
+    except Exception as exc:  # noqa: BLE001
+        return {'available': False, 'error': _err_text(exc)}
+    if resp.status_code == 401:
+        return {'available': False, 'error': '上游拒绝了鉴权（api_key 不一致）'}
+    if resp.status_code == 404:
+        return {'available': False,
+                'error': '该上游版本没有这个端点（需要较新的上游镜像）'}
+    if resp.status_code >= 400:
+        return {'available': False, 'error': f'上游返回 {resp.status_code}'}
+    try:
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        return {'available': False, 'error': f'上游返回的不是 JSON：{_err_text(exc)}'}
+    if not isinstance(data, dict):
+        return {'available': False, 'error': '上游返回的结构无法识别'}
+    return {'available': True, **data}
+
+
 async def get_models() -> tuple[bool, list | dict]:
     try:
         async with config.http_client(15, connect=3) as client:
