@@ -143,9 +143,14 @@ export const accountApi = {
       failed: string[];
     }>('/api/accounts/refresh-credits' + (force ? '?force=true' : '?force=false')),
   checkinAll: () =>
-    post<{total: number; succeeded: number; results: {nickname: string; ok: boolean; message: string}[]}>(
-      '/api/accounts/checkin-all',
-    ),
+    post<{
+      /** 只统计**可签到**的账号：不适用（国际版）的账号不计入分母，另见 skipped */
+      total: number;
+      succeeded: number;
+      /** 不适用的账号数（国际版没有签到体系）。它既不算成功也不算失败 */
+      skipped: number;
+      results: {nickname: string; ok: boolean; message: string; code?: number; skipped?: boolean}[];
+    }>('/api/accounts/checkin-all'),
   /** 签到记录（分页）。days 用于时间范围筛选 */
   checkinLogs: (limit = 20, offset = 0, uid?: string, days?: number, realm?: Realm) =>
     get<CheckinLogPage>('/api/checkin-logs', {limit, offset, uid, days, realm}),

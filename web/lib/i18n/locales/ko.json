@@ -266,6 +266,7 @@
     "checkinAllDoneDetail": "{ok}/{total}개 계정 성공",
     "checkinPartial": "출석 완료, {failed}개 실패",
     "checkinPartialDetail": "{ok}/{total}개 계정 성공, 자세한 내용은 '작업' 페이지를 확인하세요",
+    "checkinSkippedNote": "(그 외 {skipped}개는 해당 없음 — 국제판에는 출석 체크가 없습니다)",
     "restarted": "업스트림을 재시작했습니다",
     "disabledReason": "비활성화 사유: {reason}",
     "badgeDisabled": "● 비활성화됨",

@@ -266,6 +266,7 @@
     "checkinAllDoneDetail": "{ok}/{total} 個帳號成功",
     "checkinPartial": "簽到完成，{failed} 個失敗",
     "checkinPartialDetail": "{ok}/{total} 個帳號成功，詳見「任務」頁",
+    "checkinSkippedNote": "（另有 {skipped} 個帳號不適用：國際版無簽到體系）",
     "restarted": "已重新啟動上游",
     "disabledReason": "停用原因：{reason}",
     "badgeDisabled": "● 已停用",
