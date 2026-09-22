@@ -931,6 +931,29 @@ async def account_refresh(filename: str, user: dict = Depends(security.require_a
     }
 
 
+@router.post('/accounts/{filename}/clear-cooling')
+async def account_clear_cooling(
+    filename: str,
+    user: dict = Depends(security.require_admin),
+) -> dict:
+    """强制退出账号级冷却、熔断/降权和模型级限流状态。
+
+    上游没有提供清除运行态冷却的管理接口，而 state.json 每 5 秒会被内存
+    Flush 覆盖。因此这个动作必须：停上游 → 原子修改目标账号 → 启上游 →
+    验证实时状态。只改目标 uid，不碰凭证、积分、禁用位或其它账号。
+    """
+    try:
+        raw = wb2api.read_account_file_any(filename)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail='账号文件不存在') from exc
+    uid = str((raw.get('account') or {}).get('uid') or '').strip()
+    if not uid:
+        raise HTTPException(status_code=400, detail='该账号文件缺少 uid，无法定位上游状态')
+
+    ok, message, detail = await wb2api.force_clear_account_cooling(uid)
+    return {'ok': ok, 'message': message, **(detail or {})}
+
+
 @router.delete('/accounts/{filename}')
 async def account_delete(filename: str, user: dict = Depends(security.require_admin)) -> dict:
     try:

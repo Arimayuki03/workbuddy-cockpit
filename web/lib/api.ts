@@ -161,6 +161,11 @@ export const accountApi = {
     post<{ok: boolean; message: string}>(`/api/accounts/${encodeURIComponent(file)}/test`),
   refresh: (file: string) =>
     post<{ok: boolean; message: string}>(`/api/accounts/${encodeURIComponent(file)}/refresh`),
+  /** 强制清除账号级冷却、熔断/降权与模型级限流（会重启一次上游）。 */
+  clearCooling: (file: string) =>
+    post<{ok: boolean; message: string; uid?: string; backup?: string}>(
+      `/api/accounts/${encodeURIComponent(file)}/clear-cooling`,
+    ),
   restart: () => post<{ok: boolean; message: string}>('/api/restart'),
 
   /* ── 成长任务一键执行（issue #19）─────────────────────
