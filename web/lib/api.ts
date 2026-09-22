@@ -1,4 +1,5 @@
 import axios, {AxiosError} from 'axios';
+import {BASE_PATH} from './base-path';
 import {tp} from './i18n';
 import type {Realm} from './realm-context';
 import type {
@@ -24,6 +25,7 @@ import type {
   TaskLogResponse,
   TaskRunStatus,
   UpstreamConfig,
+  UpstreamStats,
   UpstreamStatus,
   UsageBreakdown,
   UpdateCheck,
@@ -34,7 +36,9 @@ import type {
 } from './types';
 
 export const http = axios.create({
-  baseURL: '',
+  // 子路径部署时接口也挂在前缀下（反向代理剥掉前缀再转发给本服务）。
+  // 这里必须用 basePath，否则所有请求都会打到域名根路径的 /api 上。
+  baseURL: BASE_PATH,
   withCredentials: true,
   timeout: 60000,
 });
@@ -59,8 +63,11 @@ http.interceptors.response.use(
     if (error.response?.status === 401 && typeof window !== 'undefined') {
       // 会话失效：清掉缓存的登录态，避免仍显示管理员入口
       window.sessionStorage.removeItem('wb-me');
-      if (!window.location.pathname.startsWith('/login')) {
-        window.location.href = '/login';
+      // 这里必须带 basePath：basePath 只自动作用于 next/router 的跳转，
+      // 裸的 window.location.href 会跳到域名根路径的 /login 上（通常 404）。
+      const loginPath = `${BASE_PATH}/login`;
+      if (!window.location.pathname.startsWith(loginPath)) {
+        window.location.href = loginPath;
       }
     }
     return Promise.reject(error);
@@ -228,6 +235,11 @@ export const statsApi = {
     get<UsageBreakdown[]>('/api/stats/by-model', {days, realm}),
   byKey: (days = 30, realm?: Realm) =>
     get<UsageBreakdown[]>('/api/stats/by-key', {days, realm}),
+  /**
+   * 上游自己那份统计（issue #59）。口径与本页其它数字不同：含**直连上游**的调用，
+   * 且是自上游进程启动以来的累计（没有时段概念）。
+   */
+  upstream: () => get<UpstreamStats>('/api/stats/upstream'),
   /** 按请求日志回填用量缺口（幂等） */
   rebuildUsage: () =>
     post<{rows_before: number; rows_after: number; requests_delta: number; tokens_delta: number}>(

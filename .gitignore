@@ -88,3 +88,6 @@ dev/.shots-copy-link
 # 模型受限徽章验收（verify_model_limit_ui.py）的临时数据与截图
 dev/.model-limit
 dev/.shots-model-limit
+# 上游官方统计验收（verify_upstream_stats_ui.py）的临时数据与截图
+dev/.upstream-stats
+dev/.shots-upstream-stats
