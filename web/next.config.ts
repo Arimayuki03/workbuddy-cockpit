@@ -6,9 +6,11 @@ const backend = process.env.NEXT_PUBLIC_BACKEND_BASE_URL || 'http://127.0.0.1:78
 // 子路径部署：构建时设 NEXT_PUBLIC_BASE_PATH=/workbuddy-manager。
 // 留空即根路径部署（默认），此时不设置 basePath，产物与改动前逐字节一致。
 //
-// 只设 basePath、**不设** assetPrefix：Next 的 webpack publicPath 是
-// `${assetPrefix}${basePath}/_next/`，两个都设会变成
-// `/workbuddy-manager/workbuddy-manager/_next/`，静态资源全 404。
+// 这里只设 basePath。Next 在 assetPrefix 为空时会自动把它补成 basePath
+// （next/dist/server/config.js：`if (result.assetPrefix === '') result.assetPrefix = result.basePath`），
+// 而 webpack 的 publicPath 只由 assetPrefix 决定（`${assetPrefix}/_next/`），
+// 所以最终是 `/workbuddy-manager/_next/`，不会出现双前缀。
+// 也就是说「只设 basePath」与「两者都设成同一个值」产物完全一致，不必特意回避 assetPrefix。
 const basePath = (process.env.NEXT_PUBLIC_BASE_PATH || '').replace(/\/+$/, '');
 
 const nextConfig: NextConfig = {
