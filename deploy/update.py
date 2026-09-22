@@ -475,7 +475,7 @@ def update_upstream(rep: Reporter) -> None:
 
     # 6) 重建并启动
     rep.log('重建并启动上游容器（首次可能需数分钟）…')
-    compose_cmd = _compose_cmd()
+    compose_cmd = _compose_cmd(rep)
     if compose_cmd is None:
         # 容器镜像已内置 compose 插件（见 Dockerfile）；真走到这里说明用户
         # 用的是旧镜像或**自建的**管理端镜像。给出可执行的修法，而不是
@@ -484,7 +484,8 @@ def update_upstream(rep: Reporter) -> None:
             '找不到可用的 compose 命令（docker compose / docker-compose 都没有）。\n'
             '  容器部署请更新到最新版管理端镜像（已内置 compose 插件）；\n'
             '  自建镜像请在 Dockerfile 里安装 compose；\n'
-            '  宿主机部署请安装 docker compose 插件或 docker-compose。'
+            '  宿主机部署请安装 docker compose 插件或 docker-compose。\n'
+            '  自查：容器内执行 `docker compose version` 与 `ls /usr/local/lib/docker/cli-plugins/`。'
         )
     rc, out = run(compose_cmd + ['up', '-d', '--build'], cwd=UPSTREAM_DIR, rep=rep, check=False)
     if rc != 0:
@@ -492,6 +493,15 @@ def update_upstream(rep: Reporter) -> None:
         rep.log(f'重建失败（exit {rc}）', 'error')
         if hint:
             rep.log(f'原因判断：{hint}', 'error')
+        # exit 127 = 选中的 compose 命令**实际不存在**。这只有两种可能：
+        # ① 探测通过、执行时文件没了（罕见）；② 执行的是**旧版更新器**——
+        #    旧版没有上面那段探测，会直接去跑 docker-compose（issue #55）。
+        # 两种都要把它指出来：否则用户只能看到一行「命令不存在」，无从判断。
+        if rc == 127:
+            rep.log('诊断：选中的 compose 命令在执行时不存在。'
+                    '若上面的日志里**没有**「compose 探测」那一行，说明本次执行的是'
+                    '旧版更新器（新版会先探测并打出结果）——请重新更新管理端并确认'
+                    '容器已用新镜像重启，再重试。', 'error')
         # 构建失败时 compose 不会动已在运行的容器，明确说明当前服务状态
         _report_service_state(rep)
         raise RuntimeError('上游重建失败' + (f'：{hint}' if hint else '，请查看上方日志'))
@@ -526,7 +536,7 @@ _TRUST_ANCHOR_FILES = ('update.py', 'release-signing-key.pub')
 
 
 def _explain_deploy_risk(rep: Reporter, modified: list[str], added: list[str],
-                         here: Path) -> None:
+                         here: Path, backup: Path | None = None) -> None:
     """把 deploy/ 差异翻译成「要不要紧张、下一步做什么」。
 
     为什么要单独一段说明：早先只说「已跳过同步」，管理员看到一排文件名
@@ -537,6 +547,14 @@ def _explain_deploy_risk(rep: Reporter, modified: list[str], added: list[str],
       2. 修改了非信任锚文件（如 systemd 单元）→ 看一眼即可，想要新功能就覆盖
       3. 修改了信任锚（update.py / 公钥）→ **必须人工比对**，确认是官方改动
          而非被替换，再覆盖；这是整条供应链防护的最后一关
+
+    ## 还要说清「不同步的代价」（issue #55）
+
+    只讲风险会让管理员一律选择不动手，而**更新器本身**也在 deploy/ 里：不同步
+    就意味着「更新器永远是旧的那一份」，它修过的毛病（例如 compose v2 探测）
+    不会生效 —— issue #28 修过一次、#55 又报了一次，就是同一批人始终跑着旧
+    更新器。所以这里必须给出**代价**与**一条可执行的命令**，而不是只留下
+    「需人工确认」四个字。
     """
     anchors = [f for f in modified if Path(f).name in _TRUST_ANCHOR_FILES]
     others = [f for f in modified if Path(f).name not in _TRUST_ANCHOR_FILES]
@@ -553,6 +571,64 @@ def _explain_deploy_risk(rep: Reporter, modified: list[str], added: list[str],
     if modified:
         rep.log(f'   比对方法：diff {here.parent}/<文件名> <新包目录>/deploy/<文件名>')
     rep.log(f'   覆盖位置：{here.parent}（本次未改动任何文件）')
+
+    # 「不同步的代价」：更新器就在 deploy/ 里，不换它 = 以后每次都还用旧逻辑。
+    updater = [f for f in modified if Path(f).name == 'update.py']
+    if updater:
+        rep.log('   ⚠️ 本次更新改动了**更新器本身**（deploy/update.py）。'
+                '不同步的话，从下一次起仍由旧更新器执行更新，本次修的问题不会生效。',
+                'warn')
+    rep.log('   想让它随包更新：设环境变量 WB_SYNC_DEPLOY=1 后重新运行本次更新'
+            '（会在覆盖前备份到数据目录），或按上面的「比对方法」人工比对后手动覆盖。')
+    if backup is not None:
+        rep.log(f'   本次备份目录：{backup}')
+
+
+def _sync_deploy(new_deploy: Path, install_dir: Path, backup: Path,
+                 rep: Reporter) -> tuple[list[str], list[str]]:
+    """把包内的 deploy/ 覆盖到安装目录（仅在与本地不同时动手），返回 (新增, 修改)。
+
+    调用前提：包**已经通过验签**（`verify_release_signature` 在解压之前执行）。
+    因此这里的覆盖与替换 server/ 是同一性质的 —— 都是维护者签过名的内容，
+    不会降级信任链。仍然先备份，便于回退。
+
+    抽成独立函数是为了可测：它决定「更新器自己能不能被更新」，而这段逻辑
+    过去只存在于 `update_manager` 内联代码里，改错了没有测试会红。
+    """
+    dest = install_dir / 'deploy'
+    added: list[str] = []
+    modified: list[str] = []
+    for src in sorted(new_deploy.rglob('*')):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(new_deploy)
+        dst = dest / rel
+        try:
+            if not dst.is_file():
+                added.append(str(rel))
+            elif dst.read_bytes() != src.read_bytes():
+                modified.append(str(rel))
+        except OSError:
+            modified.append(str(rel))
+    if not (added or modified):
+        return [], []
+    shutil.copytree(dest, backup / 'deploy', dirs_exist_ok=True)
+    for src in sorted(new_deploy.rglob('*')):
+        if src.is_file():
+            rel = src.relative_to(new_deploy)
+            (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dest / rel)
+    rep.log('deploy/ 已按 WB_SYNC_DEPLOY=1 **同步到包内版本**'
+            f'（旧文件备份在 {backup / "deploy"}）', 'warn')
+    if modified:
+        rep.log('   同步（改动）：' + '、'.join(modified[:8])
+                + ('…' if len(modified) > 8 else ''), 'warn')
+    if added:
+        rep.log('   同步（新增）：' + '、'.join(added[:8])
+                + ('…' if len(added) > 8 else ''), 'warn')
+    rep.log('   注意：若本次同步改了 update.py，**下一次**更新才由新版本执行'
+            '（本次仍跑在旧代码上）。', 'warn')
+    return added, modified
 
 
 def _read_upstream_ref() -> str:
@@ -667,7 +743,23 @@ def _has_compose_v1() -> bool:
         return False
 
 
-def _compose_cmd() -> list[str] | None:
+def _compose_plugin_paths() -> list[str]:
+    """已安装的 compose 插件文件（按 docker CLI 的查找顺序，列出存在的那些）。
+
+    只用于诊断输出：compose 用不了时，最需要知道的就是「插件到底装没装、装在哪」
+    —— 否则只能对着 `docker-compose: No such file` 猜（issue #55 的报告在这里
+    卡住了）。容器镜像按 Dockerfile 会把插件放在第一个路径。
+    """
+    cands = [
+        Path('/usr/local/lib/docker/cli-plugins/docker-compose'),
+        Path('/usr/lib/docker/cli-plugins/docker-compose'),
+        Path('/usr/local/libexec/docker/cli-plugins/docker-compose'),
+        Path.home() / '.docker' / 'cli-plugins' / 'docker-compose',
+    ]
+    return [str(p) for p in cands if p.is_file()]
+
+
+def _compose_cmd(rep: Reporter | None = None) -> list[str] | None:
     """解析出可用的 compose 命令；都不可用返回 None。
 
     为什么不能像原先那样「有 v2 就用 v2，否则退回 v1」：容器形态下
@@ -677,12 +769,25 @@ def _compose_cmd() -> list[str] | None:
     于是原先的写法在容器里必然走进 `['docker-compose']` 分支，
     报 `FileNotFoundError: 'docker-compose'`（issue #28 的 exit 127）。
 
-    顺序：先用宿主机已有的（v2 优先，它是官方推荐形态），
-    实在没有再用我们自带的回退实现（见 `_fallback_compose_up`）。
+    顺序：先用宿主机已有的（v2 优先，它是官方推荐形态；容器镜像自带的就是它），
+    再退到旧的 `docker-compose`。两者都没有时返回 None，由调用方**直接报错并给出
+    可执行的修法** —— 绝不去执行一个明知不存在的命令（那样用户只会看到一行
+    `命令不存在`，完全看不出该做什么，issue #55 的报告正是这个形态）。
+
+    传 `rep` 时打印探测结果（含插件文件路径）。这行日志还有一个用处：它是判断
+    **「更新器本身是不是太旧」** 的证据 —— 旧版更新器没有这段探测，日志里根本
+    不会出现它（issue #55 的报告里就没有，据此可判定执行的是旧代码）。
     """
-    if _has_compose_v2():
+    v2 = _has_compose_v2()
+    v1 = _has_compose_v1()
+    if rep:
+        found = _compose_plugin_paths()
+        rep.log('compose 探测：docker compose=%s，docker-compose=%s%s'
+                % ('可用' if v2 else '不可用', '可用' if v1 else '不可用',
+                   ('，插件文件=' + '、'.join(found)) if found else '，未发现插件文件'))
+    if v2:
         return ['docker', 'compose']
-    if _has_compose_v1():
+    if v1:
         return ['docker-compose']
     return None
 
@@ -795,6 +900,7 @@ def update_manager(rep: Reporter) -> None:
         new_deploy = new_root / 'deploy'
         if new_deploy.is_dir():
             here = Path(__file__).resolve()
+            # 先算差异（用于提示），再决定是否同步
             added: list[str] = []
             modified: list[str] = []
             for src in sorted(new_deploy.rglob('*')):
@@ -809,18 +915,26 @@ def update_manager(rep: Reporter) -> None:
                         modified.append(str(rel))
                 except OSError:
                     modified.append(str(rel))
-            if added or modified:
+            if not (added or modified):
+                rep.log('deploy/ 与包内一致，无需同步')
+            elif os.environ.get('WB_SYNC_DEPLOY') == '1':
+                # 显式选择同步：包已通过验签（在解压之前就验过），因此包内的
+                # deploy/ 与 server/ 同属「维护者签过名的内容」，覆盖它不会
+                # 降级信任链。仍然先备份、并逐文件列出改了什么。
+                try:
+                    _sync_deploy(new_deploy, INSTALL_DIR, backup, rep)
+                except OSError as exc:
+                    rep.log(f'deploy/ 同步失败（继续完成本次更新）：{exc}', 'warn')
+            else:
                 rep.log('⚠️ 新包内的 deploy/ 与本地不同，**已跳过同步**'
-                        '（deploy/ 含验签逻辑，是信任锚，不能随包替换）', 'warn')
+                        '（deploy/ 含验签逻辑，是信任锚，不随包自动替换）', 'warn')
                 if modified:
                     rep.log('   修改（需人工确认）：' + '、'.join(modified[:8])
                             + ('…' if len(modified) > 8 else ''), 'warn')
                 if added:
                     rep.log('   新增（本地没有，多半无害）：' + '、'.join(added[:8])
                             + ('…' if len(added) > 8 else ''), 'warn')
-                _explain_deploy_risk(rep, modified, added, here)
-            else:
-                rep.log('deploy/ 与包内一致，无需同步')
+                _explain_deploy_risk(rep, modified, added, here, backup)
 
         # 版本标记：界面「当前版本」与更新提醒都以它为准，必须一并替换，
         # 否则更新后仍显示旧版本，并一直提示「发现新版本可用」

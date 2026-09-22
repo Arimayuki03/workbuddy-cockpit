@@ -294,6 +294,8 @@
     "modelLimitUntil": "预计 {at} 恢复",
     "modelMissing": "该账号没有这个模型",
     "creditsNoneTitle": "上游尚未返回该账号的积分（可能是刚添加、或上游不可达）",
+    "snapshot": "上游快照",
+    "snapshotTitle": "来自上游 /status 的快照值：上游上次调度该账号时记下的余额，可能滞后数小时。点「刷新积分」可查实时值。",
     "creditsTitle": "当前可花费积分余额（所有套餐剩余额度合计）",
     "cacheTitle": "60 秒内已查过，直接用了服务端缓存；点「刷新积分」可强制重新查询",
     "cacheAge": "缓存 {n}s 前",
