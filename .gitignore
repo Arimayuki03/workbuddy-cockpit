@@ -85,3 +85,6 @@ dev/.shots-viewer-credits
 # 复制链接验收（verify_copy_link_ui.py）的临时数据与截图
 dev/.copy-link
 dev/.shots-copy-link
+# 模型受限徽章验收（verify_model_limit_ui.py）的临时数据与截图
+dev/.model-limit
+dev/.shots-model-limit

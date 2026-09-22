@@ -390,7 +390,8 @@ export default function AccountsPage() {
    *  —— 有人只能进容器翻 state.json 才知道。
    *
    *  所以它与状态徽章**并列**展示（不是替代）：账号确实可用，只是有模型受限。
-   *  悬停给出每个受限模型与预计恢复时间——上游台账里带权威的重置时刻。 */
+   *  徽章里列具体有哪些模型受限，悬停再给出每个模型的恢复时间——上游台账里
+   *  带权威的重置时刻。 */
   function renderModelLimit(a: Account) {
     const limited = rateLimitedModels(a);
     if (!limited.length) return null;
@@ -407,10 +408,15 @@ export default function AccountsPage() {
           : t('accounts.modelLimited');
       return `${m.model} · ${why}`;
     });
-    const first = limited[0];
-    const shown = limited.length === 1
-      ? first.model
-      : t('accounts.modelsCount', {count: limited.length, n: limited.length});
+    // 徽章里**直接给出模型名**（用户反馈：只知道「有 2 个模型受限」不够用，得知道
+    // 是哪些，才能换模型或者告诉调用方避开它们）。名字可能很长（`global:` 前缀的
+    // 型号尤甚），所以最多列两个，其余用「+N」带过；完整清单与各自恢复时间仍在
+    // 悬停里——那里才是逐条说明的地方。
+    const MAX_INLINE = 2;
+    const names = limited.slice(0, MAX_INLINE).map((m) => m.model).join(sep);
+    const shown = limited.length > MAX_INLINE
+      ? `${names} +${limited.length - MAX_INLINE}`
+      : names;
     return (
       <Badge
         variant="secondary"
