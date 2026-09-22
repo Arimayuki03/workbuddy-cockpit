@@ -24,6 +24,7 @@ import {useI18n} from '@/lib/i18n/provider';
 import {t as tGlobal, tp as tpGlobal} from '@/lib/i18n';
 import {RichText} from '@/lib/i18n/rich-text';
 import {settingsApi, upstreamApi, errText} from '@/lib/api';
+import {BASE_PATH} from '@/lib/base-path';
 import type {ModelInfo, ModelSource, UpstreamConfig, UserItem} from '@/lib/types';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
@@ -1836,7 +1837,7 @@ export default function SettingsPage() {
                                 if (r?.relogin_required) {
                                   notify.ok(t('settings.passwordUpdated'), t('settings.passwordRelogin'));
                                   window.setTimeout(() => {
-                                    window.location.href = '/login';
+                                    window.location.href = `${BASE_PATH}/login`;
                                   }, 1800);
                                   return;
                                 }
