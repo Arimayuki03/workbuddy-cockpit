@@ -269,7 +269,7 @@ if not errorlevel 1 goto :healthy
 rem 端口占用但 healthz 不通 → 查进程归属
 set PROCLINE=
 for /f "delims=" %%n in ('tasklist /FI "PID eq %PID%" 2^>nul') do set "PROCLINE=%%n"
-echo %PROCLINE% | findstr /i "wb2api.exe" >nul 2>nul
+echo %PROCLINE% | findstr /i "wb2api" >nul 2>nul
 if not errorlevel 1 goto :stale
 
 rem 其他程序占用
@@ -391,8 +391,8 @@ pause
 goto :menu
 
 rem 停止 wb2api：优先按 wb2api.pid 精确停止（与 start-workbuddy2api.cmd 共享同一 pid 文件，
-rem 先校验该 PID 确属 wb2api.exe，防 PID 复用误杀）；pid 缺失/失效时回退按映像名，
-rem 最后按端口 7863 兜底。成功置 STOPPED=1，未发现运行中的服务则保持 0。
+rem 校验映像名以 wb2api 开头防 PID 复用误杀）；pid 缺失/失效时回退按映像名通配 wb2api*
+rem（覆盖改名发行 exe），最后按端口 7863 兜底。成功置 STOPPED=1，未发现则保持 0。
 :stop_service
 set STOPPED=0
 set STOP_PID=
@@ -401,7 +401,7 @@ set STOP_PID_NUM=
 if defined STOP_PID set /a STOP_PID_NUM=STOP_PID 2>nul
 if not "%STOP_PID_NUM%"=="%STOP_PID%" set STOP_PID=
 if defined STOP_PID (
-    tasklist /FI "PID eq %STOP_PID%" 2>nul | findstr /i "wb2api.exe" >nul 2>nul
+    tasklist /FI "PID eq %STOP_PID%" 2>nul | findstr /i "wb2api" >nul 2>nul
     if not errorlevel 1 (
         taskkill /PID %STOP_PID% /T /F >nul 2>nul
         if not errorlevel 1 set STOPPED=1
@@ -409,7 +409,7 @@ if defined STOP_PID (
     del /q wb2api.pid >nul 2>nul
 )
 if "%STOPPED%"=="1" goto :stop_service_done
-taskkill /F /IM wb2api.exe >nul 2>nul
+taskkill /F /IM "wb2api*" >nul 2>nul
 if not errorlevel 1 (
     set STOPPED=1
     goto :stop_service_done
@@ -418,13 +418,13 @@ rem 按映像名没杀到 → 端口 7863 仍有 LISTENING 则按端口兜底。
 set PORT_PID=
 for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":7863" ^| findstr "LISTENING" 2^>nul') do set PORT_PID=%%p
 if not defined PORT_PID goto :stop_service_done
-taskkill /F /PID %PORT_PID% /T /F >nul 2>nul
+taskkill /F /PID %PORT_PID% /T >nul 2>nul
 if not errorlevel 1 set STOPPED=1
 :stop_service_done
 if "%STOPPED%"=="1" (
     echo  服务已停止。
 ) else (
-    echo  未检测到运行中的服务（wb2api.exe）。
+    echo  未检测到运行中的服务（wb2api*.exe）。
 )
 goto :eof
 

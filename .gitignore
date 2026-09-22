@@ -22,6 +22,9 @@ data/
 /task.exe
 /acct.exe
 /stats.exe
+/activity.exe
+# 带版本号的发行 exe（go build -o wb2api-v1.2.0-windows-amd64.exe ./cmd/server）
+/wb2api-v*-windows-amd64.exe
 # 换版前留的旧产物备份（*.exe.bak / *.exe.bak-日期 / *.exe.<tag>.bak）
 *.exe.bak*
 *.exe.*.bak*

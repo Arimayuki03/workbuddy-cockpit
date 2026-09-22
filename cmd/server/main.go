@@ -80,37 +80,49 @@ func main() {
 		absPath = *cfgPath
 	}
 
+	firstRunKey := ""
 	cfg, err := Load(*cfgPath)
 	if err != nil {
-		// 配置文件不存在时给一次机会用纯默认 + env。必须用 errors.Is（不是 os.IsNotExist）：
-		// Load 把 os.ReadFile 的错误包了一层 fmt.Errorf %w，os.IsNotExist 只对裸
-		// *PathError 生效、对包装错误恒 false，原写法该分支实际不可达。
+		// 配置文件不存在时先走首启引导：生成带随机 api_key 的最小 config.json
+		// 再加载（双击发行 exe 即可用，密钥打印给用户）。必须用 errors.Is
+		//（不是 os.IsNotExist）：Load 把 os.ReadFile 的错误包了一层 fmt.Errorf %w，
+		// os.IsNotExist 只对裸 *PathError 生效、对包装错误恒 false，原写法该分支
+		// 实际不可达。生成失败回落原 Load("") 路径，按既有 fatal 文案退出。
 		if errors.Is(err, os.ErrNotExist) {
-			log.Printf("config %s not found, using defaults+env", *cfgPath)
-			cfg, err = Load("")
+			if key := bootstrapConfig(*cfgPath); key != "" {
+				firstRunKey = key
+				log.Printf("config %s not found, generated with random api_key", *cfgPath)
+				cfg, err = Load(*cfgPath)
+			} else {
+				log.Printf("config %s not found and bootstrap failed, using defaults+env", *cfgPath)
+				cfg, err = Load("")
+			}
 		}
 		if err != nil {
-			log.Fatalf("load config: %v", err)
+			fatalExit("load config: %v", err)
 		}
+	}
+	if firstRunKey != "" {
+		printFirstRunBanner(absPath, firstRunKey)
 	}
 
 	// fail-fast：api_key 无条件必填（normalize 已先拦一次；admin/panel 开启时文案
 	// 更具体的双保险兜底）。withAuth 对空 api_key 一律放行，等于把 /admin 管理端点
 	// 裸奔在监听地址上（缺省 :7863 全网卡）。
 	if cfg.Admin.Enabled && strings.TrimSpace(cfg.APIKey) == "" {
-		log.Fatalf("admin.enabled=true 但 api_key 为空：请先在 config.json 配置 api_key 再开启 admin（否则管理端点无鉴权暴露）")
+		fatalExit("admin.enabled=true 但 api_key 为空：请先在 config.json 配置 api_key 再开启 admin（否则管理端点无鉴权暴露）")
 	}
 	// fail-fast（v1.2.0 设计文档 §8）：panel.enabled=true（缺省）且 api_key 为空拒启。
 	// 面板是浏览器可交互的管理面（登录换发 30 天会话 cookie + 全量运维端点），
 	// 空密钥部署等于把面板裸奔在监听地址上。校验在 main（normalize 层不做：
 	// panel.enabled 缺省 true，库内拦截会让全部既有空 api_key 配置一起拒载）。
 	if cfg.Panel.Enabled && strings.TrimSpace(cfg.APIKey) == "" {
-		log.Fatalf("panel.enabled=true 但 api_key 为空：请先在 config.json 配置 api_key，或将 panel.enabled 置 false 拒绝启动面板")
+		fatalExit("panel.enabled=true 但 api_key 为空：请先在 config.json 配置 api_key，或将 panel.enabled 置 false 拒绝启动面板")
 	}
 
 	auths, err := auth.LoadDir(cfg.AuthDir)
 	if err != nil {
-		log.Fatalf("load auths: %v", err)
+		fatalExit("load auths: %v", err)
 	}
 	log.Printf("loaded %d account(s) from %s", len(auths), cfg.AuthDir)
 
@@ -435,7 +447,9 @@ func main() {
 	}
 	log.Printf("workbuddy2api listening on %s (api_key=%v)", cfg.Listen, cfg.APIKey != "")
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("http: %v", err)
+		// 端口占用是 Windows 双击场景最常见的「闪退」（上一次实例还在跑）：
+		// fatalExit 在交互控制台下等回车，用户能看到「端口已被占用」与处置提示。
+		fatalExit("http: %v（%s 端口被占用？先停掉旧实例：start-workbuddy2api.cmd / status-workbuddy2api.cmd）", err, cfg.Listen)
 	}
 	log.Printf("bye")
 }
