@@ -8,7 +8,9 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import socket
+import tempfile
 import time
 from pathlib import Path
 
@@ -492,6 +494,206 @@ async def set_manual_disabled(uid: str, disabled: bool, reason: str = '') -> tup
         return False, f'上游返回 {resp.status_code}', 'error'
     return True, ('已通过上游状态位停用（签到与保活照常执行）' if disabled
                   else '已通过上游状态位启用'), 'ok'
+
+
+def upstream_state_file() -> Path:
+    """读取上游 config.json 并解析 state_file 的真实路径。
+
+    上游允许 `state_file` 使用相对路径，且相对的是上游进程的工作目录。
+    管理端与上游共享同一个上游仓库目录，因此这里按 `WB_UPSTREAM_DIR`
+    解析；配置缺失或非法时拒绝操作，避免猜错路径后改到别的文件。
+    """
+    try:
+        cfg = json.loads(config.UPSTREAM_CONFIG.read_text(encoding='utf-8'))
+    except FileNotFoundError as exc:
+        raise ValueError(f'未找到上游配置文件：{config.UPSTREAM_CONFIG}') from exc
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f'读取上游配置失败：{exc}') from exc
+    if not isinstance(cfg, dict):
+        raise ValueError('上游配置不是 JSON 对象')
+    raw = str(cfg.get('state_file') or 'data/state.json').strip()
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = config.UPSTREAM_DIR / path
+    return path.resolve()
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    """原子写回状态文件，并保留原文件的权限与属主。"""
+    st = path.stat()
+    encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
+    fd, tmp_name = tempfile.mkstemp(prefix=f'.{path.name}.', suffix='.tmp', dir=path.parent)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, 'wb') as fh:
+            fh.write(encoded)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, st.st_mode & 0o777)
+        try:
+            os.chown(tmp, st.st_uid, st.st_gid)
+        except PermissionError:
+            # 非 root 部署若本来就是文件属主，chown 到同一个 uid/gid 也可能在
+            # 某些平台上被拒绝；权限模式已经保留，失败不应阻断写入。
+            pass
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def clear_account_cooling_state(uid: str) -> dict:
+    """清除一个账号在 state.json 中的冷却、熔断、降权与模型级限流。
+
+    只修改 target uid 对应条目，`disabled` / `manual_disabled` / 凭证 / 积分
+    等正交状态保持不变。调用方必须先停止上游，否则周期 Flush 会覆盖本改动。
+    """
+    uid = str(uid or '').strip()
+    if not uid:
+        raise ValueError('uid 为空')
+    path = upstream_state_file()
+    try:
+        state = json.loads(path.read_text(encoding='utf-8'))
+    except FileNotFoundError as exc:
+        raise ValueError(f'未找到上游状态文件：{path}') from exc
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f'上游状态文件不是合法 JSON（{path}）：{exc}') from exc
+    accounts = state.get('accounts') if isinstance(state, dict) else None
+    if not isinstance(accounts, dict) or not isinstance(accounts.get(uid), dict):
+        raise ValueError('该账号不在上游状态文件中')
+
+    # 保留一份最近一次强制清除前的快照，便于人工回退。state.json 不含凭证。
+    backup = path.with_name(path.name + '.force-clear.bak')
+    shutil.copy2(path, backup)
+
+    account = accounts[uid]
+    before = {
+        'until': account.get('until'),
+        'reason': account.get('reason'),
+        'model_cooldowns': account.get('model_cooldowns'),
+        'breaker_until': account.get('breaker_until'),
+        'degrade_until': account.get('degrade_until'),
+    }
+    account['until'] = '0001-01-01T00:00:00Z'
+    account['cool_kind'] = 0
+    account['soft_streak'] = 0
+    account.pop('model_cooldowns', None)
+    account.pop('breaker_until', None)
+    account['retry_count'] = 0
+    account.pop('degrade_until', None)
+    account['consecutive_fails'] = 0
+    # disabled=true 时 reason 是禁用原因，不属于冷却域，不能误清。
+    if not bool(account.get('disabled')):
+        account.pop('reason', None)
+
+    _atomic_write_json(path, state)
+    return {'uid': uid, 'state_file': str(path), 'backup': str(backup), 'before': before}
+
+
+async def _set_upstream_running(running: bool) -> tuple[bool, str]:
+    """停止或启动上游，供需要离线修改 state.json 的运维动作使用。"""
+    if config.WB2API_MODE == 'native':
+        script = config.WB2API_START_SCRIPT if running else config.WB2API_STOP_SCRIPT
+        if not script.is_file():
+            return False, f'未找到原生上游脚本：{script}'
+        cmd = (('cmd.exe', '/d', '/c', str(script)) if os.name == 'nt' else (str(script),))
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(script.parent),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=_NATIVE_RESTART_TIMEOUT)
+            if proc.returncode != 0:
+                return False, f'{script.name} 退出码 {proc.returncode}'
+            return True, f'{script.name} 执行成功'
+        except asyncio.TimeoutError:
+            _kill_quietly(proc)
+            return False, f'{script.name} 执行超时'
+        except Exception as exc:  # noqa: BLE001
+            return False, f'执行 {script.name} 失败：{exc}'
+
+    action = 'start' if running else 'stop'
+    cmd = ['docker', action]
+    if not running:
+        cmd.extend(['--time', '15'])
+    cmd.append(config.WB2API_CONTAINER)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await proc.communicate()
+        if proc.returncode == 0:
+            return True, f'容器已{"启动" if running else "停止"}'
+        detail = err.decode(errors='ignore').strip()
+        return False, detail or f'docker {action} 退出码 {proc.returncode}'
+    except FileNotFoundError:
+        return False, '未找到 docker 命令'
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
+async def _wait_for_upstream(timeout: float = 35.0) -> dict:
+    deadline = time.monotonic() + timeout
+    last: dict = {'connected': False, 'error': '等待上游重启超时'}
+    while time.monotonic() < deadline:
+        last = await get_status()
+        if last.get('connected'):
+            return last
+        await asyncio.sleep(1)
+    return last
+
+
+async def force_clear_account_cooling(uid: str) -> tuple[bool, str, dict]:
+    """强制清除账号冷却与模型级限流，并重启上游使离线修改生效。"""
+    uid = str(uid or '').strip()
+    if not uid:
+        return False, 'uid 为空', {}
+
+    initial = await get_status()
+    if initial.get('connected'):
+        account = next(
+            (x for x in initial.get('accounts') or [] if str(x.get('uid') or '') == uid),
+            None,
+        )
+        if account is None:
+            return False, '该账号不在上游账号池里', {}
+        if not account.get('cooling') and not account.get('rate_limited_models'):
+            return True, '该账号当前没有冷却或模型级限流状态，无需清除', {}
+
+    stopped, stop_message = await _set_upstream_running(False)
+    if not stopped:
+        return False, f'停止上游失败：{stop_message}', {}
+
+    try:
+        changed = clear_account_cooling_state(uid)
+    except Exception as exc:  # noqa: BLE001
+        # 修改失败也必须尽力把上游拉回来，不能让它停在 maintenance 状态。
+        await _set_upstream_running(True)
+        return False, f'清除状态失败：{exc}', {}
+
+    started, start_message = await _set_upstream_running(True)
+    if not started:
+        return False, f'状态已清除，但启动上游失败：{start_message}', changed
+
+    status = await _wait_for_upstream()
+    if not status.get('connected'):
+        return False, f'上游重启后未就绪：{status.get("error") or "未知错误"}', changed
+    account = next(
+        (x for x in status.get('accounts') or [] if str(x.get('uid') or '') == uid),
+        None,
+    )
+    if account is None:
+        return False, '状态已清除且上游已启动，但账号尚未进入账号池', changed
+    if account.get('cooling') or account.get('rate_limited_models'):
+        return False, '上游已重启，但冷却或模型限流状态仍然存在', changed
+
+    return True, '已强制清除冷却与模型限流状态，上游已重启生效', changed
 
 
 def admin_enabled_in_config() -> tuple[bool | None, str]:
