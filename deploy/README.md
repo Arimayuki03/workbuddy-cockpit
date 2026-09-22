@@ -133,7 +133,52 @@ server {
 > 首段可被客户端伪造）。若前面还叠了 CDN，请把服务端
 > `WB_TRUSTED_PROXY_HOPS` 设为 CDN + 反代的层数。
 
-### 4. 加固建议
+### 4. 子路径部署（可选）
+
+如果域名根路径已被别的站点占用（例如 `https://example.com/` 是另一个系统），
+管理端可以挂在子路径下，例如 `https://example.com/workbuddy-manager/`。
+
+需要**两处**同时配置，缺一不可。
+
+**① 构建前端时指定前缀**
+
+```bash
+cd /opt/workbuddy-manager/web
+NEXT_PUBLIC_BASE_PATH=/workbuddy-manager npm run build:export
+```
+
+**② 后端与反代对齐前缀**
+
+在 systemd unit 或 `.env` 里加上（取值与上面完全一致）：
+
+```
+WB_BASE_PATH=/workbuddy-manager
+```
+
+Nginx 用**带尾斜杠**的 `proxy_pass` 把前缀剥掉再转发——服务端路由本身不认识前缀：
+
+```nginx
+location /workbuddy-manager/ {
+    proxy_pass http://127.0.0.1:7864/;   # 末尾这个 / 就是「剥掉前缀」
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade    $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 300s;
+}
+```
+
+> 网关（`/v1`）会一起挂到前缀下：接入地址是
+> `https://example.com/workbuddy-manager/v1`。密钥页展示的地址会自动带上前缀。
+
+> 症状好认：页面能打开，但随即跳到域名根的 `/login` 并 404 —— 根路径属于另一个
+> 站点，自然没有这个路由。这说明 ① 或 ② 漏了一个：前缀只在前端和后端**都**知道
+> 的情况下才成立。
+
+### 5. 加固建议
 
 - 用防火墙或安全组只放行 `22 / 80 / 443`；`7863`、`7864` 保持仅本机
 - 可在 1Panel 为站点配置 IP 白名单，或叠加 Cloudflare Access
