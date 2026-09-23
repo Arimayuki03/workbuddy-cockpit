@@ -357,6 +357,7 @@
     "checkinAllStarted": "一括チェックインを開始しました",
     "checkinAllStartedDetail": "チェックインはバックグラウンドで非同期に実行されます。進捗は「ログ → システムログ」のタスクチャンネルで確認できます",
     "colRequests": "成功 / 失敗",
+    "sortToggle": "列見出しをクリックして並び替え",
     "refreshBalance": "全件残高を更新",
     "refreshBalanceTitle": "全アカウントの実際の残高を並行照会し、プールに書き戻します（同期待ち）",
     "reviveTitle": "アカウントを復活（無効化 / クールダウン / サーキットブレーカーを解除）",

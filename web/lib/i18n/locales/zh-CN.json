@@ -294,6 +294,7 @@
     "badgeDegraded": "● 连败降权",
     "degradedReason": "连续 {n} 次失败后已被临时移出账号池，稍后会自动恢复。若反复出现，请检查该账号的令牌是否失效（需要重新登录）",
     "colRequests": "成功 / 失败",
+    "sortToggle": "点击列头切换排序",
     "balance": "查余额",
     "balanceDone": "余额已刷新",
     "balanceShort": "余额",
