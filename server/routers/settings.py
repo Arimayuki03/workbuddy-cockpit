@@ -45,7 +45,7 @@ async def save_upstream(body: dict, request: Request,
         result['reload_scheduled'] = False
         result['reload_hint'] = (
             '配置已写入，但当前环境无法操作 docker，不会自动重启上游容器。'
-            '请在宿主机执行 docker compose restart wbapi（上游目录下）使其生效。'
+            '请在宿主机执行 docker compose restart wb2api（上游目录下）使其生效。'
         )
     return result
 
