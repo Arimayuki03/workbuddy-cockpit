@@ -153,6 +153,26 @@ var autoActions = []autoAction{
 		Desc:     "小程序五次对话（小程序口径）：accept → mini 对话上报 ×5（自动补差额）→ 领奖（+300c+5e）",
 		run:      runSequentialChat5,
 	},
+	{
+		TaskCode: "Sequential_Tasks_4",
+		Desc:     "小程序定时任务（预留，每日零点解锁一环）：accept → 定时任务创建事件（PC 同源）→ 领奖（判据待解锁验证）",
+		run:      runSequentialAutomation,
+	},
+	{
+		TaskCode: "Sequential_Tasks_5",
+		Desc:     "小程序使用 GLM5.2（预留）：accept → 带模型字段的 mini 对话上报 → 领奖（判据待解锁验证）",
+		run:      runSequentialModelChat,
+	},
+	{
+		TaskCode: "Sequential_Tasks_6",
+		Desc:     "小程序十次对话（预留）：accept → mini 对话上报 ×target（自动补差额）→ 领奖",
+		run:      runSequentialChat10,
+	},
+	{
+		TaskCode: "Sequential_Tasks_7",
+		Desc:     "体验灵感功能（预留，疑 PC 口径 +500c+5e）：accept → 灵感事件组（PC+mp 双形态）→ 领奖（判据待解锁验证）",
+		run:      runSequentialPlaybook,
+	},
 }
 
 // autoActionFor 查任务对应的动作；无则返回 nil（不可自动化）。
@@ -182,6 +202,13 @@ var mpTaskCodes = map[string]bool{
 	"Sequential_Tasks_1": true, // 小程序首对话（mini chat，无 activityId）
 	"Sequential_Tasks_2": true, // 小程序选中专家并完成有效对话（mp 指纹 expert_actual_use）
 	"Sequential_Tasks_3": true, // 小程序完成 5 次对话（与 Tasks_1 同形状，target=5 逐条累加）
+	// Tasks_4..7 存在性已实测（accept 返回 prerequisite not met 链式依赖；Tasks_8 not
+	// found 封顶）。链条每日零点解锁一环（task locked until 次日），判据为 issue #42
+	// 描述 + mpsrc 事件形状预置，解锁后逐个实测校正。
+	"Sequential_Tasks_4": true,
+	"Sequential_Tasks_5": true,
+	"Sequential_Tasks_6": true,
+	"Sequential_Tasks_7": true,
 }
 
 // isMPTaskCode 报告任务是否小程序口径专属（决定回读/接受/领奖走 mp 变体）。
@@ -382,6 +409,117 @@ func runSequentialChat(p *Panel, a *auth.Auth) (string, error) {
 // （上游 task_runner 实测两账号 +300c+5e，重跑幂等）。
 func runSequentialChat5(p *Panel, a *auth.Auth) (string, error) {
 	return p.runMPMiniChatTask(a, "Sequential_Tasks_3", false)
+}
+
+// runSequentialChat10 完成 Sequential_Tasks_6「在小程序内完成 10 次有效对话」（预留）。
+// 判据假定与 Tasks_1/3 同形状（mini chat_request_send），target 由任务自带（回读），
+// runMPMiniChatTask 按差额补报——issue #42 称 target=10，以解锁后实际下发为准。
+func runSequentialChat10(p *Panel, a *auth.Auth) (string, error) {
+	return p.runMPMiniChatTask(a, "Sequential_Tasks_6", false)
+}
+
+// runSequentialEventTask Sequential 链预留任务通用骨架：mp 查询 → accept（带验证）
+// → 判据事件上报（primary；未点亮且 fallback 非空时补一轮）→ 回读 → 达标领奖。
+// 每日零点解锁一环：locked 期间 accept 不落账，返回等下次调度（无需人工干预）。
+func (p *Panel) runSequentialEventTask(a *auth.Auth, code string, primary, fallback func() error) (string, error) {
+	t, err := p.taskByCodeMP(a, code)
+	if err != nil {
+		return "", err
+	}
+	if t == nil {
+		return "mp 口径未下发该任务（前置任务未完成或活动未开始）", nil
+	}
+	if t.Claimed {
+		return "已领取", nil
+	}
+	target := t.Target
+	if target <= 0 {
+		target = 1
+	}
+	if t.Current >= target || t.AcceptStatus == "completed" {
+		credit, energy, err := p.cfg.Upstream.ClaimRewardMP(a, code)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("已领取奖励（+%dc +%de）", credit, energy), nil
+	}
+	if t.AcceptStatus == "not_accepted" || t.AcceptStatus == "" {
+		if !p.acceptWithVerifyMP(a, code) {
+			return "accept 未登记生效（任务可能处于每日锁定窗口，等解锁后自动重试）", nil
+		}
+	}
+	if err := primary(); err != nil {
+		return fmt.Sprintf("判据上报失败: %v", err), nil
+	}
+	// 回读（两轮各隔 3s）；未点亮且有 fallback 时补报一轮再读。
+	for round := 0; round < 2; round++ {
+		time.Sleep(claimPollGap)
+		t2, err2 := p.taskByCodeMP(a, code)
+		if err2 != nil || t2 == nil {
+			continue
+		}
+		t = t2
+		if t.Claimable || t.Claimed || t.Current >= target {
+			break
+		}
+		if round == 0 && fallback != nil {
+			if err := fallback(); err != nil {
+				return fmt.Sprintf("备选判据上报失败: %v", err), nil
+			}
+		}
+	}
+	if t.Claimed {
+		return "本轮已入账（claimed）", nil
+	}
+	if t.Current < target {
+		return "已上报但进度未点亮（判据形态待解锁后校正，下次重试）", nil
+	}
+	credit, energy, err := p.cfg.Upstream.ClaimRewardMP(a, code)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("任务点亮并领取奖励（+%dc +%de）", credit, energy), nil
+}
+
+// runSequentialAutomation 完成 Sequential_Tasks_4「创建定时任务」（预留）。
+// mp 源码无 automation 事件发射点 → 判据疑为 PC 口径：复用 automation_1 同源
+// 事件（DesktopAutomationCreateEvent，PC 任务三账号实测点亮）。
+func runSequentialAutomation(p *Panel, a *auth.Auth) (string, error) {
+	return p.runSequentialEventTask(a, "Sequential_Tasks_4",
+		func() error {
+			return p.cfg.Upstream.ReportDesktopEvent(a, upstream.DesktopAutomationCreateEvent("wb2api 自动化"))
+		}, nil)
+}
+
+// runSequentialModelChat 完成 Sequential_Tasks_5「使用 GLM5.2」（预留）。
+// primary：mp 对话事件带 requestModelId/requestModelName=glm-5.2（mpsrc main 32904
+// 发射点实测形状）；fallback：PC 域模型活跃上报（Model_chat_GLM5.2 同源）。
+func runSequentialModelChat(p *Panel, a *auth.Auth) (string, error) {
+	return p.runSequentialEventTask(a, "Sequential_Tasks_5",
+		func() error {
+			conv := fmt.Sprintf("wb2api-mp-glm-%d", time.Now().UnixMilli())
+			return p.cfg.Upstream.ReportMPEvent(a, upstream.MiniChatModelEvent(conv, "glm-5.2", "GLM-5.2"))
+		},
+		func() error {
+			return p.cfg.Upstream.ReportChatActivityModel(a, fmt.Sprintf("wb2api-mp-glm-%d", time.Now().UnixMilli()), "", "glm-5.2", "GLM-5.2")
+		})
+}
+
+// runSequentialPlaybook 完成 Sequential_Tasks_7「体验灵感功能」（预留，疑 PC 口径）。
+// primary：PC 灵感事件组（DesktopPlaybookPromptSequence，playbook_prompt 三账号
+// 实测点亮）；fallback：mp 指纹灵感事件组（MiniPlaybookEvents，mpsrc 形状）。
+func runSequentialPlaybook(p *Panel, a *auth.Auth) (string, error) {
+	ms := time.Now().UnixMilli()
+	return p.runSequentialEventTask(a, "Sequential_Tasks_7",
+		func() error {
+			conv := fmt.Sprintf("wb2api-pb-%d", ms)
+			req := fmt.Sprintf("wb2api-pb-req-%d", ms)
+			return p.cfg.Upstream.ReportDesktopEvent(a,
+				upstream.DesktopPlaybookPromptSequence(conv, req, "pm-gtm-launch-plan", "新产品上市 GTM 发布计划一页纸")...)
+		},
+		func() error {
+			return p.cfg.Upstream.ReportMPEvent(a, upstream.MiniPlaybookEvents("pm-gtm-launch-plan", "新产品上市 GTM 发布计划一页纸")...)
+		})
 }
 
 // runMiniExpert 完成 Sequential_Tasks_2「在小程序内选中专家并完成有效对话」。
