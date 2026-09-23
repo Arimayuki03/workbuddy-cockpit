@@ -119,9 +119,13 @@ export const accountApi = {
           reload_triggered: boolean; message: string}>(
       `/api/accounts/${encodeURIComponent(file)}/disabled`, {disabled}),
   checkin: (file: string) =>
-    post<{code: number; message: string; credits?: number | null}>(
-      `/api/accounts/${encodeURIComponent(file)}/checkin`,
-    ),
+    post<{
+      code: number;
+      message: string;
+      /** 今天已经签过：后端没打上游请求，直接就地返回。提示语要与「刚签上」分开 */
+      already?: boolean;
+      credits?: number | null;
+    }>(`/api/accounts/${encodeURIComponent(file)}/checkin`),
   /** 单个账号的实时积分（直接向腾讯查询） */
   credits: (file: string) =>
     get<{
@@ -144,12 +148,21 @@ export const accountApi = {
     }>('/api/accounts/refresh-credits' + (force ? '?force=true' : '?force=false')),
   checkinAll: () =>
     post<{
-      /** 只统计**可签到**的账号：不适用（国际版）的账号不计入分母，另见 skipped */
+      /**
+       * 只统计**本次真正发起签到**的账号：国际版（不适用）与今天已签到的都不进
+       * 分母，分别见 skipped / already。原先 total 里混着「今天已签过」的账号，
+       * 界面会把「无需重复」说成「刚签成功」。
+       */
       total: number;
       succeeded: number;
+      /** 今天已签到、本次被跳过的账号数（没打上游请求） */
+      already: number;
       /** 不适用的账号数（国际版没有签到体系）。它既不算成功也不算失败 */
       skipped: number;
-      results: {nickname: string; ok: boolean; message: string; code?: number; skipped?: boolean}[];
+      results: {
+        nickname: string; ok: boolean; message: string;
+        code?: number; skipped?: boolean; already?: boolean;
+      }[];
     }>('/api/accounts/checkin-all'),
   /** 签到记录（分页）。days 用于时间范围筛选 */
   checkinLogs: (limit = 20, offset = 0, uid?: string, days?: number, realm?: Realm) =>

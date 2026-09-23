@@ -604,6 +604,27 @@ def add_checkin_log(
     )
 
 
+def checkin_done_since(ts_from: int) -> dict[str, int]:
+    """每个账号在 `ts_from` 之后**最近一次成功**签到的时刻（uid → ts）。
+
+    没有记录的账号不出现在结果里，调用方用 `.get(uid)` 判空即可。
+
+    为什么成功判定直接用 `success = 1` 而不看 code：签到侧把两种都记成成功——
+    `0`（本次签到成功）与 `10001`（今天已签过）——而这两者对「今天签没签」是
+    同一个答案。`-2`（国际版无签到体系）与各种失败都是 `success = 0`，不会污染。
+    换句话说：这里问的是「今天签到这件事有没有办成过」，不是「是谁办的」。
+
+    仅取时间不取 code / source：界面要的是「签没签、什么时候签的」，多取列反而
+    得为「同一 ts 多条」写去重。
+    """
+    rows = query(
+        'SELECT uid, MAX(ts) AS ts FROM checkin_logs '
+        "WHERE success = 1 AND ts >= ? AND uid != '' GROUP BY uid",
+        (int(ts_from),),
+    )
+    return {str(r['uid']): int(r['ts']) for r in rows if r['ts'] is not None}
+
+
 # days 参数的统一上限。**必须有上限**：超大整数在 SQLite 绑定时会溢出抛错
 # （实测 /api/logs?days=999999999999999 返回 500）。db 层是唯一的收敛点，
 # 在这里钳一次就覆盖了所有调用方（logs/stats/accounts 各处）。

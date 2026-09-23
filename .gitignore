@@ -100,3 +100,5 @@ dev/.shots-account-note
 # 提示词缓存标记验收（verify_cache_log_ui.py）的临时数据与截图
 dev/.cache-log
 dev/.shots-cache-log
+# 子路径部署验收（verify_subpath.py）的临时数据
+dev/.subpath

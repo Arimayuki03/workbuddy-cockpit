@@ -13,9 +13,11 @@ import {
   Users,
   Power,
   CalendarCheck,
+  Check,
   Coins,
   ChevronRight,
   RotateCcw,
+  Sparkles,
   StickyNote,
 } from 'lucide-react';
 import {useHeartbeat} from '@/lib/use-heartbeat';
@@ -36,6 +38,7 @@ import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {AddAccountDialog} from '@/components/common/accounts/AddAccountDialog';
 import {CreditCountdown} from '@/components/common/accounts/CreditCountdown';
 import {AccountNoteDialog} from '@/components/common/accounts/AccountNoteDialog';
+import {AccountTaskDialog} from '@/components/common/accounts/AccountTaskDialog';
 import {useAuth} from '@/lib/auth-context';
 import {realmLabel, useRealm} from '@/lib/realm-context';
 import {useT} from '@/lib/i18n/provider';
@@ -61,6 +64,8 @@ export default function AccountsPage() {
   // 备注编辑（issue #67）：记的是**哪个账号**而不是布尔——弹窗要以该账号当前的
   // 备注为初值，否则会拿上一个账号的内容去保存。
   const [noteTarget, setNoteTarget] = useState<Account | null>(null);
+  // 活动任务（单账号执行成长任务）的目标账号；null = 对话框关闭
+  const [taskTarget, setTaskTarget] = useState<Account | null>(null);
   const [busyFile, setBusyFile] = useState<string | null>(null);
   const [checkinAllBusy, setCheckinAllBusy] = useState(false);
   /** 每个账号积分是实时查询还是命中缓存（含缓存已存在秒数） */
@@ -147,11 +152,26 @@ export default function AccountsPage() {
     try {
       const r = await accountApi.checkinAll();
       const failed = r.total - r.succeeded;
-      // 不适用（国际版）的账号不计入分母，但要说明，否则用户看到「5/5 成功」
-      // 会以为少了一个号——那个号无论点多少次都是「已跳过」。
-      const note = r.skipped > 0 ? ' ' + t('accounts.checkinSkippedNote', {skipped: r.skipped}) : '';
+      // 两类账号都不计入分母，各自补一句说明，否则用户会以为漏签了：
+      //   skipped — 国际版没有签到体系，点多少次都是「已跳过」
+      //   already — 今天已经签过，本次没再打上游（这正是「不重复签到」的效果）
+      const notes = [
+        r.skipped > 0 ? t('accounts.checkinSkippedNote', {skipped: r.skipped}) : '',
+        r.already > 0 ? t('accounts.checkinAlreadyNote', {n: r.already}) : '',
+      ].filter(Boolean).join(' ');
+      const note = notes ? ' ' + notes : '';
       if (r.total === 0) {
-        notify.info(t('accounts.noCheckinTargets'), note.trim() || undefined);
+        // 「今天都已签到」和「没有可签到的账号」是两回事：前者是正常且理想的状态
+        // （说明当天不用再操作），后者说明池子里没有国内版账号。混成一句「没有
+        // 可签到的账号」会让前者看起来像出了问题。
+        if (r.already > 0) {
+          notify.ok(
+            t('accounts.checkinNothingPending'),
+            t('accounts.checkinNothingPendingDetail', {n: r.already}) + note,
+          );
+        } else {
+          notify.info(t('accounts.noCheckinTargets'), notes.trim() || undefined);
+        }
       } else if (failed === 0) {
         notify.ok(
           t('accounts.checkinAllDone'),
@@ -190,6 +210,24 @@ export default function AccountsPage() {
   const visible = useMemo(
     () => merged.filter((a) => (a.realm ?? 'cn') === realm),
     [merged, realm],
+  );
+
+  /**
+   * 今天还没签到的账号数 —— 「全部签到」按钮据此显示与禁用。
+   *
+   * 判据与签到按钮的**可见条件**保持一致（国内版、且未被面板停用）：面板停用的
+   * 账号已完全退出账号池、签到也跟着停了，把它算进「待签到」会让按钮牌子上
+   * 永远留着一个点不掉、也签不了的数字。
+   */
+  const pendingCheckin = useMemo(
+    () =>
+      visible.filter(
+        (a) =>
+          (a.realm ?? 'cn') === 'cn' &&
+          a.disabled_by_panel !== true &&
+          a.checkin_today == null,
+      ).length,
+    [visible],
   );
 
   /** 执行单账号操作（签到 / 测活 / 刷新 / 删除），成功后同步底栏计数 */
@@ -550,6 +588,12 @@ export default function AccountsPage() {
     // 国际版没有签到体系（上游对 global 账号直接过滤，不发请求）。
     // 这一行的「签到」按钮对国际版账号只会返回「已跳过」，属误导，故不显示。
     const canCheckin = (a.realm ?? 'cn') === 'cn';
+    // 今天已经签过：按钮转为「已签到」并禁用。
+    // 为什么要在界面上拦：腾讯对重复签到回 10001（幂等成功），所以点下去「看着
+    // 也能成功」——但每次都真打一次 RPC，还会在签到记录里堆一串「今日已签到」，
+    // 把真正的失败记录挤下去。后端另有一道拦截（不发请求），这里是让用户
+    // 一眼看出「不用再点了」，而不是点了之后才知道。
+    const checkinDone = a.checkin_today != null;
     // 本面板改名停用（issue #21）：账号已完全退出账号池，签到等任务也随之停掉，
     // 所以隐藏其它操作（它们对这个号已无意义）。
     const paused = a.disabled_by_panel === true;
@@ -578,9 +622,40 @@ export default function AccountsPage() {
             某个号在拖后腿（一直失败、触发风控）时，先停用它比删掉更合适
             （删除会丢凭证、只能重新扫码；停用是可逆的）。 */}
         {(!off || viaBit) && canCheckin && (
-          <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('accounts.checkin')} disabled={busy}
-            onClick={() => run(a.file, () => accountApi.checkin(a.file), t('accounts.opDone'))}>
-            <Gift className="h-3.5 w-3.5" />
+          <Button
+            variant="ghost"
+            size="icon"
+            className={
+              'h-7 w-7 rounded-md ' +
+              (checkinDone
+                ? 'text-emerald-600 hover:text-emerald-600 disabled:opacity-100 dark:text-emerald-400'
+                : '')
+            }
+            title={
+              checkinDone
+                ? t('accounts.checkinDoneTitle', {at: fmtDateTime(a.checkin_today as number)})
+                : t('accounts.checkin')
+            }
+            disabled={busy || checkinDone}
+            onClick={() => run(a.file, () => accountApi.checkin(a.file), t('accounts.opDone'))}
+          >
+            {checkinDone ? <Check className="h-3.5 w-3.5" /> : <Gift className="h-3.5 w-3.5" />}
+          </Button>
+        )}
+        {/* 活动任务（单账号）：与「任务」页的一键执行是同一套（调用上游
+            task_runner.py），区别是只对这一个账号跑 —— 池子里某个号想单独
+            补一轮任务时，不必把全部账号再跑一遍。国际版不适用 CN 任务中心
+            （脚本自己会 skip），所以与签到按钮同一个可见条件。 */}
+        {(!off || viaBit) && canCheckin && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 rounded-md"
+            title={t('accounts.taskRun')}
+            disabled={busy}
+            onClick={() => setTaskTarget(a)}
+          >
+            <Sparkles className="h-3.5 w-3.5" />
           </Button>
         )}
         {(!off || viaBit) && (
@@ -716,16 +791,30 @@ export default function AccountsPage() {
             {/* 「全部签到」仅国内版显示：国际版**没有签到体系**（上游调度器对
                 global 账号直接过滤，不发请求）。显示一个按下去只会得到「已跳过」
                 的按钮是误导，直接不给。 */}
+            {/* 「全部签到」反映当天状态：
+                · 还有待签的 → 文案回到「全部签到」，并带上待签数（不用点进去数）
+                · 今天都签过了 → 文案变「今日已签」并禁用。禁用比「点了提示已签到」
+                  更好：重复点击本来就不该发生，让按钮自己说出原因，比点完再报错省一次往返。
+                判据 pendingCheckin 与每行签到按钮的可见条件一致，不会出现
+                「按钮说还有 1 个、列表里却找不到那个号」的矛盾。 */}
             {isAdmin && realm === 'cn' && (
               <Button
                 size="sm"
                 variant="outline"
                 className="rounded-full"
                 onClick={checkinAll}
-                disabled={checkinAllBusy || !visible.length}
+                disabled={checkinAllBusy || pendingCheckin === 0}
+                title={
+                  pendingCheckin === 0
+                    ? t('accounts.checkinAllNoneTitle')
+                    : t('accounts.checkinAllTitle', {n: pendingCheckin})
+                }
               >
                 <CalendarCheck className={checkinAllBusy ? 'animate-pulse' : ''} />
-                {t('accounts.checkinAll')}
+                {pendingCheckin === 0 ? t('accounts.checkinAllNone') : t('accounts.checkinAll')}
+                {pendingCheckin > 0 && (
+                  <span className="tabular-nums opacity-70">{pendingCheckin}</span>
+                )}
               </Button>
             )}
             {isAdmin && (
@@ -881,6 +970,12 @@ export default function AccountsPage() {
         open={noteTarget !== null}
         onOpenChange={(open) => { if (!open) setNoteTarget(null); }}
         onSaved={load}
+      />
+      <AccountTaskDialog
+        account={taskTarget}
+        open={taskTarget !== null}
+        onOpenChange={(open) => { if (!open) setTaskTarget(null); }}
+        onFinished={load}
       />
     </div>
   );
