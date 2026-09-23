@@ -350,6 +350,13 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # 便宜模型与贵模型的实际扣费能差几十倍，按 token 限额估不出花了多少积分
     # （提需求的人遇到的正是这个问题）。上游从 2026-09-13 起在末帧 usage 里
     # 带回真实 credit，我们已按请求存进 request_logs.credit，所以这里算得准。
+    # 提示词缓存的三段 token（issue #69）：腾讯在流式末帧 usage 里给
+    # prompt_cache_hit_tokens / prompt_cache_miss_tokens / prompt_cache_write_tokens。
+    # **可空**：老上游不给这三个字段时是 NULL（「没数据」），与「给了但是 0」不是
+    # 一回事——后者代表这次请求真的没命中缓存，而前者代表我们不知道。
+    ('request_logs', 'cache_hit_tokens', 'INTEGER'),
+    ('request_logs', 'cache_miss_tokens', 'INTEGER'),
+    ('request_logs', 'cache_write_tokens', 'INTEGER'),
     ('api_keys', 'quota_credit', 'REAL NOT NULL DEFAULT 0'),
     ('api_keys', 'used_credit', 'REAL NOT NULL DEFAULT 0'),
     # 入站请求被拦的**原因**（issue #33）。
@@ -793,14 +800,15 @@ def add_request_log(**fields: object) -> None:
     execute(
         'INSERT INTO request_logs(ts, key_id, ip, model, mapped_model, status, '
         'prompt_tokens, completion_tokens, latency_ms, first_token_ms, ua, error, '
-        'stream, credit, realm) '
-        'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'stream, credit, realm, cache_hit_tokens, cache_miss_tokens, cache_write_tokens) '
+        'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         (fields.get('ts'), fields.get('key_id'), fields.get('ip'),
          fields.get('model'), fields.get('mapped_model'), fields.get('status'),
          fields.get('prompt_tokens'), fields.get('completion_tokens'),
          fields.get('latency_ms'), fields.get('first_token_ms'), fields.get('ua'),
          fields.get('error'), fields.get('stream'), fields.get('credit'),
-         fields.get('realm')),
+         fields.get('realm'), fields.get('cache_hit_tokens'),
+         fields.get('cache_miss_tokens'), fields.get('cache_write_tokens')),
     )
     _request_log_writes += 1
     if _request_log_writes >= _REQUEST_LOG_CHECK_EVERY:

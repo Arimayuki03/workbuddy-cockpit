@@ -418,6 +418,12 @@
     "modelsUnknown": "這些名字找不到對應模型（可能拼錯了）：{names}。它們不會被列出，呼叫時也會被拒。"
   },
   "logs": {
+    "cacheShort": "快取 {pct}%",
+    "cacheMissShort": "未命中",
+    "cacheTitle": "提示詞快取：命中 {hit} / 未命中 {miss} token",
+    "rowCacheHit": "快取命中 Token",
+    "rowCacheMiss": "快取未命中 Token",
+    "rowCacheWrite": "快取寫入 Token",
     "title": "請求日誌",
     "description": "反向代理閘道的每一次呼叫記錄，含狀態、延遲與 Token 計量（每 60 秒自動重新整理；含中國版與國際版呼叫，不按版本過濾）",
     "clearTitle": "清空所有日誌？",

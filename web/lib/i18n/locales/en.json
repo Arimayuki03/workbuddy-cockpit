@@ -442,6 +442,12 @@
     "modelsUnknown": "No model matches these names (possible typo): {names}. They will not be listed and calls using them are rejected."
   },
   "logs": {
+    "cacheShort": "cache {pct}%",
+    "cacheMissShort": "no cache hit",
+    "cacheTitle": "Prompt cache: {hit} hit / {miss} miss tokens",
+    "rowCacheHit": "Cache hit tokens",
+    "rowCacheMiss": "Cache miss tokens",
+    "rowCacheWrite": "Cache write tokens",
     "title": "Request logs",
     "description": "Every call through the gateway, with status, latency and token metering (auto-refresh every 60s; includes both the China and Global editions, not filtered by edition)",
     "clearTitle": "Clear all logs?",
