@@ -714,6 +714,8 @@
     "runLogReportNotNeeded": "[task_runner] {uid} {code}: report not needed ({cur}/{target})",
     "runLogBuddy5Fallback": "[task_runner] {uid} {code}: report {i}/{need} {status} code={sc} buddy5 failed -> falling back to a single send {status2} code={sc2}",
     "runLogNoObjectId": "[task_runner] {uid} {code}: report no usable object id, skip",
+    "runLogNoObjectIdSkipLight": "[task_runner] {uid} {code}: {kind} no usable object id, WARN skipping light-up",
+    "runLogIdsFewerThanNeeded": "[task_runner] {uid} {code}: only {have} usable object ids < {need} needed, reporting what is available this run",
     "runLogBelowTarget": "[task_runner] {uid} {code}: report below target ({cur}/{target}), WARN for next run",
     "runLogListTasksFailed": "ERR: [task_runner] {uid} query list_tasks failed: {err}",
     "runLogBulkWarning": "WARN: full batch + --yes without --only — mind batch 54, confirm the Hermes decision before running",

@@ -690,6 +690,8 @@
     "runLogReportNotNeeded": "[task_runner] {uid} {code}: report 보고 불필요 ({cur}/{target})",
     "runLogBuddy5Fallback": "[task_runner] {uid} {code}: report {i}/{need} {status} code={sc} buddy5 실패 -> 단일 전송으로 대체 {status2} code={sc2}",
     "runLogNoObjectId": "[task_runner] {uid} {code}: report 사용 가능한 객체 id 없음, skip",
+    "runLogNoObjectIdSkipLight": "[task_runner] {uid} {code}: {kind} 사용 가능한 객체 id 없음, WARN 점등 건너뜀",
+    "runLogIdsFewerThanNeeded": "[task_runner] {uid} {code}: 사용 가능한 객체 id {have} < 필요 {need}, 이번 실행은 가능한 수만 보고",
     "runLogBelowTarget": "[task_runner] {uid} {code}: report target 미달({cur}/{target}), WARN 다음 실행에 재시도",
     "runLogListTasksFailed": "ERR: [task_runner] {uid} query list_tasks 실패: {err}",
     "runLogBulkWarning": "WARN: 전체 일괄 + --yes 에 --only 미지정 — 54번 일괄에 주의, Hermes 결정을 확인한 뒤 실행하세요",

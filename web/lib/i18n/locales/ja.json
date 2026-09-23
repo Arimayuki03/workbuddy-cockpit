@@ -690,6 +690,8 @@
     "runLogReportNotNeeded": "[task_runner] {uid} {code}: report 送信不要（{cur}/{target}）",
     "runLogBuddy5Fallback": "[task_runner] {uid} {code}: report {i}/{need} {status} code={sc} buddy5 失敗 -> 単発送信にフォールバック {status2} code={sc2}",
     "runLogNoObjectId": "[task_runner] {uid} {code}: report 使用可能なオブジェクト id なし、skip",
+    "runLogNoObjectIdSkipLight": "[task_runner] {uid} {code}: {kind} 使用可能なオブジェクト id なし、WARN 点灯をスキップ",
+    "runLogIdsFewerThanNeeded": "[task_runner] {uid} {code}: 使用可能なオブジェクト id {have} < 必要 {need}、今回は可用数のみ報告",
     "runLogBelowTarget": "[task_runner] {uid} {code}: report target 未達（{cur}/{target}）、WARN 次回に持ち越し",
     "runLogListTasksFailed": "ERR: [task_runner] {uid} query list_tasks 失敗: {err}",
     "runLogBulkWarning": "WARN: 全件一括 + --yes で --only 未指定。54 番の一括に注意——Hermes の判断を確認してから実行してください",
