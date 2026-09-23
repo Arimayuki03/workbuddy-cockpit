@@ -345,3 +345,70 @@ if config.STATIC_DIR.is_dir():
         if not_found.is_file():
             return FileResponse(not_found, status_code=404)
         return JSONResponse({'error': 'not found'}, status_code=404)
+
+
+# ── 子路径部署（反向代理前缀）────────────────────────────────────────
+#
+# 反向代理把本站挂在 /workbuddy-manager 这类前缀下、且**不剥离**前缀时，后端
+# 收到的路径仍带着前缀 —— 路由、静态挂载与 SPA 兜底全都匹配不上，页面会 404。
+# 这里在最外层统一剥掉，让内部逻辑只看到「前缀之后的路径」。
+#
+# 反向代理若已经剥离了前缀（proxy_pass 带 URI 的常见写法），本中间件找不到
+# 前缀、原样放行 —— 两种反代配置都能工作，nginx 侧不必改。
+#
+# 响应侧同步处理：SPA 的 RSC 兜底等场景会 302 到站内绝对路径（`/xxx`），
+# 不补回前缀就会把用户带出子路径、落到站点根目录。
+#
+# 与 `config.BASE_PATH` 的分工：那个值被用来**主动构造**带前缀的绝对地址
+# （见上面 SPA 兜底的 RedirectResponse）；本中间件负责「进来的路径带前缀」与
+# 「出去的 Location 漏前缀」这两件事。两者都指同一个 WB_BASE_PATH。
+class StripBasePathMiddleware:
+    """纯 ASGI 中间件：剥离请求前缀，并把响应里的站内绝对位置补回前缀。"""
+
+    def __init__(self, app, prefix: str) -> None:
+        self.app = app
+        self.prefix = prefix
+        self._prefix_slash = prefix + '/'
+
+    async def __call__(self, scope, receive, send):
+        if scope.get('type') != 'http':
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get('path') or '/'
+        if path == self.prefix or path.startswith(self._prefix_slash):
+            stripped = path[len(self.prefix):] or '/'
+            scope = dict(scope)
+            scope['path'] = stripped
+            scope['raw_path'] = stripped.encode('utf-8')
+
+        async def send_with_prefix(message):
+            if message.get('type') == 'http.response.start' and message.get('headers'):
+                message = dict(message)
+                message['headers'] = [
+                    (k, self._rewrite_location(v) if k.lower() == b'location' else v)
+                    for k, v in message['headers']
+                ]
+            await send(message)
+
+        await self.app(scope, receive, send_with_prefix)
+
+    def _rewrite_location(self, value: bytes) -> bytes:
+        try:
+            text = value.decode('latin-1')
+        except Exception:  # noqa: BLE001
+            return value
+        # 只处理站内绝对路径（/ 开头，且不是 //host 这种协议相对写法）
+        if not text.startswith('/') or text.startswith('//'):
+            return value
+        # 已经带前缀的不重复叠加（SPA 兜底那处已自己补过）
+        if text == self.prefix or text.startswith(self._prefix_slash):
+            return value
+        return (self.prefix + text).encode('latin-1')
+
+
+if config.BASE_PATH:
+    # add_middleware 后注册的在外层，所以这行放在文件末尾：请求进来先过它，
+    # 后面的限流 / 缓存头 / 路由看到的都是剥离后的路径。
+    app.add_middleware(StripBasePathMiddleware, prefix=config.BASE_PATH)
+    logger.info('子路径部署：已启用前缀 %s（反代可保留或自行剥离，两者都可用）', config.BASE_PATH)
