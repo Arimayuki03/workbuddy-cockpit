@@ -933,10 +933,14 @@ async def account_refresh(filename: str, user: dict = Depends(security.require_a
         return {'ok': False,
                 'message': f'{message}，但写入账号文件失败：{exc}（有效期未保存）'}
 
-    reloaded = await reload.restart_now()
+    # restart_now() 返回 (ok, message) 二元组，必须解包：直接当布尔用会因为
+    # 非空元组恒为真，从而在重载失败时仍报「已重载生效」（且 reload_triggered
+    # 会变成数组、与前端声明的 boolean 不符）。
+    reloaded, reload_error = await reload.restart_now()
     return {
         'ok': True,
-        'message': message + ('，上游已重载生效' if reloaded else '；请手动重启上游以生效'),
+        'message': message + ('，上游已重载生效' if reloaded
+                              else f'；上游重载失败：{reload_error}，请在宿主机重启上游容器'),
         'reload_triggered': reloaded,
         'expires_at': fields.get('expires_at'),
     }
