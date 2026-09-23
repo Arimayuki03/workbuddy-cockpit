@@ -64,6 +64,11 @@ WORKDIR /src
 # 实测缓慢且会断。留空 = 官方源（失败时自动降级到 npmmirror）。
 #   docker compose build --build-arg NPM_REGISTRY=https://registry.npmmirror.com
 ARG NPM_REGISTRY=""
+# 子路径部署前缀（例如 /workbuddy-manager）。留空 = 部署在根路径。
+# 构建期写进 NEXT_PUBLIC_BASE_PATH，Next 会把它内联进前端产物：
+# 所有资源引用与 axios 请求都会带上该前缀。
+ARG BASE_PATH=""
+ENV NEXT_PUBLIC_BASE_PATH=$BASE_PATH
 
 COPY web/ /src/
 
@@ -107,7 +112,8 @@ ENV PYTHONUNBUFFERED=1 \
     WB_STATIC_DIR=/app/web/out \
     WB_AUTH_DIR=/opt/workbuddy2api/auths \
     WB_UPSTREAM_CONFIG=/opt/workbuddy2api/config.json \
-    WB2API_BASE=http://127.0.0.1:7863
+    WB2API_BASE=http://127.0.0.1:7863 \
+    WB_BASE_PATH=""
 
 # 可选：Debian 软件源镜像（留空 = 官方源 deb.debian.org）。
 #
