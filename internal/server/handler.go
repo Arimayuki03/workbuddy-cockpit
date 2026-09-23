@@ -783,6 +783,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadRequest
 				return
 			}
+			// 图片格式/数据无效：立即透传上游原文回客户端，不罚号不轮转。
+			// 同一 body 换账号仍是同样的解析结果，轮转只会放大无效请求。
+			if kind == upstream.ErrImageInvalid {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "image request was rejected by upstream"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "image_invalid", msg,
+					h.hintOf(upstream.ErrImageInvalid, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				return
+			}
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
@@ -950,7 +964,7 @@ func rotateBackoff(i int, ctx context.Context) bool {
 // 此处不再按原始 status 二次判断。仅在 chatCompletions 轮转循环内调用：内容拦截
 // 会立即 400 返回，其余种类 continue 换号（continue 前由 rotateBackoff 退避）。
 //
-// 九条路径，各司其职：
+// 十条路径，各司其职：
 //   - ErrHardCredit → CooldownUntilTomorrow4AM：即时硬冷却到次日 04:00（等签到恢复）。
 //   - ErrSoftRate → 优先对齐上游重置墙钟（带「将在 … 重置」时 6004 走模型级豁免、
 //     非 6004 走账号级，均不指数堆加）；无重置时间才走有界退避。冷却时长优先采信
@@ -965,6 +979,9 @@ func rotateBackoff(i int, ctx context.Context) bool {
 //   - ErrBadParams → 不罚账号（同 ErrContentBlocked 待遇），但仍轮转。
 //   - ErrPromptTooLong → 11115：请求的问题不是账号的问题。零动作（不冷却/不熔断/
 //     不 NoteError、不喂连败），chatCompletions 已直接透传原文返回不轮转。
+//   - ErrImageInvalid → 图片格式/数据无效：请求的问题不是账号的问题（同一 body
+//     换任何号都会得到相同的解析错误）。零动作（不冷却/不熔断/不 NoteError、
+//     不喂连败），chatCompletions 已直接透传原文返回不轮转。
 //   - ErrModelBlocked → BlockModelBackoff：(账号, 模型) 11102 负缓存避让。
 //   - ErrServer → NoteError：喂单一连续失败计数器 fails + 累计错误 errTotal，
 //     达到 breakerThreshold 触发熔断（指数退避）。
@@ -1040,6 +1057,9 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 11115「prompt is too long」：请求的问题不是账号的问题（同一 body 换任何
 		// 号都超限）。零动作（不冷却/不熔断/不 NoteError，同 ErrContentBlocked 待遇），
 		// chatCompletions 已直接透传原文返回不轮转——该分支只为文档完备。
+	case upstream.ErrImageInvalid:
+		// 图片格式/数据无效：请求的问题不是账号的问题（同一 body 换任何号都会
+		// 得到相同解析错误）。零动作，chatCompletions 已 fail-fast 透传。
 	case upstream.ErrBadParams:
 		// 请求体解析失败（400 + Unmarshal chat params failed / 11101）：发给上游的 body
 		// 有问题（网关侧不再截断，均为客户端畸形 JSON）。换了账号照样 400，
