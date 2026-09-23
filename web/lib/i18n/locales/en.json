@@ -231,6 +231,7 @@
     "hours72": "Last 72h",
     "days7": "Last 7 days",
     "days30": "Last 30 days",
+    "sinceStart": "Since start",
     "saveNow": "Save now",
     "savedToDisk": "Usage data saved to disk",
     "totalRequests": "Total requests",

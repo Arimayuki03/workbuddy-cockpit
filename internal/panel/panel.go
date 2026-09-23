@@ -734,7 +734,8 @@ func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 // helpers
 // ---------------------------------------------------------------------------
 
-// usage 返回逐请求用量聚合。hours 查询参数控制时间窗（默认 72，上限 1440=60 天）：
+// usage 返回逐请求用量聚合。hours 查询参数控制时间窗（默认 72；"all" 或 <=0
+// 表示自记录以来全量，即「启动以来」档的模型/账号排行；数字上限 1440=60 天）：
 // series / by_account / by_model 只聚合窗口内的桶（面板的时间筛选对图和表同时生效）；
 // totals / by_realm 恒为全量累计。窗口外的小时点在 series 中自动折叠为日点，长期趋势不丢。
 func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
@@ -744,7 +745,9 @@ func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 	}
 	hours := 72
 	if v := r.URL.Query().Get("hours"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		if strings.EqualFold(v, "all") {
+			hours = 0
+		} else if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			hours = n
 		}
 	}

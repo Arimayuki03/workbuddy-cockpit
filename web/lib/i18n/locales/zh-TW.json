@@ -246,6 +246,7 @@
     "byAccount": "按帳號",
     "cacheHit": "快取命中",
     "days30": "近 30 天",
+    "sinceStart": "啟動以來",
     "days7": "近 7 天",
     "hours24": "近 24 小時",
     "hours72": "近 72 小時",

@@ -384,16 +384,19 @@ type Snapshot struct {
 	Generated string     `json:"generated"`
 }
 
-// Snapshot 聚合当前全部桶。hours 控制时序返回多少个小时点（其余按日折叠）。
-// 窗口语义：series / by_account / by_model 只聚合窗口内的桶——面板的时间
-// 筛选必须对这三份视图同时生效（否则切时间窗只有图变、表不动）；
+// Snapshot 聚合当前全部桶。hours 控制时间窗：>0 时 series / by_account /
+// by_model 只聚合窗口内的桶——面板的时间筛选必须对这三份视图同时生效（否则
+// 切时间窗只有图变、表不动）；hours<=0 表示「自记录以来」全量口径（面板的
+// 「启动以来」档）：排行聚合全部桶，series 保留近 30 天小时粒度（与最长数字
+// 档一致，短历史不塌成日点）、更早的折叠为日点，长期趋势不丢。
 // totals / by_realm 恒为全量累计（「累计请求」卡片的文案就是累计口径）。
 // nicks 是 uid→昵称映射，仅用于展示。
 func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 	if r == nil {
 		return Snapshot{Series: []Point{}, Generated: time.Now().Format(time.RFC3339)}
 	}
-	if hours <= 0 || hours > 24*60 {
+	allTime := hours <= 0 // 面板「启动以来」档：排行与时序都吃全部桶
+	if !allTime && (hours <= 0 || hours > 24*60) {
 		hours = 72
 	}
 
@@ -418,6 +421,10 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 
 	nowHour := time.Now().Truncate(time.Hour)
 	hourFrom := nowHour.Add(-time.Duration(hours-1) * time.Hour)
+	// allTime 档时序的小时粒度窗口：与最长数字档（30 天）一致。全部按日折叠会让
+	// 短历史（如仅 2 天数据）的图塌成 3 个日点、观感上「启动以来反而变糊」；
+	// 保留近 30 天小时点，更早的折叠为日点，排行表才是全量口径。
+	allHourFrom := nowHour.Add(-(30*24 - 1) * time.Hour)
 
 	for i := range bs {
 		b := &bs[i]
@@ -428,17 +435,19 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 		}
 		realmAgg[b.Realm].add(b)
 
-		// 账号/模型行跟随时间窗：小时桶按时间戳判断，日桶落在窗口内才计入。
+		// 账号/模型行跟随时间窗（allTime 时全量）：小时桶按时间戳判断，日桶落在窗口内才计入。
 		// 注意与 series 的 stitching 口径不同——那里窗口外的小时点并回日点保时序
 		// 连续；这里是筛选，窗口外的数据直接不计入。
-		inWindow := false
-		if strings.HasPrefix(b.Scope, "h:") {
-			if ts, err := time.ParseInLocation(hourLayout, strings.TrimPrefix(b.Scope, "h:"), time.Local); err == nil {
-				inWindow = !ts.Before(hourFrom)
-			}
-		} else if day, ok := strings.CutPrefix(b.Scope, "d:"); ok {
-			if ts, err := time.ParseInLocation(dayLayout, day, time.Local); err == nil {
-				inWindow = !ts.Before(hourFrom)
+		inWindow := allTime
+		if !inWindow {
+			if strings.HasPrefix(b.Scope, "h:") {
+				if ts, err := time.ParseInLocation(hourLayout, strings.TrimPrefix(b.Scope, "h:"), time.Local); err == nil {
+					inWindow = !ts.Before(hourFrom)
+				}
+			} else if day, ok := strings.CutPrefix(b.Scope, "d:"); ok {
+				if ts, err := time.ParseInLocation(dayLayout, day, time.Local); err == nil {
+					inWindow = !ts.Before(hourFrom)
+				}
 			}
 		}
 		if inWindow {
@@ -465,7 +474,9 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 			if err != nil {
 				continue
 			}
-			if !ts.Before(hourFrom) {
+			// allTime 档保留近 30 天的小时粒度（与最长数字档一致），更早的按日归并；
+			// 数字档只保留窗口内的小时点，窗口外并日避免时序出现空洞。
+			if (!allTime && !ts.Before(hourFrom)) || (allTime && !ts.Before(allHourFrom)) {
 				if hourSeries[b.Realm+"|"+scope] == nil {
 					hourSeries[b.Realm+"|"+scope] = &aggAcc{}
 				}

@@ -109,7 +109,15 @@ export function useCachedAsync<T>(
   const [loading, setLoading] = useState(() => !peekCache<T>(key));
   // 「刷新中」（缓存已显示数据、后台在拉新）：给按钮转圈用，不触发骨架屏
   const [refreshing, setRefreshing] = useState(false);
-  const busy = useRef(false);
+  // 在途请求所属的 key（null=无在途）。不能是裸布尔：切时间窗（stats 页 hours）
+  // 时旧 key 的在途请求若占着全局锁，新 key 的 refresh 会被整个吞掉——表格
+  // 停在旧窗口的数据直到下一轮心跳才自愈，看起来就是「切筛选没反应」。
+  // 同 key 并发仍去重；不同 key 各取各的，响应只落各自的缓存键。
+  const busyKey = useRef<string | null>(null);
+  // 当前 key 的镜像：在途响应解析回来时，key 可能已经切走——此时只写缓存，
+  // 不 setData 污染新视图。
+  const keyRef = useRef(key);
+  keyRef.current = key;
 
   // key 变化（如 logs/stats 页的 limit/hours 换挡）= 换了一份快照：立即重置
   // data/loading 到新 key 的缓存态，否则旧 key 的数据会闪现在新 key 的视图里。
@@ -121,21 +129,26 @@ export function useCachedAsync<T>(
   }, [key]);
 
   const refresh = useCallback(async (): Promise<T | null> => {
-    if (busy.current) return null;
-    busy.current = true;
+    if (busyKey.current === key) return null;
+    busyKey.current = key;
     setRefreshing(true);
     try {
       const fresh = await fetcherRef.current();
       putCache(key, fresh);
-      setData(fresh);
+      if (keyRef.current === key) {
+        setData(fresh);
+      }
       return fresh;
     } catch (e) {
       // 错误仍交给调用方处理（notify.err 在各页面自己调）；缓存值保留继续展示
       throw e;
     } finally {
-      busy.current = false;
-      setRefreshing(false);
-      setLoading(false);
+      // 只有仍持有锁（没被别的 key 覆盖）时才清：旧请求后到时不抢新请求的账
+      if (busyKey.current === key) {
+        busyKey.current = null;
+        setRefreshing(false);
+        setLoading(false);
+      }
     }
   }, [key]);
 

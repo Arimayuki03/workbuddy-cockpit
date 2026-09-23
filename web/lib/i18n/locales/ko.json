@@ -246,6 +246,7 @@
     "byAccount": "계정별",
     "cacheHit": "캐시 적중",
     "days30": "최근 30일",
+    "sinceStart": "시작 이래",
     "days7": "최근 7일",
     "hours24": "최근 24시간",
     "hours72": "최근 72시간",

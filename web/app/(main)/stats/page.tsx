@@ -55,13 +55,14 @@ export default function StatsPage() {
   // 唯一保留全局口径的是原生 /v1/stats 卡片与其下表（重启即清的另一套数据）。
   const {realm, label: realmName} = useRealm();
   const t = useT();
-  const [hours, setHours] = useState('72');
+  // 'all' = 自记录以来全量：按模型/按账号恢复全量排行，时序按日归并（后端契约 hours<=0）。
+  const [hours, setHours] = useState<string>('72');
   const [saveBusy, setSaveBusy] = useState(false);
   // usage/native 都进缓存：切页先出上次的图表与卡片，后台静默刷新。
   // key 带 hours：切时间窗 = 换一份快照，各自缓存互不覆盖。
   const usageCache = useCachedAsync<UsageSnapshot>(
     `stats:usage:${hours}`,
-    () => statsApi.usage(Number(hours) || 72),
+    () => statsApi.usage(hours === 'all' ? 'all' : Number(hours) || 72),
     {ttl: 5000},
   );
   const nativeCache = useCachedAsync<MetricsSnapshot>(
@@ -143,7 +144,7 @@ export default function StatsPage() {
           yAxisId="tokens"
           tickLine={false}
           axisLine={false}
-          width={52}
+          width={60}
           fontSize={11}
           stroke="var(--muted-foreground)"
           tickFormatter={(v) => fmtCompact(Number(v))}
@@ -260,6 +261,7 @@ export default function StatsPage() {
                 <SelectItem value="72">{t('stats.hours72')}</SelectItem>
                 <SelectItem value="168">{t('stats.days7')}</SelectItem>
                 <SelectItem value="720">{t('stats.days30')}</SelectItem>
+                <SelectItem value="all">{t('stats.sinceStart')}</SelectItem>
               </SelectContent>
             </Select>
             <Button
