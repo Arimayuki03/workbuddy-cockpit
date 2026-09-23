@@ -11,7 +11,8 @@
 //
 //	GET   /admin/tasks        任务快照：kind/中文标签/enabled/hours/next_fire/running/last_run/last_result
 //	POST  /admin/tasks/run    {kind|"all"} 异步手动触发；同 kind 撞车回 409（不排队不重复打上游）
-//	PATCH /admin/tasks        {kind, enabled} 热改排程开关 + 写回 config.json（最小 diff + .bak 备份）
+//	PATCH /admin/tasks        {kind, enabled} 热改排程开关 + 写回 config.json（最小 diff + .bak 备份）；
+//	                          或 {kind, hours:[...]} 热改触发小时（SetHours 免重启）+ 写回 config.json
 //	POST  /admin/credits      实时积分（每号 1 次上游余额查询）：服务端冷却 + 单飞，超频 429
 //	GET   /admin/credits      上次查询缓存 + 冷却截止时间（纯本地，零上游）
 //	PATCH /admin/credits-interval {interval_sec} 热改冷却 + 写回 config.json（60–86400 秒）
@@ -236,13 +237,18 @@ func (h *Handler) adminTaskRun(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// adminTaskPatch 热改排程开关：内存生效（调度器即时重排）+ 写回 config.json。
+// adminTaskPatch 热改排程开关/触发小时：内存生效（调度器即时重排）+ 写回 config.json。
+// 带 hours 数组=改触发小时（SetHours 热生效免重启）；不带=改 enabled 开关（SetEnabled）。
 // 写回失败不回滚内存改动，但响应里 persisted=false + note 说明，重启后会退回旧值——
 // 插件 UI 据此提示"仅本次运行生效"。
 func (h *Handler) adminTaskPatch(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Kind    string `json:"kind"`
 		Enabled bool   `json:"enabled"`
+		// Hours 触发小时表（0-23，可多个）：存在即走"改小时"分支。用指针区分
+		//「未携带」与「携带空数组」——空数组语义=禁用（历史决定，config.Schedule），
+		// 端点侧直接拒绝并指向 *_enabled 开关。
+		Hours   *[]int `json:"hours"`
 	}
 	if !decodeAdminJSON(w, r, &req) {
 		return
@@ -256,6 +262,47 @@ func (h *Handler) adminTaskPatch(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("kind=%q 非法（可选：%v）", req.Kind, scheduler.Kinds()))
 		return
 	}
+
+	// —— 改触发小时 ——（TM 插件「应用」按钮与面板设置页走这里）
+	if req.Hours != nil {
+		if len(*req.Hours) == 0 {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
+				fmt.Sprintf("hours 不能为空数组（禁用任务请用 schedule.%s_enabled=false）", req.Kind))
+			return
+		}
+		if !h.cfg.Sched.SetHours(req.Kind, *req.Hours) {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
+				"hours 需为 0-23 的小时数字")
+			return
+		}
+		resp := map[string]any{
+			"service":   ServiceName,
+			"kind":      req.Kind,
+			"hours":     *req.Hours,
+			"persisted": false,
+		}
+		path := h.cfg.Admin.ConfigPath
+		if path == "" {
+			resp["note"] = "ConfigPath 未配置，小时仅内存生效（重启后丢失）"
+		} else {
+			changed, err := patchConfigHours(path, req.Kind+"_hours", *req.Hours)
+			switch {
+			case err != nil:
+				resp["note"] = "写回 config.json 失败，小时仅内存生效（重启后丢失）: " + err.Error()
+				log.Printf("WARN: admin: 写回 config.json: %v", err)
+			case !changed:
+				resp["persisted"] = true
+				resp["note"] = "config.json 已是目标值，未改动"
+			default:
+				resp["persisted"] = true
+				log.Printf("admin: schedule.%s_hours=%v 已热生效并写回 %s（原文件备份 .bak）", req.Kind, *req.Hours, path)
+			}
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	// —— 改排程开关 ——（不带 hours 的旧形态，兼容既有插件/脚本）
 	h.cfg.Sched.SetEnabled(req.Kind, req.Enabled)
 
 	resp := map[string]any{
@@ -517,6 +564,17 @@ func patchConfigInt(path, section, key string, val int64) (bool, error) {
 	return patchConfigScalar(path, section, key, []byte(strconv.FormatInt(val, 10)))
 }
 
+// patchConfigHours 把配置文件里 schedule.<key> 的小时数组原子替换为 hours。
+// 整体替换、元素原样（元素数 0 由调用方拒绝）；用 json.Marshal 生成字面量后走
+// 与标量补丁同一条 splice 通路——splice 的 value token 跨度替换对数组同样适用。
+func patchConfigHours(path, key string, hours []int) (bool, error) {
+	lit, err := json.Marshal(hours)
+	if err != nil {
+		return false, err
+	}
+	return patchConfigScalar(path, "schedule", key, lit)
+}
+
 // patchConfigMu 串行化 config.json 的读-改-写临界区。PATCH /admin/tasks 与
 // PATCH /admin/credits-interval 都经 patchConfigScalar 落盘：无互斥时并发 PATCH
 // 各自基于旧字节做 splice，后落盘者覆盖先落盘者的改动（补丁丢失）而两个响应仍都
@@ -580,9 +638,10 @@ func patchConfigScalar(path, section, key string, lit []byte) (bool, error) {
 	return true, nil
 }
 
-// spliceBool 用 json.Decoder token 流定位 section.key 的标量值并做跨度替换/插入
+// spliceBool 用 json.Decoder token 流定位 section.key 的值并做跨度替换/插入
 // （名字沿用旧称）。只依赖 Token()+InputOffset()，不重建对象——键序、未知字段、
-// 数字/字符串原文全部原样；lit 是目标标量的 JSON 字面量（true/false/数字/字符串）。
+// 数字/字符串原文全部原样；lit 是目标值的 JSON 字面量（true/false/数字/字符串，
+// 或小时补丁的数组字面量 [9,21]——数组按"从值首字节到闭括号"的整段跨度替换）。
 func spliceBool(raw []byte, section, key string, lit []byte) ([]byte, bool, error) {
 	if !json.Valid(raw) {
 		return nil, false, fmt.Errorf("config 不是合法 JSON，拒绝写回")
@@ -601,8 +660,29 @@ func spliceBool(raw []byte, section, key string, lit []byte) ([]byte, bool, erro
 	}
 	var stack []frame
 	var topOpen, secOpen int64 = -1, -1 // 顶层 / section 对象 '{' 之后的偏移
-	pending := false                    // 已读到目标成员名，下一个标量 token 是其值
+	pending := false                    // 已读到目标成员名，正在等它的值
 	pendingPre := int64(0)
+	// 数组值跨度模式（hours 补丁）：目标 key 的值以 '[' 开头时，跨 token 消费到
+	// 匹配闭括号，再对 [vStart, off) 整段替换——标量路径"下一个标量 token 即值"
+	// 的假设对数组不成立，数组内部元素只消费不处理。
+	pendingArr := false
+	arrDepth := 0
+	arrVStart := int64(0)
+	skipWS := func(i, off int64) int64 {
+		for i < off && (raw[i] == ' ' || raw[i] == '\t' || raw[i] == '\r' || raw[i] == '\n') {
+			i++
+		}
+		return i
+	}
+	// valueStart 从成员名 token 之后定位值的起始字节：越过 空白 → `:` → 空白。
+	// Decoder 不为键值间的 `:` 出 token，标量/数组两条路径共用。
+	valueStart := func(off int64) (int64, error) {
+		v := skipWS(pendingPre, off)
+		if v >= off || raw[v] != ':' {
+			return 0, fmt.Errorf("config 结构异常：找不到 %s.%s 的值分隔符，拒绝写回", section, key)
+		}
+		return skipWS(v+1, off), nil
+	}
 
 	for {
 		t, err := dec.Token()
@@ -613,18 +693,45 @@ func spliceBool(raw []byte, section, key string, lit []byte) ([]byte, bool, erro
 			return nil, false, fmt.Errorf("扫描 config 失败: %w", err)
 		}
 		if d, ok := t.(json.Delim); ok {
+			off := dec.InputOffset()
+			if pendingArr {
+				switch d {
+				case '[', '{':
+					arrDepth++
+				case ']', '}':
+					arrDepth--
+					if arrDepth == 0 {
+						if bytes.Equal(raw[arrVStart:off], lit) {
+							return raw, false, nil // 等值：零改动
+						}
+						out := make([]byte, 0, len(raw)+len(lit)+8)
+						out = append(out, raw[:arrVStart]...)
+						out = append(out, lit...)
+						out = append(out, raw[off:]...)
+						return out, true, nil
+					}
+				}
+				continue
+			}
 			if pending {
-				// 目标 key 的值不是标量（对象/数组）——不敢猜，直接拒写。
+				// 目标 key 的值以定界符开头：数组=整段跨度替换（hours 补丁），对象仍拒写。
+				if d == '[' {
+					v, verr := valueStart(off)
+					if verr != nil {
+						return nil, false, verr
+					}
+					pendingArr, arrDepth, arrVStart = true, 1, v
+					continue
+				}
 				return nil, false, fmt.Errorf("config 里 %s.%s 的值不是标量，拒绝写回", section, key)
 			}
 			switch d {
 			case '{', '[':
-				end := dec.InputOffset()
 				stack = append(stack, frame{obj: d == '{', wantKey: d == '{'})
 				if len(stack) == 1 && d == '{' {
-					topOpen = end
+					topOpen = off
 				} else if len(stack) == 2 && d == '{' && secOpen < 0 && stack[0].key == section {
-					secOpen = end
+					secOpen = off
 				}
 			case '}', ']':
 				stack = stack[:len(stack)-1]
@@ -649,20 +756,15 @@ func spliceBool(raw []byte, section, key string, lit []byte) ([]byte, bool, erro
 			}
 			continue
 		}
+		if pendingArr {
+			continue // 数组值内部元素：只消费（跨度替换在闭括号处整体完成）
+		}
 		if pending {
-			// 值跨度：[vStart, off)。Decoder 不为键值间的 `:` 出 token，
-			// 需从名字 token 后依次越过：空白 → `:` → 空白，才到布尔字面量首字节。
-			skipWS := func(i int64) int64 {
-				for i < off && (raw[i] == ' ' || raw[i] == '\t' || raw[i] == '\r' || raw[i] == '\n') {
-					i++
-				}
-				return i
+			// 值跨度：[vStart, off)。
+			vStart, verr := valueStart(off)
+			if verr != nil {
+				return nil, false, verr
 			}
-			vStart := skipWS(pendingPre)
-			if vStart >= off || raw[vStart] != ':' {
-				return nil, false, fmt.Errorf("config 结构异常：找不到 %s.%s 的值分隔符，拒绝写回", section, key)
-			}
-			vStart = skipWS(vStart + 1)
 			if bytes.Equal(raw[vStart:off], lit) {
 				return raw, false, nil // 等值：零改动
 			}
@@ -752,6 +854,12 @@ func memberIndentAfter(raw []byte, openOff int64) []byte {
 	lineStart := i
 	for lineStart > 0 && raw[lineStart-1] != '\n' {
 		lineStart--
+	}
+	// lineStart 没退过本对象的行首 = 成员与开括号同行（单行对象如 {"a":1}，
+	// 行首在 openOff 之前）：无真缩进可用，照抄前缀会把 `{"schedule":{` 这类
+	// 内容当缩进插入、产出非法 JSON。改用自带换行的两空格缩进。
+	if lineStart <= openOff {
+		return []byte("\n  ")
 	}
 	ind := raw[lineStart:i]
 	if len(ind) == 0 {

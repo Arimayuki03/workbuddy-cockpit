@@ -79,6 +79,11 @@ type Scheduler struct {
 
 	// —— 以下为 /admin 热管理与观测新增字段（不影响既有定时/CLI 行为）——
 	//
+	// hoursMu 保护 hoursTab：SetHours 热改（/admin PATCH 与面板保存配置）写、
+	// nextWake/hoursOf/SnapshotAll 读。hours 缺席时回落 cfg（启动期装配的快照），
+	// 因此不热改路径的行为与引入前逐位一致。
+	hoursMu sync.RWMutex
+	hoursTab [kindCount][]int
 	// enabled 六类任务的可热改排程开关：New 时从 Config.*Disabled 取反初始化，
 	// 之后 SetEnabled 原子改写并经 wake 唤醒 Run 重排定时器（热生效免重启）。
 	// nextWake 只读本组标志，不再读 cfg 的 Disabled bool（cfg 保持不可变快照语义）。
@@ -226,25 +231,25 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	}
 	var slots []slot
 	if s.enabled[taskCheckin].Load() {
-		slots = append(slots, slot{nextFire(now, s.cfg.CheckinHours), taskCheckin})
+		slots = append(slots, slot{nextFire(now, s.hoursOf(taskCheckin)), taskCheckin})
 	}
 	if s.enabled[taskTravel].Load() {
-		slots = append(slots, slot{nextFire(now, s.cfg.TravelHours), taskTravel})
+		slots = append(slots, slot{nextFire(now, s.hoursOf(taskTravel)), taskTravel})
 	}
 	if s.enabled[taskActivity].Load() {
-		slots = append(slots, slot{nextFire(now, s.cfg.ActivityHours), taskActivity})
+		slots = append(slots, slot{nextFire(now, s.hoursOf(taskActivity)), taskActivity})
 	}
 	if s.enabled[taskKeepalive].Load() {
-		slots = append(slots, slot{nextFire(now, s.cfg.KeepaliveHours), taskKeepalive})
+		slots = append(slots, slot{nextFire(now, s.hoursOf(taskKeepalive)), taskKeepalive})
 	}
 	if s.enabled[taskSchool].Load() {
-		slots = append(slots, slot{nextFire(now, s.cfg.SchoolHours), taskSchool})
+		slots = append(slots, slot{nextFire(now, s.hoursOf(taskSchool)), taskSchool})
 	}
 	if s.enabled[taskCat].Load() {
-		slots = append(slots, slot{nextFire(now, s.cfg.CatHours), taskCat})
+		slots = append(slots, slot{nextFire(now, s.hoursOf(taskCat)), taskCat})
 	}
 	if s.enabled[taskQueue].Load() {
-		slots = append(slots, slot{nextFire(now, s.cfg.QueueHours), taskQueue})
+		slots = append(slots, slot{nextFire(now, s.hoursOf(taskQueue)), taskQueue})
 	}
 	var earliest time.Time
 	for _, sl := range slots {
@@ -1013,8 +1018,20 @@ func (s *Scheduler) RunKindNow(name string) error {
 	return nil
 }
 
-// hoursOf 单类任务的排程小时表（cfg 快照，New 后不再变化）。
+// hoursOf 单类任务的排程小时表：优先 SetHours 热改值，缺席回落 cfg 快照。
+// 读锁内逐项拷贝不可变切片本身（切片头），调用方拿到的切片内容此后不再变化
+// （SetHours 整体替换切片，从不就地改元素）。
 func (s *Scheduler) hoursOf(k taskKind) []int {
+	s.hoursMu.RLock()
+	defer s.hoursMu.RUnlock()
+	if h := s.hoursTab[k]; h != nil {
+		return h
+	}
+	return s.cfgHours(k)
+}
+
+// cfgHours 启动期装配的小时表（cfg 不可变快照，New 归一化过缺省值）。
+func (s *Scheduler) cfgHours(k taskKind) []int {
 	switch k {
 	case taskCheckin:
 		return s.cfg.CheckinHours
@@ -1033,4 +1050,29 @@ func (s *Scheduler) hoursOf(k taskKind) []int {
 	default:
 		return s.cfg.CatHours
 	}
+}
+
+// SetHours 热改某类任务的排程小时表（/admin PATCH hours 与面板保存配置）：
+// 替换后通知 Run 主循环重排定时器，无需重启进程。空数组与 nil 拒绝（语义是
+// 「禁用」，走 SetEnabled，见 config.Schedule 的历史决定）；非法小时拒绝。
+// 返回 ok=false 表示 kind 非法或 hours 非法。
+func (s *Scheduler) SetHours(name string, hours []int) bool {
+	k, exist := KindFromName(name)
+	if !exist || len(hours) == 0 {
+		return false
+	}
+	for _, h := range hours {
+		if h < 0 || h > 23 {
+			return false
+		}
+	}
+	cp := append([]int(nil), hours...)
+	s.hoursMu.Lock()
+	s.hoursTab[k] = cp
+	s.hoursMu.Unlock()
+	select {
+	case s.wake <- struct{}{}:
+	default: // 已有未消费通知：重排幂等，无需排队
+	}
+	return true
 }

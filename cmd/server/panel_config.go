@@ -4,13 +4,13 @@
 // 热生效范围（设计取舍）：
 //   - api_key / cooldown.soft_rate / features.sanitize_blacklist_fingerprints → livecfg 快照
 //   - pool.* → pool.SetBreaker/SetMaxInFlight/SetSoftRateMax/SetWeights/SetCostExploreInterval/SetDegrade
-//   - schedule.*_enabled → scheduler.SetEnabled（主仓库无 panel 的 Reconfigure——
-//     排程小时数组为启动期装配，热改只覆盖开关；hours 变更需重启，列入 restartRequired）
+//   - schedule.*_enabled → scheduler.SetEnabled；schedule.*_hours → scheduler.SetHours
+//     （两者均热生效免重启；normalize 保证 hours 非空、SetHours 拒绝非法小时）
 //   - model_map → server.SetModelMap（模型映射链头热替换）
 //
 // 需重启（监听地址、HTTP client 超时、auth_dir 等装配期依赖）：
 //   - listen / auth_dir / state_file / upstream.* / upstash.* / session_sticky.*（TTL 类）/
-//     schedule.*_hours（主仓库排程小时不热改）/ global.enabled（auth 包全局闸装配期注入）
+//     global.enabled（auth 包全局闸装配期注入）
 //
 // 落盘：深合并保留未知键（用户手写注释性字段不丢失）+ tmp+rename 原子替换；
 // 校验与启动同一套 Default+normalize（ParseConfigInto），失败直接返回、不落盘。
@@ -102,7 +102,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetSoftRateMax(newCfg.SoftRateMaxDur)
 	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
-	// 排程开关热改（主仓库排程开关经 SetEnabled；hours 数组不热改）。
+	// 排程开关热改（主仓库排程开关经 SetEnabled）+ 触发小时热改（SetHours，
+	// 通知 Run 主循环立即重排定时器——面板保存配置与 /admin PATCH hours 共用）。
 	for _, kind := range scheduler.Kinds() {
 		var enabled bool
 		switch kind {
@@ -123,6 +124,14 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		}
 		_ = sch.SetEnabled(kind, enabled)
 	}
+	// hours 热改：normalize 保证小时数组非空（空数组回落默认），SetHours 校验 0-23。
+	_ = sch.SetHours("checkin", newCfg.Schedule.CheckinHours)
+	_ = sch.SetHours("travel", newCfg.Schedule.TravelHours)
+	_ = sch.SetHours("activity", newCfg.Schedule.ActivityHours)
+	_ = sch.SetHours("keepalive", newCfg.Schedule.KeepaliveHours)
+	_ = sch.SetHours("school", newCfg.Schedule.SchoolHours)
+	_ = sch.SetHours("cat", newCfg.Schedule.CatHours)
+	_ = sch.SetHours("queue", newCfg.Schedule.QueueHours)
 
 	return restartRequiredFields(newCfg), nil
 }
@@ -146,9 +155,6 @@ func restartRequiredFields(c *Config) []string {
 		out = append(out, "upstash")
 	}
 	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
-	// 主仓库排程小时数组是启动期装配（scheduler.cfg 快照），热改不覆盖。
-	out = append(out, "schedule.checkin_hours", "schedule.travel_hours", "schedule.activity_hours",
-		"schedule.keepalive_hours", "schedule.school_hours", "schedule.cat_hours", "schedule.queue_hours")
 	// global.enabled 在 auth.SetGlobalEnabled / handler GlobalEnabled / upstream.GlobalEnabled
 	// 三处装配期注入；prompt 文本与 global base 同理。
 	out = append(out, "global.enabled", "global.chat_base", "global.billing_base",

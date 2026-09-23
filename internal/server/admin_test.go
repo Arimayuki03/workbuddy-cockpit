@@ -255,6 +255,72 @@ func TestAdminTaskPatchInsertsMissingSection(t *testing.T) {
 	}
 }
 
+// TestAdminTaskPatchHours 端到端验证 PATCH hours 分支（TM 插件「应用」与面板设置页）：
+// 调度器小时表热生效（快照立即回新值）+ config.json 数组形态最小 diff 写回 + 等值零改动 +
+// 空数组/非法小时 400。
+func TestAdminTaskPatchHours(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	orig := "{\n  \"listen\": \":7863\",\n  \"schedule\": {\n    \"checkin_hours\": [9, 21],\n    \"checkin_enabled\": true\n  }\n}\n"
+	if err := os.WriteFile(path, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := adminHandler(t, "sekret", path)
+
+	// 正常改小时：200 + persisted + 调度器热生效 + 落盘数组形态。
+	rec := do(t, h, "PATCH", "/admin/tasks", "sekret", `{"kind":"checkin","hours":[6,12,23]}`, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH hours 应 200，实得 %d body=%s", rec.Code, rec.Body)
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["persisted"] != true {
+		t.Fatalf("persisted 应为 true：%v", resp)
+	}
+	for _, ts := range h.cfg.Sched.SnapshotAll() {
+		if ts.Kind != "checkin" {
+			continue
+		}
+		if len(ts.Hours) != 3 || ts.Hours[0] != 6 || ts.Hours[2] != 23 {
+			t.Fatalf("调度器快照 hours = %v，热生效失败", ts.Hours)
+		}
+	}
+	raw, _ := os.ReadFile(path)
+	var v map[string]any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("写回后 JSON 非法：%v", err)
+	}
+	schSec, _ := v["schedule"].(map[string]any)
+	ch, _ := schSec["checkin_hours"].([]any)
+	if len(ch) != 3 || ch[0] != float64(6) || ch[2] != float64(23) {
+		t.Fatalf("落盘 checkin_hours = %v，want [6,12,23]", schSec["checkin_hours"])
+	}
+	if schSec["checkin_enabled"] != true {
+		t.Fatal("兄弟键被波及")
+	}
+	if !strings.Contains(string(raw), `"listen": ":7863"`) {
+		t.Fatal("原有键被改坏")
+	}
+
+	// 等值再提交：persisted true + 未改动。
+	rec = do(t, h, "PATCH", "/admin/tasks", "sekret", `{"kind":"checkin","hours":[6,12,23]}`, "")
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !strings.Contains(resp["note"].(string), "已是目标值") {
+		t.Fatalf("等值提交应注明未改动：%v", resp["note"])
+	}
+
+	// 空数组：400（禁用走 *_enabled 开关）。
+	rec = do(t, h, "PATCH", "/admin/tasks", "sekret", `{"kind":"checkin","hours":[]}`, "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("空数组应 400，实得 %d", rec.Code)
+	}
+	// 非法小时：400。
+	rec = do(t, h, "PATCH", "/admin/tasks", "sekret", `{"kind":"checkin","hours":[24]}`, "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("小时 24 应 400，实得 %d", rec.Code)
+	}
+}
+
 func TestSpliceBoolTable(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -298,6 +364,37 @@ func TestSpliceBoolTable(t *testing.T) {
 		{"invalid json", `{"a":}`, "schedule", "k", "true", true, nil},
 		{"top array", `[1,2]`, "schedule", "k", "true", true, nil},
 		{"obj value rejected", `{"schedule":{"checkin_enabled":{"nested":true}}}`, "schedule", "checkin_enabled", "true", true, nil},
+		// —— hours 数组值：整段跨度替换（PATCH hours 落盘路径）——
+		{"arr replace", "{\n  \"schedule\": {\n    \"checkin_hours\": [9, 21],\n    \"checkin_enabled\": true\n  }\n}\n", "schedule", "checkin_hours", "[6,12,23]", false,
+			func(t *testing.T, out []byte, changed bool) {
+				if !changed {
+					t.Fatalf("数组替换应 changed=true")
+				}
+				s := string(out)
+				if !strings.Contains(s, "\"checkin_hours\": [6,12,23]") {
+					t.Fatalf("数组未被替换：%q", s)
+				}
+				if !strings.Contains(s, "\"checkin_enabled\": true") {
+					t.Fatalf("兄弟键被波及：%q", s)
+				}
+			}},
+		{"arr equal", `{"schedule":{"checkin_hours":[9,21]}}`, "schedule", "checkin_hours", "[9,21]", false,
+			func(t *testing.T, out []byte, changed bool) {
+				if changed || !bytes.Equal(out, []byte(`{"schedule":{"checkin_hours":[9,21]}}`)) {
+					t.Fatalf("数组等值应零改动 changed=%v out=%s", changed, out)
+				}
+			}},
+		{"arr insert missing key", `{"schedule":{"cat_enabled": true}}`, "schedule", "queue_hours", "[10]", false,
+			func(t *testing.T, out []byte, _ bool) {
+				var v map[string]map[string]any
+				if err := json.Unmarshal(out, &v); err != nil {
+					t.Fatalf("数组键插入后应合法 err=%v out=%s", err, out)
+				}
+				if q, ok := v["schedule"]["queue_hours"].([]any); !ok || len(q) != 1 || q[0] != float64(10) {
+					t.Fatalf("queue_hours 未插入：%s", out)
+				}
+			}},
+		{"arr replace obj value rejected", `{"schedule":{"checkin_hours":{"nested":1}}}`, "schedule", "checkin_hours", "[9]", true, nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
