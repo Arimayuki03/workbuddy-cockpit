@@ -207,7 +207,8 @@
     "creditsExpiry": "Nearest expiry: {amount} credits on {time}",
     "failedRequests": "Failed requests",
     "todayFailed": "{n} failed today",
-    "weekFailed": "{n} failed in 7 days · {realm}"
+    "weekFailed": "{n} failed in 7 days · {realm}",
+    "creditsExpiryDaily": "{amount} credits expire on the nearest day ({time})"
   },
   "stats": {
     "title": "Usage",
@@ -1028,7 +1029,11 @@
     "errDuration": "Format: 30s / 10m / 2h / 1d",
     "errNoNewline": "Line breaks and control characters are not allowed",
     "errHourFormat": "Invalid hour format",
-    "errEnum": "Value is outside the allowed range"
+    "errEnum": "Value is outside the allowed range",
+    "displayTitle": "Display",
+    "displayDesc": "This group only affects how **this browser** shows things — no system behavior changes, and it takes effect immediately.",
+    "expiryDailyLabel": "Group expiring credits by day",
+    "expiryDailyDesc": "When on, the dashboard groups them by **calendar day**: credits expiring on the same day are summed instead of showing only the nearest one. Hovering still lists the amount and date of every entry."
   },
   "phrases": {
     "请求失败": "Request failed",
