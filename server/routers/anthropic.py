@@ -1015,6 +1015,7 @@ async def messages(request: Request):
                 _as_int(usage.get('prompt_tokens')), _as_int(usage.get('completion_tokens')),
                 latency, ua, None if resp.status_code < 400 else str(data)[:500], False,
                 credit=gateway._usage_credit(usage),
+                cache_hit=gateway._cache_hit_of(usage),
             )
             if resp.status_code >= 400:
                 msg = ''
@@ -1154,6 +1155,7 @@ async def messages(request: Request):
                 _as_int(usage.get('prompt_tokens')), _as_int(usage.get('completion_tokens')),
                 latency, ua, error_text, True,
                 credit=gateway._usage_credit(usage), first_token=first_token_ms,
+                cache_hit=gateway._cache_hit_of(usage),
             )
 
     return StreamingResponse(gen(), status_code=200, media_type='text/event-stream')
