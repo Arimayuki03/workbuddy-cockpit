@@ -137,7 +137,7 @@ function go(v) {
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
-  if (v === 'taskscenter') { loadSchoolStatus(true); pollQueueOnce(); }
+  if (v === 'taskscenter') { loadSchoolStatus(true); reattachQueueView(); }
 }
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
 go((location.hash || '#accounts').slice(1) in TITLES ? (location.hash || '#accounts').slice(1) : 'accounts');
@@ -623,7 +623,7 @@ $('btnRefresh').onclick = async () => {
 function refreshVisible() {
   if (view === 'accounts') loadOverview(true);
   else if (view === 'logs') loadLogs();
-  else if (view === 'taskscenter') pollQueueOnce();
+  else if (view === 'taskscenter') reattachQueueView();
 }
 function start() {
   loadOverview(true);
@@ -1235,6 +1235,17 @@ function startQueuePolling() {
     toast('任务队列执行结束', 'ok');
     loadSchoolStatus(true);
   }, 3000);
+}
+// reattachQueueView 切回任务中心视图时恢复队列进度：仅当本页启动的队列仍在
+// 执行才重新开轮询（残留态/别页队列不接管——视图不被旧结果冲掉）。
+function reattachQueueView() {
+  if (queueTimer) return; // 轮询已在跑（跨视图不中断）
+  (async () => {
+    try {
+      const q = await api('tasks/queue');
+      if (q.started && q.running && (!lastQueueSeq || q.seq === lastQueueSeq)) startQueuePolling();
+    } catch (e) { /* 静默 */ }
+  })();
 }
 
 /* ── 用量 ─────────────────────────────────────────────────────────── */
