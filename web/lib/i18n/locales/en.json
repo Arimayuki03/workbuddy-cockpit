@@ -290,6 +290,7 @@
     "checkinAllDoneDetail": "{ok}/{total} accounts succeeded",
     "checkinPartial": "Check-in finished, {failed} failed",
     "checkinPartialDetail": "{ok}/{total} accounts succeeded; see the Tasks page for details",
+    "checkinSkippedNote": "(plus {skipped} not applicable — the international realm has no check-in)",
     "restarted": "Upstream restarted",
     "disabledReason": "Disabled reason: {reason}",
     "badgeDisabled": "● Disabled",

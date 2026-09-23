@@ -466,7 +466,8 @@ async def checkin_all(user: dict = Depends(security.require_admin)) -> dict:
         if not supports_checkin(realm_of(auth)):
             msg = '国际版无签到体系，已跳过'
             db.add_checkin_log(uid, nickname, 'manual-batch', False, -2, msg)
-            return {'nickname': nickname, 'ok': False, 'code': -2, 'message': msg}
+            return {'nickname': nickname, 'ok': False, 'skipped': True,
+                    'code': -2, 'message': msg}
 
         async with sem:
             # 传完整 auth dict：billing 域要带 X-User-Id 等身份头
@@ -483,8 +484,18 @@ async def checkin_all(user: dict = Depends(security.require_admin)) -> dict:
         return {'nickname': nickname, 'ok': ok, 'code': code, 'message': message}
 
     results = await asyncio.gather(*(one(a) for a in accounts)) if accounts else []
-    succeeded = sum(1 for r in results if r['ok'])
-    return {'total': len(results), 'succeeded': succeeded, 'results': list(results)}
+    # 「不适用」的账号（国际版没有签到体系）不进分母。
+    # 它既不会成功、也不是失败，算进 total 会让界面显示成「5/6 个账号成功」，
+    # 用户会以为有一个号漏签了、反复去点——而那个号无论点多少次都是「已跳过」。
+    # 单独用 skipped 报出来，让界面能说清「N 个不适用」。
+    applicable = [r for r in results if not r.get('skipped')]
+    succeeded = sum(1 for r in applicable if r['ok'])
+    return {
+        'total': len(applicable),
+        'succeeded': succeeded,
+        'skipped': len(results) - len(applicable),
+        'results': list(results),
+    }
 
 
 @router.get('/checkin-logs')
