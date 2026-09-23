@@ -579,6 +579,23 @@ class DockerAssetsTest(unittest.TestCase):
         self.assertRegex(df, r'(?m)^ARG\s+NPM_REGISTRY',
                          'Dockerfile 未声明 NPM_REGISTRY —— compose 传了也会被忽略')
 
+    def test_compose_passes_mirror_and_base_path_args(self) -> None:
+        """镜像里的两个国外下载源、以及子路径前缀，同样要 compose ↔ Dockerfile 对齐。
+
+        这类「可选开关」最容易出的错法不是写坏，而是**只加了一边**：compose 里
+        列了参数、Dockerfile 却没声明同名 ARG —— docker 对多余的 build-arg 只是
+        忽略，于是用户填了值、构建照样卡在 download.docker.com / GitHub 上，
+        而且没有任何报错。这条与上面的 NPM_REGISTRY 同款。
+        """
+        import yaml
+        dc = yaml.safe_load((_ROOT / 'docker-compose.yml').read_text(encoding='utf-8'))
+        args = (dc['services']['workbuddy-manager'].get('build') or {}).get('args') or {}
+        df = (_ROOT / 'Dockerfile').read_text(encoding='utf-8')
+        for name in ('DOCKER_CLI_BASE', 'COMPOSE_URL_PREFIX', 'BASE_PATH'):
+            self.assertIn(name, args, f'compose 没有暴露 {name}')
+            self.assertRegex(df, rf'(?m)^ARG\s+{name}',
+                             f'Dockerfile 未声明 {name} —— compose 传了也会被忽略')
+
     def test_dockerfile_structure_checker_passes(self) -> None:
         """跑一遍 Dockerfile 结构自检（指令拼写 / 阶段引用 / shell 配平）。
 
