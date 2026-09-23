@@ -917,6 +917,18 @@ release notes, and creates a Release with the archives attached.
 
 ---
 
+## Related projects
+
+- [**sanguine886/workbuddy-sdk**](https://github.com/sanguine886/workbuddy-sdk) (Go, MIT) —
+  a community-maintained Go client library covering both of this project's API surfaces:
+  the control plane `/api/*` (accounts, keys, stats, logs, security, settings, users,
+  updates) and the data plane `/v1/*` (Chat Completions / Responses / Anthropic
+  Messages / Models). Handy for Go tooling — `go get` it instead of wiring HTTP and
+  session auth by hand.
+
+> A community project with **no code dependency on this repository**; please report
+> issues to [its tracker](https://github.com/sanguine886/workbuddy-sdk/issues).
+
 ## Credits
 
 - [**LINUX DO**](https://linux.do) — the community where this project is published and discussed
