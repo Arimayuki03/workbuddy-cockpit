@@ -38,6 +38,14 @@ export interface Account {
    * 所以临时停用（改文件名）不会丢。没有备注时是空串（不是缺字段）。
    */
   note?: string;
+  /**
+   * 今天成功签到的时刻（epoch 秒）；null / 缺省 = 今天还没签。
+   *
+   * 判定依据是本端签到记录（腾讯对「今天已签过」回 10001，我们照记成功），
+   * 所以它同时代表「本面板签过」与「今天已签到」。界面据此把签到按钮变成
+   * 已签到态，避免重复点击（详见 server/routers/accounts.py 的 `_today_start`）。
+   */
+  checkin_today?: number | null;
   rate_limited_models?: {
     model: string;
     /** 该模型的冷却截止（已被 soft_rate_max 截断） */
