@@ -183,7 +183,8 @@
     "creditsExpiry": "最近一笔 {amount} 积分将于 {time} 到期",
     "failedRequests": "失败请求",
     "todayFailed": "今天 {n} 次失败",
-    "weekFailed": "近 7 天 {n} 次失败 · {realm}"
+    "weekFailed": "近 7 天 {n} 次失败 · {realm}",
+    "creditsExpiryDaily": "最近一天（{time}）共 {amount} 积分到期"
   },
   "stats": {
     "title": "用量统计",
@@ -985,6 +986,10 @@
     "errDuration": "格式如 30s / 10m / 2h / 1d",
     "errNoNewline": "不能包含换行或控制字符",
     "errHourFormat": "时刻格式有误",
-    "errEnum": "取值不在允许范围内"
+    "errEnum": "取值不在允许范围内",
+    "displayTitle": "界面",
+    "displayDesc": "这一组只影响**本浏览器**的显示方式，不改变系统行为，改完立即生效。",
+    "expiryDailyLabel": "到期积分按天模糊统计",
+    "expiryDailyDesc": "开启后，仪表盘的到期积分按**天**归并：同一天到期的多笔合并显示总和，而不是只显示最近那一笔。悬停仍能看到每一笔的金额与日期。"
   }
 }
