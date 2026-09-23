@@ -310,20 +310,31 @@ export interface RequestLog {
    * 与 latency_ms 的区别：latency_ms 含模型生成全部内容的耗时，回答越长越大，
    * 反映不出上游响应快慢；首字延迟才是「上游多久开始回话」。
    */
+  first_token_ms: number | null;
   /**
    * 提示词缓存的三段 token（issue #69）：上游（腾讯）在流式末帧 usage 里给。
    * **null = 上游没给这三个字段**（老上游），与「给了 0」不是一回事——
    * 后者代表这次请求确实没命中缓存。界面据此显示「—」而不是 0%。
+   *
+   * 前缀缓存是**按账号**存的，所以「换了号」与「没命中」常常一起出现，
+   * 与下面那个 account 列对着看才有意义。
    */
   cache_hit_tokens: number | null;
   cache_miss_tokens: number | null;
   cache_write_tokens: number | null;
-  first_token_ms: number | null;
   ua: string | null;
   error: string | null;
   stream: boolean;
   /** 本次调用的真实扣费（上游 usage.credit）；null = 上游未返回，不是 0 */
   credit: number | null;
+  /**
+   * 本次实际用了哪个上游账号，形如 `昵称(uid8)`。
+   *
+   * 账号由上游决定、不在响应里回传，本端是**采集上游容器日志后按时间对回来的**，
+   * 所以比请求本身晚几秒——刚打完的请求这一列可能还是 null（界面显示「—」，
+   * 稍后刷新即有）。null 也可能是「日志已滚掉」或「上游没在跑容器」。
+   */
+  account: string | null;
 }
 
 export interface UsagePoint {

@@ -17,7 +17,7 @@ from .routers import (
     accounts, anthropic, auth, gateway, keys, logs, models, playground,
     responses, security as security_router, settings, stats, system,
 )
-from .services import renew, tasklog, taskrun
+from .services import accountlog, renew, tasklog, taskrun
 
 logger = logging.getLogger(__name__)
 
@@ -37,12 +37,16 @@ async def lifespan(app: FastAPI):
     # token 自动续期（issue #40）：上游只在「保活时刻」与「有流量时」刷新，
     # 长期闲置的账号会一路走到过期。这里按剩余寿命巡检补齐那个空档。
     renew.start_scheduler()
+    # 请求日志的「账号」回填（issue #69）：账号是上游选的、不在响应里回传，
+    # 只能从它的容器日志里读出来再按时间对回去（见 accountlog 的说明）。
+    accountlog.start_collector()
     try:
         yield
     finally:
         tasklog.stop_collector()
         taskrun.stop_scheduler()
         renew.stop_scheduler()
+        accountlog.stop_collector()
 
 
 def _warn_if_exposed() -> None:

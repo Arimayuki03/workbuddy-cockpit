@@ -107,6 +107,18 @@ step(!!rNone && rNone.marker === '' && !!rHit && rHit.marker !== '' && !!rMiss &
      '上游没给数据的条目**不显示**缓存标记（而不是 0%）',
      rNone ? `该行 Token 格=「${rNone.marker}」` : '(没找到 10.0.0.3 这一行)');
 
+// 账号列（PR #70）：三条都由「采集上游日志 → 按时间回填」补上了
+const ACCT_NAMES = ['张叔叔', 'Moonquakes', '备用号'];
+const ACCT_UIDS = ['299e342b', '3a3a19b1', '11112222'];
+const withName = rows.filter((r) => ACCT_NAMES.some((n) => r.txt.includes(n)));
+const withUid = rows.filter((r) => ACCT_UIDS.some((u) => r.txt.includes(u)));
+const head = await page.evaluate(() => document.querySelector('thead')?.innerText || '');
+step(/账号/.test(head), '表头有「账号」这一列', `表头=${head.replace(/\s+/g, ' ').slice(0, 90)}`);
+step(withName.length === 3, '三条日志都补上了实际调用的账号（昵称）',
+     `命中昵称的行数=${withName.length}；` + rows.map((r) => r.txt.slice(0, 70)).join(' ‖ '));
+step(withUid.length === 3, '账号名后面的 uid8 也显示了（重名账号靠它区分）',
+     `带 uid8 的行数=${withUid.length}`);
+
 // 展开命中那条的详情，看三段数字。按「标签 → 值」成对读，
 // 避免用 /192/ 这种在大段文本里随处可命中的松散匹配。
 async function detailPair(label) {
@@ -120,10 +132,13 @@ await page.waitForTimeout(900);
 await page.screenshot({path: path.join(OUT, 'detail.png'), fullPage: true});
 
 // 断言用的是界面默认语言（zh-CN）的标签
+const acctLine = await detailPair('账号');
 const firstTokenLine = await detailPair('首字延迟');
 const hitLine = await detailPair('缓存命中 Token');
 const missLine = await detailPair('缓存未命中 Token');
 const writeLine = await detailPair('缓存写入 Token');
+step(!!acctLine && /张叔叔|Moonquakes|备用号/.test(acctLine),
+     '详情里的「账号」也是回填后的那个（昵称(uid8)）', `读到：${acctLine}`);
 // 抽屉里得是点的那一行：首字延迟 300ms 是种子给 10.0.0.1 的独有值
 step(!!firstTokenLine && /300ms/.test(firstTokenLine),
      '抽屉里是点的那一行（首字延迟 = 300ms）', `读到：${firstTokenLine}`);

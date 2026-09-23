@@ -367,6 +367,25 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # ——实测有用户发了 issue 也说不清是哪一种。
     # 存量记录为 NULL（那时没记原因），界面按「未记录」展示。
     ('ip_access_logs', 'reason', 'TEXT'),
+    # 本次请求**实际用了哪个上游账号**（issue #69）。
+    #
+    # 为什么需要单独记：账号是**上游**选的，本端转发时并不知道。此前日志里
+    # 只有「请求了什么」，没有「谁答的」，于是两件事都无法回答：
+    #   · 同一把密钥的连续请求是否被分散到了不同账号（上游的轮换是否在工作）；
+    #   · 某个账号是不是在拖后腿（错误率/延迟异常）。
+    # 客户端的 system prompt 命中缓存时，同一账号才会命中同一份前缀缓存——
+    # 所以这一列也是判断「为什么这次没走缓存」的线索。
+    #
+    # 值形如 `昵称(uid8)`，与上游日志里的写法一致；脱敏与截断在写入侧做。
+    # NULL = 未关联上（采集不可用、或该条在上游日志里已滚掉），界面显示「—」。
+    ('request_logs', 'account', 'TEXT'),
+    # 输入侧命中缓存的 token 数（上游 usage.prompt_cache_hit_tokens）。
+    #
+    # 为什么值得单独记：prompt_tokens 是**含**缓存的，光看它看不出这次省了
+    # 多少——同一段 8k 前缀，命中与不命中的扣费能差约 17 倍（上游实测）。
+    # 缓存是否生效与「账号是否稳定」强相关，和上面那列一起看才有意义。
+    # NULL = 上游未返回该字段（旧版上游/非对话类请求），与「命中 0」是两回事。
+    ('request_logs', 'cache_hit_tokens', 'INTEGER'),
 )
 
 
@@ -821,20 +840,78 @@ def add_request_log(**fields: object) -> None:
     execute(
         'INSERT INTO request_logs(ts, key_id, ip, model, mapped_model, status, '
         'prompt_tokens, completion_tokens, latency_ms, first_token_ms, ua, error, '
-        'stream, credit, realm, cache_hit_tokens, cache_miss_tokens, cache_write_tokens) '
-        'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'stream, credit, realm, account, cache_hit_tokens, cache_miss_tokens, '
+        'cache_write_tokens) '
+        'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         (fields.get('ts'), fields.get('key_id'), fields.get('ip'),
          fields.get('model'), fields.get('mapped_model'), fields.get('status'),
          fields.get('prompt_tokens'), fields.get('completion_tokens'),
          fields.get('latency_ms'), fields.get('first_token_ms'), fields.get('ua'),
          fields.get('error'), fields.get('stream'), fields.get('credit'),
-         fields.get('realm'), fields.get('cache_hit_tokens'),
+         fields.get('realm'), fields.get('account'), fields.get('cache_hit_tokens'),
          fields.get('cache_miss_tokens'), fields.get('cache_write_tokens')),
     )
     _request_log_writes += 1
     if _request_log_writes >= _REQUEST_LOG_CHECK_EVERY:
         _request_log_writes = 0
         _prune_request_logs()
+
+
+# 账号回填的匹配窗口（秒）。
+#
+# 上游日志的时间戳是「请求结束」时刻，与本端 `request_logs.ts` 同义（也在
+# 请求结束时取的 `int(time.time())`），所以能直接比。实测两者相差 < 1 秒
+# （RTT + 双方时钟），窗口给 3 秒覆盖慢链路与时钟漂移。
+_ACCOUNT_MATCH_WINDOW = 3
+
+
+def attach_request_accounts(entries: Iterable[dict]) -> int:
+    """把从上游日志采集到的账号回填到对应的请求日志行（issue #69）。返回回填条数。
+
+    entries 形如 `[{'ts': 结束时刻(epoch 秒), 'model': 上游侧模型名,
+    'account': '昵称(uid8)'}]`。
+
+    匹配规则：**同模型 + 时间最接近 + 尚未回填**。
+
+    为什么用「最接近」而不是相等：本端记的是 `int(time.time())`（秒级截断），
+    上游给的是纳秒 —— 两者不可能相等，只能就近匹配。实测「最近的一行」总是
+    正确的那条；但**同一秒内有多个同模型请求**时无法区分，所以只挑
+    `account IS NULL` 的行，避免把已经填对的行改错（宁可漏填，不可填错）。
+
+    模型名两边都取**映射后**的名字（`mapped_model`），另兼看 `model` ——
+    映射表变更时两边可能只对得上一个。
+    """
+    filled = 0
+    for e in entries:
+        ts = e.get('ts')
+        acct = _clean(e.get('account'), 64)
+        # bool 是 int 的子类：`ts=True` 会当成「1970-01-01 00:00:01」，虽然只会
+        # 匹配到空窗（几乎没有这种行），但没有时间戳就不该参与匹配。
+        if not isinstance(ts, int) or isinstance(ts, bool) or not acct:
+            continue
+        model = _clean(e.get('model'), 128)
+        # 模型名为空时**不能**匹配：`model = ''` 会命中「模型列也是空」的那些行
+        # （历史记录里存在），等于把账号填到一条毫不相干的日志上。宁可漏填。
+        if not model:
+            continue
+        try:
+            row = query_one(
+                'SELECT id FROM request_logs '
+                'WHERE account IS NULL AND ts BETWEEN ? AND ? '
+                '  AND (mapped_model = ? OR model = ?) '
+                'ORDER BY ABS(ts - ?) LIMIT 1',
+                (ts - _ACCOUNT_MATCH_WINDOW, ts + _ACCOUNT_MATCH_WINDOW,
+                 model, model, ts),
+            )
+            if row is None:
+                continue
+            execute('UPDATE request_logs SET account = ? WHERE id = ?',
+                    (acct, row['id']))
+            filled += 1
+        except Exception:  # noqa: BLE001
+            # 回填是旁路：任何异常都不能影响采集循环的其余部分
+            continue
+    return filled
 
 
 def add_ip_access_log(ip: object, path: object, blocked: bool, ua: object,
