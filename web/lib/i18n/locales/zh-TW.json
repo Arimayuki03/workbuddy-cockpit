@@ -183,7 +183,8 @@
     "creditsExpiry": "最近一筆 {amount} 積分將於 {time} 到期",
     "failedRequests": "失敗請求",
     "todayFailed": "今天 {n} 次失敗",
-    "weekFailed": "近 7 天 {n} 次失敗 · {realm}"
+    "weekFailed": "近 7 天 {n} 次失敗 · {realm}",
+    "creditsExpiryDaily": "最近一天（{time}）共 {amount} 積分到期"
   },
   "stats": {
     "title": "用量統計",
@@ -1004,7 +1005,11 @@
     "errDuration": "格式如 30s / 10m / 2h / 1d",
     "errNoNewline": "不能包含換行或控制字元",
     "errHourFormat": "時刻格式有誤",
-    "errEnum": "取值不在允許範圍內"
+    "errEnum": "取值不在允許範圍內",
+    "displayTitle": "介面",
+    "displayDesc": "這一組只影響**本瀏覽器**的顯示方式，不改變系統行為，改完立即生效。",
+    "expiryDailyLabel": "到期積分按天模糊統計",
+    "expiryDailyDesc": "開啟後，儀表板的到期積分按**天**歸併：同一天到期的多筆合併顯示總和，而不是只顯示最近那一筆。懸停仍能看到每一筆的金額與日期。"
   },
   "phrases": {
     "请求失败": "請求失敗",

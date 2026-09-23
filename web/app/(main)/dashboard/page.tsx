@@ -12,6 +12,7 @@ import {
   YAxis,
 } from 'recharts';
 import {useHeartbeat} from '@/lib/use-heartbeat';
+import {getExpiryDailyGroup, groupExpiriesByDay} from '@/lib/display-prefs';
 import {accountApi, statsApi, upstreamApi} from '@/lib/api';
 import {useRealm} from '@/lib/realm-context';
 import type {
@@ -172,6 +173,42 @@ export default function DashboardPage() {
   // 阈值是 7 天，而本页每 30 秒重渲染一次，几秒的偏差不影响分档。
   const expiryUrgent = !!nextExpiry && nextExpiry.at - Date.now() / 1000 < 7 * 86400;
 
+  /** 「到期积分按天模糊统计」开关（界面偏好，存在浏览器本地）。
+   *  首屏后读：直接读会让服务端渲染与客户端不一致（与 realm-context 同理）。 */
+  const [dailyGroup, setDailyGroup] = useState(false);
+  useEffect(() => {
+    setDailyGroup(getExpiryDailyGroup());
+  }, []);
+
+  /**
+   * 全体账号的到期明细（按时刻升序）。
+   *
+   * 与上面 nextExpiry 的区别：那个只看每个账号的**第一笔**，回答「最近一笔什么时候
+   * 没了」；这里收全量，供「按天归并」用——同一天到期的多笔要能相加，
+   * 只看第一笔永远算不出那一天的总和。
+   */
+  const allExpiries = useMemo(() => {
+    const out: CreditExpiry[] = [];
+    for (const m of Object.values(creditsMeta)) {
+      for (const e of m.expiries ?? []) out.push(e);
+    }
+    return out.sort((a, b) => a.at - b.at);
+  }, [creditsMeta]);
+
+  /**
+   * 卡片上实际要显示的到期条目。
+   *
+   * 关闭（默认）= 最近一笔；开启 = 按本地日历日归并后的第一条（最近那一天，
+   * 金额是那天到期的**总和**）。两者数量级不同（一笔 vs 一天），所以开关默认
+   * 关闭——升级后看到的还是原来那个数，想按天看的自己打开。
+   */
+  const expiryShown = useMemo(
+    () => (dailyGroup
+      ? groupExpiriesByDay(allExpiries)
+      : (nextExpiry ? [nextExpiry] : [])),
+    [dailyGroup, allExpiries, nextExpiry],
+  );
+
   /**
    * 「反代上游」面板的计数，取自上游 `/status` 的 `realm_totals`。
    *
@@ -279,7 +316,7 @@ export default function DashboardPage() {
           value={
             <span className="inline-flex items-baseline gap-1.5">
               <span>{creditsKnown.length ? fmtNumber(totalCredits) : '—'}</span>
-              <CreditCountdown expiries={nextExpiry ? [nextExpiry] : []} />
+              <CreditCountdown expiries={expiryShown} />
             </span>
           }
           hint={
@@ -290,10 +327,10 @@ export default function DashboardPage() {
               ? t('dashboard.waitingUpstream')
               : creditsLow > 0
                 ? t('dashboard.creditsLow', {count: creditsLow, n: creditsLow})
-                : nextExpiry
-                  ? t('dashboard.creditsExpiry', {
-                      time: fmtDateTime(nextExpiry.at),
-                      amount: fmtNumber(nextExpiry.amount),
+                : expiryShown.length
+                  ? t(dailyGroup ? 'dashboard.creditsExpiryDaily' : 'dashboard.creditsExpiry', {
+                      time: fmtDateTime(expiryShown[0].at),
+                      amount: fmtNumber(expiryShown[0].amount),
                     })
                   : t('dashboard.creditsCovered', {count: creditsKnown.length, n: creditsKnown.length})
           }
