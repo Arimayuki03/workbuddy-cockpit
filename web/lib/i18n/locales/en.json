@@ -475,6 +475,8 @@
     "filter": "Filter",
     "colTime": "Time",
     "colFirstToken": "First token",
+    "colAccount": "Account",
+    "rowAccount": "Account",
     "colLatency": "Latency",
     "streamShort": "stream",
     "noCreditTitle": "Upstream did not return this field (not the same as free)",

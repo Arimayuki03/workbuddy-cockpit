@@ -451,6 +451,8 @@
     "filter": "篩選",
     "colTime": "時間",
     "colFirstToken": "首字",
+    "colAccount": "帳號",
+    "rowAccount": "帳號",
     "colLatency": "總耗時",
     "streamShort": "串流",
     "noCreditTitle": "上游未回傳該項（不等於免費）",

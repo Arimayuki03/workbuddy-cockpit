@@ -136,7 +136,16 @@ def seed_logs() -> None:
         gateway._record(None, ip, 'glm-5.2', '', 200,
                         usage['prompt_tokens'], usage['completion_tokens'],
                         1200, 'seed', None, True, first_token=300, usage=usage)
-    print('已造三条请求日志（命中 / 未命中 / 没给）')
+    # 账号列（PR #70）走的是**采集上游容器日志再按时间回填**这条路：
+    # 这里直接喂三条「已解析好的上游日志条目」，等价于采集器解析后的入参。
+    # 三条都在匹配窗口内，各自认领一行（回填后立刻置为已填，不会重复认领）。
+    now = db.query_one('SELECT ts FROM request_logs ORDER BY id DESC LIMIT 1')['ts']
+    filled = db.attach_request_accounts([
+        {'ts': now, 'model': 'glm-5.2', 'account': '张叔叔(299e342b)'},
+        {'ts': now, 'model': 'glm-5.2', 'account': 'Moonquakes(3a3a19b1)'},
+        {'ts': now, 'model': 'glm-5.2', 'account': '备用号(11112222)'},
+    ])
+    print(f'已造三条请求日志（命中 / 未命中 / 没给），账号回填 {filled} 条')
     db._conn.close()
     db._conn = None
 

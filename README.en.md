@@ -292,17 +292,25 @@ ideas belong in [this repository](https://github.com/ithtelab/workbuddy-manager/
 <img src="docs/images/keys.png" alt="API keys" width="100%" />
 
 ### Request logs
-> Filter by time / key / status / model / IP, with **time to first token**, total latency, tokens and **prompt-cache hits**
+> Filter by time / key / status / model / IP, with **the account actually used**, **time to first token**, total latency, tokens and **prompt-cache hits**
 
 "First token" = from sending the upstream request to the first delta containing content.
 It reflects **how fast the upstream starts responding**. "Total latency" includes the whole
 generation, so it grows with answer length — useful for overall cost per request.
 Non-streaming requests have no intermediate steps, so the first-token column shows `—`.
 
+**Account** is which upstream account served this call, shown as `nickname(uid8)`. The upstream
+picks it and does not return it in the response, so the panel reads the upstream's container log
+and matches entries by time — that is why it **appears a few seconds after** the request (a
+just-finished one may still show `—`). When the container log is unavailable (upstream on another
+host, no `docker.sock`, native deployment) the column stays `—`; nothing else is affected.
+
 The cache marker after the token count (green "cache N%" / amber "no cache hit") comes from the
 usage data the upstream returns; it tells you whether a repeated prefix is **actually hitting the
-cache**, which is billed much cheaper. When the upstream does not return this data the marker is
-omitted (the detail view says "not captured") — that is not the same as "no cache hit".
+cache**, which is billed much cheaper. Prefix caches are stored **per account**, so "the account
+changed" and "no cache hit" often show up together — read the two columns side by side. When the
+upstream does not return this data the marker is omitted (the detail view says "not captured") —
+that is not the same as "no cache hit".
 
 <img src="docs/images/logs.png" alt="Request logs" width="100%" />
 

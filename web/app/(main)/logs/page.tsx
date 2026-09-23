@@ -59,6 +59,28 @@ function cachePct(l: RequestLog): string {
   return String(Math.round((hit / (hit + miss)) * 100));
 }
 
+/**
+ * 账号列（issue #69）：上游日志里的形状是 `昵称(uid8)`。
+ *
+ * 拆开显示是为了两件事都好办：昵称给人看（「这几次都落在张叔叔那个号上」），
+ * uid 用于和账号页/上游日志对齐（重名的账号靠它区分）。
+ * 对不上这个形状时原样显示——上游改格式我们也不该丢信息。
+ */
+function AccountCell({account}: {account: string | null}) {
+  if (!account) {
+    return <span className="text-muted-foreground/50">—</span>;
+  }
+  const m = account.match(/^(.*?)\(([^()]*)\)$/);
+  return (
+    <>
+      <span>{m ? m[1] : account}</span>
+      {m && m[2] && (
+        <span className="ml-1 font-mono text-[10px] text-muted-foreground">{m[2]}</span>
+      )}
+    </>
+  );
+}
+
 export default function LogsPage() {
   const t = useT();
   const {isAdmin} = useAuth();
@@ -231,6 +253,7 @@ export default function LogsPage() {
               <TableHead className="pl-4 text-[11px] text-muted-foreground">{t('logs.colTime')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">{t('nav.keys')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">IP</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('logs.colAccount')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">{t('nav.models')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colStatus')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">{t('logs.colFirstToken')}</TableHead>
@@ -249,6 +272,12 @@ export default function LogsPage() {
                 <TableCell className="pl-4 text-xs text-muted-foreground">{fmtDateTimeMarked(l.ts)}</TableCell>
                 <TableCell className="text-xs">{l.key_name || '—'}</TableCell>
                 <TableCell className="font-mono text-xs text-muted-foreground">{l.ip}</TableCell>
+                {/* 本次用的上游账号（issue #69）。账号由上游选、不在响应里回传，
+                    这一列是采集它的容器日志后按时间对回来的——比请求晚几秒，
+                    所以刚打完的请求可能还是「—」，稍后刷新就有。 */}
+                <TableCell className="text-xs">
+                  <AccountCell account={l.account} />
+                </TableCell>
                 <TableCell className="text-xs">
                   {l.model || '—'}
                   {l.mapped_model && l.mapped_model !== l.model && (
@@ -375,6 +404,7 @@ export default function LogsPage() {
               {([
                 ['ip', t('logs.rowIp'), detail.ip],
                 ['key', t('logs.rowKey'), detail.key_name || '—'],
+                ['account', t('logs.rowAccount'), detail.account || t('logs.notCollected')],
                 ['model', t('logs.rowModel'), detail.model || '—'],
                 ['mapped', t('logs.rowMappedModel'), detail.mapped_model || '—'],
                 ['status', t('logs.rowStatus'), String(detail.status)],
