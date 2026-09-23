@@ -39,6 +39,14 @@ services:
         # 官方 registry 国内访问慢且会断。
         #   docker compose build --build-arg NPM_REGISTRY=https://registry.npmmirror.com
         NPM_REGISTRY: ""
+        # 可选：镜像里要装 docker CLI（供容器内「重载上游 / 读上游日志 / 一键更新」用），
+        # 它的静态包固定从 download.docker.com 取——国外 CDN，国内实测很慢，
+        # 构建会长时间停在这一步。填国内镜像基址可绕开。
+        # 可选值：https://mirrors.aliyun.com/docker-ce / https://mirrors.tuna.tsinghua.edu.cn/docker-ce
+        DOCKER_CLI_BASE: ""
+        # 可选：compose 插件从 GitHub Releases 下载（官方地址国内会超时）。
+        # 用法是「加速前缀 + 原始 URL」，例如 https://ghfast.top/
+        COMPOSE_URL_PREFIX: ""
     image: workbuddy-manager:latest
     container_name: workbuddy-manager
     # 这个 restart 策略是容器版「一键更新」能生效的前提：
