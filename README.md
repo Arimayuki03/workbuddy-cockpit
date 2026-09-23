@@ -26,7 +26,7 @@
 
 WorkBuddy Cockpit 是一个自托管的一体化项目：**后端**是多账号 OpenAI 兼容网关（OAuth 登录、账号池轮转、熔断与冷却、会话粘性），**前端**是内嵌进同一个二进制的全功能 Web 管理面板（账号、任务、用量、配置、日志），部署一个容器、记住一个地址，全部搞定。
 
-> 前身是 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的 fork。v1.2.0 起项目以独立形态演进：吸收 [workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 的后端管理能力与 [workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) 的前端设计，网关核心与上游保持同源兼容。设计决策见 [docs/DESIGN-v1.2.0-panel-manager.md](docs/DESIGN-v1.2.0-panel-manager.md)。
+> 前身是 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的 fork（**上游仓库自 2026-09-23 起已被作者删除、不可访问**，链接仅为历史署名；本项目按 MIT 独立继续演进）。v1.2.0 起项目以独立形态演进：吸收 [workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 的后端管理能力与 [workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) 的前端设计，网关核心与上游保持同源兼容。设计决策见 [docs/DESIGN-v1.2.0-panel-manager.md](docs/DESIGN-v1.2.0-panel-manager.md)。
 
 ### 与上游 / 同类项目的关系
 
@@ -35,22 +35,22 @@ WorkBuddy Cockpit 是一个自托管的一体化项目：**后端**是多账号 
 | 形态 | 纯网关，无面板 | 网关 + 原生 HTML 面板 | 外挂面板（Python 中间层 + Next.js） | **网关 + 内嵌 Next.js 面板** |
 | 部署 | 单容器 | 单容器 | 网关 + 面板双容器 | **单容器** |
 | 账号池治理 | ✓ | ✓ | —（调网关 API） | ✓（上游同源 + cost_explore） |
-| 任务自动化 | ✓ 内置六类调度 | ✓ 全内置 | 依赖 Python 脚本 | ✓ 内置调度 + 成长任务/开学季一键自动化 |
+| 任务自动化 | ✓ 内置六类调度 | ✓ 全内置 | 依赖 Python 脚本 | ✓ 内置调度 + 成长任务/顺序任务链/开学季一键自动化 |
 | 用量统计 | `/v1/stats` 聚合 | 逐请求分桶 | 自建 SQLite | **两者都有** |
 | Windows 工作流 | ✓ cmd 启停脚本 | — | 脚本 | ✓ cmd 启停 + bat 交互菜单 + CLI 全套 |
 
 ## ✨ 功能总览
 
-### 🎛️ Web 管理面板（v1.2.0）
+### 🎛️ Web 管理面板
 
 浏览器打开即用，与网关同端口同鉴权，明暗主题，简中 / 繁中 / 英 / 日 / 韩五语言：
 
-- **总览** — 账号健康分布、今日请求 / token / 积分扣费一目了然
-- **账号** — 池总览（状态 / 积分进度条 / 冷却倒计时 / 成功失败计数 / 在途数）；单号禁用 / 恢复 / 复活 / 签到 / 查余额 / 移除；批量签到 / 保活 / 余额刷新；**扫码 / 授权登录添加账号**，凭证落盘后热加载进池，免重启
-- **任务** — 成长任务一键自动化（17/18 个任务纯 API 完成：推进 → 轮询计分 → 自动领奖，执行队列账号内串行、账号间并发）；开学季活动 5 任务一键闭环 + **券码二维码**；六类定时任务快照与手动触发
-- **统计** — 逐请求用量分桶（时间片 × 域 × 账号 × 模型）时间轴图表 + 按模型聚合的请求量 / token / 延迟 / 扣费
-- **日志** — 请求日志（模型 / 账号 / 状态 / tokens / 首字延迟 / 扣费 / 错误，环形缓冲最近约 1000 条）+ 系统日志（任务 / 对话 / 系统三频道）
-- **设置** — 配置热编辑（深合并原子写回，部分键立即生效）、Upstash 连通性测试、**模型映射**（自定义模型名 → 真实模型，服务 cc-switch 等写死模型名的客户端）、版本检查提示
+- **总览** — 账号健康分布、今日请求 / token / 积分扣费一目了然；到期积分按天归并口径切换（本地偏好）
+- **账号** — 池总览（状态 / 积分进度条 / 冷却倒计时 / 成功失败计数 / 在途数）；单号禁用 / 恢复 / 复活 / 签到 / 查余额 / 移除；批量签到 / 保活 / 余额刷新；**扫码 / 授权登录添加账号**，凭证落盘后热加载进池，免重启；**凭据导出 / 导入**（跨部署迁移账号，同 UID 覆盖更新）；**强制清冷却**（冷却 / 熔断 / 连败降权 / 模型级限流一键归零，不碰禁用位）
+- **任务** — 成长任务一键自动化（25 个任务动作纯 API 完成：推进 → 轮询计分 → 自动领奖，执行队列账号内串行、账号间并发；含小程序 Sequential_Tasks_1..7 顺序任务链——专家对话、5/10 次对话、GLM5.2、灵感功能等，链式依赖每日解锁自动重试）；开学季活动 5 任务一键闭环 + **券码二维码**；七类定时任务快照与手动触发
+- **统计** — 逐请求用量分桶（时间片 × 域 × 账号 × 模型）时间轴图表 + 按模型聚合的请求量 / token / 延迟 / 扣费；时间窗筛选图和表同步生效；时间窗含近 24h / 72h / 7d / 30d 数字档与「启动以来」全量档
+- **日志** — 请求日志（模型 / 账号 / 状态 / tokens / 首字延迟 / 扣费 / 错误 / **prompt 缓存命中三段观测**，环形缓冲最近约 1000 条）+ 系统日志（任务 / 对话 / 系统三频道）
+- **设置** — 配置热编辑（深合并原子写回，部分键立即生效，排程小时免重启热改）、Upstash 连通性测试、**模型映射**（自定义模型名 → 真实模型，服务 cc-switch 等写死模型名的客户端）、版本检查提示
 - **Playground** — 面板内直接对话测试，走本网关 `/v1/chat/completions`
 
 ### 🐝 账号池治理
@@ -60,20 +60,20 @@ WorkBuddy Cockpit 是一个自托管的一体化项目：**后端**是多账号 
 - **在途租约** — 单号最大并发占用限制；`/status` 透出 `in_flight_by_model` 每模型在途台账
 - **账本择优** — 按 `usage.credit` 折算每千 token 单价记入 (账号， 模型) 账本，免费 / 便宜的号优先，观测 EMA 平滑、6h 失效
 - **成本分层条件探索** — tier 0 垄断时搭车改道探索未知号，承接真实请求零新增上游调用，成功即毕业
-- **分级熔断与冷却** — 429 软冷却指数退避、402 硬冷却至次日 04:00、连败熔断、模型级限流独立冷却（切模型豁免）、WAF IP 级 fail-fast
+- **分级熔断与冷却** — 429 软冷却指数退避、402 硬冷却至次日 04:00（不被软冷却 / 限流覆盖翻型，零余额号不会提前回池）、连败熔断、模型级限流独立冷却（切模型豁免）、WAF IP 级 fail-fast；运维可从面板**强制清冷却**
 - **会话粘性** — conversation 四键 → prompt_cache_key → 首条 user 消息派生，多轮上下文不跳号；粘性按模型判活
 - **双域适配** — 国内版（`copilot.tencent.com`）与国际版（`www.workbuddy.ai`）共享一池，按 realm 或模型名前缀路由
 
 ### ⏰ 定时积分任务
 
-六类任务独立排程、独立开关（`schedule.*_enabled`）：签到（09/21 点，尾部自动跑连登管家：7/14/28 档自动兑换 + 抽奖自动抽完）、活跃地图（10 点）、猫猫旅行（09/21 点，领养状态机修正）、token 保活（22 点）、开学季（12 点）、夜猫子（01 点）。面板与 `/admin/tasks` 均可手动触发。
+七类任务独立排程、独立开关（`schedule.*_enabled`），**触发小时可在面板 / API 热改（免重启）**：签到（09/21 点，尾部自动跑连登管家：7/14/28 档自动兑换 + 抽奖自动抽完）、活跃地图（10 点）、猫猫旅行（09/21 点，领养状态机修正）、token 保活（22 点）、开学季（12 点）、夜猫子（01 点）、任务执行队列（10 点，默认关）。面板与 `/admin/tasks` 均可手动触发；单任务 panic 有 recover 兜底，不会击穿网关进程。
 
 ### 🔌 OpenAI 兼容接口
 
 - `/v1/chat/completions` 流式 + 非流式（出站强制 stream，SSE 白名单重建，非流式本地聚合）、`/v1/models`（effort 档位 / 积分倍率 / 上下文全字段）、`/v1/stats`、`/status`、`/healthz`
 - 出站改写管线：强制 `stream:true`、`developer` 角色归一、tool_choice 归一、`image_url` 字符串兼容、DeepSeek 思维链注入、`reasoning_effort` 档位降级、`reasoning_content` 回填、指纹脱敏
 - 系统提示词三模式（passthrough / custom / append）+ 内容拦截降级重试
-- 模型映射、错误分类轮转退避
+- 模型映射、错误分类轮转退避；国际版模型目录**双 UA 并发探测取并集**（IDE UA 字段权威、CLI UA 补 deepseek 系缺失 id），试用横幅模型自动补入目录；上下文窗口按「远端权威 → 静态知识表 → model.json 缓存 → models.dev 按需拉取」四级回退
 
 ### 🖥️ Windows 原生工作流
 
@@ -115,7 +115,7 @@ go build -trimpath -tags embed_panel -ldflags="-s -w" -o wb2api ./cmd/server
 
 ### 方式三：Windows 一键脚本
 
-双击 **启动服务.bat** 交互菜单即可（自动编译所需工具、自动检测端口与僵死进程）。详见 [使用指南.md](使用指南.md)。
+双击 **启动服务.bat** 交互菜单即可（自动编译所需工具、自动检测端口与僵死进程）。发行版 exe 双击即可用：配置文件不存在时首启引导会自动生成带随机 `api_key` 的最小 `config.json` 并打印密钥（双击报错窗口保持可见）。详见 [使用指南.md](使用指南.md)。
 
 ### 验证
 
@@ -144,7 +144,7 @@ curl -sN http://localhost:7863/v1/chat/completions \
 
 ## ⚙️ 配置
 
-配置以 [`config.example.json`](config.example.json) 为完整参考，`WB2A_*` 环境变量可覆盖（25 个，含 `WB2A_CONFIG` 指定配置路径）。常用段：
+配置以 [`config.example.json`](config.example.json) 为完整参考，`WB2A_*` 环境变量可覆盖（28 个，含 `WB2A_CONFIG` 指定配置路径）。常用段：
 
 ```jsonc
 {
@@ -153,17 +153,19 @@ curl -sN http://localhost:7863/v1/chat/completions \
   "auth_dir": "./auths",        // 账号凭证目录（5s 轮询热加载）
   "upstash": { "url": "", "token": "" }, // 状态镜像到 Upstash Redis（可选）
   "usage":   { "enabled": true },  // 逐请求用量分桶落盘 data/usage.json
-  "panel":   { "enabled": true, "loopback_only": false } // Web 面板（v1.2.0）
+  "panel":   { "enabled": true, "loopback_only": false }, // Web 管理面板
+  "schedule": { "checkin_enabled": true, "checkin_hours": [9, 21], "queue_enabled": false } // 七类任务排程（面板可热改）
 }
 ```
 
-| v1.2.0 新增键 | 默认 | 说明 |
+| 新增键 | 默认 | 说明 |
 |---|---|---|
 | `panel.enabled` | `true` | 启用 Web 面板（关掉即回到纯网关形态） |
 | `panel.loopback_only` | `false` | 面板仅限本机回环访问（公网反代场景保持 false） |
 | `usage.enabled` | `true` | 逐请求用量分桶统计（关掉则统计页只剩 `/v1/stats` 聚合） |
+| `schedule.queue_hours` / `queue_enabled` | `[10]` / `false` | 任务中心执行队列排程（默认关；面板任务页可手动触发） |
 
-安全契约：`panel.enabled` 或 `admin.enabled` 为 true 且 `api_key` 为空时**拒绝启动**。面板与 API 同端口同鉴权，自带严格 CSP 等安全头；公网部署务必设置 api_key 并置于 HTTPS 反代之后。
+安全契约：`panel.enabled` 或 `admin.enabled` 为 true 且 `api_key` 为空时**拒绝启动**。面板与 API 同端口同鉴权，自带严格 CSP 等安全头；登录失败限速（按 IP 10 分钟内 5 次失败锁定 15 分钟，防 api_key 在线穷举）；公网部署务必设置 api_key 并置于 HTTPS 反代之后。
 
 > ⚠️ 合规须知：本项目是**非官方**网关，使用 WorkBuddy / CodeBuddy 账号作为上游，**仅限本人授权账号、本机 / 私有环境测试**。详细边界见[免责声明](#️-免责声明)。
 
@@ -182,7 +184,7 @@ flowchart LR
         H --> S
         P["账号池\n三因子加权 · 熔断 · 冷却 · 租约"] --> U
         S["会话粘性路由"] -.绑定镜像.-> REDIS
-        T["定时调度\n六类任务 + 连登管家"] --> P
+        T["定时调度\n七类任务 + 连登管家"] --> P
         U["上游 Client\nChatHTTP 流式 · 短 RPC"]
         PG --> P
         PG -.用量分桶.-> DATA[("data/usage.json")]
@@ -215,7 +217,7 @@ workbuddy-cockpit/
 
 | 文档 | 内容 |
 |---|---|
-| [使用指南.md](使用指南.md) | 启停 / 配置 / 账号管理 / 接口验证 / 面板用法 / 常见问题排查 |
+| [使用指南.md](使用指南.md) | 启停 / 配置 / 账号管理 / 接口验证 / 面板用法（含凭据导入导出）/ 常见问题排查 |
 | [docs/DESIGN-v1.2.0-panel-manager.md](docs/DESIGN-v1.2.0-panel-manager.md) | v1.2.0 面板整合设计定稿 |
 | [config.example.json](config.example.json) | 全量配置键参考（含注释级说明） |
 
@@ -226,13 +228,16 @@ workbuddy-cockpit/
 | v1.0.0 | 2026-09-14 | 上游基线（Sliverkiss/workbuddy2api），ghcr 镜像发布流程 |
 | v1.1.0 | 2026-09-20 | 吸收上游 2026-09-20 合并：`/v1/stats`、账号停用/恢复/复活端点、auths 热加载、global 域路由 |
 | v1.1.1 | 2026-09-20 | `/status` 透出 `in_flight_by_model` 每模型在途台账 |
-| **v1.2.0** | 2026-09-21 | **项目更名 WorkBuddy Cockpit**；整合 Web 管理面板（panel 后端 + manager 前端壳）、模型映射、请求日志、版本检查；吸收上游两段式治理流水线、`image_url` 兼容等。网关侧 `/v1/*`、`/admin/*`、`/status` 接口契约保持完全兼容 |
+| v1.2.0 | 2026-09-22 | **项目更名 WorkBuddy Cockpit**；整合 Web 管理面板（panel 后端 + manager 前端壳）、模型映射、请求日志、版本检查；吸收上游两段式治理流水线、`image_url` 兼容等。网关侧 `/v1/*`、`/admin/*`、`/status` 接口契约保持完全兼容 |
+| v1.2.1 | 2026-09-23 | 用量页时间窗修复：新增「启动以来」全量档、切窗竞态修复、Y 轴刻度遮挡修复 |
+| v1.3.0 | 2026-09-23 | **账号凭据导出 / 导入**——跨部署迁移账号（同 UID 覆盖更新，导出格式与落盘同形） |
+| 未发布（main） | 2026-09-24 | 顺序任务链全链自动化（Sequential_Tasks_1..7）+ 强制清冷却（硬冷却不被翻型 + 面板一键清除）+ 国际版模型双 UA 探测并集 + prompt 缓存命中率观测 + 登录限速 / 任务 panic recover 安全加固 |
 
 完整变更见 [Releases](https://github.com/Arimayuki03/workbuddy-cockpit/releases)。
 
 ## 🙏 致谢
 
-- [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) — 网关核心的上游基座（本 fork 的起点）
+- [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) — 网关核心的上游基座（本 fork 的起点；上游仓库已删库下线，署名依 MIT 保留）
 - [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) — 面板后端能力（账号池视图 / 任务自动化 / 开学季 / 用量分桶 / OAuth 加号 / 配置热编辑）的移植源（MIT）
 - [ithtelab/workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) — 前端面板设计与页面结构的来源（MIT）；其 UI 设计 token 与组件层改编自 [linux-do/cdk](https://github.com/linux-do/cdk)（MIT），一并致谢
 
