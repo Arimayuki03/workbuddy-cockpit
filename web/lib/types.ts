@@ -308,6 +308,22 @@ export interface RequestLog {
   stream: boolean;
   /** 本次调用的真实扣费（上游 usage.credit）；null = 上游未返回，不是 0 */
   credit: number | null;
+  /**
+   * 本次实际用了哪个上游账号，形如 `昵称(uid8)`。
+   *
+   * 账号由上游决定、不在响应里回传，本端是**采集上游容器日志后按时间对回来的**，
+   * 所以比请求本身晚几秒——刚打完的请求这一列可能还是 null（界面显示「—」，
+   * 稍后刷新即有）。null 也可能是「日志已滚掉」或「上游没在跑容器」。
+   */
+  account: string | null;
+  /**
+   * 输入侧命中缓存的 token 数。
+   *
+   * null 与 0 含义不同：null = 上游没给这个字段（旧版上游/该请求类型不带），
+   * 0 = 这次确实没命中。前缀缓存是**按账号**存的，所以「换号」与「没命中」
+   * 常一起出现——两列对着看才有意义。
+   */
+  cache_hit_tokens: number | null;
 }
 
 export interface UsagePoint {

@@ -253,7 +253,30 @@ def _usage_credit(usage: dict | None) -> float | None:
     return val if val >= 0 else None
 
 
-def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt: int, ct: int, latency: int, ua: str | None, error: str | None, stream: bool, *, credit: float | None = None, first_token: int | None = None) -> None:
+def _cache_hit_of(usage: object) -> int | None:
+    """取上游 usage 里的缓存命中 token 数；**没给该字段时返回 None**（不是 0）。
+
+    为什么必须区分 None 与 0：`0` 是「这次确实没命中」，`None` 是「上游没告诉
+    我们」（旧版上游、或该请求类型不带这个字段）。界面上两者的含义完全不同——
+    前者说明缓存策略没生效、值得查，后者只是没有数据。
+
+    上游字段名是 `prompt_cache_hit_tokens`（**不是** OpenAI 标准的
+    `prompt_tokens_details.cached_tokens`：实测上游前者有值、后者恒为 0，
+    见 anthropic.py `_usage_fields` 的同款说明）。
+    """
+    if not isinstance(usage, dict):
+        return None
+    raw = usage.get('prompt_cache_hit_tokens')
+    # bool 是 int 的子类，True 会被 int() 成 1 —— 那不是 token 数，当没有处理
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt: int, ct: int, latency: int, ua: str | None, error: str | None, stream: bool, *, credit: float | None = None, first_token: int | None = None, cache_hit: int | None = None) -> None:
     """记录调用日志与用量。
 
     credit 为上游返回的真实扣费（usage.credit）。None 表示上游没给，
@@ -300,6 +323,7 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
             stream=1 if stream else 0,
             credit=credit,
             realm=realm,
+            cache_hit_tokens=cache_hit,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning('写入请求日志失败（不影响请求）: %s', exc)
@@ -650,6 +674,7 @@ async def _chat(request: Request, upstream_path: str):
             _record(
                 key, ip, requested_model or '', mapped or '', resp.status_code, pt, ct,
                 latency, ua, error, False, credit=_usage_credit(usage),
+                cache_hit=_cache_hit_of(usage),
             )
             if data is not None:
                 return JSONResponse(data, status_code=resp.status_code)
@@ -706,7 +731,7 @@ async def _chat(request: Request, upstream_path: str):
             _record(
                 key, ip, requested_model or '', mapped or '', status_code, pt, ct,
                 latency, ua, error_text, True, credit=_usage_credit(usage),
-                first_token=first_token_ms,
+                first_token=first_token_ms, cache_hit=_cache_hit_of(usage),
             )
 
     return StreamingResponse(generator(), status_code=status_code, media_type=content_type)

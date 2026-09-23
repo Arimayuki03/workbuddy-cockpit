@@ -90,6 +90,13 @@ def list_logs(
             'error': r['error'],
             'stream': bool(r['stream']),
             'credit': r['credit'],
+            # 本次实际用了哪个上游账号（issue #69）。NULL = 尚未回填 ——
+            # 账号是采集上游日志后按时间对回来的，比请求本身晚几秒，
+            # 所以刚打完的请求这一列可能是空的（界面显示「—」，刷新即可）。
+            'account': r['account'],
+            # 输入侧命中缓存的 token 数。NULL 与 0 含义不同：
+            # NULL = 上游没给这个字段，0 = 这次确实没命中（见 db 的列说明）。
+            'cache_hit_tokens': r['cache_hit_tokens'],
         }
         for r in rows
     ]

@@ -118,6 +118,7 @@ async def chat(body: ChatIn, request: Request, user: dict = Depends(security.req
             int((time.time() - started) * 1000),
             request.headers.get('user-agent'), None, False,
             credit=gateway._usage_credit(usage),
+            cache_hit=gateway._cache_hit_of(usage),
         )
         return StreamingResponse(iter([raw]), media_type='application/json',
                                  status_code=resp.status_code)
@@ -158,6 +159,7 @@ async def chat(body: ChatIn, request: Request, user: dict = Depends(security.req
                 request.headers.get('user-agent'), error_text, True,
                 credit=gateway._usage_credit(usage),
                 first_token=first_token_ms,
+                cache_hit=gateway._cache_hit_of(usage),
             )
 
     return StreamingResponse(gen(), status_code=resp.status_code,
