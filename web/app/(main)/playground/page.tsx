@@ -81,8 +81,12 @@ export default function PlaygroundPage() {
     loadModels();
   }, [loadModels]);
 
-  // 切换版本 = 换了一套账号池与模型，旧对话留着会造成误解（模型不同、额度不同）
+  // 切换版本 = 换了一套账号池与模型，旧对话留着会造成误解（模型不同、额度不同）。
+  // 同时中止仍在进行的流式请求：realm 变化只触发本 effect（组件并不重挂），
+  // 不主动 abort 的话旧流会继续读、后台继续耗上游积分，且 setMsgs 会写到空数组
+  // 的 [-1] 下标产生幽灵属性。
   useEffect(() => {
+    abortRef.current?.abort();
     setMsgs([]);
     setSessionCredit(0);
   }, [realm]);

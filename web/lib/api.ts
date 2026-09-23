@@ -63,9 +63,22 @@ const LONG_TIMEOUT = {timeout: 600000};
  * 没收录的原样展示。
  */
 export function errText(e: unknown): string {
-  const ax = e as AxiosError<{detail?: string; error?: string; message?: string}>;
+  const ax = e as AxiosError<{
+    detail?: string;
+    message?: string;
+    error?: string | {message?: string; code?: string | number};
+  }>;
   const d = ax?.response?.data;
-  const raw = (typeof d === 'string' ? d : d?.error || d?.detail || d?.message) || ax?.message || '';
+  // OpenAI 风格错误体是 {error: {message, code}}——error 是对象而非字符串，
+  // 直接 truthy 取值会把对象透给 toast 渲染，炸掉整个 React 树。
+  const errField = d?.error;
+  const fromErrorObj =
+    typeof errField === 'string' ? errField : errField?.message;
+  const rawCandidate =
+    (typeof d === 'string' ? d : fromErrorObj || d?.detail || d?.message) ||
+    ax?.message ||
+    '';
+  const raw = typeof rawCandidate === 'string' ? rawCandidate : String(rawCandidate);
   return raw ? tp(raw) : tp('请求失败');
 }
 
@@ -116,6 +129,9 @@ export const accountApi = {
   /* ── 单号运维 ──────────────────────────────────────── */
   revive: (uid: string) =>
     post<OkResponse>(`/api/accounts/${encodeURIComponent(uid)}/revive`),
+  /** 强制清除冷却/熔断/连败降权/模型级限流（不碰禁用位） */
+  clearCooldown: (uid: string) =>
+    post<OkResponse>(`/api/accounts/${encodeURIComponent(uid)}/clear-cooldown`),
   disable: (uid: string) =>
     post<OkResponse>(`/api/accounts/${encodeURIComponent(uid)}/disable`),
   /** 单号签到：签到 + 余额查询解冻（"今天已签到"等业务错误不阻塞余额刷新） */

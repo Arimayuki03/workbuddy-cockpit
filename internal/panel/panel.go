@@ -231,6 +231,7 @@ func (p *Panel) routes() {
 	p.api("GET", "/api/login/poll", "/api/auth/poll", p.loginPoll)
 	p.api("GET", "/api/login/regions", "/api/auth/regions", p.loginRegions)
 	p.api("POST", "/api/accounts/{uid}/revive", "/api/accounts/{uid}/revive", p.accountRevive)
+	p.api("POST", "/api/accounts/{uid}/clear-cooldown", "/api/accounts/{uid}/clear-cooldown", p.accountClearCooldown)
 	p.api("POST", "/api/accounts/{uid}/disable", "/api/accounts/{uid}/disable", p.accountDisable)
 	p.api("POST", "/api/accounts/{uid}/enable", "/api/accounts/{uid}/enable", p.accountEnable)
 	p.api("POST", "/api/accounts/{uid}/checkin", "/api/accounts/{uid}/checkin", p.accountCheckin)
@@ -534,6 +535,22 @@ func (p *Panel) accountRevive(w http.ResponseWriter, r *http.Request) {
 	p.cfg.Pool.SetManualDisabled(uid, false, "")
 	log.Printf("panel: revive uid=%s（人工清除禁用/手动停用）", uid)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// accountClearCooldown 运维强制清除冷却与模型限流（吸收 workbuddy-manager 1.0.64
+// 的 force-clear）：冷却域 + 熔断 + 连败降权 + 6004 模型级冷却表全归零，
+// 不碰禁用/手动停用两位。账号冷却中的场景下，等自然到期没有意义时用。
+func (p *Panel) accountClearCooldown(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	found, cleared := p.cfg.Pool.ForceClearCooldown(uid)
+	if !found {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	if cleared {
+		log.Printf("panel: clear-cooldown uid=%s（人工强制清除冷却/限流）", uid)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cleared": cleared})
 }
 
 // accountDisable 人工停用（SetManualDisabled(true)：只摘除选号流量，排程照常，

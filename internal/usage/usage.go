@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -74,9 +75,11 @@ type Recorder struct {
 	dirty   bool
 	started time.Time
 
-	stopOnce sync.Once
-	stop     chan struct{}
-	done     chan struct{}
+	startOnce   sync.Once
+	startedFlag atomic.Bool
+	stopOnce    sync.Once
+	stop        chan struct{}
+	done        chan struct{}
 }
 
 // New 创建记录器。path 为空时禁用落盘（纯内存，测试用）。
@@ -98,30 +101,37 @@ func New(path string) *Recorder {
 
 // Start 启动后台防抖落盘与折叠。Stop 前一直运行。
 func (r *Recorder) Start() {
-	go func() {
-		defer close(r.done)
-		t := time.NewTicker(flushInterval)
-		defer t.Stop()
-		for {
-			select {
-			case <-r.stop:
-				r.flush(true)
-				return
-			case <-t.C:
-				r.mu.Lock()
-				n := len(r.buckets)
-				r.mu.Unlock()
-				if n > maxBuckets {
-					r.Rollup(time.Now())
+	r.startOnce.Do(func() {
+		r.startedFlag.Store(true)
+		go func() {
+			defer close(r.done)
+			t := time.NewTicker(flushInterval)
+			defer t.Stop()
+			for {
+				select {
+				case <-r.stop:
+					r.flush(true)
+					return
+				case <-t.C:
+					r.mu.Lock()
+					n := len(r.buckets)
+					r.mu.Unlock()
+					if n > maxBuckets {
+						r.Rollup(time.Now())
+					}
+					r.flush(false)
 				}
-				r.flush(false)
 			}
-		}
-	}()
+		}()
+	})
 }
 
-// Stop 停止后台循环并做最后一次落盘。
+// Stop 停止后台循环并做最后一次落盘。Start 未调用时直接返回（done 永不关闭，
+// 等待会死锁——防御「构造后未 Start 就 Stop」的初始化失败路径）。
 func (r *Recorder) Stop() {
+	if !r.startedFlag.Load() {
+		return
+	}
 	r.stopOnce.Do(func() { close(r.stop) })
 	<-r.done
 }
@@ -284,22 +294,33 @@ func (r *Recorder) flush(force bool) {
 	r.dirty = false
 	r.mu.Unlock()
 
+	// 任何一步失败都恢复 dirty：让这批增量在下一轮 flush 重试——否则一旦磁盘
+	// 抖动/ENOSPC 期间没有新请求进来，丢掉的用量统计会永久缺失，违背「重启不丢」承诺。
+	markDirty := func() {
+		r.mu.Lock()
+		r.dirty = true
+		r.mu.Unlock()
+	}
 	raw, err := json.Marshal(snap)
 	if err != nil {
 		log.Printf("[usage] 序列化失败: %v", err)
+		markDirty()
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o755); err != nil {
 		log.Printf("[usage] 建目录失败: %v", err)
+		markDirty()
 		return
 	}
 	tmp := r.path + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		log.Printf("[usage] 写临时文件失败: %v", err)
+		markDirty()
 		return
 	}
 	if err := os.Rename(tmp, r.path); err != nil {
 		log.Printf("[usage] 原子替换失败: %v", err)
+		markDirty()
 	}
 }
 

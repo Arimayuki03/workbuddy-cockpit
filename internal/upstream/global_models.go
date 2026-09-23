@@ -61,6 +61,18 @@ const (
 	globalModelsFailCooldown = 5 * time.Minute
 )
 
+// v3 探测 UA（吸收 panel 分支 9dce68a 实测，2026-09-22）：
+// /v3/config 对不同 User-Agent 下发**不同模型集合**——
+//   - IDE UA（CodeBuddyIDE/4.12.0 CodeBuddy/4.12.0）→ 模型少但单条字段更全
+//     （响应体积更大；独有 o4-mini / enhance-1.0 / auto-chat，无 deepseek 系列）
+//   - CLI UA（CLI/<ver> CodeBuddy/<ver> 三段式，即本网关默认出站 UA）→ 模型多
+//     （实测含 deepseek-v4.1-flash / gpt-6-astra / kimi-k2.8-preview）
+//
+// 两路各有独有模型，故 global 侧 v3 主路并发两 UA 取并集（IDE 路字段权威、
+// CLI 路补缺失 id）；单路失败降级另一路。CN 侧 FetchModels 的 v3 路保持
+// CommonHeaders 默认 UA 单路不变（零回归）。
+const v3ProbeIDEUA = "CodeBuddyIDE/4.12.0 CodeBuddy/4.12.0"
+
 // globalModelsProbePaths global 企业模型目录端点候选序列（按 realm 切 base，路径"家族"）：
 // /v2 家族优先（PR #20 实测 /v2/enterprises/personal/models 200 含完整模型表），
 // /console 作 fallback（同域旧路径，或 500）。参考 PLAN v1 §2.2 分歧③ 与
@@ -184,12 +196,19 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 		defaults map[string]string
 		err      error
 	}
-	v3Ch := make(chan probeResult, 1)
+	// probeV3 单次 /v3/config 探测（UA 参数化）。该端点对不同 UA 下发**不同模型集合**
+	// （见 v3ProbeIDEUA 注释），故 IDE/CLI 两路并发后并集合并。
+	probeV3 := func(ua string) chan probeResult {
+		ch := make(chan probeResult, 1)
+		go func() {
+			names, infos, efforts, defaults, perr := c.globalModelsOnceUA(a, v3ConfigPath, ua)
+			ch <- probeResult{names, infos, efforts, defaults, perr}
+		}()
+		return ch
+	}
+	v3IDECh := probeV3(v3ProbeIDEUA)
+	v3CLICh := probeV3("") // 空 = CommonHeaders 默认 UA（本网关三段式 CLI 形态）
 	enterpriseCh := make(chan probeResult, 1)
-	go func() {
-		names, infos, efforts, defaults, perr := c.globalModelsOnce(a, v3ConfigPath)
-		v3Ch <- probeResult{names, infos, efforts, defaults, perr}
-	}()
 	go func() {
 		// 企业端点家族：/v2 首选 → /console 兜底（既有探活序，零回归）。
 		var lastErr error
@@ -204,8 +223,28 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 		}
 		enterpriseCh <- probeResult{err: lastErr}
 	}()
-	v3 := <-v3Ch
+	v3IDE := <-v3IDECh
+	v3CLI := <-v3CLICh
 	enterprise := <-enterpriseCh
+	// v3 两 UA 自合并：IDE 路字段权威（响应体积更大、单条字段更全），CLI 路只补
+	// 缺失的模型 id（deepseek 系列等）。单路成功即用该路；两路全失败才带 err
+	// 进入下游降级判断。
+	var v3 probeResult
+	switch {
+	case v3IDE.err != nil && v3CLI.err != nil:
+		v3 = probeResult{err: v3IDE.err}
+	case v3IDE.err != nil:
+		log.Printf("WARN: [upstream] global models: v3/config IDE-UA probe failed (default-UA only): %v", v3IDE.err)
+		v3 = v3CLI
+	case v3CLI.err != nil:
+		log.Printf("WARN: [upstream] global models: v3/config default-UA probe failed (IDE-UA only): %v", v3CLI.err)
+		v3 = v3IDE
+	default:
+		vn, vi := mergeGlobalCatalog(v3IDE.names, v3IDE.infos, v3CLI.names, v3CLI.infos)
+		efforts := mergeEffortBuckets(v3IDE.efforts, v3CLI.efforts)
+		defaults := mergeEffortDefaults(v3IDE.defaults, v3CLI.defaults)
+		v3 = probeResult{names: vn, infos: vi, efforts: efforts, defaults: defaults}
+	}
 
 	if v3.err != nil && enterprise.err != nil {
 		// 两路全失败 → 负缓存语义（等价原家族端点全非 2xx）。
@@ -305,12 +344,21 @@ func mergeEffortDefaults(primary, secondary map[string]string) map[string]string
 
 // globalModelsOnce 单端点探测。2xx + 解析出非空名单 → (names, infos, efforts, defaults, nil)；否则 (nil,...,err)。
 func (c *Client) globalModelsOnce(a *auth.Auth, path string) ([]string, []ModelInfo, map[string][]string, map[string]string, error) {
+	return c.globalModelsOnceUA(a, path, "")
+}
+
+// globalModelsOnceUA 同 globalModelsOnce，ua 非空时覆盖 User-Agent（/v3/config 对
+// UA 敏感且不同 UA 下发不同模型集合，见 v3ProbeIDEUA；空串走 CommonHeaders 默认）。
+func (c *Client) globalModelsOnceUA(a *auth.Auth, path, ua string) ([]string, []ModelInfo, map[string][]string, map[string]string, error) {
 	url := c.chatBase(a) + path // 按 realm 切 base：global 账号 → global base
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
 	c.CommonHeaders(req, a) // 共享请求头（Origin/Referer/UA），与 FetchModels 同款
+	if ua != "" {
+		req.Header.Set("User-Agent", ua)
+	}
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
@@ -369,8 +417,24 @@ func parseGlobalModelNames(raw []byte) (names []string, infos []ModelInfo, effor
 	}
 	// 对象形态：data.models[].id/.name（id 优先），disabled 剔除，全字段落 ModelInfo。
 	// dynModelEntry 与 CN FetchModels 共用（两域模型对象同构），零解析口径漂移。
+	// ModelTrialBanner：上游把「N 天免费试用」的模型只放在
+	// data.productFeaturesConfig.ModelTrialBanner.banners[].modelId，不在 data.models
+	// 里（实测 global 侧 hy4-preview-f 即如此：modelId=hy4-preview-f、
+	// targetModelId=hy4-preview、trialDays=14），纯 data.models 解析会漏——但该模型
+	// 实际可调用。元数据口径：能力字段从 targetModelId 的既有条目继承（试用版与转正
+	// 目标是同族模型，能力一致）；Credits/Tags 显式清空（它们描述"转正后"的计费与
+	// 营销信息，用在免费试用版上会误导下游展示）；firstUseTimeKey/trialDays 属账号级
+	// 试用状态，不透出。CN 侧 data.models 已含同 id 时去重跳过，行为不变。
 	var obj struct {
 		Models []dynModelEntry `json:"models"`
+		ProductFeaturesConfig struct {
+			ModelTrialBanner struct {
+				Banners []struct {
+					ModelID       string `json:"modelId"`
+					TargetModelID string `json:"targetModelId"`
+				} `json:"banners"`
+			} `json:"ModelTrialBanner"`
+		} `json:"productFeaturesConfig"`
 	}
 	if err := json.Unmarshal(env.Data, &obj); err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("global models parse: %w", err)
@@ -407,6 +471,33 @@ func parseGlobalModelNames(raw []byte) (names []string, infos []ModelInfo, effor
 			}
 			defaults[id] = d
 		}
+	}
+	// 补入试用横幅模型（ModelTrialBanner）：能力继承 targetModelId 条目、
+	// Credits/Tags 清空（口径见上方结构体注释）。
+	byID := make(map[string]ModelInfo, len(infos))
+	for _, mi := range infos {
+		byID[mi.ID] = mi
+	}
+	for _, b := range obj.ProductFeaturesConfig.ModelTrialBanner.Banners {
+		id := strings.TrimSpace(b.ModelID)
+		if id == "" {
+			continue
+		}
+		if _, exists := byID[id]; exists {
+			continue
+		}
+		mi := ModelInfo{ID: id}
+		if tgt := strings.TrimSpace(b.TargetModelID); tgt != "" {
+			if base, ok := byID[tgt]; ok {
+				mi = base
+				mi.ID = id
+			}
+		}
+		mi.Credits = ""
+		mi.Tags = nil
+		byID[id] = mi
+		out = append(out, id)
+		infos = append(infos, mi)
 	}
 	if len(out) == 0 {
 		return nil, nil, nil, nil, fmt.Errorf("global models empty list")

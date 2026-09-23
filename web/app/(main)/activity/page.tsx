@@ -101,9 +101,11 @@ export default function ActivityPage() {
     a.tasks.every((x) => x.status === 'claimed' || (x.target_count > 0 && x.progress >= x.target_count)),
   ).length;
 
+  // 心跳是后台自愈型刷新：失败时静默等下一轮，不要 60s 一轮弹错误雨
+  // （stats 页与 logs 页同口径）。用户手动触发的「刷新」在按钮路径单独报错。
   useHeartbeat(
     () => {
-      statusCache.refresh().catch((e) => notify.err(errText(e)));
+      statusCache.refresh().catch(() => {/* 下一轮自愈 */});
     },
     60000,
   );
