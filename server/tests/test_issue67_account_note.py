@@ -169,6 +169,60 @@ class NoteEndpointTest(_DbCase):
         self.assertEqual(db.account_notes(), {UID: '张叔叔（已停用）'})
 
 
+class NoteRouteContractTest(unittest.TestCase):
+    """路由自身的契约：**只有管理员能改**，且 body 必须走 requestBody。
+
+    为什么单测不够：上面的用例直接调端点函数，绕过了 FastAPI 的依赖注入与参数绑定
+    —— 把 `require_admin` 漏掉、或者把 `Body(...)` 写成普通参数，那些用例**照样绿**。
+    审查时正是这么查出来的：新加的 `PUT` 不在既有的「写接口 query 参数」闸门覆盖
+    范围内（那个闸门当时只查 post），所以这里单独钉住。
+    """
+
+    def test_requires_admin(self) -> None:
+        from server.routers import accounts as A
+        route = next((r for r in A.router.routes if getattr(r, 'path', '') == '/api/accounts/{filename}/note'), None)
+        self.assertIsNotNone(route, '没找到备注端点')
+        names = set()
+        stack = list(route.dependant.dependencies)
+        while stack:
+            d = stack.pop()
+            names.add(getattr(d.call, '__name__', str(d.call)))
+            stack.extend(d.dependencies)
+        self.assertIn('require_admin', names,
+                      '备注端点没有要求管理员 —— 任何登录用户都能改别人的备注')
+        self.assertIn('current_user', names, '没要求登录')
+
+    def test_body_is_declared_as_request_body(self) -> None:
+        """`note` 必须从 JSON body 取：写成普通参数会被当成 query，静默失效。"""
+        import os
+        import tempfile
+        os.environ.setdefault('WB_DATA_DIR', tempfile.mkdtemp())
+        from server.main import app
+        op = app.openapi()['paths']['/api/accounts/{filename}/note']['put']
+        self.assertIn('requestBody', op, 'PUT 没声明 requestBody —— 前端发的 note 会读不到')
+
+
+class NoteNormalisationTest(_DbCase):
+    """备注文本的归一化：换行/连续空白收起，避免在单行展示里看起来像坏数据。"""
+
+    def test_whitespace_collapsed(self) -> None:
+        fname = _write_auth(config.AUTH_DIR, UID, '小号')
+        raw = '张叔叔' + chr(10) + chr(10) + '高中同学   备用'
+        out = asyncio.run(A.account_set_note(fname, {'note': raw}, user={'role': 'admin'}))
+        self.assertEqual(out['note'], '张叔叔 高中同学 备用',
+                         '换行与连续空格应被收起：备注是单行展示的')
+
+    def test_newline_only_note_is_treated_as_empty(self) -> None:
+        fname = _write_auth(config.AUTH_DIR, UID, '小号')
+        asyncio.run(A.account_set_note(fname, {'note': '写过的'}, user={'role': 'admin'}))
+        blank = chr(10) + '  ' + chr(10)
+        out = asyncio.run(A.account_set_note(fname, {'note': blank}, user={'role': 'admin'}))
+        self.assertEqual(out['note'], '')
+        self.assertEqual(db.account_notes(), {}, '只有空白的备注应该等于清除')
+        self.assertEqual(out['note'], '')
+        self.assertEqual(db.account_notes(), {}, '只有空白的备注应该等于清除')
+
+
 class NoteInListTest(_DbCase):
     """备注随账号列表一次带出（只读账号也能看到）。"""
 
