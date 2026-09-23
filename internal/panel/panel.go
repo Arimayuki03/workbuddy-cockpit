@@ -236,6 +236,9 @@ func (p *Panel) routes() {
 	p.api("POST", "/api/accounts/{uid}/checkin", "/api/accounts/{uid}/checkin", p.accountCheckin)
 	p.api("POST", "/api/accounts/{uid}/balance", "/api/accounts/{uid}/balance", p.accountBalance)
 	p.api("POST", "/api/accounts/{uid}/remove", "/api/accounts/{uid}/remove", p.accountRemove)
+	// 凭据导入/导出（transfer.go）：跨部署共享账号。导出含 token，走同一 withAuth 闸。
+	p.api("GET", "/api/accounts/export", "/api/accounts/export", p.accountsExport)
+	p.api("POST", "/api/accounts/import", "/api/accounts/import", p.accountsImport)
 	p.api("GET", "/api/accounts/{uid}/tasks", "/api/accounts/{uid}/tasks", p.accountTasks)
 	p.api("POST", "/api/accounts/{uid}/tasks/accept", "/api/accounts/{uid}/tasks/accept", p.accountTaskAccept)
 	p.api("POST", "/api/accounts/{uid}/tasks/accept_all", "/api/accounts/{uid}/tasks/accept_all", p.taskAcceptAll)

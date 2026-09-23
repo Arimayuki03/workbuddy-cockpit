@@ -320,6 +320,32 @@ func (a *Auth) SaveAtomic() error {
 	return os.Rename(tmp, a.FilePath)
 }
 
+// ExportDoc 返回与 SaveAtomic 落盘同形的嵌套凭据文档（供账号导出）。
+// 全程持 a.mu：与 RefreshToken 锁内写回互斥，导出的是一份完整的 token 快照，
+// 不会夹带半更新的 accessToken/refreshToken。返回值为全新结构，调用方可自由改写。
+func (a *Auth) ExportDoc() map[string]any {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	doc := map[string]any{
+		"auth": map[string]any{
+			"accessToken":  a.AccessToken,
+			"refreshToken": a.RefreshToken,
+			"expiresAt":    a.ExpiresAt,
+			"domain":       a.Domain,
+			"realm":        a.realm,
+		},
+		"account": map[string]any{
+			"uid":          a.UID,
+			"enterpriseId": a.EnterpriseID,
+			"nickname":     a.Nickname,
+		},
+	}
+	if a.DeviceToken != "" {
+		doc["device_token"] = a.DeviceToken
+	}
+	return doc
+}
+
 // AuthFileGlob auth 文件的统一 glob 模式（宽侧：workbuddy*.json）。
 // 网关 LoadDir 与 cmd 运维工具（signin/credit/trial）共用此单一来源——
 // 此前 cmd 侧私用 workbuddy-*.json 窄模式，不带连字符的文件（如

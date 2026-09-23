@@ -356,7 +356,21 @@
     "refreshBalance": "全量重新整理餘額",
     "refreshBalanceTitle": "並行查詢所有帳號的真實餘額並寫回池內（同步等待）",
     "reviveTitle": "復活帳號（清除禁用 / 冷卻 / 熔斷）",
-    "revived": "帳號已復活"
+    "revived": "帳號已復活",
+    "export": "匯出憑證",
+    "exportTitle": "匯出全部帳號憑證（含 token，請妥善保管）",
+    "exportDone": "已匯出帳號憑證檔案",
+    "import": "匯入憑證",
+    "importTitle": "匯入帳號憑證",
+    "importDesc": "選擇先前匯出的 JSON 檔案（也相容單一 auth 憑證檔）。匯入後立即落盤並加入帳號池，同 UID 帳號會被覆蓋更新。",
+    "importPickFile": "點擊選擇 JSON 檔案",
+    "importPickHint": "支援匯出檔、單一憑證檔或憑證陣列",
+    "importAction": "開始匯入",
+    "importDone": "成功匯入 {n} 個帳號",
+    "importNone": "沒有帳號被匯入（見下方原因）",
+    "importSummary": "匯入完成：成功 {n} 個，略過 {s} 個",
+    "importTooLarge": "檔案過大（上限 20MB）",
+    "importReadError": "讀取檔案失敗，請重試"
   },
   "keys": {
     "title": "API 金鑰",
