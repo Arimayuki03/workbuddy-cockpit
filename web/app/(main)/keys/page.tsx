@@ -326,9 +326,9 @@ export default function KeysPage() {
                       <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">{t('keys.badgeOk')}</Badge>
                     )}
                   </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    {k.expires_at ? fmtDateTime(k.expires_at) : t('keys.neverExpires')}
-                  </TableCell>
+                  {/* 版本必须排在有效期**前面**，与表头一致（issue #68：这两列的
+                      单元格与表头顺序反了，界面上「版本」列显示的是有效期、「有效期」
+                      列显示的是版本 —— 用户看到的就是这个错位）。 */}
                   <TableCell>
                     {k.realm === 'global' ? (
                       <Badge variant="secondary" className="rounded-full text-[10px]">{t('realm.global')}</Badge>
@@ -344,6 +344,9 @@ export default function KeysPage() {
                         {t('keys.realmUnset')}
                       </span>
                     )}
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {k.expires_at ? fmtDateTime(k.expires_at) : t('keys.neverExpires')}
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     {k.max_ips ? t('keys.ipLimit', {n: k.max_ips}) : t('keys.ipUnlimited')} /{' '}
