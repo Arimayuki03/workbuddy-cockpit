@@ -690,6 +690,8 @@
     "runLogReportNotNeeded": "[task_runner] {uid} {code}: report 无需上报（{cur}/{target}）",
     "runLogBuddy5Fallback": "[task_runner] {uid} {code}: report {i}/{need} {status} code={sc} buddy5 失败 -> 降级单发 {status2} code={sc2}",
     "runLogNoObjectId": "[task_runner] {uid} {code}: report 无可用对象 id，skip",
+    "runLogNoObjectIdSkipLight": "[task_runner] {uid} {code}: {kind} 无可用对象 id，WARN 跳过点亮",
+    "runLogIdsFewerThanNeeded": "[task_runner] {uid} {code}: 可用对象 id {have} < 需 {need}，本轮按可用数上报",
     "runLogBelowTarget": "[task_runner] {uid} {code}: report 未达 target（{cur}/{target}），WARN 待下次",
     "runLogListTasksFailed": "ERR: [task_runner] {uid} query list_tasks 失败: {err}",
     "runLogBulkWarning": "WARN: 全量批量 + --yes 未限定 --only，注意 54 号批量——请确认 Hermes 决策后再跑",

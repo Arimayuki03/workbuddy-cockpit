@@ -97,6 +97,16 @@ const RULES: LineRule[] = [
   [runner('report 未达 target（(\\d+)/(\\d+)），WARN 待下次'), (m) =>
     tStatic('tasks.runLogBelowTarget', {uid: m[1], code: m[2], cur: m[3], target: m[4]})],
 
+  // ── 上游 2026-09-23（ee3c694 / 9a26ae7）「对象 id 池不够」的两行 ────
+  // 成长任务续作（Sequential_Tasks_2/3）引入了「专家市场」这类**动态对象池**：
+  // 池子为空、或数量不够本轮目标时会各打一行。`kind` 是任务类型标识（数据，
+  // 原样保留，与上面 `runLogLightUpKindDryRun` 的处理一致）。
+  [runner('(\\S+) 无可用对象 id，WARN 跳过点亮'), (m) =>
+    tStatic('tasks.runLogNoObjectIdSkipLight', {uid: m[1], code: m[2], kind: m[3]})],
+  [runner('可用对象 id (\\d+) < 需 (\\d+)，本轮按可用数上报'), (m) =>
+    tStatic('tasks.runLogIdsFewerThanNeeded', {
+      uid: m[1], code: m[2], have: m[3], need: m[4]})],
+
   // ── 账号级：任务列表拉取失败 / 全量批量警告 / 国际版跳过 ──────────
   [/^ERR: \[task_runner\] (\S+) query list_tasks 失败: (.*)$/, (m) =>
     tStatic('tasks.runLogListTasksFailed', {uid: m[1], err: m[2]})],
