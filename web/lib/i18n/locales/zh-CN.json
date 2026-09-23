@@ -207,6 +207,7 @@
     "hours72": "近 72 小时",
     "days7": "近 7 天",
     "days30": "近 30 天",
+    "sinceStart": "启动以来",
     "saveNow": "立即落盘",
     "savedToDisk": "用量数据已落盘",
     "totalRequests": "累计请求",

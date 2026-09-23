@@ -197,8 +197,8 @@ export const modelApi = {
 
 /* ── 用量统计 ───────────────────────────────────────── */
 export const statsApi = {
-  /** 用量分桶快照；hours 控制小时粒度时序窗口（默认 72，上限 1440=60 天） */
-  usage: (hours = 72) => get<UsageSnapshot>('/api/usage', {hours}),
+  /** 用量分桶快照；hours 控制时间窗（默认 72，上限 1440=60 天；'all'=自记录以来全量） */
+  usage: (hours: number | 'all' = 72) => get<UsageSnapshot>('/api/usage', {hours}),
   /** 立即把内存中的用量桶落盘（正常由后台 30s 防抖负责） */
   saveUsage: () => post<OkOnlyResponse>('/api/usage/save'),
   /** 原生 /v1/stats：按模型聚合的请求统计（主仓库 metrics.go 形状） */

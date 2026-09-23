@@ -102,12 +102,16 @@ export function fmtNumber(n: number | null | undefined): string {
   return n.toLocaleString(intlLocale());
 }
 
-/** 大数紧凑显示：1.2k / 3.4M */
+/** 大数紧凑显示：1.2k / 3.4M / 2.4G */
 export function fmtCompact(n: number | null | undefined): string {
   if (!n) return '0';
   if (n < 1000) return String(n);
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
-  return `${(n / 1_000_000).toFixed(1)}M`;
+  // >=10M 去小数（「2000M」比「2000.0M」短一个字符）：Y 轴刻度槽位有限，
+  // 长标签溢出会被图表容器裁剪（趋势图 2000.0M 被遮挡的成因）。
+  if (n < 10_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n < 1_000_000_000) return `${Math.round(n / 1_000_000)}M`;
+  return `${(n / 1_000_000_000).toFixed(1)}G`;
 }
 
 export function fmtLatency(ms: number): string {

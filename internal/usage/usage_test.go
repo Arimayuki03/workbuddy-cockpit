@@ -200,6 +200,40 @@ func TestSnapshotWindowFiltersBreakdowns(t *testing.T) {
 	if !found {
 		t.Fatal("60 天窗口 by_account 应含日桶 u3")
 	}
+
+	// 「启动以来」全量档（hours<=0）：排行恢复全量口径，含 40 天前日桶与 48h 前小时桶；
+	// series 保留近 30 天小时粒度（48h 点仍是 hour），40 天前日桶仍是 day。
+	sAll := r.Snapshot(0, nil)
+	var u3Tokens, u2Tokens int64
+	for _, row := range sAll.ByAccount {
+		switch row.Key {
+		case "u3":
+			u3Tokens = row.PromptTokens
+		case "u2":
+			u2Tokens = row.PromptTokens
+		}
+	}
+	if u3Tokens != 90 || u2Tokens != 50 {
+		t.Fatalf("全量档 by_account 缺行: u3=%d u2=%d, want 90/50", u3Tokens, u2Tokens)
+	}
+	if sAll.Totals.PromptTokens != 170 {
+		t.Fatalf("全量档 totals = %d, want 170", sAll.Totals.PromptTokens)
+	}
+	hourPts, dayPts := 0, 0
+	for _, p := range sAll.Series {
+		switch p.Scope {
+		case "hour":
+			hourPts++
+		case "day":
+			dayPts++
+		}
+	}
+	if hourPts < 1 {
+		t.Fatalf("全量档 series 应保留近 30 天小时点, got %+v", sAll.Series)
+	}
+	if dayPts < 1 {
+		t.Fatalf("全量档 series 应含 30 天前的日点(40 天前日桶), got %+v", sAll.Series)
+	}
 }
 
 // TestSnapshotEmptySeriesNotNull 零桶契约：刚启动无流量时 Snapshot.Series 必须是
