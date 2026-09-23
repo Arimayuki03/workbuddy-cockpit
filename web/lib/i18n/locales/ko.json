@@ -183,7 +183,8 @@
     "creditsExpiry": "가장 가까운 만료: {amount} 크레딧 ({time})",
     "failedRequests": "실패 요청",
     "todayFailed": "오늘 {n}건 실패",
-    "weekFailed": "최근 7일 {n}건 실패 · {realm}"
+    "weekFailed": "최근 7일 {n}건 실패 · {realm}",
+    "creditsExpiryDaily": "가장 가까운 만료일({time})에 {amount} 포인트 만료"
   },
   "stats": {
     "title": "사용량",
@@ -985,7 +986,11 @@
     "errDuration": "형식: 30s / 10m / 2h / 1d",
     "errNoNewline": "줄바꿈이나 제어 문자는 사용할 수 없습니다",
     "errHourFormat": "시각 형식이 올바르지 않습니다",
-    "errEnum": "허용 범위를 벗어난 값입니다"
+    "errEnum": "허용 범위를 벗어난 값입니다",
+    "displayTitle": "화면",
+    "displayDesc": "이 그룹은 **이 브라우저**의 표시 방식만 바꿉니다. 동작은 그대로이며 변경 즉시 적용됩니다.",
+    "expiryDailyLabel": "만료 포인트 일 단위 집계",
+    "expiryDailyDesc": "켜면 대시보드의 만료 포인트를 **날짜 단위**로 묶어 같은 날 만료되는 금액을 합산합니다. 마우스를 올리면 각 항목의 금액과 날짜는 그대로 볼 수 있습니다."
   },
   "phrases": {
     "请求失败": "요청 실패",

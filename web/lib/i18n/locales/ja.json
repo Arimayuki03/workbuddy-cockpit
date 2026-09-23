@@ -183,7 +183,8 @@
     "creditsExpiry": "直近の失効: {amount} クレジット（{time}）",
     "failedRequests": "失敗リクエスト",
     "todayFailed": "本日 {n} 件失敗",
-    "weekFailed": "直近 7 日 {n} 件失敗 · {realm}"
+    "weekFailed": "直近 7 日 {n} 件失敗 · {realm}",
+    "creditsExpiryDaily": "直近の期限日（{time}）に {amount} ポイントが失効"
   },
   "stats": {
     "title": "使用量",
@@ -985,7 +986,11 @@
     "errDuration": "形式: 30s / 10m / 2h / 1d",
     "errNoNewline": "改行や制御文字は使用できません",
     "errHourFormat": "時刻の形式が正しくありません",
-    "errEnum": "許可された範囲外の値です"
+    "errEnum": "許可された範囲外の値です",
+    "displayTitle": "表示",
+    "displayDesc": "このグループは**このブラウザー**の表示だけを変えます（動作は変わりません）。変更はすぐ反映されます。",
+    "expiryDailyLabel": "期限切れポイントを日単位で集計",
+    "expiryDailyDesc": "オンにすると、ダッシュボードの期限切れポイントを**日単位**でまとめます（同じ日に切れる分は合算）。マウスを載せれば各エントリの金額と日時はこれまでどおり確認できます。"
   },
   "phrases": {
     "请求失败": "リクエストに失敗しました",
