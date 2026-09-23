@@ -998,9 +998,13 @@ async def account_set_note(
     if not uid:
         raise HTTPException(status_code=400, detail='该账号文件缺少 uid，无法保存备注')
 
-    # 截断而不是拒绝：备注是给人看的短文本，用户粘多了不该报错丢掉整句。
+    # 先把**所有空白收起成单个空格**（审查补）：备注在列表里是单行展示 + 悬停看
+    # 全文，粘进来的多行文本（或中间一串空格）会让它看起来像坏数据；顺带把
+    # 「只有换行/空格」的输入归成空串 = 清除。
+    #
+    # 截断而不是拒绝：备注是给人看的短文本，粘多了不该报错丢掉整句。
     # 上限取 100 字符（界面上也是这个 maxLength），够写清是谁/做什么用。
-    note = str(body.get('note') or '').strip()[:100]
+    note = ' '.join(str(body.get('note') or '').split())[:100]
     if note:
         db.set_account_note(uid, note)
     else:
