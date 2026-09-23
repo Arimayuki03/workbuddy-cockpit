@@ -314,6 +314,24 @@ function outCell(m, pr) {
   return '<td class="num" title="' + esc(tip) + '"><span style="color:var(--ink-3)">?</span><div class="note">未测出' + stale + '</div></td>';
 }
 
+/* rateCell 倍率列：牌价 vs 生效价。上游 credits 是牌价（转正后基准倍率），
+   modelPromotions 给当前生效折扣（限时免费 factor=0 / 夜间五折 0.5 等）——
+   WorkBuddy 客户端显示的正是生效价。有折扣：生效价大字 + 标签 + 划线牌价，
+   悬停带时段说明；无 factor 只有标签（错峰类）：牌价 + 标签。 */
+function rateCell(m) {
+  const tip = m.promo_note ? ' title="' + esc(m.promo_note) + '"' : '';
+  if (m.promo_factor != null && m.promo_credits) {
+    const base = m.credits ? ' <s style="color:var(--ink-3);font-size:11.5px">' + esc(m.credits) + '</s>' : '';
+    const label = m.promo_label ? ' <span class="tag ok">' + esc(m.promo_label) + '</span>' : '';
+    return '<span' + tip + ' style="cursor:help"><b>' + esc(m.promo_credits) + '</b>' + label + base + '</span>';
+  }
+  if (m.promo_label) {
+    return '<span' + tip + ' style="cursor:help">' + (m.credits ? esc(m.credits) : '—') +
+      ' <span class="tag warn">' + esc(m.promo_label) + '</span></span>';
+  }
+  return m.credits ? esc(m.credits) : '—';
+}
+
 async function loadModels() {
   const tb = $('mdBody');
   tb.innerHTML = '<tr><td colspan="7"><div class="empty">正在向上游查询…</div></td></tr>';
@@ -339,7 +357,7 @@ async function loadModels() {
       const capHtml = caps.length ? '<div class="id" style="margin-top:2px">' + caps.join(' ') + '</div>' : '';
       const tip = m.description ? ' title="' + esc(m.description) + '"' : '';
       return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div>' + capHtml + '</td>' +
-        '<td class="num">' + (m.credits ? esc(m.credits) : '—') + '</td>' +
+        '<td class="num">' + rateCell(m) + '</td>' +
         '<td>' + (m.default_effort ? '<span class="tag ok">' + esc(m.default_effort) + '</span>' : '<span style="color:var(--ink-3)">—</span>') + '</td>' +
         '<td class="efs" style="white-space:normal">' + effs + '</td>' +
         '<td class="num">' + (m.context_length ? Math.round(m.context_length / 1000) + 'K' : '—') + '</td>' +
