@@ -35,6 +35,20 @@
   注意：**老版本的上游不返回这三个字段**，这时标记不显示（详情里写「未采集」）——
   这跟「没有命中」是两回事，不会用 0 冒充数据。
 
+- **镜像构建可以在国内网络下跑完了**：镜像里有两步固定从国外取文件——装 docker CLI
+  要从 `download.docker.com` 下静态包，装 compose 插件要从 GitHub Releases 下
+  （容器内「重载上游 / 读上游日志 / 一键更新」依赖这两个）。国内直连会长时间卡在
+  这两步甚至失败。现在构建时可以换成国内镜像与加速前缀：
+
+  ```bash
+  docker compose build \
+    --build-arg DOCKER_CLI_BASE=https://mirrors.aliyun.com/docker-ce \
+    --build-arg COMPOSE_URL_PREFIX=https://ghfast.top/
+  ```
+
+  也可以直接填进 `docker-compose.yml` 的 `build.args`。不填即原来的官方源，
+  行为与改动前完全一致。
+
 ---
 
 ## [1.0.66] - 2026-09-23
