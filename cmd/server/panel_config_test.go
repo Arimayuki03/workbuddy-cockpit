@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"workbuddy2api/internal/livecfg"
@@ -80,14 +81,20 @@ func TestPanelSaveConfigMergePersist(t *testing.T) {
 		t.Errorf("live SoftCooldown = %v, want 300s", live.Load().SoftCooldown)
 	}
 
-	// restartRequired 含 listen / auth_dir / schedule hours 等装配期字段。
+	// restartRequired 含 listen / auth_dir / global.enabled 等装配期字段；
+	// schedule.*_hours 自 SetHours 热改后不再是重启项。
 	found := map[string]bool{}
 	for _, f := range restart {
 		found[f] = true
 	}
-	for _, want := range []string{"listen", "schedule.checkin_hours", "global.enabled"} {
+	for _, want := range []string{"listen", "global.enabled"} {
 		if !found[want] {
 			t.Errorf("restartRequired missing %q; got %v", want, restart)
+		}
+	}
+	for _, gone := range []string{"schedule.checkin_hours", "schedule.queue_hours"} {
+		if found[gone] {
+			t.Errorf("restartRequired must no longer contain %q (hours hot-reload); got %v", gone, restart)
 		}
 	}
 
@@ -100,6 +107,52 @@ func TestPanelSaveConfigMergePersist(t *testing.T) {
 	_ = json.Unmarshal(raw2, &got2)
 	if got2["api_key"] != "k2" {
 		t.Errorf("failed save must not touch disk; api_key = %v", got2["api_key"])
+	}
+}
+
+// TestPanelSaveConfigHoursHotApply 验证面板提交 schedule.checkin_hours 后：
+// 落盘保留数组形态 + scheduler 小时表热生效（SnapshotAll 立即回新值，无需重启）。
+// 回归：SetHours 引入前排程小时数组只在启动期装配，面板改了也不生效。
+func TestPanelSaveConfigHoursHotApply(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(fp, []byte(`{"api_key":"k1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	live := livecfg.New(livecfg.Snapshot{APIKey: "k1"})
+	p := pool.New("")
+	up := upstream.New()
+	sch := scheduler.New(scheduler.Config{Pool: p, Upstream: up})
+
+	if _, err := saveConfig([]byte(`{"schedule":{"checkin_hours":[7,12,23]}}`), fp, live, p, up, sch); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+
+	var got map[string]any
+	raw, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("config not valid json: %v", err)
+	}
+	schedSec, _ := got["schedule"].(map[string]any)
+	hours, _ := schedSec["checkin_hours"].([]any)
+	if len(hours) != 3 || hours[0] != float64(7) || hours[2] != float64(23) {
+		t.Errorf("schedule.checkin_hours = %v, want [7,12,23]", schedSec["checkin_hours"])
+	}
+
+	// 热生效：调度器快照回新小时表（找不到 7/12/23 即未生效）。
+	for _, ts := range sch.SnapshotAll() {
+		if ts.Kind != "checkin" {
+			continue
+		}
+		if len(ts.Hours) != 3 || ts.Hours[0] != 7 || ts.Hours[2] != 23 {
+			t.Errorf("scheduler snapshot checkin hours = %v, want [7,12,23] (hot-applied)", ts.Hours)
+		}
+		if ts.Enabled && !strings.HasPrefix(ts.NextFire, "") && ts.NextFire == "" {
+			t.Errorf("enabled task must carry next_fire")
+		}
 	}
 }
 
