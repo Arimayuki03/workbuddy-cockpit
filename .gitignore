@@ -94,3 +94,6 @@ dev/.shots-upstream-stats
 # 密钥列表列对齐验收（verify_keys_layout_ui.py）的临时数据与截图
 dev/.keys-layout
 dev/.shots-keys-layout
+# 账号备注验收（verify_account_note_ui.py）的临时数据与截图
+dev/.account-note
+dev/.shots-account-note

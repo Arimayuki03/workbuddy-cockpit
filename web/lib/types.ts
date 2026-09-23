@@ -33,6 +33,11 @@ export interface Account {
    * 账号级冷却时间不足以表达，故逐条列出。
    * 字段名照上游 /status 的 JSON：model / until / reset_at / reason。
    */
+  /**
+   * 本端给这个账号写的备注（issue #67）。按 uid 存在本端库里，不在上游账号文件里，
+   * 所以临时停用（改文件名）不会丢。没有备注时是空串（不是缺字段）。
+   */
+  note?: string;
   rate_limited_models?: {
     model: string;
     /** 该模型的冷却截止（已被 soft_rate_max 截断） */

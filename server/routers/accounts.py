@@ -25,6 +25,11 @@ async def list_accounts(user: dict = Depends(security.current_user)) -> dict:
     accounts = wb2api.list_auth_accounts()
     status = await wb2api.get_status()
     wb2api.merge_pool_status(accounts, status)
+    # 备注随列表一次带回（issue #67）：按 uid 取，没有备注的账号给空串而不是缺字段
+    # —— 前端两处视图（手机卡片 / 桌面表格）都直接读它，缺字段会多一处判空。
+    notes = db.account_notes()
+    for a in accounts:
+        a['note'] = notes.get(str(a.get('uid') or ''), '')
     synced = sum(1 for a in accounts if a.get('credits') is not None)
     return {
         'total': len(accounts),
@@ -967,6 +972,40 @@ async def account_clear_cooling(
 
     ok, message, detail = await wb2api.force_clear_account_cooling(uid)
     return {'ok': ok, 'message': message, **(detail or {})}
+
+
+@router.put('/accounts/{filename}/note')
+async def account_set_note(
+    filename: str,
+    body: dict = Body(...),
+    user: dict = Depends(security.require_admin),
+) -> dict:
+    """给账号写一句备注（issue #67）——比如「张叔叔」「备用号」「给小李用的」。
+
+    为什么需要：用手机号邀请注册的账号，昵称往往认不出是谁，删号时不知道该删哪个。
+
+    存法见 `db.account_notes` 的注释：**按 uid** 存在本端库里（不写进上游的账号
+    文件——那是上游按自己 schema 读写的文件，塞自定义字段会被它覆盖或超出 schema）。
+    uid 是账号的稳定标识，所以临时停用（改文件名）不会让备注丢。
+
+    空串 = 删除备注（不留空行）。
+    """
+    try:
+        raw = wb2api.read_account_file_any(filename)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail='账号文件不存在') from exc
+    uid = str((raw.get('account') or {}).get('uid') or '').strip()
+    if not uid:
+        raise HTTPException(status_code=400, detail='该账号文件缺少 uid，无法保存备注')
+
+    # 截断而不是拒绝：备注是给人看的短文本，用户粘多了不该报错丢掉整句。
+    # 上限取 100 字符（界面上也是这个 maxLength），够写清是谁/做什么用。
+    note = str(body.get('note') or '').strip()[:100]
+    if note:
+        db.set_account_note(uid, note)
+    else:
+        db.delete_account_note(uid)
+    return {'ok': True, 'uid': uid, 'note': note}
 
 
 @router.delete('/accounts/{filename}')

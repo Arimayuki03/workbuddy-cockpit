@@ -171,6 +171,15 @@ export const accountApi = {
     post<{ok: boolean; message: string; uid?: string; backup?: string}>(
       `/api/accounts/${encodeURIComponent(file)}/clear-cooling`,
     ),
+  /**
+   * 给账号写备注（issue #67）。传空串 = 清除备注。
+   * 存的是本端库、按 uid 关联——临时停用（改文件名）不会丢。
+   */
+  setNote: (file: string, note: string) =>
+    put<{ok: boolean; uid: string; note: string}>(
+      `/api/accounts/${encodeURIComponent(file)}/note`,
+      {note},
+    ),
   restart: () => post<{ok: boolean; message: string}>('/api/restart'),
 
   /* ── 成长任务一键执行（issue #19）─────────────────────
