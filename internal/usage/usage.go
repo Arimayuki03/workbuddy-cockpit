@@ -385,6 +385,9 @@ type Snapshot struct {
 }
 
 // Snapshot 聚合当前全部桶。hours 控制时序返回多少个小时点（其余按日折叠）。
+// 窗口语义：series / by_account / by_model 只聚合窗口内的桶——面板的时间
+// 筛选必须对这三份视图同时生效（否则切时间窗只有图变、表不动）；
+// totals / by_realm 恒为全量累计（「累计请求」卡片的文案就是累计口径）。
 // nicks 是 uid→昵称映射，仅用于展示。
 func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 	if r == nil {
@@ -425,20 +428,35 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 		}
 		realmAgg[b.Realm].add(b)
 
-		if acctAgg[b.UID] == nil {
-			acctAgg[b.UID] = &aggAcc{}
+		// 账号/模型行跟随时间窗：小时桶按时间戳判断，日桶落在窗口内才计入。
+		// 注意与 series 的 stitching 口径不同——那里窗口外的小时点并回日点保时序
+		// 连续；这里是筛选，窗口外的数据直接不计入。
+		inWindow := false
+		if strings.HasPrefix(b.Scope, "h:") {
+			if ts, err := time.ParseInLocation(hourLayout, strings.TrimPrefix(b.Scope, "h:"), time.Local); err == nil {
+				inWindow = !ts.Before(hourFrom)
+			}
+		} else if day, ok := strings.CutPrefix(b.Scope, "d:"); ok {
+			if ts, err := time.ParseInLocation(dayLayout, day, time.Local); err == nil {
+				inWindow = !ts.Before(hourFrom)
+			}
 		}
-		acctAgg[b.UID].add(b)
-		// 一个账号只属于一个 realm，这里记下来供前端展示「域」列；
-		// keyed() 的 Realm 字段默认是空的（它按 key 分组，不知道 realm）。
-		if acctRealm[b.UID] == "" {
-			acctRealm[b.UID] = b.Realm
-		}
+		if inWindow {
+			if acctAgg[b.UID] == nil {
+				acctAgg[b.UID] = &aggAcc{}
+			}
+			acctAgg[b.UID].add(b)
+			// 一个账号只属于一个 realm，这里记下来供前端展示「域」列；
+			// keyed() 的 Realm 字段默认是空的（它按 key 分组，不知道 realm）。
+			if acctRealm[b.UID] == "" {
+				acctRealm[b.UID] = b.Realm
+			}
 
-		if modelAgg[b.Realm+"|"+b.Model] == nil {
-			modelAgg[b.Realm+"|"+b.Model] = &aggAcc{}
+			if modelAgg[b.Realm+"|"+b.Model] == nil {
+				modelAgg[b.Realm+"|"+b.Model] = &aggAcc{}
+			}
+			modelAgg[b.Realm+"|"+b.Model].add(b)
 		}
-		modelAgg[b.Realm+"|"+b.Model].add(b)
 
 		scope := strings.TrimPrefix(b.Scope, "h:")
 		isHour := strings.HasPrefix(b.Scope, "h:")

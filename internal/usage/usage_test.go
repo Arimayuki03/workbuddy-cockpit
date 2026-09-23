@@ -147,6 +147,61 @@ func TestSnapshotRealmDimension(t *testing.T) {
 	}
 }
 
+// 面板时间筛选必须对 by_account/by_model 同样生效：切 24h/72h/60 天时两张表
+// 的行与数值跟着窗口变；totals/by_realm 恒为全量累计（「累计请求」卡片口径）。
+// 回归背景：曾经 by_account/by_model 聚合全部历史桶，切时间窗只有趋势图变化。
+func TestSnapshotWindowFiltersBreakdowns(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	r.Add(now, "cn", "u1", "glm-5.2", Delta{PromptTokens: 30, HasPromptTokens: true}, true)                      // 窗口内
+	r.Add(now.Add(-48*time.Hour), "cn", "u2", "claude-4.6", Delta{PromptTokens: 50, HasPromptTokens: true}, true) // 24h 窗口外
+
+	s24 := r.Snapshot(24, nil)
+	if len(s24.ByModel) != 1 || s24.ByModel[0].Key != "glm-5.2" || s24.ByModel[0].PromptTokens != 30 {
+		t.Fatalf("24h by_model = %+v, want 仅 glm-5.2/30", s24.ByModel)
+	}
+	if len(s24.ByAccount) != 1 || s24.ByAccount[0].Key != "u1" || s24.ByAccount[0].PromptTokens != 30 {
+		t.Fatalf("24h by_account = %+v, want 仅 u1/30", s24.ByAccount)
+	}
+	// 全量口径不受窗口影响。
+	if s24.Totals.PromptTokens != 80 {
+		t.Fatalf("24h totals = %d, want 80（全量累计）", s24.Totals.PromptTokens)
+	}
+	if len(s24.ByRealm) != 1 || s24.ByRealm[0].PromptTokens != 80 {
+		t.Fatalf("24h by_realm = %+v, want 80", s24.ByRealm)
+	}
+
+	s72 := r.Snapshot(72, nil)
+	if len(s72.ByModel) != 2 || len(s72.ByAccount) != 2 {
+		t.Fatalf("72h by_model/by_account = %d/%d 行, want 各 2", len(s72.ByModel), len(s72.ByAccount))
+	}
+
+	// 日桶（Rollup 折叠产物）同样受窗口过滤：手工注入 40 天前的日桶。
+	r.mu.Lock()
+	day := time.Now().AddDate(0, 0, -40).Format(dayLayout)
+	r.buckets["d:"+day+"|cn|u3|glm-5.2"] = &bucket{Scope: "d:" + day, Realm: "cn", UID: "u3", Model: "glm-5.2", Req: 1, PT: 90, TT: 90}
+	r.mu.Unlock()
+
+	s24b := r.Snapshot(24, nil)
+	if s24b.Totals.PromptTokens != 170 {
+		t.Fatalf("注入日桶后 totals = %d, want 170", s24b.Totals.PromptTokens)
+	}
+	for _, row := range s24b.ByAccount {
+		if row.Key == "u3" {
+			t.Fatalf("24h by_account 不应含 40 天前的日桶: %+v", s24b.ByAccount)
+		}
+	}
+	found := false
+	for _, row := range r.Snapshot(1440, nil).ByAccount { // 60 天窗口
+		if row.Key == "u3" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("60 天窗口 by_account 应含日桶 u3")
+	}
+}
+
 // TestSnapshotEmptySeriesNotNull 零桶契约：刚启动无流量时 Snapshot.Series 必须是
 // 空数组而非 nil——Go nil 切片序列化为 JSON null，面板 /stats/ 页 usage.series.filter()
 // 直接 TypeError 白屏（2026-09-22 双击发行 exe 首启后打开 /stats/ 即崩的根因）。

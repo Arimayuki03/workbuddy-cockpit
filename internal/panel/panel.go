@@ -734,8 +734,9 @@ func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 // helpers
 // ---------------------------------------------------------------------------
 
-// usage 返回逐请求用量聚合。hours 查询参数控制小时粒度时序窗口（默认 72，
-// 上限 1440=60 天）；更早的数据自动折叠为日点，因此长期趋势不会丢。
+// usage 返回逐请求用量聚合。hours 查询参数控制时间窗（默认 72，上限 1440=60 天）：
+// series / by_account / by_model 只聚合窗口内的桶（面板的时间筛选对图和表同时生效）；
+// totals / by_realm 恒为全量累计。窗口外的小时点在 series 中自动折叠为日点，长期趋势不丢。
 func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Usage == nil {
 		writeErr(w, http.StatusNotImplemented, "usage recorder not available")
