@@ -356,7 +356,21 @@
     "refreshBalance": "전체 잔액 새로고침",
     "refreshBalanceTitle": "모든 계정의 실제 잔액을 병렬로 조회해 풀에 다시 기록합니다(동기 대기)",
     "reviveTitle": "계정 부활(비활성화 / 쿨다운 / 서킷브레이커 해제)",
-    "revived": "계정이 부활되었습니다"
+    "revived": "계정이 부활되었습니다",
+    "export": "자격 증명 내보내기",
+    "exportTitle": "모든 계정 자격 증명 내보내기(토큰 포함, 안전 보관)",
+    "exportDone": "계정 자격 증명 파일을 내보냈습니다",
+    "import": "자격 증명 가져오기",
+    "importTitle": "계정 자격 증명 가져오기",
+    "importDesc": "이전에 내보낸 JSON 파일(단일 auth 자격 증명 파일도 가능)을 선택하세요. 가져온 계정은 즉시 저장되어 풀에 추가되며, 같은 UID 계정은 덮어써집니다.",
+    "importPickFile": "클릭하여 JSON 파일 선택",
+    "importPickHint": "내보내기 파일·단일 자격 증명 파일·배열 지원",
+    "importAction": "가져오기",
+    "importDone": "{n}개 계정을 가져왔습니다",
+    "importNone": "가져온 계정이 없습니다(아래 사유 확인)",
+    "importSummary": "가져오기 완료: 성공 {n}건, 건너뜀 {s}건",
+    "importTooLarge": "파일이 너무 큽니다(최대 20MB)",
+    "importReadError": "파일을 읽지 못했습니다. 다시 시도하세요"
   },
   "keys": {
     "title": "API 키",

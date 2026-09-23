@@ -179,6 +179,13 @@ export interface OkResponse {
   file_error?: string;
 }
 
+/** POST /api/accounts/import（panel transfer.go）：skipped 逐项带原因 */
+export interface AccountImportResponse {
+  ok: boolean;
+  imported: number;
+  skipped: {uid?: string; reason: string}[];
+}
+
 /** 批量任务触发（checkin_all / travel_all / activity_all / keepalive_all） */
 export interface BatchStartResponse {
   ok: boolean;

@@ -299,7 +299,21 @@
     "checkinAllStarted": "批量签到已触发",
     "checkinAllStartedDetail": "签到在后台异步执行，进度可在「日志 → 系统日志」的任务频道查看",
     "reviveTitle": "复活账号（清除禁用 / 冷却 / 熔断）",
-    "revived": "账号已复活"
+    "revived": "账号已复活",
+    "export": "导出凭据",
+    "exportTitle": "导出全部账号凭据（含 token，妥善保管）",
+    "exportDone": "已导出账号凭据文件",
+    "import": "导入凭据",
+    "importTitle": "导入账号凭据",
+    "importDesc": "选择此前导出的 JSON 文件（也兼容单个 auth 凭证文件）。导入后立即落盘并加入账号池，同 UID 账号会被覆盖更新。",
+    "importPickFile": "点击选择 JSON 文件",
+    "importPickHint": "支持导出文件、单个凭证文件或凭据数组",
+    "importAction": "开始导入",
+    "importDone": "成功导入 {n} 个账号",
+    "importNone": "没有账号被导入（见下方原因）",
+    "importSummary": "导入完成：成功 {n} 个，跳过 {s} 个",
+    "importTooLarge": "文件过大（上限 20MB）",
+    "importReadError": "读取文件失败，请重试"
   },
   "keys": {
     "title": "API 密钥",

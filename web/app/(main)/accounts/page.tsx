@@ -30,6 +30,11 @@ import {EmptyState} from '@/components/common/layout/EmptyState';
 import {CardRowsSkeleton, TableSkeleton} from '@/components/common/layout/LoadSkeleton';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {AddAccountDialog} from '@/components/common/accounts/AddAccountDialog';
+import {
+  ExportAccountsButton,
+  ImportAccountsButton,
+  ImportAccountsDialog,
+} from '@/components/common/accounts/TransferAccountsDialog';
 import {CreditCountdown} from '@/components/common/accounts/CreditCountdown';
 import {useAuth} from '@/lib/auth-context';
 import {realmLabel, useRealm} from '@/lib/realm-context';
@@ -50,6 +55,7 @@ export default function AccountsPage() {
   const t = useT();
   const {isAdmin} = useAuth();
   const [addOpen, setAddOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [busyUid, setBusyUid] = useState<string | null>(null);
   const [checkinAllBusy, setCheckinAllBusy] = useState(false);
   const [balanceAllBusy, setBalanceAllBusy] = useState(false);
@@ -427,10 +433,14 @@ export default function AccountsPage() {
               </Button>
             )}
             {isAdmin && (
-              <Button size="sm" className="rounded-full" onClick={() => setAddOpen(true)}>
-                <Plus />
-                {t('accounts.addAccount')}
-              </Button>
+              <>
+                <ExportAccountsButton disabled={!visible.length} />
+                <ImportAccountsButton onOpen={() => setImportOpen(true)} />
+                <Button size="sm" className="rounded-full" onClick={() => setAddOpen(true)}>
+                  <Plus />
+                  {t('accounts.addAccount')}
+                </Button>
+              </>
             )}
           </>
         }
@@ -550,6 +560,7 @@ export default function AccountsPage() {
       </section>
 
       <AddAccountDialog open={addOpen} onOpenChange={setAddOpen} onSuccess={load} />
+      <ImportAccountsDialog open={importOpen} onOpenChange={setImportOpen} onSuccess={load} />
     </div>
   );
 }

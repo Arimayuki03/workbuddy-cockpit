@@ -323,7 +323,21 @@
     "checkinAllStarted": "Batch check-in triggered",
     "checkinAllStartedDetail": "Check-ins run in the background; watch the task channel under Logs → System",
     "reviveTitle": "Revive account (clears disable / cooldown / breaker)",
-    "revived": "Account revived"
+    "revived": "Account revived",
+    "export": "Export",
+    "exportTitle": "Export all account credentials (contains tokens, keep safe)",
+    "exportDone": "Account credentials exported",
+    "import": "Import",
+    "importTitle": "Import account credentials",
+    "importDesc": "Pick a previously exported JSON file (a single auth credential file works too). Imported accounts are saved and loaded into the pool immediately; same-UID accounts are overwritten.",
+    "importPickFile": "Click to choose a JSON file",
+    "importPickHint": "Supports export bundles, single credential files, or arrays",
+    "importAction": "Import",
+    "importDone": "Imported {n} accounts",
+    "importNone": "No accounts were imported (see reasons below)",
+    "importSummary": "Import finished: {n} succeeded, {s} skipped",
+    "importTooLarge": "File too large (20MB limit)",
+    "importReadError": "Failed to read file, please retry"
   },
   "keys": {
     "title": "API keys",

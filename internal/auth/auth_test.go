@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/json"
 	"io"
 	"log"
 	"os"
@@ -304,5 +305,51 @@ func TestLoadDirLoadsNonHyphenFile(t *testing.T) {
 	}
 	if len(list) != 1 || list[0].UID != "u1" {
 		t.Fatalf("list=%+v want 1 account (uid=u1)", list)
+	}
+}
+
+// TestExportDocRoundtrip 导出文档与 SaveAtomic 落盘同形：Parse(导出内容) 应得到
+// 全同的凭证（含 device_token）；这是「导出文件能被导入方 auth.Parse 直接吃」的
+// 格式契约锁。
+func TestExportDocRoundtrip(t *testing.T) {
+	a := &Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: 1753600000,
+		Domain: "www.codebuddy.cn", UID: "u1", EnterpriseID: "e1", Nickname: "n1",
+		DeviceToken: "dt"}
+	doc := a.ExportDoc()
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	b, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse(export): %v", err)
+	}
+	if b.AccessToken != "at" || b.RefreshToken != "rt" || b.ExpiresAt != 1753600000 ||
+		b.Domain != "www.codebuddy.cn" || b.UID != "u1" || b.EnterpriseID != "e1" ||
+		b.Nickname != "n1" || b.DeviceToken != "dt" {
+		t.Errorf("roundtrip mismatch: %+v", b)
+	}
+	if b.RealmStored() != "" {
+		t.Errorf("realm=%q want \"\"（空 realm 由导入方 BackfillRealm 补）", b.RealmStored())
+	}
+}
+
+// TestExportDocNestedShape 导出必须是嵌套形（auth/account 两段），与 auths/ 目录
+// 既有文件形状一致——面板/运维工具按该形状读取。
+func TestExportDocNestedShape(t *testing.T) {
+	a := &Auth{AccessToken: "at", RefreshToken: "rt", UID: "u1"}
+	var probe struct {
+		Auth    map[string]any `json:"auth"`
+		Account map[string]any `json:"account"`
+	}
+	raw, _ := json.Marshal(a.ExportDoc())
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if probe.Auth == nil || probe.Account == nil {
+		t.Fatalf("want nested auth/account shape: %s", raw)
+	}
+	if probe.Auth["accessToken"] != "at" || probe.Account["uid"] != "u1" {
+		t.Errorf("auth/account fields mismatch: %s", raw)
 	}
 }

@@ -20,6 +20,7 @@ import type {
   ModelProbesResponse,
   OkOnlyResponse,
   OkResponse,
+  AccountImportResponse,
   OverviewResponse,
   PackagesResponse,
   PanelModelsResponse,
@@ -84,8 +85,11 @@ http.interceptors.response.use(
 
 const get = async <T>(url: string, params?: Record<string, unknown>, cfg?: {timeout?: number}): Promise<T> =>
   (await http.get<T>(url, {params, ...cfg})).data;
-const post = async <T>(url: string, body?: unknown, cfg?: {timeout?: number}): Promise<T> =>
-  (await http.post<T>(url, body, cfg)).data;
+const post = async <T>(
+  url: string,
+  body?: unknown,
+  cfg?: {timeout?: number; headers?: Record<string, string>},
+): Promise<T> => (await http.post<T>(url, body, cfg)).data;
 /* ── 鉴权 ───────────────────────────────────────────── */
 export const authApi = {
   me: () => get<Me>('/api/me'),
@@ -121,6 +125,24 @@ export const accountApi = {
     post<AccountBalanceResponse>(`/api/accounts/${encodeURIComponent(uid)}/balance`),
   remove: (uid: string) =>
     post<OkResponse>(`/api/accounts/${encodeURIComponent(uid)}/remove`),
+
+  /* ── 凭据导入/导出（panel transfer.go）─────────────────── */
+  /**
+   * 导出全部账号凭据为 JSON 文件下载（含 token，勿外传不可信对象）。
+   * 走 axios blob 拿响应体，再由调用方触发浏览器保存。
+   */
+  exportAll: async () => {
+    const res = await http.get<Blob>('/api/accounts/export', {
+      responseType: 'blob',
+    });
+    const cd = String(res.headers['content-disposition'] ?? '');
+    const m = cd.match(/filename="?([^";]+)"?/i);
+    return {blob: res.data, filename: m?.[1] ?? 'workbuddy-accounts.json'};
+  },
+  /** 导入凭据：body 为导出文件原样（兼容裸数组/单个 auth 文件内容） */
+  import: (raw: string) => post<AccountImportResponse>('/api/accounts/import', raw, {
+    headers: {'Content-Type': 'application/json'},
+  }),
 
   /* ── 批量任务（异步执行，进度看系统日志频道）──────────────── */
   checkinAll: () => post<BatchStartResponse>('/api/checkin_all'),

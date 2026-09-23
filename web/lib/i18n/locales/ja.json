@@ -356,7 +356,21 @@
     "refreshBalance": "全件残高を更新",
     "refreshBalanceTitle": "全アカウントの実際の残高を並行照会し、プールに書き戻します（同期待ち）",
     "reviveTitle": "アカウントを復活（無効化 / クールダウン / サーキットブレーカーを解除）",
-    "revived": "アカウントを復活しました"
+    "revived": "アカウントを復活しました",
+    "export": "認証情報を書き出す",
+    "exportTitle": "全アカウントの認証情報を書き出す（トークンを含む・厳重管理）",
+    "exportDone": "認証情報ファイルを書き出しました",
+    "import": "認証情報を読み込む",
+    "importTitle": "アカウント認証情報の読み込み",
+    "importDesc": "以前書き出した JSON ファイル（単一の auth 認証ファイルにも対応）を選択してください。読み込み後すぐに保存してアカウントプールに追加します。同じ UID のアカウントは上書きされます。",
+    "importPickFile": "クリックして JSON ファイルを選択",
+    "importPickHint": "書き出しファイル・単一認証ファイル・配列に対応",
+    "importAction": "読み込む",
+    "importDone": "{n} 件のアカウントを読み込みました",
+    "importNone": "読み込めたアカウントはありません（下記の理由を確認）",
+    "importSummary": "読み込み完了：成功 {n} 件、スキップ {s} 件",
+    "importTooLarge": "ファイルが大きすぎます（上限 20MB）",
+    "importReadError": "ファイルの読み取りに失敗しました。再試行してください"
   },
   "keys": {
     "title": "API キー",
