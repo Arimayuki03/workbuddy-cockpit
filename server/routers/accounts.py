@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import time
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -13,6 +14,22 @@ from ..services import (
 from ..services.realm import realm_of, supports_checkin
 
 router = APIRouter(prefix='/api', tags=['accounts'])
+
+
+def _today_start() -> int:
+    """本地时区「今天 0 点」的 epoch 秒 —— 签到状态按**自然日**判定。
+
+    两件事都要求自然日口径：
+
+      · 腾讯侧签到就是按自然日算的（重复签到时它回 10001「今日已签到」）；
+      · 界面要回答的是「今天签没签」，不是「最近 24 小时签没签」。
+
+    为什么用本地时间而不是 UTC：容器 TZ=Asia/Shanghai（见 docker-compose.yml），
+    这里若按 UTC 取当天 0 点，中国时间每天 08:00 之前会被算成「昨天」——
+    表现为早上刚签完，界面又说没签。
+    """
+    now = datetime.datetime.now()
+    return int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
 
 
 @router.get('/accounts')
@@ -28,8 +45,16 @@ async def list_accounts(user: dict = Depends(security.current_user)) -> dict:
     # 备注随列表一次带回（issue #67）：按 uid 取，没有备注的账号给空串而不是缺字段
     # —— 前端两处视图（手机卡片 / 桌面表格）都直接读它，缺字段会多一处判空。
     notes = db.account_notes()
+    # 今日签到状态随列表一次带回（和备注同一个理由：两处视图都直接读它）。
+    # 数据源是本端签到记录 —— 腾讯对「今天已签过」回 10001 且我们照记，
+    # 所以「本端签过」与「今天已签到」在这里是同一件事。上游自动签到不产
+    # 逐账号记录（它只打一行汇总），所以首次进入面板时可能显示未签到，
+    # 手动点一次拿到 10001 后就归位了 —— 这一点在界面上如实说明。
+    done_today = db.checkin_done_since(_today_start())
     for a in accounts:
-        a['note'] = notes.get(str(a.get('uid') or ''), '')
+        uid = str(a.get('uid') or '')
+        a['note'] = notes.get(uid, '')
+        a['checkin_today'] = done_today.get(uid)
     synced = sum(1 for a in accounts if a.get('credits') is not None)
     return {
         'total': len(accounts),
@@ -305,6 +330,21 @@ async def account_checkin(filename: str, user: dict = Depends(security.require_a
         db.add_checkin_log(uid, nickname, 'manual', False, None, '该账号无有效 accessToken')
         return {'code': -1, 'message': '该账号无有效 accessToken'}
 
+    # 今天已经签过就不再打上游：腾讯对重复签到回 10001（幂等成功，不是错误），
+    # 但每点一次都是一次真实 RPC，而且会在签到记录里堆出一串「今日已签到」，
+    # 把真正的失败记录挤出视线（线上实测：同一个账号一天被记了 11 条）。
+    # 这里就地返回、不写日志，让「签到记录」保持「每次实际动作一条」。
+    done_at = db.checkin_done_since(_today_start()).get(uid)
+    if done_at is not None:
+        return {
+            'code': 10001,
+            'already': True,
+            'message': '今日已签到，无需重复',
+            'checkin_today': done_at,
+            'credits': None,
+            'expiries': [],
+        }
+
     # 传完整 auth dict：billing 域要带 X-User-Id 等身份头（对齐上游 BillingHeaders）
     code, message = await tencent.checkin({
         'access_token': token,
@@ -333,6 +373,9 @@ async def account_checkin(filename: str, user: dict = Depends(security.require_a
     return {
         'code': code,
         'message': message,
+        # 10001 = 腾讯说「今天已签过」：这也是成功，但和「本次刚签上」在提示语上
+        # 要分开说 —— 否则用户会以为自己的点击真的又签了一次。
+        'already': code == 10001,
         'credits': credits,
         'expiries': expiries,
     }
@@ -447,6 +490,7 @@ async def checkin_all(user: dict = Depends(security.require_admin)) -> dict:
     后端却还在跑，用户容易重复点击。并发后总耗时约等于最慢的单个账号。
     """
     accounts = wb2api.list_auth_accounts()
+    done_today = db.checkin_done_since(_today_start())
     sem = _checkin_semaphore()
 
     async def one(acc: dict) -> dict:
@@ -474,6 +518,13 @@ async def checkin_all(user: dict = Depends(security.require_admin)) -> dict:
             return {'nickname': nickname, 'ok': False, 'skipped': True,
                     'code': -2, 'message': msg}
 
+        # 今日已签到：跳过（理由同单账号签到 —— 重复点是白打的 RPC，
+        # 还会在签到记录里堆出一串「今日已签到」把失败记录挤下去）。
+        # 结果里照报，界面才能显示「N 个今日已签到」而不是让它们凭空消失。
+        if uid and uid in done_today:
+            return {'nickname': nickname, 'ok': True, 'already': True,
+                    'code': 10001, 'message': '今日已签到，已跳过'}
+
         async with sem:
             # 传完整 auth dict：billing 域要带 X-User-Id 等身份头
             code, message = await tencent.checkin({
@@ -489,15 +540,21 @@ async def checkin_all(user: dict = Depends(security.require_admin)) -> dict:
         return {'nickname': nickname, 'ok': ok, 'code': code, 'message': message}
 
     results = await asyncio.gather(*(one(a) for a in accounts)) if accounts else []
-    # 「不适用」的账号（国际版没有签到体系）不进分母。
-    # 它既不会成功、也不是失败，算进 total 会让界面显示成「5/6 个账号成功」，
-    # 用户会以为有一个号漏签了、反复去点——而那个号无论点多少次都是「已跳过」。
-    # 单独用 skipped 报出来，让界面能说清「N 个不适用」。
+    # 两类账号都不进 `total` 分母，各自单独报数：
+    #   · skipped：国际版没有签到体系，既不会成功也不是失败。算进 total 会显示成
+    #     「5/6 成功」，用户以为漏签了一个号、反复去点——而它永远是「已跳过」。
+    #   · already：今日已签到，本次压根没打上游。算进 total 会把「无需重复」说成
+    #     「刚签成功」，用户会以为这次点击真的又签了一次。
+    # 于是 total 的含义收敛成「本次真正发起并需要结果的账号数」，
+    # succeeded 自然就是「这次真签上了几个」。
     applicable = [r for r in results if not r.get('skipped')]
-    succeeded = sum(1 for r in applicable if r['ok'])
+    already = [r for r in applicable if r.get('already')]
+    attempted = [r for r in applicable if not r.get('already')]
+    succeeded = sum(1 for r in attempted if r['ok'])
     return {
-        'total': len(applicable),
+        'total': len(attempted),
         'succeeded': succeeded,
+        'already': len(already),
         'skipped': len(results) - len(applicable),
         'results': list(results),
     }
