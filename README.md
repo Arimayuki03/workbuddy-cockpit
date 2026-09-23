@@ -823,6 +823,16 @@ CI 会构建前端、打包产物、从 CHANGELOG 提取对应版本段落作为
 
 ---
 
+## 相关项目
+
+- [**sanguine886/workbuddy-sdk**](https://github.com/sanguine886/workbuddy-sdk)（Go，MIT）——
+  社区维护的 Go 客户端库，完整覆盖本项目的两个 API 面：管理面 `/api/*`（账号池、密钥、
+  统计、日志、安全、设置、用户、系统更新）与数据面 `/v1/*`（Chat Completions /
+  Responses / Anthropic Messages / Models）。用 Go 写运维工具时可直接 `go get`，
+  不必自己拼 HTTP 与登录态。
+
+> 以上为社区项目，**与本仓库无代码依赖**；使用中遇到问题请到其[仓库](https://github.com/sanguine886/workbuddy-sdk/issues)反馈。
+
 ## 致谢
 
 - [**LINUX DO**](https://linux.do) —— 本项目的发布与交流社区
