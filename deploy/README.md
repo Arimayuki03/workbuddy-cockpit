@@ -140,17 +140,30 @@ server {
 
 需要**两处**同时配置，缺一不可。
 
-**① 构建前端时指定前缀**
+**① 把前缀交给前端构建**
+
+宿主机 / 源码部署：
 
 ```bash
 cd /opt/workbuddy-manager/web
 NEXT_PUBLIC_BASE_PATH=/workbuddy-manager npm run build:export
 ```
 
+容器部署时前端是**在镜像构建阶段**编译的（宿主机上没有 `web/out`），所以前缀要传给
+构建而不是运行时：
+
+```bash
+docker compose build --build-arg BASE_PATH=/workbuddy-manager
+docker compose up -d
+```
+
+也可以直接写进 `docker-compose.yml` 的 `build.args.BASE_PATH`（留空 = 根路径部署，与
+改动前一致）。
+
 **② 后端与反代对齐前缀**
 
-加到 **systemd unit 的 `Environment=`** 里（容器部署则写进 compose 的 `environment:`），
-取值与上面完全一致：
+加到 **systemd unit 的 `Environment=`** 里（容器部署则把 compose 的 `environment:` 里
+那行 `WB_BASE_PATH` 取消注释），取值与上面完全一致：
 
 ```
 WB_BASE_PATH=/workbuddy-manager
@@ -164,7 +177,9 @@ WB_BASE_PATH=/workbuddy-manager
 >
 > （唯一的例外是 Windows 原生部署：`start.ps1` 用 `uvicorn --env-file .env` 显式读取 `.env`。）
 
-Nginx 用**带尾斜杠**的 `proxy_pass` 把前缀剥掉再转发——服务端路由本身不认识前缀：
+**③ 反向代理：两种 `proxy_pass` 写法都可以**
+
+带尾斜杠（反代自己把前缀剥掉）：
 
 ```nginx
 location /workbuddy-manager/ {
@@ -179,6 +194,19 @@ location /workbuddy-manager/ {
     proxy_read_timeout 300s;
 }
 ```
+
+不带尾斜杠（反代原样转发，前缀由服务端自己剥掉）：
+
+```nginx
+location /workbuddy-manager/ {
+    proxy_pass http://127.0.0.1:7864;    # 没有尾斜杠：请求带着前缀进来
+    ...同样那几个 header 与超时...
+}
+```
+
+> 第二种写法值得单独说明：**面板类工具（如 1Panel）新建反向代理时，界面拼出来的
+> `proxy_pass` 常常是不带尾斜杠的那种**，而手写配置的人也很容易漏掉那个 `/`。
+> 两种都能用的意义是——不必先搞清楚「该不该带尾斜杠」才能配通。
 
 > 网关（`/v1`）会一起挂到前缀下：接入地址是
 > `https://example.com/workbuddy-manager/v1`。密钥页展示的地址会自动带上前缀。
