@@ -266,6 +266,7 @@
     "checkinAllDoneDetail": "{ok}/{total} 件のアカウントが成功しました",
     "checkinPartial": "チェックイン完了、{failed} 件失敗",
     "checkinPartialDetail": "{ok}/{total} 件成功。詳細は「タスク」ページをご覧ください",
+    "checkinSkippedNote": "（ほかに {skipped} 件は対象外：国際版にはチェックイン機能がありません）",
     "restarted": "上流を再起動しました",
     "disabledReason": "無効化の理由: {reason}",
     "badgeDisabled": "● 無効",

@@ -142,14 +142,20 @@ export default function AccountsPage() {
     try {
       const r = await accountApi.checkinAll();
       const failed = r.total - r.succeeded;
+      // 不适用（国际版）的账号不计入分母，但要说明，否则用户看到「5/5 成功」
+      // 会以为少了一个号——那个号无论点多少次都是「已跳过」。
+      const note = r.skipped > 0 ? ' ' + t('accounts.checkinSkippedNote', {skipped: r.skipped}) : '';
       if (r.total === 0) {
-        notify.info(t('accounts.noCheckinTargets'));
+        notify.info(t('accounts.noCheckinTargets'), note.trim() || undefined);
       } else if (failed === 0) {
-        notify.ok(t('accounts.checkinAllDone'), t('accounts.checkinAllDoneDetail', {ok: r.succeeded, total: r.total}));
+        notify.ok(
+          t('accounts.checkinAllDone'),
+          t('accounts.checkinAllDoneDetail', {ok: r.succeeded, total: r.total}) + note,
+        );
       } else {
         notify.warn(
           t('accounts.checkinPartial', {failed}),
-          t('accounts.checkinPartialDetail', {ok: r.succeeded, total: r.total}),
+          t('accounts.checkinPartialDetail', {ok: r.succeeded, total: r.total}) + note,
         );
       }
       await load();
