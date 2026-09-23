@@ -184,6 +184,18 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT
 );
 
+-- 账号备注（issue #67）：给账号起个「人记得住」的名字。
+--
+-- 为什么本端存而不是写进账号文件：账号文件是**上游的**文件（它按自己 schema 读写，
+-- 也会原子回写），往里塞自定义字段既可能被上游覆盖，也超出它的 schema。备注是
+-- 「我们这边怎么看这些号」，按 uid 关联即可——uid 是账号的稳定标识，改文件名
+-- （临时停用）或重新启用都不变，所以备注不会因为用户点了停用就丢。
+CREATE TABLE IF NOT EXISTS account_notes (
+  uid        TEXT PRIMARY KEY,
+  note       TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
 -- 签到 / 保活结果记录。上游只在失败时打日志、成功静默，
 -- 因此本表用于留下我们自己触发的签到结果，便于事后追溯。
 CREATE TABLE IF NOT EXISTS checkin_logs (
@@ -494,6 +506,27 @@ def get_setting(key: str, default: Any = None) -> Any:
         return json.loads(row['value'])
     except Exception:
         return default
+
+
+# ── 账号备注（issue #67）────────────────────────────────
+#
+# 备注按 **uid** 关联，不按文件名：临时停用会把文件改成 `.disabled`，按文件名存
+# 会让备注在停用/启用之间丢掉。调用方负责先解析出 uid（见 accounts 路由）。
+def set_account_note(uid: str, note: str) -> None:
+    execute(
+        'INSERT INTO account_notes(uid, note, updated_at) VALUES(?, ?, ?) '
+        'ON CONFLICT(uid) DO UPDATE SET note = excluded.note, updated_at = excluded.updated_at',
+        (str(uid), str(note), int(time.time())),
+    )
+
+
+def delete_account_note(uid: str) -> None:
+    execute('DELETE FROM account_notes WHERE uid = ?', (str(uid),))
+
+
+def account_notes() -> dict[str, str]:
+    """全部备注 {uid: note}。账号列表一次取回，避免按账号逐条查。"""
+    return {str(r['uid']): str(r['note']) for r in query('SELECT uid, note FROM account_notes')}
 
 
 def set_setting(key: str, value: Any) -> None:

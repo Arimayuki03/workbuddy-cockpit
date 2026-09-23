@@ -16,6 +16,7 @@ import {
   Coins,
   ChevronRight,
   RotateCcw,
+  StickyNote,
 } from 'lucide-react';
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
@@ -34,6 +35,7 @@ import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {AddAccountDialog} from '@/components/common/accounts/AddAccountDialog';
 import {CreditCountdown} from '@/components/common/accounts/CreditCountdown';
+import {AccountNoteDialog} from '@/components/common/accounts/AccountNoteDialog';
 import {useAuth} from '@/lib/auth-context';
 import {realmLabel, useRealm} from '@/lib/realm-context';
 import {useT} from '@/lib/i18n/provider';
@@ -56,6 +58,9 @@ export default function AccountsPage() {
   const [upstream, setUpstream] = useState<UpstreamStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
+  // 备注编辑（issue #67）：记的是**哪个账号**而不是布尔——弹窗要以该账号当前的
+  // 备注为初值，否则会拿上一个账号的内容去保存。
+  const [noteTarget, setNoteTarget] = useState<Account | null>(null);
   const [busyFile, setBusyFile] = useState<string | null>(null);
   const [checkinAllBusy, setCheckinAllBusy] = useState(false);
   /** 每个账号积分是实时查询还是命中缓存（含缓存已存在秒数） */
@@ -556,6 +561,19 @@ export default function AccountsPage() {
     const hasClearableState = a.cooling === true || rateLimitedModels(a).length > 0;
     return (
       <div className="flex justify-end gap-1">
+        {/* 备注（issue #67）：只动本端库里的一行文本，不碰上游、不重启容器，
+            所以放在最前——它是最轻的动作。任何状态下的账号都能写备注：
+            停用的号恰恰更容易忘了它是谁。 */}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 rounded-md"
+          title={a.note ? t('accounts.noteEditTitle') : t('accounts.noteAdd')}
+          disabled={busy}
+          onClick={() => setNoteTarget(a)}
+        >
+          <StickyNote className={'h-3.5 w-3.5 ' + (a.note ? 'text-amber-600 dark:text-amber-400' : '')} />
+        </Button>
         {/* 临时停用 / 启用（issue #21、#45）。放在最前：它是最轻的「止血」动作——
             某个号在拖后腿（一直失败、触发风控）时，先停用它比删掉更合适
             （删除会丢凭证、只能重新扫码；停用是可逆的）。 */}
@@ -738,6 +756,11 @@ export default function AccountsPage() {
                       {a.nickname || t('accounts.unnamed')}
                     </div>
                     <div className="truncate font-mono text-[10px] text-muted-foreground">{a.uid}</div>
+                    {a.note ? (
+                      <div className="truncate text-[10px] text-muted-foreground" title={a.note}>
+                        {t('accounts.noteLabel')}{a.note}
+                      </div>
+                    ) : null}
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center justify-end gap-1.5">
@@ -784,9 +807,16 @@ export default function AccountsPage() {
                 <TableCell className="pl-4">
                   <div className="flex items-center gap-2.5">
                     {renderAvatar(a)}
-                    <span className={'truncate text-sm font-medium ' + (a.is_expired ? 'text-muted-foreground' : '')}>
-                      {a.nickname || t('accounts.unnamed')}
-                    </span>
+                    <div className="min-w-0">
+                      <div className={'truncate text-sm font-medium ' + (a.is_expired ? 'text-muted-foreground' : '')}>
+                        {a.nickname || t('accounts.unnamed')}
+                      </div>
+                      {a.note ? (
+                        <div className="truncate text-[10px] text-muted-foreground" title={a.note}>
+                          {t('accounts.noteLabel')}{a.note}
+                        </div>
+                      ) : null}
+                    </div>
                     <Badge
                       variant="secondary"
                       className={
@@ -846,6 +876,12 @@ export default function AccountsPage() {
       </div>
 
       <AddAccountDialog open={addOpen} onOpenChange={setAddOpen} onSuccess={load} />
+      <AccountNoteDialog
+        account={noteTarget}
+        open={noteTarget !== null}
+        onOpenChange={(open) => { if (!open) setNoteTarget(null); }}
+        onSaved={load}
+      />
     </div>
   );
 }
