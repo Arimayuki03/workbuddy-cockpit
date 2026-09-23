@@ -302,6 +302,14 @@ export interface RequestLog {
    * 与 latency_ms 的区别：latency_ms 含模型生成全部内容的耗时，回答越长越大，
    * 反映不出上游响应快慢；首字延迟才是「上游多久开始回话」。
    */
+  /**
+   * 提示词缓存的三段 token（issue #69）：上游（腾讯）在流式末帧 usage 里给。
+   * **null = 上游没给这三个字段**（老上游），与「给了 0」不是一回事——
+   * 后者代表这次请求确实没命中缓存。界面据此显示「—」而不是 0%。
+   */
+  cache_hit_tokens: number | null;
+  cache_miss_tokens: number | null;
+  cache_write_tokens: number | null;
   first_token_ms: number | null;
   ua: string | null;
   error: string | null;

@@ -418,6 +418,12 @@
     "modelsUnknown": "这些名字找不到对应模型（可能拼错了）：{names}。它们不会被列出，调用时也会被拒。"
   },
   "logs": {
+    "cacheShort": "缓存 {pct}%",
+    "cacheMissShort": "未命中",
+    "cacheTitle": "提示词缓存：命中 {hit} / 未命中 {miss} token",
+    "rowCacheHit": "缓存命中 Token",
+    "rowCacheMiss": "缓存未命中 Token",
+    "rowCacheWrite": "缓存写入 Token",
     "title": "请求日志",
     "description": "反代网关的每一次调用记录，含状态、延迟与 Token 计量（每 60 秒自动刷新；含国内版与国际版调用，不按版本过滤）",
     "clearTitle": "清空所有日志？",

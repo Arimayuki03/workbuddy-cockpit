@@ -1309,11 +1309,13 @@ async def _handle(request: Request) -> JSONResponse | StreamingResponse:
                 usage = data.get('usage') or {}
             except Exception:  # noqa: BLE001
                 data = None
+            # 整份 usage 交过去（而不是只取 credit）：扣费与提示词缓存三段
+            # 都在这一份里，分开取就会出现「某条协议缓存永远是空的」（issue #69）。
             gateway._record(
                 key, ip, model, mapped or '', resp.status_code,
                 _as_int(usage.get('prompt_tokens')), _as_int(usage.get('completion_tokens')),
                 latency, ua, None if resp.status_code < 400 else str(data)[:500], False,
-                credit=gateway._usage_credit(usage),
+                usage=usage,
             )
             if resp.status_code >= 400:
                 return _failed(_upstream_error_text(data, resp), resp.status_code,
@@ -1462,7 +1464,7 @@ async def _handle(request: Request) -> JSONResponse | StreamingResponse:
                 _as_int(usage.get('prompt_tokens')),
                 _as_int(usage.get('completion_tokens')),
                 latency, ua, error_text, True,
-                credit=gateway._usage_credit(usage), first_token=first_token_ms,
+                usage=usage, first_token=first_token_ms,
             )
 
     return StreamingResponse(gen(), status_code=200, media_type='text/event-stream')

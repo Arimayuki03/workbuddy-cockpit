@@ -253,11 +253,45 @@ def _usage_credit(usage: dict | None) -> float | None:
     return val if val >= 0 else None
 
 
-def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt: int, ct: int, latency: int, ua: str | None, error: str | None, stream: bool, *, credit: float | None = None, first_token: int | None = None) -> None:
+def _usage_cache(usage: dict | None) -> tuple[int | None, int | None, int | None]:
+    """从 usage 里取提示词缓存的三段 token（issue #69）。
+
+    腾讯在流式末帧 usage 里给 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`
+    / `prompt_cache_write_tokens`；**上游自己的缓存统计就是从这三个字段来的**
+    （其 `/v1/stats` 的 cache_hit_rate 同源），所以我们不必自己估算。
+
+    三个都要能区分「没给」与「给了 0」：老上游不给 = None（界面上显示「—」），
+    给了 0 = 这次真的没命中缓存。混为一谈会让用户以为缓存生效了。
+    """
+
+    def _one(name: str) -> int | None:
+        if not isinstance(usage, dict):
+            return None
+        raw = usage.get(name)
+        # bool 是 int 的子类，`True` 不能当成 1 个 token
+        if raw is None or isinstance(raw, bool):
+            return None
+        try:
+            val = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return val if val >= 0 else None
+
+    return (_one('prompt_cache_hit_tokens'),
+            _one('prompt_cache_miss_tokens'),
+            _one('prompt_cache_write_tokens'))
+
+
+def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt: int, ct: int, latency: int, ua: str | None, error: str | None, stream: bool, *, credit: float | None = None, first_token: int | None = None, usage: dict | None = None) -> None:
     """记录调用日志与用量。
 
     credit 为上游返回的真实扣费（usage.credit）。None 表示上游没给，
     与「扣了 0」是两回事，因此用 NULL 存而不是 0。
+
+    `usage` 可以直接把上游那份 usage 传进来：扣费与**提示词缓存三段**都从它里面取
+    （issue #69）。之所以整份传进来而不是在各调用点各取一遍——四条协议路径
+    （chat 流式/非流式、Responses、Anthropic）都各自有一份 usage，分开取迟早漏一处，
+    而漏的表现是「某个协议的缓存统计永远是空的」。传 `credit` 仍然有效（显式值优先）。
 
     first_token 为首字延迟（毫秒）。None 表示未采集到：非流式请求本来就没有
     中间过程，历史记录也没这个值，因此同样用 NULL 存，而不是 0。
@@ -266,6 +300,10 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
     （曾因统计函数缺失导致流式响应在收尾阶段中断，客户端看到
     内容正常但报 terminated）。因此这里整体兜底。
     """
+    if credit is None:
+        credit = _usage_credit(usage)
+    cache_hit, cache_miss, cache_write = _usage_cache(usage)
+
     try:
         # realm 由**实际发往上游的模型名**判定（上游按 `cn:` / `global:` 前缀路由）：
         # 它决定这次调用实际走了哪个账号池，也是界面按版本切换日志/统计的依据。
@@ -300,6 +338,9 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
             stream=1 if stream else 0,
             credit=credit,
             realm=realm,
+            cache_hit_tokens=cache_hit,
+            cache_miss_tokens=cache_miss,
+            cache_write_tokens=cache_write,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning('写入请求日志失败（不影响请求）: %s', exc)
@@ -649,7 +690,7 @@ async def _chat(request: Request, upstream_path: str):
             error = None if resp.status_code < 400 else (str(data)[:500] if data is not None else resp.text[:500])
             _record(
                 key, ip, requested_model or '', mapped or '', resp.status_code, pt, ct,
-                latency, ua, error, False, credit=_usage_credit(usage),
+                latency, ua, error, False, usage=usage,
             )
             if data is not None:
                 return JSONResponse(data, status_code=resp.status_code)
@@ -705,7 +746,7 @@ async def _chat(request: Request, upstream_path: str):
             ct = int(usage.get('completion_tokens') or 0)
             _record(
                 key, ip, requested_model or '', mapped or '', status_code, pt, ct,
-                latency, ua, error_text, True, credit=_usage_credit(usage),
+                latency, ua, error_text, True, usage=usage,
                 first_token=first_token_ms,
             )
 
