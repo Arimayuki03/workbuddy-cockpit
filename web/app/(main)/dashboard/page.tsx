@@ -493,7 +493,19 @@ export default function DashboardPage() {
         </div>
         {scoped.length ? (
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {scoped.slice(0, 9).map((a) => {
+            {/* 默认按实时积分多→少排序（无积分数据的排最后，同分按 uid 稳定序）；
+                3 列 × 6 行 = 18 个的上限，再多看账号页 */}
+            {[...scoped]
+              .sort((a, b) => {
+                const ca = credOf(a);
+                const cb = credOf(b);
+                const va = typeof ca === 'number' ? ca : -1;
+                const vb = typeof cb === 'number' ? cb : -1;
+                if (va !== vb) return vb - va;
+                return a.uid.localeCompare(b.uid);
+              })
+              .slice(0, 18)
+              .map((a) => {
               const tier = availabilityOf(a);
               const statusLabel = t(availabilityLabelKey(tier, a));
               const titleKey = availabilityTitleKey(tier);

@@ -357,6 +357,7 @@
     "checkinAllStarted": "批次簽到已觸發",
     "checkinAllStartedDetail": "簽到在背景非同步執行，進度可在「日誌 → 系統日誌」的任務頻道查看",
     "colRequests": "成功 / 失敗",
+    "sortToggle": "點擊列頭切換排序",
     "refreshBalance": "全量重新整理餘額",
     "refreshBalanceTitle": "並行查詢所有帳號的真實餘額並寫回池內（同步等待）",
     "reviveTitle": "復活帳號（清除禁用 / 冷卻 / 熔斷）",

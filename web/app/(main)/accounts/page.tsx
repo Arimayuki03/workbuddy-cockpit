@@ -1,6 +1,6 @@
 'use client';
 
-import {useCallback, useMemo, useState} from 'react';
+import {useCallback, useEffect, useMemo, useState} from 'react';
 import {
   Gift,
   Pause,
@@ -13,6 +13,9 @@ import {
   RefreshCw,
   HeartPulse,
   ShieldOff,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
 } from 'lucide-react';
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
@@ -58,6 +61,57 @@ export default function AccountsPage() {
   const [addOpen, setAddOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [busyUid, setBusyUid] = useState<string | null>(null);
+
+  /* ── 列排序（浏览器本地偏好持久化）─────────────────────
+   * key 对应可排序列：nickname / uid / status / credits / requests。
+   * dir: 'asc' | 'desc'。默认 credits desc（积分多→少）。
+   * 首帧与 SSR 对齐（默认值），水合后再回填 localStorage，避免 hydration mismatch
+   * 与隐私模式 SecurityError（expiryDailyMerge / i18n locale 同款约定）。 */
+  type SortKey = 'nickname' | 'uid' | 'status' | 'credits' | 'requests';
+  type SortDir = 'asc' | 'desc';
+  // 换列时的默认方向：数值/档位列默认降序（多→少、健康→故障），文本列默认升序（A→Z）。
+  // 点击与持久化恢复共用这一份口径，避免两处各写各的产生漂移。
+  const defaultDirFor = (key: SortKey): SortDir =>
+    key === 'credits' || key === 'requests' || key === 'status' ? 'desc' : 'asc';
+  const [sortKey, setSortKey] = useState<SortKey>('credits');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem('accountsSort');
+      if (raw === 'nickname' || raw === 'uid' || raw === 'status' || raw === 'credits' || raw === 'requests') {
+        setSortKey(raw);
+        // dir 键缺失/损坏时回落到该列的点击默认方向，与 toggleSort 同口径
+        setSortDir(defaultDirFor(raw));
+      }
+      const dir = window.localStorage.getItem('accountsSortDir');
+      if (dir === 'asc' || dir === 'desc') setSortDir(dir);
+    } catch {/* 存储不可用：保持默认 */}
+    // defaultDirFor 是模块级纯函数（无外部依赖），不进依赖数组
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // 在事件处理器里同步算好下一个状态再 setState：updater 必须是纯函数，
+  // 把副作用（另一个 setState、localStorage 写入）塞进 updater 会在 StrictMode
+  // 双调用下把方向翻转执行两次（相互抵消，表现为点击无效果）。
+  const toggleSort = useCallback(
+    (key: SortKey) => {
+      let dir: SortDir;
+      if (sortKey !== key) {
+        dir = defaultDirFor(key);
+        setSortKey(key);
+      } else {
+        // 同列：翻转方向
+        dir = sortDir === 'asc' ? 'desc' : 'asc';
+      }
+      setSortDir(dir);
+      try {
+        window.localStorage.setItem('accountsSort', key);
+        window.localStorage.setItem('accountsSortDir', dir);
+      } catch {/* 忽略 */}
+    },
+    // defaultDirFor 是模块级纯函数（无外部依赖），不进依赖数组
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sortKey, sortDir],
+  );
   const [checkinAllBusy, setCheckinAllBusy] = useState(false);
   const [balanceAllBusy, setBalanceAllBusy] = useState(false);
 
@@ -139,11 +193,64 @@ export default function AccountsPage() {
     }
   }, [load, t]);
 
-  /** 按当前版本过滤（Go 单实例双版本共存；存量无 realm 视为 cn） */
-  const visible = useMemo(
-    () => accounts.filter((a) => (a.realm ?? 'cn') === realm),
-    [accounts, realm],
-  );
+  /** 按当前版本过滤（Go 单实例双版本共存；存量无 realm 视为 cn），再按列排序 */
+  const visible = useMemo(() => {
+    const list = accounts.filter((a) => (a.realm ?? 'cn') === realm);
+    // 可用性分档权重：数值越小越靠前。asc = 健康→故障；desc 反转。
+    const tierWeight = (a: Account): number => {
+      switch (availabilityOf(a)) {
+        case 'online': return 0;
+        case 'neverSucceeded': return 1;
+        case 'cooling': return 2;
+        case 'unknown': return 3;
+        case 'manualDisabled': return 4;
+        case 'disabled': return 5;
+      }
+    };
+    const mul = sortDir === 'asc' ? 1 : -1;
+    return [...list].sort((a, b) => {
+      switch (sortKey) {
+        case 'nickname': {
+          const na = (a.nickname || '').trim();
+          const nb = (b.nickname || '').trim();
+          // 昵称按 locale 排；都为空时回落 uid，保持稳定
+          if (na && nb) return mul * na.localeCompare(nb);
+          if (na !== nb) return mul * (nb ? 1 : -1); // 空昵称排后面（asc）
+          return a.uid.localeCompare(b.uid);
+        }
+        case 'uid':
+          return mul * a.uid.localeCompare(b.uid);
+        case 'status': {
+          const d = tierWeight(a) - tierWeight(b);
+          if (d !== 0) return mul * d;
+          return a.uid.localeCompare(b.uid);
+        }
+        case 'requests': {
+          const sa = a.success_count ?? 0;
+          const sb = b.success_count ?? 0;
+          if (sa !== sb) return mul * (sa - sb);
+          const ea = a.err_total ?? 0;
+          const eb = b.err_total ?? 0;
+          if (ea !== eb) return mul * (ea - eb);
+          return a.uid.localeCompare(b.uid);
+        }
+        case 'credits':
+        default: {
+          // 实时余额优先（查过余额的号用它），缺数据的排最后
+          const va = liveCredits[a.uid] ?? a.credits;
+          const vb = liveCredits[b.uid] ?? b.credits;
+          const na = typeof va === 'number';
+          const nb = typeof vb === 'number';
+          if (na && nb) {
+            if (va !== vb) return mul * ((va as number) - (vb as number));
+          } else if (na !== nb) {
+            return nb ? 1 : -1; // 无数据恒排末尾，与方向无关
+          }
+          return a.uid.localeCompare(b.uid);
+        }
+      }
+    });
+  }, [accounts, realm, sortKey, sortDir, liveCredits]);
 
   /** 执行单账号操作（签到 / 余额 / 复活 / 停用 / 删除），成功后刷新列表 */
   async function run(uid: string, fn: () => Promise<unknown>, okMsg: string) {
@@ -176,6 +283,35 @@ export default function AccountsPage() {
     } finally {
       setBusyUid(null);
     }
+  }
+
+  /** 排序表头（桌面表格）：可点列头切换排序，当前列显示方向箭头 + aria-sort。
+   *  手机端卡片不提供排序入口（账号数少、触屏排序收益低），仅桌面生效。 */
+  function renderSortableHead(key: SortKey, label: string, extraClass?: string) {
+    const active = sortKey === key;
+    let Icon = ArrowUpDown;
+    if (active) Icon = sortDir === 'asc' ? ArrowUp : ArrowDown;
+    // 屏幕阅读器需要 aria-sort 才能感知当前排序列与方向（图标纯视觉）
+    let ariaSort: 'ascending' | 'descending' | 'none' = 'none';
+    if (active) ariaSort = sortDir === 'asc' ? 'ascending' : 'descending';
+    return (
+      <TableHead className={extraClass} aria-sort={ariaSort}>
+        <button
+          type="button"
+          onClick={() => toggleSort(key)}
+          title={t('accounts.sortToggle')}
+          className={
+            'inline-flex items-center gap-1 rounded-md px-1 py-0.5 text-[11px] transition-colors ' +
+            (active
+              ? 'font-medium text-foreground'
+              : 'text-muted-foreground hover:text-foreground')
+          }
+        >
+          {label}
+          <Icon className={'h-3 w-3 ' + (active ? '' : 'opacity-50')} />
+        </button>
+      </TableHead>
+    );
   }
 
   /** 账号状态徽章（表格与移动端卡片共用）。
@@ -500,12 +636,12 @@ export default function AccountsPage() {
         <Table>
           <TableHeader>
             <TableRow className="border-b border-border/60 hover:bg-transparent">
-              <TableHead className="pl-4 text-[11px] text-muted-foreground">{t('accounts.colNickname')}</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">UID</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colStatus')}</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">{t('metric.credits')}</TableHead>
-              <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colRequests')}</TableHead>
-              {isAdmin && <TableHead className="pr-4 text-right text-[11px] text-muted-foreground">{t('accounts.colActions')}</TableHead>}
+              {renderSortableHead('nickname', t('accounts.colNickname'), 'pl-4')}
+              {renderSortableHead('uid', 'UID')}
+              {renderSortableHead('status', t('accounts.colStatus'))}
+              {renderSortableHead('credits', t('metric.credits'))}
+              {renderSortableHead('requests', t('accounts.colRequests'))}
+              {isAdmin && <TableHead className="pr-4 text-[11px] text-muted-foreground">{t('accounts.colActions')}</TableHead>}
             </TableRow>
           </TableHeader>
           <TableBody>

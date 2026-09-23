@@ -109,6 +109,7 @@ export default function LogsPage() {
         (l) =>
           l.model?.toLowerCase().includes(kw) ||
           l.uid?.toLowerCase().includes(kw) ||
+          l.nick?.toLowerCase().includes(kw) ||
           l.error?.toLowerCase().includes(kw),
       );
     }
@@ -322,6 +323,7 @@ export default function LogsPage() {
               <TableHeader>
                 <TableRow className="border-b border-border/60 hover:bg-transparent">
                   <TableHead className="pl-4 text-[11px] text-muted-foreground">{t('logs.colTime')}</TableHead>
+                  <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colNickname')}</TableHead>
                   <TableHead className="text-[11px] text-muted-foreground">{t('tasks.colAccount')}</TableHead>
                   <TableHead className="text-[11px] text-muted-foreground">{t('nav.models')}</TableHead>
                   <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colStatus')}</TableHead>
@@ -338,6 +340,7 @@ export default function LogsPage() {
                     onClick={() => setDetail(l)}
                   >
                     <TableCell className="pl-4 text-xs text-muted-foreground">{fmtLogTime(l.time)}</TableCell>
+                    <TableCell className="max-w-[10rem] truncate text-xs" title={l.nick || undefined}>{l.nick || '—'}</TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground">{l.uid || '—'}</TableCell>
                     <TableCell className="text-xs">{l.model || '—'}</TableCell>
                     <TableCell>
@@ -503,7 +506,8 @@ export default function LogsPage() {
           {detail && (
             <div className="space-y-3 px-4 pb-8 text-xs">
               {([
-                ['uid', t('tasks.colAccount'), detail.uid || '—'],
+                ['uid', t('accounts.colNickname'), detail.nick || '—'],
+                ['uid2', t('tasks.colAccount'), detail.uid || '—'],
                 ['model', t('logs.rowModel'), detail.model || '—'],
                 ['status', t('logs.rowStatus'), String(detail.status)],
                 ['ttfb', t('logs.rowFirstToken'), detail.ttfb_ms ? fmtLatency(detail.ttfb_ms) : t('logs.notCollected')],
@@ -525,7 +529,7 @@ export default function LogsPage() {
                 ['error', t('logs.rowError'), detail.error || '—'],
               ] as [string, string, string][]).map(([id, k, v]) => {
                 // 这些字段内容较长且常需要贴出来（排查 / 反馈），给出复制入口
-                const copyable = ['uid', 'error'].includes(id) && v !== '—';
+                const copyable = ['uid', 'uid2', 'error'].includes(id) && v !== '—';
                 return (
                   <div key={id} className="flex items-start gap-3">
                     <div className="w-32 shrink-0 text-muted-foreground">{k}</div>

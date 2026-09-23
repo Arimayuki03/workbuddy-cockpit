@@ -318,6 +318,7 @@
     "badgeDegraded": "● Degraded (consecutive failures)",
     "degradedReason": "Temporarily removed from the account pool after {n} consecutive failures; it recovers automatically. If this keeps happening, check whether the account's token has expired (re-login required)",
     "colRequests": "OK / fail",
+    "sortToggle": "Click a column header to change sorting",
     "balance": "Balance",
     "balanceDone": "Balance refreshed",
     "balanceShort": "Balance",
