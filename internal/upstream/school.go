@@ -15,6 +15,7 @@ package upstream
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -28,12 +29,10 @@ import (
 const schoolBase = "/portal/activity/school"
 
 // schoolJSON 学院活动 API 请求（剥信封，业务 code≠0 返回带 msg 的 error）。
+// body 直传 billingJSON（其内 marshal 一次）——不得在此预编码 []byte：
+// json.Marshal 对 []byte 走 base64（曾致 draw 报 40000 "draw_uuid required"）。
 func (c *Client) schoolJSON(a *auth.Auth, method, path string, body map[string]any, out any) error {
-	var raw []byte
-	if body != nil {
-		raw, _ = json.Marshal(body)
-	}
-	data, err := c.billingJSON(a, method, schoolBase+path, raw)
+	data, err := c.billingJSON(a, method, schoolBase+path, body)
 	if err != nil {
 		return err
 	}
@@ -102,19 +101,36 @@ func (c *Client) SchoolChances(a *auth.Auth) (int, error) {
 }
 
 // SchoolDraw 抽奖一次，返回奖品描述（prize_code + 积分）。
+// draw_uuid 为标准 uuid v4（带横线 8-4-4-4-12）：对齐 python 闭环脚本实测口径
+// （uuid.uuid4()，每轮一次性）。注意 clientToken 那种 `<prefix>-<hex>` 混合形态
+// 本端点从未被服务端成功验证过（此前请求体 base64 化全灭），勿混用。
 func (c *Client) SchoolDraw(a *auth.Auth) (string, error) {
 	var out struct {
 		PrizeCode    string `json:"prize_code"`
 		CreditAmount int    `json:"credit_amount"`
 	}
 	if err := c.schoolJSON(a, http.MethodPost, "/wheel/draw",
-		map[string]any{"draw_uuid": growthClientToken("draw")}, &out); err != nil {
+		map[string]any{"draw_uuid": uuidV4()}, &out); err != nil {
 		return "", err
 	}
 	if out.CreditAmount > 0 {
 		return fmt.Sprintf("%s +%dc", out.PrizeCode, out.CreditAmount), nil
 	}
 	return out.PrizeCode, nil
+}
+
+// uuidV4 生成 RFC 4122 v4 形态 uuid（8-4-4-4-12 带横线）。版本/变体位按规范置位。
+func uuidV4() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// 熵源故障兜底：仍输出合法形态（服务端只当一次性幂等键，不校验真随机性）。
+		for i := range b {
+			b[i] = byte(time.Now().UnixNano() >> (i % 8 * 8))
+		}
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // ---- 开学季 chat_3_times / expert_use（2026-09-14 判据破解）----
