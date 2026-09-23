@@ -66,8 +66,9 @@ func TestGlobalModelsMergeV3PrimaryV2Supplement(t *testing.T) {
 	infos := c.FetchGlobalModelInfos(globalAcct())
 
 	// 两路并发各一次（v2 200 → 不打 /console）。
-	if len(calls) != 2 {
-		t.Fatalf("probe calls=%v want 2 (v3 + v2)", calls)
+	// 双 UA 后 v3 主路为两路并发（IDE UA + 默认 UA）+ 企业端点 1 路 = 3 次。
+	if len(calls) != 3 {
+		t.Fatalf("probe calls=%v want 3 (v3 x2 UA + v2)", calls)
 	}
 
 	// 名单：v3 原序（glm-5.2, hy4-preview, deepseek-v4.1-flash）+ v2 补充（gpt-5.3-codex）。
@@ -108,8 +109,9 @@ func TestGlobalModelsMergeV3FailDegradesToV2(t *testing.T) {
 	names := globalModelsClient(t, srv).FetchGlobalModels(globalAcct())
 
 	// v3 400 + v2 200：降级为 v2 结果（v3 不拖累）。
-	if len(calls) != 2 {
-		t.Fatalf("probe calls=%v want 2 (v3 attempted + v2 succeeded)", calls)
+	// 双 UA 后：v3 两路（都失败）+ v2 成功 1 路 = 3 次。
+	if len(calls) != 3 {
+		t.Fatalf("probe calls=%v want 3 (v3 x2 UA attempted + v2 succeeded)", calls)
 	}
 	want := []string{"glm-5.2", "hy4-preview", "gpt-5.3-codex"}
 	if !sameStrings(names, want) {
@@ -264,4 +266,62 @@ func countIDs(list []string, s string) int {
 		}
 	}
 	return n
+}
+
+// trialBannerFixture /v3/config 带 ModelTrialBanner 试用横幅：hy4-preview-f 只在
+// banners 里（data.models 没有），targetModelId 指向既有条目 hy4-preview。
+// 吸收 panel 分支 b498416（上游实测 global 侧 hy4-preview-f 即此形态，实际可调用）。
+const trialBannerFixture = `{"code":0,"data":{
+	"models":[
+		{"id":"hy4-preview","name":"Hy4","credits":"x0.29","maxInputTokens":256000,"maxOutputTokens":32000}
+	],
+	"productFeaturesConfig":{"ModelTrialBanner":{"banners":[
+		{"firstUseTimeKey":"hy4.first_user_time","modelId":"hy4-preview-f","targetModelId":"hy4-preview","trialDays":14}
+	]}}
+}}`
+
+// TestGlobalModelsTrialBanner 试用横幅模型补进目录：
+//   - hy4-preview-f 出现在名单（纯 data.models 解析会漏）；
+//   - 能力字段从 targetModelId 条目继承（ContextWindow 同 hy4-preview 的 256000）；
+//   - Credits/Tags 显式清空（试用版不透出转正后的计费与营销信息）；
+//   - data.models 已含同 id 时去重跳过（横幅不覆盖目录条目）。
+func TestGlobalModelsTrialBanner(t *testing.T) {
+	auth.SetGlobalEnabled(true)
+	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
+
+	var calls []string
+	srv := v3V2ProbeSrv(t, &calls, 200, trialBannerFixture)
+	defer srv.Close()
+
+	c := globalModelsClient(t, srv)
+	names := c.FetchGlobalModels(globalAcct())
+	infos := c.FetchGlobalModelInfos(globalAcct())
+
+	found := false
+	for _, id := range names {
+		if id == "hy4-preview-f" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("trial banner model hy4-preview-f missing from names=%v", names)
+	}
+	var banner ModelInfo
+	for _, mi := range infos {
+		if mi.ID == "hy4-preview-f" {
+			banner = mi
+		}
+	}
+	if banner.ID == "" {
+		t.Fatalf("trial banner model missing from infos=%v", infos)
+	}
+	if banner.ContextWindow != 256000 {
+		t.Errorf("banner ContextWindow=%d want 256000 (inherited from targetModelId entry)", banner.ContextWindow)
+	}
+	if banner.Credits != "" {
+		t.Errorf("banner Credits=%q want empty (trial model must not carry post-conversion pricing)", banner.Credits)
+	}
+	if len(banner.Tags) != 0 {
+		t.Errorf("banner Tags=%v want empty", banner.Tags)
+	}
 }

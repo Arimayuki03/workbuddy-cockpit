@@ -100,6 +100,46 @@ func (p *Pool) SetManualDisabled(uid string, disabled bool, reason string) (foun
 	return true, true
 }
 
+// ForceClearCooldown 运维强制清除账号的冷却与限流状态（吸收 workbuddy-manager
+// v1.0.64 的 force-clear 思路）：冷却域（until/coolKind/softStreak/modelCooldowns）、
+// 熔断器（fails/retryCount/breakerUntil）、连败降权（consecutiveFails/degradeUntil）
+// 全部归零。6004 模型级 limit 的独立冷却表一并清空——运维明确表达"这个号现在就能用"
+// 时，等冷却自然过期没有意义；上游若真仍限流，下一次请求会重新学习（代价是可能
+// 白打一次 6004，可接受）。
+// 与 ReviveDisabled 的分工：那个只解自动禁用（disabled 位），本方法只清"暂时不可用"
+// 的各计时器——禁用/手动停用两位都**不碰**，各有自己的入口。
+// 返回 (found, cleared)：uid 不存在 → (false,false)；无可清状态 → (true,false)。
+func (p *Pool) ForceClearCooldown(uid string) (found, cleared bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false, false
+	}
+	if e.until.IsZero() && e.coolKind == 0 && e.softStreak == 0 && e.modelCooldowns == nil &&
+		e.fails == 0 && e.retryCount == 0 && e.breakerUntil.IsZero() &&
+		e.consecutiveFails == 0 && e.degradeUntil.IsZero() {
+		return true, false
+	}
+	// 已禁用账号保留 disabled_reason：disableLocked 有意保留熔断观测，ForceClearCooldown
+	// 只解「暂时不可用」的计时器，不应抹掉 /status 与面板上 disabled_reason 的运维线索。
+	// clearCoolingLocked 会连 reason 一并清空，这里改用按需保 reason 的写法。
+	if e.disabled {
+		saved := e.reason
+		e.clearCoolingLocked()
+		e.reason = saved
+	} else {
+		e.clearCoolingLocked()
+	}
+	e.fails = 0
+	e.retryCount = 0
+	e.breakerUntil = time.Time{}
+	e.consecutiveFails = 0
+	e.degradeUntil = time.Time{}
+	p.dirty.Store(true)
+	return true, true
+}
+
 // ManualDisabledState 读单个账号的手动停用态（供端点回显）。uid 不存在时 ok=false。
 func (p *Pool) ManualDisabledState(uid string) (disabled bool, reason string, ok bool) {
 	p.mu.RLock()

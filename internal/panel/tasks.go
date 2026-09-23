@@ -6,6 +6,7 @@ package panel
 
 import (
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -65,9 +66,20 @@ func (p *Panel) accountTaskAccept(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		TaskCodes []string `json:"task_codes"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.TaskCodes) == 0 {
+	if err := json.NewDecoder(io.LimitReader(r.Body, loginBodyLimit)).Decode(&body); err != nil || len(body.TaskCodes) == 0 {
 		writeErr(w, http.StatusBadRequest, "task_codes required")
 		return
+	}
+	// 限制单次 accept 数量与元素长度：避免恶意/异常客户端送巨型数组占内存或反射到上游。
+	if len(body.TaskCodes) > 100 {
+		writeErr(w, http.StatusBadRequest, "too many task_codes (max 100)")
+		return
+	}
+	for _, c := range body.TaskCodes {
+		if len(c) == 0 || len(c) > 128 {
+			writeErr(w, http.StatusBadRequest, "invalid task_code length")
+			return
+		}
 	}
 	if err := p.cfg.Upstream.AcceptTasks(a, body.TaskCodes); err != nil {
 		writeErr(w, http.StatusBadGateway, "accept: "+err.Error())
@@ -159,8 +171,12 @@ func (p *Panel) accountTaskClaim(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		TaskCode string `json:"task_code"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.TaskCode == "" {
+	if err := json.NewDecoder(io.LimitReader(r.Body, loginBodyLimit)).Decode(&body); err != nil || body.TaskCode == "" {
 		writeErr(w, http.StatusBadRequest, "task_code required")
+		return
+	}
+	if len(body.TaskCode) > 128 {
+		writeErr(w, http.StatusBadRequest, "invalid task_code length")
 		return
 	}
 	// 小程序口径任务走 chat 域 mp 头领奖（缺头实测不可领）；其余 Web 端接口。

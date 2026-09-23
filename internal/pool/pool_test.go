@@ -839,7 +839,8 @@ func TestCooldownSoftStreakResetByReenable(t *testing.T) {
 }
 
 func TestCooldownHardDoesNotAdvanceSoftStreak(t *testing.T) {
-	// 硬冷却（余额耗尽）时长由签到时点决定，不参与软退避指数。
+	// 硬冷却（余额耗尽）时长由签到时点决定，不参与软退避指数；且 CooldownSoftRate
+	// 不得把更长的硬冷却截短/翻转（零余额号提前回池只会白打一次 402）。
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.CooldownUntilTomorrow4AM("u1", "余额不足")
@@ -847,7 +848,17 @@ func TestCooldownHardDoesNotAdvanceSoftStreak(t *testing.T) {
 		t.Fatalf("hard cooldown must not touch soft_streak, got %d", st.SoftStreak)
 	}
 	p.CooldownSoftRate("u1", 600*time.Second, time.Time{}, "x")
-	wantCoolSec(t, p, "u1", 600, 3)
+	// 硬冷却保留：kind 不翻成 soft_rate，截止时间仍是次日 04:00 附近。
+	st, _ := p.Status("u1")
+	if st.CoolKind != "hard_credit" {
+		t.Fatalf("hard cooldown kind must be preserved, got %q", st.CoolKind)
+	}
+	if st.SoftStreak != 0 {
+		t.Fatalf("preserved hard cooldown must not advance soft_streak, got %d", st.SoftStreak)
+	}
+	if st.CoolRemaining < 60*60 { // 至少还有 1 小时才到 04:00（远端未来）
+		t.Errorf("hard cooldown should retain long horizon, got %ds", st.CoolRemaining)
+	}
 }
 
 func TestSoftStreakPersistsAcrossReload(t *testing.T) {

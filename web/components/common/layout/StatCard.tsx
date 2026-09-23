@@ -36,6 +36,7 @@ const TONE_ICON: Record<StatTone, string> = {
  */
 export function StatCard({
   label,
+  labelNode,
   value,
   hint,
   icon: Icon,
@@ -44,6 +45,8 @@ export function StatCard({
   delay = 0,
 }: {
   label: string;
+  /** 需要在 label 位置放交互元素（如口径切换按钮）时的 ReactNode 覆盖；优先于 label */
+  labelNode?: ReactNode;
   value: ReactNode;
   hint?: string;
   icon?: LucideIcon;
@@ -66,7 +69,7 @@ export function StatCard({
     >
       <div className="flex items-start justify-between gap-2">
         <div className="text-[11px] font-medium text-gray-500 dark:text-gray-400 truncate">
-          {label}
+          {labelNode ?? label}
         </div>
         {Icon && (
           <div

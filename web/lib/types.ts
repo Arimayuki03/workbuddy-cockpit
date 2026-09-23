@@ -582,6 +582,14 @@ export interface RequestLog {
   /** 本次真实扣费（上游 usage.credit；has_credit=false 时无观测） */
   credit: number;
   has_credit: boolean;
+  /** 缓存命中 token 数（上游 usage.prompt_cache_hit_tokens；has_cache_obs=false 时无观测） */
+  cache_hit_tokens: number;
+  /** 缓存未命中 token 数 */
+  cache_miss_tokens: number;
+  /** 缓存写入 token 数 */
+  cache_write_tokens: number;
+  /** 上游 usage 是否带缓存三段观测（缺失 ≠ 命中 0） */
+  has_cache_obs: boolean;
   error: string;
 }
 

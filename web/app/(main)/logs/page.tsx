@@ -188,6 +188,44 @@ export default function LogsPage() {
     return Number.isFinite(at) ? fmtDateTime(at / 1000) : ts;
   }
 
+  /**
+   * 请求日志缓存标记（吸收 workbuddy-manager v1.0.67 思路）：
+   * 命中为主显示绿色「缓存 N%」，完全未命中显示琥珀「未命中」，悬停可见三段明细。
+   * has_cache_obs=false 表示上游 usage 未带缓存字段（老观测缺失），不显示——
+   * 缺观测不冒充「命中 0」。写入段不计入命中率分母（命中/未命中才是同一总量两段）。
+   */
+  function cacheBadge(l: RequestLog) {
+    if (!l.has_cache_obs) return null;
+    const hit = l.cache_hit_tokens ?? 0;
+    const miss = l.cache_miss_tokens ?? 0;
+    const write = l.cache_write_tokens ?? 0;
+    const denom = hit + miss;
+    const title =
+      `hit ${fmtNumber(hit)} / miss ${fmtNumber(miss)} / write ${fmtNumber(write)}`;
+    if (denom > 0 && hit >= miss) {
+      const pct = Math.round((hit / denom) * 100);
+      return (
+        <span
+          className="ml-1.5 cursor-help rounded-full bg-emerald-500/12 px-1.5 py-0.5 text-[10px] text-emerald-600 dark:text-emerald-400"
+          title={title}
+        >
+          {t('logs.cacheHitPct', {pct})}
+        </span>
+      );
+    }
+    if (denom > 0 || write > 0) {
+      return (
+        <span
+          className="ml-1.5 cursor-help rounded-full bg-amber-500/12 px-1.5 py-0.5 text-[10px] text-amber-600 dark:text-amber-400"
+          title={title}
+        >
+          {t('logs.cacheMissFull')}
+        </span>
+      );
+    }
+    return null;
+  }
+
   return (
     <div className="flex flex-col gap-4 md:gap-6">
       <PageHeader
@@ -327,7 +365,10 @@ export default function LogsPage() {
                     </TableCell>
                     <TableCell className="text-xs tabular-nums">
                       {l.tokens > 0 ? (
-                        fmtNumber(l.tokens)
+                        <>
+                          {fmtNumber(l.tokens)}
+                          {cacheBadge(l)}
+                        </>
                       ) : (
                         <span className="text-muted-foreground/70">—</span>
                       )}
@@ -473,6 +514,13 @@ export default function LogsPage() {
                   detail.has_credit
                     ? fmtCredit(detail.credit) + (detail.credit > 0 ? '' : t('logs.unbilled'))
                     : t('logs.noCredit'),
+                ],
+                [
+                  'cache',
+                  t('logs.rowCache'),
+                  !detail.has_cache_obs
+                    ? t('logs.notCollected')
+                    : `${t('logs.cacheHitWord')} ${fmtNumber(detail.cache_hit_tokens)} · ${t('logs.cacheMissWord')} ${fmtNumber(detail.cache_miss_tokens)} · ${t('logs.cacheWriteWord')} ${fmtNumber(detail.cache_write_tokens)}`,
                 ],
                 ['error', t('logs.rowError'), detail.error || '—'],
               ] as [string, string, string][]).map(([id, k, v]) => {

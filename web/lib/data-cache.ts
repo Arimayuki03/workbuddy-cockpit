@@ -104,9 +104,19 @@ export function useCachedAsync<T>(
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
 
-  const [data, setData] = useState<T | null>(() => peekCache<T>(key)?.data ?? null);
-  // 有缓存就不是「加载中」——骨架屏只给真正空手的场景
-  const [loading, setLoading] = useState(() => !peekCache<T>(key));
+  // 首帧与 SSR 对齐（null + loading=true）：页面静态导出后服务端恒为骨架屏，
+  // 客户端水合时若直接用 sessionStorage 缓存初始化会触发 hydration mismatch、
+  // 整树客户端重渲染。改成挂载后再回填缓存，与项目其他「挂载后读存储」约定一致。
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  // 挂载后从 sessionStorage 回填一次：F5 时避免整页骨架闪 1 帧，同时保住 SSR 一致。
+  useEffect(() => {
+    const hit = peekCache<T>(key);
+    setData(hit?.data ?? null);
+    setLoading(!hit);
+    // 仅在挂载时执行一次；key 变化由下方独立 effect 处理
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // 「刷新中」（缓存已显示数据、后台在拉新）：给按钮转圈用，不触发骨架屏
   const [refreshing, setRefreshing] = useState(false);
   // 在途请求所属的 key（null=无在途）。不能是裸布尔：切时间窗（stats 页 hours）

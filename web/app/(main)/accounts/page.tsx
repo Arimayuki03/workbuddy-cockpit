@@ -12,6 +12,7 @@ import {
   Coins,
   RefreshCw,
   HeartPulse,
+  ShieldOff,
 } from 'lucide-react';
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
@@ -338,6 +339,14 @@ export default function AccountsPage() {
           onClick={() => run(a.uid, () => accountApi.balance(a.uid), t('accounts.balanceDone'))}>
           <Coins className="h-3.5 w-3.5" />
         </Button>
+        {/* 强制清除冷却/限流：冷却中（含 6004 模型级限流）不等自然到期立即回池。
+            与复活分工：这个只清计时器，禁用/停用走右边两位。 */}
+        {!off && (
+          <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('accounts.clearCooldownTitle')} disabled={busy}
+            onClick={() => run(a.uid, () => accountApi.clearCooldown(a.uid), t('accounts.clearCooldownDone'))}>
+            <ShieldOff className="h-3.5 w-3.5" />
+          </Button>
+        )}
         {/* 停用 / 复活。复活是运维口径：清禁用 + 冷却 + 熔断 */}
         {off ? (
           <Button

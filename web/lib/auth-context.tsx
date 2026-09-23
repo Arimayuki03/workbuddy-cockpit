@@ -71,7 +71,14 @@ export function AuthProvider({children}: {children: ReactNode}) {
 
   const login = useCallback(async (username: string, password: string) => {
     const res = await authApi.login(username, password);
-    const next = {username: res.username, role: res.role as Role};
+    // 后端 200 但 ok:false（或反代返回了非预期 200 体）时不能当成登录成功——
+    // 否则会把用户置为已登录态并预热数据，UI 层认证态失真。
+    if (!res?.ok) {
+      throw new Error('login rejected');
+    }
+    // role 运行时收窄，as 断言会让任意后端字符串穿透到 isAdmin 判定。
+    const role: Role = res.role === 'admin' ? 'admin' : 'viewer';
+    const next = {username: res.username, role};
     setMe(next);
     writeCachedMe(next);
     setLoading(false);

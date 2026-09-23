@@ -46,6 +46,23 @@ import {notify} from '@/lib/toast';
 export default function DashboardPage() {
   const {realm, label: realmName} = useRealm();
   const t = useT();
+  // 到期积分按天归并（浏览器本地偏好，默认关闭——升级后看到的是原口径）。
+  // 首帧与 SSR 对齐（false），水合后再从 localStorage 回填，避免 hydration mismatch
+  // 与隐私模式 SecurityError（realm-context / i18n provider 同款约定）。
+  const [expiryDailyMerge, setExpiryDailyMerge] = useState(false);
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem('expiryDailyMerge') === '1') {
+        setExpiryDailyMerge(true);
+      }
+    } catch {/* 隐私模式等存储不可用：保持默认关闭 */}
+  }, []);
+  const toggleExpiryDailyMerge = useCallback((on: boolean) => {
+    setExpiryDailyMerge(on);
+    try {
+      window.localStorage.setItem('expiryDailyMerge', on ? '1' : '0');
+    } catch {/* 隐私模式等存储不可用：本次会话内仍生效 */}
+  }, []);
   // overview（池快照，快）与 packages（逐号查上游，慢）分两个缓存条目并行拉：
   // 快的先渲染卡片骨架外的东西，慢的（积分）拿到后再补上——切页先出缓存值，
   // 后台刷新静默替换，不再出现「整页空 1-2 秒」。
@@ -71,7 +88,8 @@ export default function DashboardPage() {
   // 后组件重渲染，这里自然跟随——没有独立 setState 时序，也不会出现
   // 「先渲染池快照值、约 1 秒后被实时值覆盖」的闪变。
   const liveCredits: Record<string, number> = {};
-  let nextExpiry: {at: number; amount: number} | null = null;
+  // 到期积分明细（按时间升序收集，供「按天归并」与最近一笔两种口径共用）。
+  const expiries: {at: number; amount: number}[] = [];
   if (packages) {
     for (const row of packages.accounts) {
       if (typeof row.remain === 'number' && !row.error) liveCredits[row.uid] = row.remain;
@@ -79,10 +97,36 @@ export default function DashboardPage() {
         if (!p.end_time) continue;
         const at = Date.parse(p.end_time);
         if (!Number.isFinite(at) || p.remain <= 0) continue;
-        if (!nextExpiry || at < nextExpiry.at) nextExpiry = {at, amount: p.remain};
+        expiries.push({at, amount: p.remain});
       }
     }
   }
+  expiries.sort((a, b) => a.at - b.at);
+  // 到期积分按天归并（吸收 workbuddy-manager「到期积分按天模糊统计」思路）：
+  // 同一**本地日历日**到期的多笔合并成一笔（金额求和、时刻取当天最早——宁保守，
+  // 免得按"还有 12 天"安排、实际当天凌晨就作废）。浏览器本地偏好，不进配置。
+  const expiryDayKey = (at: number) => {
+    const d = new Date(at);
+    return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  };
+  const mergedExpiries: {at: number; amount: number}[] = [];
+  if (expiryDailyMerge) {
+    const byDay = new Map<string, {at: number; amount: number}>();
+    for (const e of expiries) {
+      const key = expiryDayKey(e.at);
+      const cur = byDay.get(key);
+      if (cur) {
+        cur.amount += e.amount;
+        cur.at = Math.min(cur.at, e.at);
+      } else {
+        byDay.set(key, {...e});
+      }
+    }
+    mergedExpiries.push(...Array.from(byDay.values()).sort((a, b) => a.at - b.at));
+  } else {
+    mergedExpiries.push(...expiries);
+  }
+  const nextExpiry: {at: number; amount: number} | null = mergedExpiries[0] ?? null;
 
   // 上游健康与用量时序：这两个端点都很快，不进缓存，保持原有的一次性拉取。
   // 心跳沿用原 load：同时刷上游状态、usage 与两个缓存条目，全部数据同帧续命。
@@ -286,7 +330,27 @@ export default function DashboardPage() {
         />
         <StatCard
           label={t('metric.credits')}
-          // 值里带上最近一笔到期：额度高但下周作废，比额度低更值得注意
+          labelNode={
+            <span className="inline-flex items-center gap-1">
+              {/* 到期口径切换（浏览器本地偏好）：默认「最近一笔」；点开按天归并。
+                  见上方 mergedExpiries 派生逻辑。labelNode 覆盖纯文本 label，
+                  使切换按钮能出现在卡片标题行。 */}
+              <button
+                type="button"
+                onClick={() => toggleExpiryDailyMerge(!expiryDailyMerge)}
+                title={t('dashboard.expiryMergeToggle', {mode: expiryDailyMerge ? t('dashboard.expiryMergeDaily') : t('dashboard.expiryMergeSingle')})}
+                className={
+                  'rounded-full px-1.5 py-0.5 text-[9px] font-normal leading-none ' +
+                  (expiryDailyMerge
+                    ? 'bg-sky-500/15 text-sky-600 dark:text-sky-400'
+                    : 'bg-gray-500/10 text-gray-500 dark:text-gray-400')
+                }
+              >
+                {expiryDailyMerge ? t('dashboard.expiryMergeDaily') : t('dashboard.expiryMergeSingle')}
+              </button>
+            </span>
+          }
+          // 值里带上最近到期：额度高但下周作废，比额度低更值得注意
           value={creditsKnown.length ? fmtNumber(totalCredits) : '—'}
           hint={
             !creditsKnown.length
@@ -294,10 +358,15 @@ export default function DashboardPage() {
               : creditsLow > 0
                 ? t('dashboard.creditsLow', {count: creditsLow, n: creditsLow})
                 : nextExpiry
-                  ? t('dashboard.creditsExpiry', {
-                      time: fmtDateTime(nextExpiry.at),
-                      amount: fmtNumber(nextExpiry.amount),
-                    })
+                  ? expiryDailyMerge && mergedExpiries.length > 1
+                    ? t('dashboard.creditsExpiryDaily', {
+                        time: fmtDateTime(nextExpiry.at),
+                        amount: fmtNumber(nextExpiry.amount),
+                      })
+                    : t('dashboard.creditsExpiry', {
+                        time: fmtDateTime(nextExpiry.at),
+                        amount: fmtNumber(nextExpiry.amount),
+                      })
                   : t('dashboard.creditsCovered', {count: creditsKnown.length, n: creditsKnown.length})
           }
           icon={Coins}

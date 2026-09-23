@@ -22,7 +22,13 @@ type requestLogEntry struct {
 	TTFBMS    int64     `json:"ttfb_ms"` // 首字延迟（非流式/无帧 = 0）
 	Credit    float64   `json:"credit"`  // 扣费（hasCredit=false 时无观测）
 	HasCredit bool      `json:"has_credit"`
-	Error     string    `json:"error,omitempty"` // 非 200 的原因摘要
+	// 缓存三段（上游 usage 的 prompt_cache_*_tokens）：HasCacheObs=false 表示本次
+	// 无 usage 观测（缺观测 ≠ 命中 0，前端不显示标记）；true 时命中/未命中可全 0。
+	CacheHit    int    `json:"cache_hit_tokens,omitempty"`
+	CacheMiss   int    `json:"cache_miss_tokens,omitempty"`
+	CacheWrite  int    `json:"cache_write_tokens,omitempty"`
+	HasCacheObs bool   `json:"has_cache_obs,omitempty"`
+	Error       string `json:"error,omitempty"` // 非 200 的原因摘要
 }
 
 // requestLogCap 环形缓冲容量（设计文档 §4.3.2：~1000 条，重启即清）。
@@ -101,16 +107,20 @@ func (h *Handler) handleRequestLogs(w http.ResponseWriter, r *http.Request) {
 // 前置条件：done() 已把 uid/nick/ttfb 等字段填齐。
 func requestLogPayloadFromStat(s *chatStat) requestLogEntry {
 	return requestLogEntry{
-		Time:      time.Now(),
-		Model:     s.model,
-		UID:       s.uid,
-		Nick:      s.nick,
-		Mode:      s.mode,
-		Status:    s.status,
-		Tokens:    s.toks,
-		TTFBMS:    s.ttfb.Milliseconds(),
-		Credit:    s.credit,
-		HasCredit: s.hasCredit,
-		Error:     s.errSummary,
+		Time:        time.Now(),
+		Model:       s.model,
+		UID:         s.uid,
+		Nick:        s.nick,
+		Mode:        s.mode,
+		Status:      s.status,
+		Tokens:      s.toks,
+		TTFBMS:      s.ttfb.Milliseconds(),
+		Credit:      s.credit,
+		HasCredit:   s.hasCredit,
+		CacheHit:    s.cacheHit,
+		CacheMiss:   s.cacheMiss,
+		CacheWrite:  s.cacheWr,
+		HasCacheObs: s.hasUsage,
+		Error:       s.errSummary,
 	}
 }

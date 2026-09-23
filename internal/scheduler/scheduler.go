@@ -345,6 +345,13 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 		wg.Add(1)
 		go func(k taskKind) {
 			defer wg.Done()
+			// 任务体横跨上游 JSON 解析 / panel 注入回调 / 脚本执行，任何一处 panic 都不该
+			// 击穿整个网关进程。recover 后按任务失败口径记录，让其余任务与主循环继续。
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("scheduler: task %d panic: %v", k, r)
+				}
+			}()
 			s.dispatch(ctx, k)
 		}(k)
 	}
@@ -1005,7 +1012,7 @@ func (s *Scheduler) SnapshotAll() []KindSnapshot {
 // 与定时器或另一次手动撞车时返回 ErrBusy，不排队不重复打上游。
 // 不看排程开关——禁用中的任务同样允许手动执行一次（与 cmd/task 语义一致）。
 // 执行完成（含失败）后写 running/lastRun/lastOut 观测字段。
-func (s *Scheduler) RunKindNow(name string) error {
+func (s *Scheduler) RunKindNow(name string) (err error) {
 	k, ok := KindFromName(name)
 	if !ok {
 		return fmt.Errorf("unknown task kind %q", name)
@@ -1014,6 +1021,14 @@ func (s *Scheduler) RunKindNow(name string) error {
 		return ErrBusy
 	}
 	defer s.runMu[k].Unlock()
+	// 手动触发经 admin 后台 goroutine 进来，任务体 panic 不应击穿进程；
+	// 以 error 形式回传给 admin 记录到 last_result，进程得以续命。
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("scheduler: RunKindNow(%s) panic: %v", name, r)
+			err = fmt.Errorf("task %s panic: %v", name, r)
+		}
+	}()
 	s.runOne(context.Background(), k)
 	return nil
 }

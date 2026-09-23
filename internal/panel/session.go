@@ -17,7 +17,10 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"io"
+	"log"
+	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"workbuddy2api/internal/httpauth"
@@ -33,11 +36,92 @@ const sessionTTL = 30 * 24 * time.Hour
 // loginBodyLimit 登录/映射请求体上限（防大 body 拖内存；表单极小）。
 const loginBodyLimit = 1 << 16
 
+// 登录失败速率限制：/api/login 是面板唯一免鉴权入口，无限制会被在线穷举 api_key
+// （成功后等于拿到 /v1/* + 凭据导出全量能力）。按来源 IP 计数，达到阈值后短暂锁定。
+const (
+	loginFailWindow  = 10 * time.Minute // 计数窗口
+	loginFailMax     = 5                // 窗口内允许失败次数
+	loginLockoutTime = 15 * time.Minute // 锁定时长
+)
+
+// loginLimiter 按来源 IP 的失败计数 + 锁定时限。map 仅在 handleLogin 路径访问，
+// 由独立 mutex 保护；条目惰性过期（命中即检查时间戳），不另起清理 goroutine。
+type loginLimiter struct {
+	mu      sync.Mutex
+	entries map[string]*loginFailEntry
+}
+type loginFailEntry struct {
+	fails       int
+	windowStart time.Time
+	lockedUntil time.Time
+}
+
+var loginRateLimit = &loginLimiter{entries: map[string]*loginFailEntry{}}
+
+// allow 判定该来源当前是否可继续尝试。true=允许，false=已锁定。
+func (l *loginLimiter) allow(ip string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e, ok := l.entries[ip]
+	if !ok {
+		return true
+	}
+	if !e.lockedUntil.IsZero() {
+		if time.Now().Before(e.lockedUntil) {
+			return false
+		}
+		// 锁定到期：清掉重来。
+		delete(l.entries, ip)
+		return true
+	}
+	return true
+}
+
+// recordFailure 记一次失败，达到阈值即锁定。返回当前是否已被锁。
+func (l *loginLimiter) recordFailure(ip string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	e, ok := l.entries[ip]
+	if !ok || now.Sub(e.windowStart) > loginFailWindow {
+		e = &loginFailEntry{windowStart: now}
+		l.entries[ip] = e
+	}
+	e.fails++
+	if e.fails >= loginFailMax {
+		e.lockedUntil = now.Add(loginLockoutTime)
+		return true
+	}
+	return false
+}
+
+// reset 登录成功后清零该来源的失败计数。
+func (l *loginLimiter) reset(ip string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.entries, ip)
+}
+
+// clientIP 提取请求来源 IP（RemoteAddr 去端口；面板在反代后时应由部署方保证
+// RemoteAddr 已是真实客户端，或另行注入 X-Forwarded-For 白名单——本项目直连形态为主）。
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
 // handleLogin POST /api/login {username,password}。
 // username 忽略（单凭证语义，manager 登录页保留输入框只是形态）；
 // password 与 api_key 经 SHA-256 摘要后常量时间比较（与 httpauth.VerifyBearer
 // 同口径，不泄露长度），成功换发签名 cookie，失败 401。
 func (p *Panel) handleLogin(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+	if !loginRateLimit.allow(ip) {
+		writeErr(w, http.StatusTooManyRequests, "too_many_attempts")
+		return
+	}
 	var body struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -57,9 +141,13 @@ func (p *Panel) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// 直接对原文 ConstantTimeCompare 会在长度不等时立即返回（泄露长度信息）；
 	// 摘要把任意长度吸收进定长 32 字节，比较耗时与输入长度、相等与否都无关。
 	if subtle.ConstantTimeCompare(sha256Sum(body.Password), sha256Sum(key)) != 1 {
+		if loginRateLimit.recordFailure(ip) {
+			log.Printf("panel: 登录失败 %d 次，来源 %s 锁定 %v", loginFailMax, ip, loginLockoutTime)
+		}
 		writeErr(w, http.StatusUnauthorized, "invalid_password")
 		return
 	}
+	loginRateLimit.reset(ip)
 	p.issueSession(w, key)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "username": "admin", "role": "admin"})
 }

@@ -54,7 +54,19 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
-		e.until = time.Now().Add(d)
+		now := time.Now()
+		newUntil := now.Add(d)
+		// 不截短生效中的更长冷却：余额耗尽的 CoolHard（至次日 04:00）若被并发
+		// 在途请求撞上的短期 CoolSoft（404/14017 等）覆盖，零余额号会在几十秒后
+		// 提前回池再吃一次 402。既有未过期截止更晚时，保留原截止与原 kind/reason。
+		// 例外：d<=0 是「立即到期/清零」语义（测试/运维强制过期用），照常走写入路径。
+		if d > 0 && now.Before(e.until) && e.until.After(newUntil) {
+			// 仅清模型级豁免表（防换模型绕过），其他字段保持。
+			e.modelCooldowns = nil
+			p.dirty.Store(true)
+			return
+		}
+		e.until = newUntil
 		e.coolKind = kind
 		e.reason = reason
 		// 非模型级冷却入口：清空 6004 模型级独立冷却表（modelCooldowns），
@@ -96,6 +108,13 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 		} else {
 			// 无解析时间（普通软冷却）：有界退避（base 起按 softStreak 翻倍、封顶
 			// softRateMax）。注意：**在软冷却中**（until 未到期）时不推进/不延长。
+			// 同样不截短更长的硬冷却（余额耗尽）：兜底探测撞上 402 中的账号时，
+			// 保留原截止与原 kind，让账号等签到恢复。
+			if now.Before(e.until) && e.coolKind == CoolHard {
+				e.modelCooldowns = nil
+				p.dirty.Store(true)
+				return
+			}
 			if e.coolKind != CoolSoft || !now.Before(e.until) {
 				d := p.softDurationLocked(base, e.softStreak+1)
 				e.softStreak++
@@ -203,6 +222,10 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		now := time.Now()
+		// 保留 CoolHard 语义：until 仍是更长的硬冷却时，既不翻 kind 也不改 reason——
+		// pickEarliestExpiryLocked 的 CoolHard 排除判据是 e.coolKind==CoolHard，
+		// 翻成 CoolSoft 会让余额耗尽号重新获得全冷却兜底资格、兜底选中必 402。
+		preserveHard := now.Before(e.until) && e.coolKind == CoolHard
 		if !resetAt.IsZero() {
 			// 新软冷却截止 = min(resetAt, now+softRateMax)；与既有未过期冷却取更长者，
 			// 不截短 CoolHard（及任何更长的未过期 until）。已过期的 until 不参与 max
@@ -212,14 +235,21 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 				soft = e.until
 			}
 			e.until = soft
+		} else if preserveHard {
+			// 仍处硬冷却：不动 until/softStreak，只清模型豁免。
+			e.modelCooldowns = nil
+			p.dirty.Store(true)
+			return
 		} else if e.coolKind != CoolSoft || !now.Before(e.until) {
 			// 新限流（不在有效软冷却中）：推进有界退避；兜底探测（仍在软冷却中）不翻倍。
 			d := p.softDurationLocked(base, e.softStreak+1)
 			e.softStreak++
 			e.until = now.Add(d)
 		}
-		e.coolKind = CoolSoft
-		e.reason = reason
+		if !preserveHard {
+			e.coolKind = CoolSoft
+			e.reason = reason
+		}
 		e.modelCooldowns = nil // 账号级软冷却：清空模型豁免（切模型不绕过）
 		p.dirty.Store(true)
 	}

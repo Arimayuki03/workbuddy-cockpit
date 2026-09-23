@@ -21,6 +21,8 @@ import {
 } from 'lucide-react';
 import {useAuth} from '@/lib/auth-context';
 import {accountApi, settingsApi} from '@/lib/api';
+import {peekCache} from '@/lib/data-cache';
+import type {OverviewResponse} from '@/lib/types';
 import {useT} from '@/lib/i18n/provider';
 import {notify} from '@/lib/toast';
 import {CountingNumber} from '@/components/animate-ui/text/counting-number';
@@ -213,28 +215,43 @@ export function ManagementBar() {
     setMounted(true);
   }, []);
 
-  // 取真实运行版本（后端 /api/system/check-update 的 current 为准）。
-  // 失败就退回 package.json，不让面板空白。
+  // 真实运行版本 + 新版本提醒共用同一次 checkUpdate 请求（每会话一次）：
+  // 避免整页加载时该端点被拉两次。
   useEffect(() => {
+    if (!mounted || typeof window === 'undefined') return;
     let alive = true;
+    const KEY = 'workbuddy-manager:update-notified';
+    const shouldNotify = window.sessionStorage.getItem(KEY) !== '1';
+    if (shouldNotify) window.sessionStorage.setItem(KEY, '1');
+
     settingsApi
       .checkUpdate()
-      .then((v) => {
-        if (alive && v?.current) setRuntimeVersion(v.current);
+      .then((c) => {
+        if (!alive) return;
+        if (c?.current) setRuntimeVersion(c.current);
+        if (shouldNotify && c?.has_update) {
+          notify.warn(t('update.newVersion'), t('update.notice', {targets: c.latest}));
+        }
       })
       .catch(() => {
-        /* 未登录/网络异常：保留 package.json 的回退值即可 */
+        /* 未登录/网络异常/检测失败：保留 package.json 的回退值，且不打扰 */
       });
     return () => {
       alive = false;
     };
-  }, []);
+  }, [mounted, t]);
 
-  // 拉取受管账号数量；账号页增删后通过自定义事件刷新
+  // 拉取受管账号数量；账号页增删后通过自定义事件刷新。
+  // 首帧优先读缓存（AuthProvider warmCache 预热过 overview，避免重复拉全池 1-2s）。
   useEffect(() => {
     let alive = true;
     const fetchCount = async () => {
       try {
+        const cached = peekCache<OverviewResponse>('overview');
+        if (cached && alive) {
+          setAccountCount(cached.data.total);
+          return;
+        }
         const data = await accountApi.overview();
         if (alive) setAccountCount(data.total);
       } catch {
@@ -248,24 +265,6 @@ export function ManagementBar() {
       window.removeEventListener('workbuddy-manager:accounts-changed', fetchCount);
     };
   }, []);
-
-  // 每个浏览器会话检测一次新版本，有更新则弹出提醒（避免打扰不重复提示）
-  useEffect(() => {
-    if (!mounted || typeof window === 'undefined') return;
-    const KEY = 'workbuddy-manager:update-notified';
-    if (window.sessionStorage.getItem(KEY) === '1') return;
-    window.sessionStorage.setItem(KEY, '1');
-
-    (async () => {
-      try {
-        const c = await settingsApi.checkUpdate();
-        if (!c.has_update) return;
-        notify.warn(t('update.newVersion'), t('update.notice', {targets: c.latest}));
-      } catch {
-        /* 检测失败静默：不打扰用户（如服务器访问 GitHub 受限） */
-      }
-    })();
-  }, [mounted, t]);
 
   useEffect(() => {
     if (!mounted || typeof window === 'undefined') return;
