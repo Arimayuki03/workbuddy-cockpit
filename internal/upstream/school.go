@@ -222,6 +222,31 @@ func SchoolSeasonChatEvent(conversationID string) map[string]any {
 	return ev
 }
 
+// MiniExpertUseEvent 构造 growth 域 Sequential_Tasks_2「在小程序内选中专家并完成
+// 有效对话」的判据事件：mp 指纹 expert_actual_use。形状对齐小程序源码
+// app-service.js 的真实发射点（上游 task_runner 实测 2026-09-23：上报即 completed，
+// claim +200c+5e）。与 school 域的 SchoolExpertUseEvents 是**两套口径**，勿照抄：
+//   - 不带 conversationId/activityId——真实事件就是这两个字段都不带；
+//   - extVersion 用小程序自身版本 2.2.8（覆盖 mpEventBase 的 2.4.0）；
+//   - source=mini_program + type 固定 "send_message"（小程序恒发此值）。
+//
+// expertID 必须是专家市场真实 ex_ id（ListMarketExperts），空 id 服务端不入账。
+func MiniExpertUseEvent(expertID, expertName, expertType string) map[string]any {
+	if expertType == "" {
+		expertType = "agent"
+	}
+	if expertName == "" {
+		expertName = expertID
+	}
+	return map[string]any{
+		"eventCode": "expert_actual_use", "reportDelay": 0,
+		"extVersion": "2.2.8", "source": "mini_program",
+		"id": expertID, "name": expertID,
+		"expertTitle": expertName, "type": "send_message",
+		"characterCount": 12, "expertType": expertType,
+	}
+}
+
 // SchoolExpertUseEvents 构造专家召唤+对话事件链（expert_use 判据，三账号实测）。
 // expertID/expertName 为开学季分类专家（16-BackToSchool）。
 func SchoolExpertUseEvents(expertID, expertName, conversationID string) []map[string]any {
