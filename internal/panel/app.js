@@ -1119,6 +1119,9 @@ let queueTimer = null, lastQueueSeq = 0;
 const GROWTH_TITLES = {}; // code → 展示名（扫描时从任务列表带出）
 $('btnScanAll').onclick = async () => {
   const b = $('btnScanAll');
+  // 停掉队列轮询：显式扫描 = 切到待办视图。否则在途队列的下一 tick 会把扫描
+  // 结果冲掉重渲染回队列视图（服务端执行不受影响，只是不再实时回写本视图）。
+  if (queueTimer) { clearInterval(queueTimer); queueTimer = null; }
   b.disabled = true; b.textContent = '扫描中…';
   try {
     const d = await api('tasks/scan_all', { method: 'POST' });
@@ -1213,27 +1216,24 @@ function groupsFromQueue(items) {
   }
   return Array.from(by.values());
 }
-async function pollQueueOnce() {
-  try {
-    const q = await api('tasks/queue');
-    if (!q.started) return;
-    // 只渲染本页启动过的那轮队列（q.running 时也要同代次——刷新页面后不再接管旧队列）。
-    if (lastQueueSeq && q.seq !== lastQueueSeq) return;
-    renderQueue(groupsFromQueue(q.items || []), q);
-  } catch (e) { /* 静默 */ }
-}
 function startQueuePolling() {
   if (queueTimer) clearInterval(queueTimer);
   queueTimer = setInterval(async () => {
-    await pollQueueOnce();
-    try {
-      const q = await api('tasks/queue');
-      if (!q.running) {
-        clearInterval(queueTimer); queueTimer = null;
-        toast('任务队列执行结束', 'ok');
-        loadSchoolStatus(true);
-      }
-    } catch (e) { /* 忽略 */ }
+    let q;
+    try { q = await api('tasks/queue'); } catch (e) { return; }
+    if (!q.started) return;
+    // 只渲染本页启动过的那轮队列（刷新页面后不再接管旧队列）。
+    if (lastQueueSeq && q.seq !== lastQueueSeq) return;
+    if (q.running) {
+      renderQueue(groupsFromQueue(q.items || []), q);
+      return;
+    }
+    // 结束：终态只渲染这一次，随即停表。此后残留的 items（running=false）不再
+    // 回写视图——曾把用户刚点开的「扫描待办」结果在下一个 tick 冲掉。
+    renderQueue(groupsFromQueue(q.items || []), q);
+    clearInterval(queueTimer); queueTimer = null;
+    toast('任务队列执行结束', 'ok');
+    loadSchoolStatus(true);
   }, 3000);
 }
 
