@@ -91,3 +91,6 @@ dev/.shots-model-limit
 # 上游官方统计验收（verify_upstream_stats_ui.py）的临时数据与截图
 dev/.upstream-stats
 dev/.shots-upstream-stats
+# 密钥列表列对齐验收（verify_keys_layout_ui.py）的临时数据与截图
+dev/.keys-layout
+dev/.shots-keys-layout
