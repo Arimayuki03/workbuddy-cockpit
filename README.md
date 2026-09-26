@@ -12,7 +12,7 @@
 [![License](https://img.shields.io/github/license/Arimayuki03/workbuddy-cockpit?style=flat-square)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white&style=flat-square)](https://go.dev)
 [![Next.js](https://img.shields.io/badge/Panel-Next.js%2015%20%2B%20shadcn%2Fui-000000?logo=nextdotjs&logoColor=white&style=flat-square)](web/)
-[![Docker Pulls](https://img.shields.io/docker/pulls/arimayuki03/workbuddy-cockpit?style=flat-square&logo=docker&label=Docker%20Pulls)](https://ghcr.io/arimayuki03/workbuddy-cockpit)
+[![GHCR Image](https://img.shields.io/badge/image-ghcr.io%2Farimayuki03%2Fworkbuddy--cockpit-2088FF?logo=github&style=flat-square)](https://github.com/Arimayuki03/workbuddy-cockpit/pkgs/container/workbuddy-cockpit)
 [![Tests](https://img.shields.io/badge/tests-go_test-success?style=flat-square)](#%E6%BA%90%E7%A0%81%E6%9E%84%E5%BB%BA)
 [![Stars](https://img.shields.io/github/stars/Arimayuki03/workbuddy-cockpit?style=flat-square&color=6E56CF)](https://github.com/Arimayuki03/workbuddy-cockpit/stargazers)
 
