@@ -62,12 +62,20 @@ jobs:
         id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
+      # 打 tag 时把版本注入镜像内二进制（面板「关于/版本检查」显示真实版本）
+      - name: Compute version for build-arg
+        id: ver
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
       - name: Build & push multi-arch
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
           tags: |
             ${{ steps.image.outputs.name }}:latest
             ${{ steps.image.outputs.name }}:${{ github.sha }}
@@ -108,11 +116,14 @@ jobs:
           set -euxo pipefail
           V="${GITHUB_REF_NAME}"
           mkdir dist
-          # 主程序：embed_panel 内嵌前端（dist 产物已提交，无需 Node 构建）
+          # 主程序：embed_panel 内嵌前端（dist 产物已提交，无需 Node 构建）。
+          # appVersion 必须注入：面板「开发版」显示与 /api/system/check-update 的
+          # current 都取这个值，未注入会一直显示 dev 且版本比对失真。
           for p in windows/amd64 linux/amd64 linux/arm64 darwin/arm64; do
             os="${p%/*}"; arch="${p#*/}"
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
               go build -tags embed_panel -trimpath \
+              -ldflags="-s -w -X workbuddy2api/internal/server.appVersion=${V}" \
               -o "dist/wb2api-${V}-${os}-${arch}" ./cmd/server
           done
           # 打包：win=zip（内单 exe）、linux=裸二进制 tar.gz，与 v1.12.0 布局一致
@@ -121,6 +132,7 @@ jobs:
           # 任务工具 exe（清单对齐 v1.12.0：acct/stats 不发布）
           for t in activity credit login signin trial; do
             CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath \
+              -ldflags="-s -w -X workbuddy2api/internal/server.appVersion=${V}" \
               -o "dist/${t}-windows-amd64.exe" "./cmd/${t}"
           done
 
