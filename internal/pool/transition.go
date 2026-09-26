@@ -11,9 +11,9 @@
 //	disabled           ← disableLocked（Disable / NoteSessionDead 达阈）
 //	manualDisabled     ← setManualDisabledLocked（运维端点 / CLI；只置位不清其他维度）
 //	until/coolKind     ← Cooldown(CoolSoft/Hard，固定时长) / CooldownSoftRate / CooldownSoftForModel 无解析分支
-//	modelCooldowns     ← CooldownSoftForModel 有解析分支；被 disableLocked/Cooldown/clearCoolingLocked 清
+//	modelCooldowns     ← CooldownSoftForModel 有解析分支；被 disableLocked/Cooldown/clearCoolingLocked 清（解冻 reviveCoolingLocked 保留）
 //	breakerUntil       ← recordBreakerFailureLocked（NoteError 喂入）；NoteSuccess 清
-//	softStreak         ← CooldownSoftRate / CooldownSoftForModel 无解析分支；NoteSuccess/reviveCoolingLocked 清
+//	softStreak         ← CooldownSoftRate / CooldownSoftForModel 无解析分支；NoteSuccess 清（解冻保留：退避指数不因余额恢复重置）
 //	sessionDeadFails   ← NoteSessionDead；ClearSessionDead/NoteSuccess/ReviveDisabled 清
 //
 // 关键正交性（疑点 4 修正）：
@@ -56,16 +56,23 @@ func (p *Pool) disableLocked(e *entry, reason string) {
 	p.dirty.Store(true)
 }
 
-// reviveCoolingLocked 只清冷却域（until/coolKind/reason/softStreak/modelCooldowns）
-// 并更新 credits，不动熔断器（fails/retryCount/breakerUntil）。签到解冻走这里：
-// 签到成功只证明余额恢复与 billing 通道健康，不证明 chat 通道健康，熔断（连续 5xx
-// 信号）不应被签到覆盖。
-// softStreak 属冷却域（与 until/coolKind 同域），随冷却一并清零——与「解冻只清冷却
-// 不清熔断」的既有 C5 语义一致；硬冷却（CoolHard）本就不参与 streak，这里清的是
-// 历史软冷却累积。调用方必须已持有 p.mu。
+// reviveCoolingLocked 清**账号级**冷却（until/coolKind/reason）并更新 credits，
+// 不动熔断器（fails/retryCount/breakerUntil）。签到解冻/余额刷新/登录回写走这里：
+// 余额恢复只证明 billing 通道健康，不证明 chat 通道健康——熔断（连续 5xx 信号）
+// 与模型级 6004 冷却都不应被覆盖。
+//
+// 不清 softStreak 与 modelCooldowns（区别于 clearCoolingLocked 的冷却域全清）：
+//   - softStreak 是连续软限流退避指数，退避的因（对端限流状态）不因本账号余额
+//     恢复而消失，保留指数让下一次限流继续退避（否则退避被解冻重置为基数，
+//     软限流的实际寿命被压进一个刷新周期——吸收 panel #55 同源修复）。
+//   - modelCooldowns 是 6004 模型级台账，对齐上游重置墙钟，语义与账号余额正交
+//     （6004 的 NoteSuccess 也不清它，同一条既有纪律）。
+// 调用方必须已持有 p.mu。
 func (p *Pool) reviveCoolingLocked(e *entry, credits int64) {
 	e.credits = credits
-	e.clearCoolingLocked()
+	e.until = time.Time{}
+	e.coolKind = 0
+	e.reason = ""
 }
 
 // setManualDisabledLocked 手动停用迁移（运维入口）：只置 manualDisabled + 原因，

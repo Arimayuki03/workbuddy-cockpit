@@ -812,30 +812,34 @@ func TestCooldownSoftStreakResetBySuccess(t *testing.T) {
 	wantCoolSec(t, p, "u1", 600, 3)
 }
 
-func TestCooldownSoftStreakResetByReenable(t *testing.T) {
-	// 签到解冻（reviveCoolingLocked）清 cooling 域 → softStreak 一并归零；
-	// 熔断域（fails/retryCount/breakerUntil）不动，与既有 C5 语义一致。
+func TestCooldownSoftStreakKeptByReenable(t *testing.T) {
+	// 语义收敛（吸收 panel #55 同源修复）：签到解冻只清**账号级**冷却
+	// （until/coolKind/reason），softStreak 软退避指数保留——退避的因是对端限流
+	// 状态，不因本账号余额恢复而消失；旧语义（解冻归零）会把软限流的实际寿命
+	// 压进一个余额刷新周期。熔断域（fails/retryCount/breakerUntil）不动，
+	// 与既有 C5 语义一致。
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.CooldownSoftRate("u1", 600*time.Second, time.Time{}, "x")
 	p.forceSoftExpired("u1")
-	p.CooldownSoftRate("u1", 600*time.Second, time.Time{}, "x")
+	p.CooldownSoftRate("u1", 600*time.Second, time.Time{}, "x") // streak=2, cooling
 	failsBefore := p.breakerFails("u1")
 
 	p.ReenableIfCredits("u1", 500)
 	st, _ := p.Status("u1")
-	if st.SoftStreak != 0 {
-		t.Errorf("reenable should reset soft_streak, got %d", st.SoftStreak)
+	if st.SoftStreak != 2 {
+		t.Errorf("reenable must keep soft_streak（退避指数保留）, got %d", st.SoftStreak)
 	}
 	if st.Cooling {
-		t.Errorf("reenable should clear cooling: %+v", st)
+		t.Errorf("reenable should clear account-level cooling: %+v", st)
 	}
 	if failsAfter := p.breakerFails("u1"); failsAfter != failsBefore {
 		t.Errorf("reenable must not touch breaker: fails %d → %d", failsBefore, failsAfter)
 	}
 
+	// 保留的 streak=2 → 下一次新限流从 1200s 起退避（600×2² 封顶校验见退避主用例）。
 	p.CooldownSoftRate("u1", 600*time.Second, time.Time{}, "x")
-	wantCoolSec(t, p, "u1", 600, 3)
+	wantCoolSec(t, p, "u1", 2400, 3)
 }
 
 func TestCooldownHardDoesNotAdvanceSoftStreak(t *testing.T) {

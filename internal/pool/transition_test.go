@@ -128,15 +128,19 @@ func TestTransitionSessionDeadDisableClearsCooling(t *testing.T) {
 	}
 }
 
-// TestTransitionReviveClearsCoolingKeepsBreaker reviveCoolingLocked（签到解冻）语义：
-// 清冷却域（until/coolKind/reason/softStreak/modelCooldowns）+ 更新 credits，不动熔断。
-// 既有单维度测试已各自锁定 reason/softStreak/modelCooldowns，本用例一次性断言完整
-// 字段集，锁定迁移原语对冷却域/熔断域的处置永远一致。
-func TestTransitionReviveClearsCoolingKeepsBreaker(t *testing.T) {
+// TestTransitionReviveClearsAccountCoolingKeepsBreaker reviveCoolingLocked（签到解冻）
+// 语义（收敛后）：只清**账号级**冷却（until/coolKind/reason）+ 更新 credits，不动熔断，
+// 保留 softStreak（软退避指数）与 modelCooldowns（6004 台账）。余额恢复只证明 billing
+// 通道健康——chat 侧的限流退避与模型限流墙钟不应被解冻重置（吸收 panel #55 同源修复）。
+func TestTransitionReviveClearsAccountCoolingKeepsBreaker(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	// 冷却域：软冷却 + 6004 模型级冷却（softStreak 累计）。
-	p.Cooldown("u1", CoolSoft, 600*time.Second, "429")
+	// 先进入一次软冷却累积 softStreak（冷却中再触发不推进，故先强制过期再进第二次）。
+	p.SetSoftRateMax(time.Hour)
+	p.CooldownSoftRate("u1", 600*time.Second, time.Time{}, "429") // streak=1
+	p.forceSoftExpired("u1")
+	p.CooldownSoftRate("u1", 600*time.Second, time.Time{}, "429") // streak=2, cooling
+	// 6004 模型级冷却（与账号级冷却并存）。
 	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "6004")
 	// 熔断域：独立信号，签到不解冻。
 	p.SetBreaker(1, time.Hour, time.Hour)
@@ -149,9 +153,14 @@ func TestTransitionReviveClearsCoolingKeepsBreaker(t *testing.T) {
 		t.Errorf("revive 后 credits=%d want 700", st.Credits)
 	}
 	until, kind, reason, streak, mc := coolingDomain(t, p, "u1")
-	if !until.IsZero() || kind != 0 || reason != "" || streak != 0 || mc != 0 {
-		t.Errorf("revive 应清冷却域：until=%v kind=%v reason=%q streak=%d modelCooldowns=%d",
-			until, kind, reason, streak, mc)
+	if !until.IsZero() || kind != 0 || reason != "" {
+		t.Errorf("revive 应清账号级冷却：until=%v kind=%v reason=%q", until, kind, reason)
+	}
+	if streak == 0 {
+		t.Error("revive 不得清 softStreak（软退避指数不因余额恢复重置）")
+	}
+	if mc != 1 {
+		t.Errorf("revive 不得清 modelCooldowns（6004 台账对齐上游重置墙钟），got %d", mc)
 	}
 	if bt, ok := p.breakerUntil("u1"); !ok || bt.IsZero() {
 		t.Fatal("revive 不得清熔断（chat 通道健康未证明）")
