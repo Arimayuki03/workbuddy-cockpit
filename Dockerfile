@@ -17,13 +17,17 @@ RUN npm run build:export
 
 # ---------- 2. Go 编译（内嵌面板） ----------
 FROM golang:1.26-alpine AS build
+# 版本注入：CI 打 tag 构建时传 --build-arg VERSION=vX.Y.Z；本地/无 tag 构建回落 dev。
+ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 # 静态产物就位（embed 目录：internal/panel/dist）后再编译，-tags embed_panel 启用内嵌。
 COPY --from=frontend /web/out/ ./internal/panel/dist/
-RUN CGO_ENABLED=0 go build -trimpath -tags embed_panel -ldflags="-s -w" -o /out/wb2api ./cmd/server \
+RUN CGO_ENABLED=0 go build -trimpath -tags embed_panel \
+      -ldflags="-s -w -X workbuddy2api/internal/server.appVersion=${VERSION}" \
+      -o /out/wb2api ./cmd/server \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/signin_bin ./cmd/signin \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/login ./cmd/login \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/credit ./cmd/credit \
