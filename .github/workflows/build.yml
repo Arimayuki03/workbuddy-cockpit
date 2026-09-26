@@ -121,10 +121,14 @@ jobs:
           # current 都取这个值，未注入会一直显示 dev 且版本比对失真。
           for p in windows/amd64 linux/amd64 linux/arm64 darwin/arm64; do
             os="${p%/*}"; arch="${p#*/}"
+            # go build -o 显式指定文件名时不会自动补 .exe，windows 目标必须显式带上
+            # （否则 zip / sha256sum 按 *.exe 找不到文件，release job 首跑即挂）
+            ext=""
+            if [ "$os" = "windows" ]; then ext=".exe"; fi
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
               go build -tags embed_panel -trimpath \
               -ldflags="-s -w -X workbuddy2api/internal/server.appVersion=${V}" \
-              -o "dist/wb2api-${V}-${os}-${arch}" ./cmd/server
+              -o "dist/wb2api-${V}-${os}-${arch}${ext}" ./cmd/server
           done
           # 打包：win=zip（内单 exe）、linux=裸二进制 tar.gz，与 v1.12.0 布局一致
           (cd dist && zip -q "wb2api-${V}-windows-amd64.zip" "wb2api-${V}-windows-amd64.exe")
