@@ -1,6 +1,8 @@
 # build.yml 定时多架构打包发布 ghcr.io + amd64 离线 tar.gz artifact。
 # 解决 issue #21「建议打包现成 docker 镜像」：NAS/离线环境拉不到 ghcr 时用 artifact。
 # 参考 /tmp/wb2api-build，适配本仓库（workflow 就住在仓库里，无需双 checkout 覆盖 Dockerfile）。
+# v1.13.0 起：打 v* tag 额外构建多平台主程序二进制 + 任务工具 exe 并上传 release assets
+# （此前全靠本地手动构建上传，v1.13.0 漏传致 release 空资产，故固化进 CI）。
 name: Build & Publish
 
 on:
@@ -85,3 +87,58 @@ jobs:
           name: wb2api-amd64
           path: wb2api-amd64.tar.gz
           if-no-files-found: error
+
+  # 打 v* tag 时构建 release 二进制资产（v1.13.0 起固化，替代本地手动上传）。
+  # 资产清单与 v1.12.0 对齐：主程序四平台（-tags embed_panel 内嵌面板前端）+
+  # win zip / linux tar.gz + 5 个任务工具 exe + sha256sums。定时/手动跑不触发本 job。
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 创建 release 与上传 assets 需要 write（顶层只给了 packages:write）
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26' # 钉 1.26 与 Dockerfile golang:1.26-alpine 一致（go.mod 1.22.5 仅是语言最低版）
+
+      - name: Build binaries
+        run: |
+          set -euxo pipefail
+          V="${GITHUB_REF_NAME}"
+          mkdir dist
+          # 主程序：embed_panel 内嵌前端（dist 产物已提交，无需 Node 构建）
+          for p in windows/amd64 linux/amd64 linux/arm64 darwin/arm64; do
+            os="${p%/*}"; arch="${p#*/}"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+              go build -tags embed_panel -trimpath \
+              -o "dist/wb2api-${V}-${os}-${arch}" ./cmd/server
+          done
+          # 打包：win=zip（内单 exe）、linux=裸二进制 tar.gz，与 v1.12.0 布局一致
+          (cd dist && zip -q "wb2api-${V}-windows-amd64.zip" "wb2api-${V}-windows-amd64.exe")
+          (cd dist && tar -czf "wb2api-${V}-linux-amd64.tar.gz" "wb2api-${V}-linux-amd64")
+          # 任务工具 exe（清单对齐 v1.12.0：acct/stats 不发布）
+          for t in activity credit login signin trial; do
+            CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath \
+              -o "dist/${t}-windows-amd64.exe" "./cmd/${t}"
+          done
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum activity-windows-amd64.exe credit-windows-amd64.exe \
+            login-windows-amd64.exe signin-windows-amd64.exe trial-windows-amd64.exe \
+            "wb2api-${GITHUB_REF_NAME}-darwin-arm64" "wb2api-${GITHUB_REF_NAME}-linux-amd64" \
+            "wb2api-${GITHUB_REF_NAME}-linux-amd64.tar.gz" "wb2api-${GITHUB_REF_NAME}-linux-arm64" \
+            "wb2api-${GITHUB_REF_NAME}-windows-amd64.exe" "wb2api-${GITHUB_REF_NAME}-windows-amd64.zip" \
+            > "sha256sums-${GITHUB_REF_NAME}.txt"
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # tag 先于 release 建好时兜底自动建（正式发布语录仍建议提前手写好再推 tag）
+          gh release view "${GITHUB_REF_NAME}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "${GITHUB_REF_NAME}" --generate-notes --repo "$GITHUB_REPOSITORY"
+          gh release upload "${GITHUB_REF_NAME}" dist/* --clobber --repo "$GITHUB_REPOSITORY"
