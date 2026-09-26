@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -259,5 +260,80 @@ func TestSnapshotEmptySeriesNotNull(t *testing.T) {
 		if decoded["series"] == nil {
 			t.Fatalf("%s: JSON series = null, 面板消费方会崩: %s", name, raw)
 		}
+	}
+}
+
+// TestFlushConcurrentNoTearing 并发 flush 撕裂写防护：面板 Save（flush(true)）与
+// 后台 ticker（flush(false)）并发时共享同一 .tmp 路径，WriteFile/Rename 交叉后
+// 落盘文件可能是半截内容。writeMu 串行化 IO 段后，任意时刻读回的文件必须是
+// 合法 JSON（回归背景：撕裂写产物 load 失败 → 用量从零开始，违背「重启不丢」）。
+func TestFlushConcurrentNoTearing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.json")
+	r := New(path)
+	r.Add(time.Now(), "cn", "u", "m", Delta{PromptTokens: 1, HasPromptTokens: true, TotalTokens: 1, HasTotal: true}, true)
+	r.dirty = true // 绕过防抖：保证并发 flush 全部执行 IO 段
+
+	const workers = 2
+	const rounds = 100
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < rounds; j++ {
+				r.flush(true)
+			}
+		}()
+	}
+	wg.Wait()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读回落盘文件: %v", err)
+	}
+	var f file
+	if err := json.Unmarshal(raw, &f); err != nil {
+		t.Fatalf("并发 flush 后落盘文件非法 JSON（撕裂写）: %v\n前 120 字节: %q", err, raw[:min(len(raw), 120)])
+	}
+	if f.Version != 1 || len(f.Buckets) != 1 {
+		t.Fatalf("落盘内容异常: version=%d buckets=%d", f.Version, len(f.Buckets))
+	}
+}
+
+// TestRollupForcedWhenOverLimit 桶数超限强制折叠：hourlyKeep 口径只折叠 90 天前
+// 的小时桶，近期桶数超限时「按期折叠」退化为空操作（内存无界）。Rollup 必须按
+// 时间升序折叠最旧的未到期小时桶，把桶数压回上限*0.8 以内，且数据总量不丢。
+// 生产上限 40 万构造代价过高，测试把 bucketLimit 调小走同一条强制折叠路径。
+func TestRollupForcedWhenOverLimit(t *testing.T) {
+	limit := 100
+	oldLimit := bucketLimit
+	bucketLimit = limit
+	t.Cleanup(func() { bucketLimit = oldLimit })
+
+	r := New("")
+	now := time.Now()
+	// limit+1 个近期（90 天内）小时桶，分布在不同小时（不同 Scope）。
+	// 直接写桶表注入（Add 会归并进当前小时的单桶，造不出多桶）。
+	r.mu.Lock()
+	for i := 0; i <= limit; i++ {
+		ts := now.Add(-time.Duration(i+1) * time.Hour).Format(hourLayout)
+		key := "h:" + ts + "|cn|u|m"
+		r.buckets[key] = &bucket{Scope: "h:" + ts, Realm: "cn", UID: "u", Model: "m", Req: 1, PT: 10, TT: 10}
+	}
+	r.mu.Unlock()
+
+	r.Rollup(now)
+
+	r.mu.Lock()
+	n := len(r.buckets)
+	r.mu.Unlock()
+	if want := limit * 8 / 10; n > want {
+		t.Fatalf("强制折叠后桶数 = %d, want ≤ %d（上限*0.8）", n, want)
+	}
+	// 折叠只改分片粒度不改总量：requests/tokens 守恒。
+	s := r.Snapshot(0, nil)
+	if s.Totals.Requests != int64(limit+1) || s.Totals.PromptTokens != int64(limit+1)*10 {
+		t.Fatalf("折叠后 totals = %d/%d, want %d/%d（数据丢失）",
+			s.Totals.Requests, s.Totals.PromptTokens, limit+1, (limit+1)*10)
 	}
 }

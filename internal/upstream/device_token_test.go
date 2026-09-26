@@ -164,11 +164,9 @@ func resetDeviceTokenFileCache(path string) (restore func()) {
 	origPath := dtFileCache.path
 	origTok := dtFileCache.token
 	origRead := dtFileCache.readAt
-	origErr := dtFileCache.lastErr
 	dtFileCache.path = path
 	dtFileCache.token = ""
 	dtFileCache.readAt = time.Time{}
-	dtFileCache.lastErr = nil
 	dtFileCache.mu.Unlock()
 	var once sync.Once
 	return func() {
@@ -177,7 +175,6 @@ func resetDeviceTokenFileCache(path string) (restore func()) {
 			dtFileCache.path = origPath
 			dtFileCache.token = origTok
 			dtFileCache.readAt = origRead
-			dtFileCache.lastErr = origErr
 			dtFileCache.mu.Unlock()
 		})
 	}

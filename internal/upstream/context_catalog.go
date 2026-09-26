@@ -77,30 +77,3 @@ var contextCapFallback = map[string]contextCap{
 	// ---- global 域路由别名/别名模型 ----
 	"auto": {context: 168000, maxOutput: 0}, // 实测外推（fork global 静态表 168K）；输出上限未知，省略
 }
-
-// ContextWindowListing 模型在 /v1/models 的 context_length（三级查找）：
-// remote（上游 maxInputTokens）>0 时权威；否则查知识表；仍未收录 → DefaultContextWindow
-// （1M，宁可高估不低估）。绝不再透出假 131072。
-func ContextWindowListing(model string, remote int64) int64 {
-	if remote > 0 {
-		return remote
-	}
-	if cap, ok := contextCapFallback[model]; ok && cap.context > 0 {
-		return cap.context
-	}
-	return DefaultContextWindow
-}
-
-// MaxOutputTokensListing 模型在 /v1/models 的 max_output_tokens（三级查找）：
-// remote（上游 maxOutputTokens）>0 时权威；否则查知识表；仍未收录 → ok=false
-// （调用方省略字段，不编造输出上限）。与 ContextWindowListing 的 1M 兜底刻意不同：
-// 输出上限无「宁可高估」的安全侧，未知即省略。
-func MaxOutputTokensListing(model string, remote int64) (int64, bool) {
-	if remote > 0 {
-		return remote, true
-	}
-	if cap, ok := contextCapFallback[model]; ok && cap.maxOutput > 0 {
-		return cap.maxOutput, true
-	}
-	return 0, false
-}

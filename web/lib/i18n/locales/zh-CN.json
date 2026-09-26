@@ -139,7 +139,8 @@
     "requestsShort": "请求",
     "name": "名称",
     "paid": "实付",
-    "unknown": "未知"
+    "unknown": "未知",
+    "usedShort": "已用"
   },
   "dashboard": {
     "title": "仪表盘",
@@ -182,7 +183,8 @@
     "creditsExpiryDaily": "{amount} 积分将于 {time}（当天共 {amount}）前到期",
     "failedRequests": "失败请求",
     "degradedHint": "其中 {count} 个账号正被连败降权",
-    "noCooling": "没有账号在冷却"
+    "noCooling": "没有账号在冷却",
+    "creditsUsedHint": "已用 {used} · 覆盖 {n} 个账号"
   },
   "stats": {
     "title": "用量统计",
@@ -320,7 +322,8 @@
     "importNone": "没有账号被导入（见下方原因）",
     "importSummary": "导入完成：成功 {n} 个，跳过 {s} 个",
     "importTooLarge": "文件过大（上限 20MB）",
-    "importReadError": "读取文件失败，请重试"
+    "importReadError": "读取文件失败，请重试",
+    "creditsUsedTitle": "当前周期内已消耗的积分（所有套餐已用额度合计）"
   },
   "keys": {
     "title": "API 密钥",
@@ -880,6 +883,7 @@
     "cfgNotLoaded": "未读取到上游配置，无法编辑",
     "mapNewAlias": "新增模型别名",
     "mapNewAliasDesc": "让下游用一个自己熟悉的名字调用某个模型。例如把 `gpt-4o-mini` 指向 `glm-5.2`。",
+    "mapRealmNote": "映射目标列表跟随当前版本域；切换国内版 / 国际版后建议确认映射目标与当前版本域一致。",
     "mapAlias": "下游使用的名字",
     "mapTarget": "实际调用模型",
     "mapAdd": "添加映射",
@@ -911,7 +915,10 @@
     "savedRestart": "已保存，部分字段需重启",
     "restartHint": "提示词 / 出站标识 / 国际版路由在装配期读取，重启服务后生效；其余字段已热生效",
     "advancedNote": "保存时后端做深合并 + 原子替换，未展示的未知键会原样保留。",
-    "reloaded": "已重新加载"
+    "reloaded": "已重新加载",
+    "cfgLoadFailed": "配置加载失败",
+    "cfgLoadFailedDesc": "暂时读不到上游配置。为避免把默认值当成当前配置，已隐藏下方表单；请确认服务可用后重试。",
+    "retryLoad": "重试加载"
   },
   "activity": {
     "title": "开学季活动",

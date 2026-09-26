@@ -3,7 +3,7 @@
 //
 // 热生效范围（设计取舍）：
 //   - api_key / cooldown.soft_rate / features.sanitize_blacklist_fingerprints → livecfg 快照
-//   - pool.* → pool.SetBreaker/SetMaxInFlight/SetSoftRateMax/SetWeights/SetCostExploreInterval/SetDegrade
+//   - pool.* → pool.SetBreaker/SetMaxInFlight/SetSoftRateMax/SetWeights/SetCostExploreInterval/SetDegrade/SetPickStrategy
 //   - schedule.*_enabled → scheduler.SetEnabled；schedule.*_hours → scheduler.SetHours
 //     （两者均热生效免重启；normalize 保证 hours 非空、SetHours 拒绝非法小时）
 //   - model_map → server.SetModelMap（模型映射链头热替换）
@@ -24,6 +24,7 @@ import (
 	"workbuddy2api/internal/livecfg"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/scheduler"
+	"workbuddy2api/internal/server"
 	"workbuddy2api/internal/upstream"
 )
 
@@ -42,7 +43,13 @@ func parseConfigInto(raw []byte, c *Config) (*Config, error) {
 
 // saveConfig 面板保存配置入口（panel.Config.SaveConfig 闭包的实现）。
 // raw 是面板提交的配置 JSON（整体或仅含其管理的键——深合并都能正确处理）。
+//
+// 与 admin PATCH 的写路径互斥（C-config 双写路径修复）：admin patchConfigScalar
+// 的 splice 落盘与本函数的整文件重写并发时互相丢补丁（各基于旧字节），两条
+// 路径经 server.ConfigMu() 收敛到同一临界区。
 func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+	server.ConfigMu().Lock()
+	defer server.ConfigMu().Unlock()
 	// 1) 解析现有文件为 map（保留用户手写的未知键），再深合并面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
@@ -50,6 +57,11 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	}
 	var cur, incoming map[string]any
 	if err := json.Unmarshal(oldRaw, &cur); err != nil {
+		cur = map[string]any{}
+	}
+	// 旧 config 是字面量 null 时 Unmarshal 成功且 cur 为 nil，mergeConfigMaps 的
+	// cur[k]=v 会 panic（面板保存 500）。与其他损坏分支同口径回落空 map。
+	if cur == nil {
 		cur = map[string]any{}
 	}
 	if err := json.Unmarshal(raw, &incoming); err != nil {
@@ -101,6 +113,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetDegrade(newCfg.Pool.DegradeThreshold, newCfg.DegradeCooldownDur, newCfg.DegradeCooldownMaxD)
 	p.SetSoftRateMax(newCfg.SoftRateMaxDur)
 	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
+	p.SetPickStrategy(pool.ParsePickStrategy(newCfg.Pool.PickStrategy)) // 选号策略热生效（weighted/credits_desc）
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	// 排程开关热改（主仓库排程开关经 SetEnabled）+ 触发小时热改（SetHours，
 	// 通知 Run 主循环立即重排定时器——面板保存配置与 /admin PATCH hours 共用）。

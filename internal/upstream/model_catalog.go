@@ -146,11 +146,19 @@ func (c *modelCatalog) put(model string, e ModelCapEntry) {
 	c.saveLocked()
 }
 
+// modelCatalogSaveHook 测试钩子：saveLocked 每次真实落盘前调用（path 为空不落盘
+// 不触发；nil = 无操作）。仅测试引用——写放大回归（同模型连续 ListingV4 只允许
+// 落盘一次）用计数断言，比 mtime 判定可靠（Windows mtime 粒度粗，快速连写会同刻）。
+var modelCatalogSaveHook func()
+
 // saveLocked 原子落盘（tmp + rename，pool state.json 同模式）。持锁调用。
 // path 为空 / 目录不可写 / 序列化失败 → 静默（内存缓存仍生效，下次进程重拉）。
 func (c *modelCatalog) saveLocked() {
 	if c.path == "" {
 		return
+	}
+	if modelCatalogSaveHook != nil {
+		modelCatalogSaveHook()
 	}
 	raw, err := json.MarshalIndent(c.entries, "", "  ")
 	if err != nil {
@@ -189,6 +197,38 @@ func modelCatalogGet(model string) (ModelCapEntry, bool) {
 // modelCatalogPut 第 4 级写入：models.dev 拉到的值落缓存（含落盘）。
 func modelCatalogPut(model string, context, maxOutput int64) {
 	modelCatalogPutSourced(model, context, maxOutput, "modelsdev")
+}
+
+// modelCatalogPutIfEnrich 第 4 级 lookup 命中点的条件写入（写放大修复）：
+// 仅当有**新增值**时才写缓存落盘——
+//   - 缓存缺失 → 写（首次拉到的值入缓存）；
+//   - 缓存条目 MaxOutputTokens==0（输出上限未知）而 lookup 返回 out>0 → 写（补上
+//     此前缺失的输出上限）；
+//   - 其余（值一致）→ 跳过：内存与落盘均无变化，不重写。
+//
+// 背景：MaxOutputTokensListingV4 对「models.dev 命中但 output=0」的模型每次
+// /v1/models 都触发 put → 整文件 MarshalIndent+写盘，写放大随请求无界；context
+// 链同理（值一致时重复写盘）。输出上限从 0→正值是唯一的新增值形态（context 变化
+// 意味着值分歧，由负缓存 + 24h 重查周期自然刷新，不在热路径补救）。
+//
+// 返回是否实际写入（测试断言用）。并发安全：整个判写序列持 catalogState 锁，
+// 多请求同时 miss 同一模型不会重复落盘。
+func modelCatalogPutIfEnrich(model string, context, output int64) bool {
+	c := catalogState
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.initLocked()
+	if e, ok := c.entries[model]; ok && validCapEntry(e) && !(e.MaxOutputTokens == 0 && output > 0) {
+		return false // 已有有效缓存且无新增值：跳过（同值重写 = 写放大）
+	}
+	c.entries[model] = ModelCapEntry{
+		ContextLength:   context,
+		MaxOutputTokens: output,
+		FetchedAt:       time.Now().UTC().Format(time.RFC3339),
+		Source:          "modelsdev",
+	}
+	c.saveLocked()
+	return true
 }
 
 // modelCatalogPutSourced 写入指定来源的条目（测试可注入 fetched_at 检查落盘格式）。
@@ -253,8 +293,10 @@ func ContextWindowListingV4(model string, remote int64, client *http.Client) int
 	if !modelsDev.negativeFresh(model) {
 		// 第 4 级触发：先查进程内文档索引（拉过一次即常驻），命中直接入缓存
 		// 返回（不等待异步拉取）；未命中 → 记负缓存 + 异步拉取（本次先回 1M）。
+		// 入缓存走条件写（putIfEnrich）：同值跳过落盘，仅缓存缺失/可补输出上限时写，
+		// 防 /v1/models 每请求整文件重写（写放大）。
 		if e, ok := modelsDev.lookup(model); ok {
-			modelCatalogPut(model, e.Context, e.Output)
+			modelCatalogPutIfEnrich(model, e.Context, e.Output)
 			return e.Context
 		}
 		modelsDev.ensureDocAsync(client, "")
@@ -279,9 +321,13 @@ func MaxOutputTokensListingV4(model string, remote int64, client *http.Client) (
 	}
 	if !modelsDev.negativeFresh(model) {
 		// 与 ContextWindowListingV4 同触发：lookup 命中先入缓存再返回
-		// （两条查找链并发 miss 同一模型时，第二调用方直接拿到刚写入的值）。
+		//（两条查找链并发 miss 同一模型时，第二调用方直接拿到刚写入的值）。
+		// 入缓存走条件写（putIfEnrich）：本函数对「models.dev 命中但 output=0」的
+		// 模型每次请求都会走到这里（第 3 级只认 MaxOutputTokens>0 的缓存条目），
+		// 若无条件 put 则每次 /v1/models 都整文件重写——同值跳过，仅缓存缺失或
+		// 输出上限从未知(0)补成正值时才落盘。
 		if e, ok := modelsDev.lookup(model); ok {
-			modelCatalogPut(model, e.Context, e.Output)
+			modelCatalogPutIfEnrich(model, e.Context, e.Output)
 			return e.Output, e.Output > 0
 		}
 		modelsDev.ensureDocAsync(client, "")

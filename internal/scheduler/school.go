@@ -12,7 +12,6 @@ package scheduler
 
 import (
 	"context"
-	"errors"
 	"log"
 	"os"
 	"os/exec"
@@ -60,23 +59,38 @@ type scriptRunner interface {
 }
 
 // scriptCmd exec.Cmd 适配器：把 exec.Cmd 的 Dir 字段包装成 SetDir 方法，
-// 满足 scriptRunner 接口（exec.Cmd 本身只有字段没有方法）。
-type scriptCmd struct{ cmd *exec.Cmd }
+// 满足 scriptRunner 接口（exec.Cmd 本身只有字段没有方法）。ctx/cancel 是
+// newScriptCmd 构建的超时上下文：Run 返回时先采样 ctx.Err() 再 cancel 释放计时器
+// （cancel 之后 Err 恒非 nil，必须先采样；timedOut 供 runScript 的超时日志判定）。
+type scriptCmd struct {
+	cmd      *exec.Cmd
+	ctx      context.Context
+	cancel   context.CancelFunc
+	timedOut bool
+}
 
 func (c *scriptCmd) SetDir(dir string) { c.cmd.Dir = dir }
-func (c *scriptCmd) Run() error        { return c.cmd.Run() }
+func (c *scriptCmd) Run() error {
+	err := c.cmd.Run()
+	c.timedOut = c.ctx.Err() != nil // cancel 前采样：脚本运行期间 deadline 是否触发
+	c.cancel()                      // 进程已结束（或启动失败）：释放 WithTimeout 计时器，幂等
+	return err
+}
 
 // newScriptCmd 构建脚本子进程。包级变量便于测试注入 fake（installFakeExec 覆盖）。
 // 工作目录由调用方 SetDir 显式设置仓库根。
-// 超时治理：ctx 带 scriptTimeout（10 分钟）——脚本挂起时 CommandContext 到期杀掉
-// 整组进程（cmd.Cancel），WaitDelay 再兜底回收残留管道句柄；否则 runMu[taskSchool]
-// 永不释放、每小时排程持续堆积（旧缺陷：无 ctx 无超时的 exec.Command().Run()）。
+// 超时治理：ctx 带 scriptTimeout（10 分钟）——脚本挂起时 CommandContext 的默认
+// Cancel（os.Process.Kill）立即杀掉进程，WaitDelay 再兜底回收残留管道句柄；
+// 否则 runMu[taskSchool] 永不释放、每小时排程持续堆积（旧缺陷：无 ctx 无超时的
+// exec.Command().Run()）。不覆盖 cmd.Cancel：自定义 Cancel（只 cancel 不杀）会让
+// 到期先等 WaitDelay 10s 才经兜底 Kill，超时治理被无故削弱；恢复默认立即杀语义。
+// cancel 不能 defer 到本函数返回（进程尚未启动，ctx 就被取消会让 Start 直接报错），
+// 由 scriptCmd.Run 收尾释放。
 var newScriptCmd = func(program string, args ...string) scriptRunner {
 	ctx, cancel := context.WithTimeout(context.Background(), scriptTimeout)
 	cmd := exec.CommandContext(ctx, program, args...)
-	cmd.Cancel = func() error { cancel(); return nil } // 超时到期：杀进程，释放 runMu
 	cmd.WaitDelay = 10 * time.Second
-	return &scriptCmd{cmd: cmd}
+	return &scriptCmd{cmd: cmd, ctx: ctx, cancel: cancel}
 }
 
 // pythonCmd 返回执行 scripts/*.py 的解释器名。
@@ -105,7 +119,7 @@ func runScript(name, root string, commands [][]string) {
 		c := newScriptCmd(cmdArgs[0], cmdArgs[1:]...)
 		c.SetDir(root)
 		if err := c.Run(); err != nil {
-			if isContextDeadline(err) {
+			if scriptTimedOut(c) {
 				log.Printf("WARN: %s (%s): 超过 %s 强杀（脚本挂起）", name, cmdArgs[1], scriptTimeout)
 				continue
 			}
@@ -116,11 +130,17 @@ func runScript(name, root string, commands [][]string) {
 	}
 }
 
-// isContextDeadline 报告 err 是否为 ctx 超时链（exec.Cmd 被 CommandContext 的
-// ctx 取消时，Wait 返回 "signal: killed" 包着 context.DeadlineExceeded 的链，
-// 经 errors.Is 逐层解包判定）。
-func isContextDeadline(err error) bool {
-	return errors.Is(err, context.DeadlineExceeded)
+// scriptTimedOut 报告脚本命令是否因 scriptTimeout 到期被 CommandContext 杀掉。
+// 判定用构建时的 ctx.Err()（Run 返回时已采样进 scriptCmd.timedOut，取消计时器前
+// 置位）而非 errors.Is(err, context.DeadlineExceeded)（旧实现 isContextDeadline）：
+// 超时路径上 Cmd.Wait 返回被杀进程的 *ExitError（"signal: killed"/Windows
+// TerminateProcess），DeadlineExceeded 只存在于 Cmd.Wait 因 Process.Wait 的错误被
+// 优先而丢弃的 watchCtx 分支，errors.Is 判定恒 false（Windows 实测）——超时被记成
+// 普通失败，丢失"强杀"语义。fake runner（测试注入）非 *scriptCmd，恒 false，
+// 走普通失败日志。
+func scriptTimedOut(c scriptRunner) bool {
+	sc, ok := c.(*scriptCmd)
+	return ok && sc.timedOut
 }
 
 // RunSchoolNow 立即执行开学季任务：school_open_day_2026.py ALL --run --yes。
@@ -138,6 +158,19 @@ func (s *Scheduler) RunSchoolNow() {
 // 探测 + RunNightChats 真实对话）。窗口外触发直接跳过（black_cat 窗口外不计分，
 // 打 skip 正常态）。单号失败只该号 WARN；账号间限速 activityAccountDelay。
 func (s *Scheduler) RunCatNow() {
+	// panel 裸 goroutine 入口：任务体 panic 不应击穿整个网关进程（与 RunCheckinNow
+	// 同理，runBatch/RunKindNow 的 recover 不覆盖本入口）。
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("scheduler: task cat panic: %v", r)
+		}
+	}()
+	s.runCat(context.Background())
+}
+
+// runCat 夜猫子任务遍历，随 ctx 取消立即退出（无 ctx 的外部入口 RunCatNow 取
+// 背景 ctx，语义与引入前 time.Sleep 版一致；账号间限速等待中取消不等睡满）。
+func (s *Scheduler) runCat(ctx context.Context) {
 	if !upstream.InNightWindow(time.Now()) {
 		log.Printf("cat: 当前不在 23:00–08:00 计数窗口，跳过")
 		return
@@ -167,7 +200,9 @@ func (s *Scheduler) RunCatNow() {
 		} else {
 			log.Printf("cat %s: 完成 %d 次夜间对话", logfmt.Label(a.UID, a.Nickname), ok)
 		}
-		time.Sleep(activityAccountDelay)
+		if !sleepCtx(ctx, activityAccountDelay) {
+			return // 优雅停机：不等限速睡满，剩余账号下轮再补
+		}
 	}
 }
 

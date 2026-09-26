@@ -64,8 +64,13 @@ func (p *Pool) StartAuthDirWatch(dir string) (stop func()) {
 				if !ok || cur == last {
 					continue // 目录暂不可读（如正在原子替换）不当作变化，避免误剔除
 				}
+				// 失败不推进 last：指纹变化但 LoadDir 失败（如磁盘抖动）时保留旧
+				// 指纹，下一轮 5s 后重新检测到变化并重试；若先推进 last 再加载，
+				// 失败的那次变更会被旧指纹永久吞掉（加载不到就再也不重试）。
+				if err := p.reloadAuthDir(dir); err != nil {
+					continue
+				}
 				last = cur
-				p.reloadAuthDir(dir)
 			}
 		}
 	}()
@@ -82,11 +87,14 @@ func (p *Pool) StartAuthDirWatch(dir string) (stop func()) {
 // 全量重扫而非增量：目录只有几十个文件，全扫的代价远低于维护增量状态
 // （增量需要处理"文件改名""写了一半"等边界）。auth.LoadDir 自身跳过坏文件，
 // 故半写入的临时文件（login.sh 用 tempfile + os.replace 原子替换）不会造成误判。
-func (p *Pool) reloadAuthDir(dir string) {
+//
+// 返回 error 供调用方决定是否推进指纹：LoadDir 失败（目录扫描出错）时返回 err，
+// 成功返回 nil。失败时调用方保留旧指纹，下一轮轮询重试——否则该次变更永久丢失。
+func (p *Pool) reloadAuthDir(dir string) error {
 	auths, err := auth.LoadDir(dir)
 	if err != nil {
-		log.Printf("WARN: [watch] 重新加载 %s 失败: %v（保持现有池状态）", dir, err)
-		return
+		log.Printf("WARN: [watch] 重新加载 %s 失败: %v（保持现有池状态，下一轮重试）", dir, err)
+		return err
 	}
 	before := len(p.AvailableUIDs())
 	p.SyncToDir(auths)
@@ -97,6 +105,7 @@ func (p *Pool) reloadAuthDir(dir string) {
 		// 数量不变但内容变了（如凭证刷新、文件改名）：仍要落一条，便于对账。
 		log.Printf("[watch] auths 目录变化：账号数保持 %d（已热加载凭证更新）", after)
 	}
+	return nil
 }
 
 // dirFingerprint 生成目录内容指纹：文件名 + 修改时间 + 大小，排序后拼接。

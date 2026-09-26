@@ -81,21 +81,23 @@ type chatRequestEvent struct {
 	UserID                string `json:"userId"`
 }
 
-// ReportChatActivity 向上游发送一条对话活跃上报（chat_request_send）。
-// conversationID 由调用方生成（如 wb2api-<ms>），无需真实会话——服务端不校验一致性。
-// requestID 为本轮请求独立标识（多轮同会话上报时各条不同）；空时回落 conversationID。
-// 错误语义与 doJSON 一致：HTTP 非 2xx / 业务 code != 0 → *Error。
-//
-// 与 issue #35 会话头族（X-Conversation-Request-ID）保持独立：本接口是 growth 域
-// 活跃上报（仅点亮连登/first_buddy，每号每天 1 次），event.requestId 是事件级标识，
-// 后台按 growth 事件去重，不走 chat 后台的 X-Conversation-Request-ID 聚合——对齐
-// 官方 chat_request_send 事件形状（probe_active.py），刻意不复用聚合主键。
-func (c *Client) ReportChatActivity(a *auth.Auth, conversationID, requestID string) error {
-	if requestID == "" {
-		requestID = conversationID
-	}
+// buildChatRequestEvent 构造 chat_request_send 事件（ReportChatActivity /
+// ReportChatActivityModel 共用，消除双构造器漂移——此前两份近乎逐行相同的构造
+// 已在 RootRequestID 落点上发生过漂移：ReportChatActivity 落 conversationID、
+// ReportChatActivityModel 落 requestID，且无任何一方注释解释差异原因）。
+// 两份构造器除 RequestModelID/RequestModelName/RootRequestID 三字段外完全一致，
+// 现收敛为单一构造器 + 显式落点参数：
+//   - rootToRequestID=true  → RootRequestID=requestID（ReportChatActivityModel 的
+//     panel 语义，school 任务链按 root 聚合各步骤）；
+//   - rootToRequestID=false → RootRequestID=conversationID（ReportChatActivity 的
+//     growth 活跃上报语义，后台按 growth 事件去重）。
+func buildChatRequestEvent(a *auth.Auth, conversationID, requestID, modelID, modelName string, rootToRequestID bool) chatRequestEvent {
 	now := time.Now().UnixMilli()
-	ev := chatRequestEvent{
+	rootID := conversationID
+	if rootToRequestID {
+		rootID = requestID
+	}
+	return chatRequestEvent{
 		EventCode:             "chat_request_send",
 		Timestamp:             now,
 		ReportDelay:           0,
@@ -103,8 +105,8 @@ func (c *Client) ReportChatActivity(a *auth.Auth, conversationID, requestID stri
 		ConversationID:        conversationID,
 		RequestID:             requestID,
 		InputLength:           12,
-		RequestModelID:        "deepseek-v4-flash",
-		RequestModelName:      "DeepSeek V4 Flash",
+		RequestModelID:        modelID,
+		RequestModelName:      modelName,
 		IsPlan:                false,
 		IsAutoExecuteTerminal: false,
 		IsAutoModify:          false,
@@ -127,16 +129,36 @@ func (c *Client) ReportChatActivity(a *auth.Auth, conversationID, requestID stri
 		FileURI:               "",
 		PresentAt:             now,
 		TraceID:               "",
-		RootRequestID:         conversationID,
+		RootRequestID:         rootID,
 		ParentConversationID:  conversationID,
 		AgentName:             "default",
 		AgentType:             "conversation",
 		UserID:                a.UID,
 	}
+}
+
+// reportChatEvent 把事件 POST 到 /v2/report（billingJSON，错误语义与 doJSON 一致）。
+func (c *Client) reportChatEvent(a *auth.Auth, ev chatRequestEvent) error {
 	raw, err := json.Marshal([]chatRequestEvent{ev})
 	if err != nil {
 		return err
 	}
 	_, err = c.billingJSON(a, http.MethodPost, reportPath, json.RawMessage(raw))
 	return err
+}
+
+// ReportChatActivity 向上游发送一条对话活跃上报（chat_request_send）。
+// conversationID 由调用方生成（如 wb2api-<ms>），无需真实会话——服务端不校验一致性。
+// requestID 为本轮请求独立标识（多轮同会话上报时各条不同）；空时回落 conversationID。
+// 错误语义与 doJSON 一致：HTTP 非 2xx / 业务 code != 0 → *Error。
+//
+// 与 issue #35 会话头族（X-Conversation-Request-ID）保持独立：本接口是 growth 域
+// 活跃上报（仅点亮连登/first_buddy，每号每天 1 次），event.requestId 是事件级标识，
+// 后台按 growth 事件去重，不走 chat 后台的 X-Conversation-Request-ID 聚合——对齐
+// 官方 chat_request_send 事件形状（probe_active.py），刻意不复用聚合主键。
+func (c *Client) ReportChatActivity(a *auth.Auth, conversationID, requestID string) error {
+	if requestID == "" {
+		requestID = conversationID
+	}
+	return c.reportChatEvent(a, buildChatRequestEvent(a, conversationID, requestID, "deepseek-v4-flash", "DeepSeek V4 Flash", false))
 }

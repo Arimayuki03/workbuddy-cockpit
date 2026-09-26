@@ -58,6 +58,15 @@ func deriveID(a *auth.Auth, salt string) string {
 	return hex.EncodeToString(sum[:18]) // 36 hex chars
 }
 
+// tail8 返回 s 的最后 8 字节；len(s) < 8 时原样返回（防短 id / 空串越界 panic）。
+// 仅用于派生展示性子串（ardot-file-* / msg-*），不承载唯一性语义，截短可接受。
+func tail8(s string) string {
+	if len(s) < 8 {
+		return s
+	}
+	return s[len(s)-8:]
+}
+
 // DesktopEvent 桌面端事件：业务字段任意（map），公共指纹由 ReportDesktopEvent 注入。
 type DesktopEvent map[string]any
 
@@ -136,7 +145,9 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 // chat_message_response(isSuccessful) → chat_message_status → chat_request_response）。
 // 实测该链点亮 RichMeow_Chat。conversationID/requestID/messageID 由调用方生成。
 func DesktopChatSequence(conversationID, requestID, messageID, modelID, modelName string) []DesktopEvent {
-	uuid := func() string { return requestID }
+	// traceID 与 rootRequestId 同值：桌面端只把 traceId 当链路串联键上报，
+	// 不校验其形态（服务端 requestId 直接复用，见 DesktopChatWithExpert）。
+	traceID := func() string { return requestID }
 	mk := func(code string, extra map[string]any) DesktopEvent {
 		ev := DesktopEvent{"eventCode": code}
 		for k, v := range extra {
@@ -160,7 +171,7 @@ func DesktopChatSequence(conversationID, requestID, messageID, modelID, modelNam
 		mk("chat_message_send", map[string]any{
 			"messageId": messageID + "-assistant", "historyCount": 0,
 			"isContextTruncated": false, "currentStepCount": 1,
-			"traceId": uuid(), "rootRequestId": requestID,
+			"traceId": traceID(), "rootRequestId": requestID,
 			"parentConversationId": conversationID,
 			"agentName":            "cli", "agentType": "main",
 		}),
@@ -171,7 +182,7 @@ func DesktopChatSequence(conversationID, requestID, messageID, modelID, modelNam
 			"mentionContexts": []any{}, "knowledgeId": []any{}, "knowledgeName": []any{},
 			"codebaseId": "", "mentionContextCount": 0, "command": "",
 			"recommendId": "", "skillId": "", "skillCount": 0, "totalCount": 0,
-			"traceId": uuid(), "rootRequestId": requestID,
+			"traceId": traceID(), "rootRequestId": requestID,
 			"parentConversationId": conversationID,
 			"agentName":            "cli", "agentType": "main",
 			"codebuddy.session_id":              conversationID,
@@ -182,7 +193,7 @@ func DesktopChatSequence(conversationID, requestID, messageID, modelID, modelNam
 			"inputToken": 120, "outputToken": 80, "totalToken": 200,
 			"cachedTokens": 0, "cachedWriteTokens": 0, "cachedMissTokens": 0,
 			"isSuccessful": true, "messageErrorCode": "", "finishReason": "stop",
-			"firstTokenAt": time.Now().UnixMilli(), "traceId": uuid(),
+			"firstTokenAt": time.Now().UnixMilli(), "traceId": traceID(),
 			"conversationId": conversationID,
 			"rootRequestId":  requestID, "parentConversationId": conversationID,
 			"agentName": "cli", "agentType": "main",
@@ -191,7 +202,7 @@ func DesktopChatSequence(conversationID, requestID, messageID, modelID, modelNam
 		}),
 		mk("chat_message_status", map[string]any{
 			"messageId": messageID + "-assistant", "messageErrorCode": "0",
-			"traceId": uuid(), "rootRequestId": requestID,
+			"traceId": traceID(), "rootRequestId": requestID,
 			"parentConversationId": conversationID,
 			"agentName":            "cli", "agentType": "main",
 		}),
@@ -365,7 +376,7 @@ func DesktopDesignCanvasSequence(conversationID, requestID string) []DesktopEven
 		},
 		DesktopEvent{
 			"eventCode": "wbx_design_canvas_open", "conversationId": conversationID,
-			"requestId": requestID, "id": "ardot-file-" + requestID[len(requestID)-8:],
+			"requestId": requestID, "id": "ardot-file-" + tail8(requestID),
 			"source": "summon_keyword", "type": "page", "cost": 13000, "isSuccessful": true,
 		},
 	)
@@ -515,6 +526,12 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	defer sse.Close()
 	buf := make([]byte, 0, 1<<20)
 	tmp := make([]byte, 8192)
+	// scanPos 已扫描偏移量：bytes.Index 恒从 buf[0] 起找会把扫描钉死在首个
+	// 不匹配的候选上（首个 "id":" 值不是合法 id 时，其后的合法 id 永远不被
+	// 检查，直到流结束/1MB 上限误报"未找到"）。每轮从 buf[scanPos:] 起找，
+	// 候选不匹配则 scanPos 前进，匹配即返回；buf 增长时 scanPos 不重置
+	// （已扫过的前缀无需重扫）。扫描逻辑见 scanServerRequestID。
+	scanPos := 0
 	for {
 		n, rerr := sse.Read(tmp)
 		if n > 0 {
@@ -526,17 +543,10 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 				}
 				fmt.Printf("[dbg-rd %d] %q\n", n, dbg)
 			}
-			if i := bytes.Index(buf, []byte(`"id":"`)); i >= 0 {
-				rest := buf[i+6:]
-				if end := bytes.IndexByte(rest, '"'); end > 0 {
-					id := string(rest[:end])
-					if os.Getenv("WB2A_DEBUG_CHAT") != "" {
-						fmt.Printf("[dbg-id] %q match=%v\n", id, idRegex.MatchString(id))
-					}
-					if idRegex.MatchString(id) {
-						return conversationID, id, nil
-					}
-				}
+			if id, next, found := scanServerRequestID(buf, scanPos); found {
+				return conversationID, id, nil
+			} else {
+				scanPos = next
 			}
 		}
 		if rerr != nil || len(buf) > 1<<20 {
@@ -544,6 +554,47 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 		}
 	}
 	return "", "", fmt.Errorf("SSE 中未找到服务端 requestId")
+}
+
+// scanServerRequestID 从 buf[start:] 起扫描第一个匹配 idRegex 的 "id":"<v>" 值。
+// 返回 (id, 下次扫描起点, 是否命中)：候选值不匹配 idRegex 时起点前进到该候选之后
+// （跳过整个 "id":"<v>" 段），保证其后出现的合法 id 仍会被检查——旧实现恒从
+// buf[0] 起 Index，首个不匹配候选会永久卡死扫描指针（desktop requestId 误报
+// "SSE 中未找到服务端 requestId"）。候选值跨 chunk 截断（无闭合引号）时起点
+// 停在候选 `"id":"` 处，等下一 chunk 拼齐后重判该候选。
+func scanServerRequestID(buf []byte, start int) (id string, next int, found bool) {
+	needle := []byte(`"id":"`)
+	pos := start
+	for {
+		if pos+len(needle) > len(buf) {
+			return "", pos, false
+		}
+		i := bytes.Index(buf[pos:], needle)
+		if i < 0 {
+			// 无更多候选：下次从"末尾可能残缺的 needle 前缀"处起扫（不漏跨 chunk 拼接）。
+			nextPos := len(buf) - len(needle) + 1
+			if nextPos < pos {
+				nextPos = pos
+			}
+			return "", nextPos, false
+		}
+		from := pos + i
+		rest := buf[from+len(needle):]
+		end := bytes.IndexByte(rest, '"')
+		if end < 0 {
+			// 值未闭合（候选被 chunk 边界截断）：停在候选起点，待数据续上重扫。
+			return "", from, false
+		}
+		candidate := string(rest[:end])
+		if os.Getenv("WB2A_DEBUG_CHAT") != "" {
+			fmt.Printf("[dbg-id] %q match=%v\n", candidate, idRegex.MatchString(candidate))
+		}
+		if idRegex.MatchString(candidate) {
+			return candidate, from, true
+		}
+		// 不匹配：从候选值末尾继续（该起点已终判，不会死循环）。
+		pos = from + len(needle) + end
+	}
 }
 
 // idRegex 服务端 requestId 形状（cmb- 前缀 32hex 或裸 32hex）。
@@ -614,7 +665,7 @@ func desktopExpertActualUse(e MarketExpert, conversationID, requestID string) De
 		"id":        e.ExpertID, "name": e.DisplayNameZH, "expertTitle": e.ProfessionZH,
 		"type": cat, "expertType": e.ExpertType, "source": "builtin", "version": ver,
 		"cost": 9000, "characterCount": 14,
-		"conversationId": conversationID, "requestId": requestID, "messageId": "msg-" + requestID[len(requestID)-8:],
+		"conversationId": conversationID, "requestId": requestID, "messageId": "msg-" + tail8(requestID),
 		"requestModelId": "fast-model", "requestModelName": "fast-model",
 	}
 }

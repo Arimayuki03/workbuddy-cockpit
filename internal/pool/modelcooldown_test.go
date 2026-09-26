@@ -508,7 +508,7 @@ func TestModelCooldownsPersistRoundTrip(t *testing.T) {
 	if d := mc.Until.Sub(reset); d < -time.Second || d > time.Second {
 		t.Errorf("恢复后 model until=%v want ~reset=%v (diff %v)", mc.Until, reset, d)
 	}
-	if mc.ResetAt != mc.ResetAt || !mc.ResetAt.Equal(reset) {
+	if mc.ResetAt.IsZero() || !mc.ResetAt.Equal(reset) {
 		t.Errorf("恢复后 model reset_at=%v want %v", mc.ResetAt, reset)
 	}
 	if mc.Reason != "6004 model rate limit" {

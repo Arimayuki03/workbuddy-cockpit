@@ -410,7 +410,13 @@ func ExtractClientIP(r *http.Request) string {
 //  3. 显式 client_name="SaaS" → 不设置（Go 客户端自带默认 UA，还原旧行为）。
 func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	// AccessToken 加锁快照（同 ChatHeaders：keepalive 可在 a.mu 内改写）。
-	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
+	// 空 token 口径与 ChatHeaders 一致：不发 "Bearer "（尾随空格）残头，改设
+	// X-No-Authorization: 1 声明无凭据。
+	if at := a.AccessTokenValue(); at != "" {
+		req.Header.Set("Authorization", "Bearer "+at)
+	} else {
+		req.Header.Set("X-No-Authorization", "1")
+	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
 	c.injectCodeBuddyRequest(req)
@@ -434,12 +440,21 @@ func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	}
 	// 设备风控头：billing 域（report/travel/balance/checkin）同样注入（见 resolveDeviceToken）。
 	c.injectDeviceToken(req, a)
+	// X-Machine-ID / X-Session-ID：对齐 CommonHeaders 全覆盖承诺（上文 181-184 行：
+	// "hub 在所有出站路径的公共 headers() 注入，本网关同样全覆盖，billing 域另行注入"）
+	// 与官方 hub 的 wb_accounts.py:250-251 行为——billing 域（report/travel/checkin/
+	// balance/growth）同需账号级设备头。此前 billing 域未走 CommonHeaders 又未补注入，
+	// 该承诺实际未兑现：billing 路径缺失 X-Machine-ID/X-Session-ID，多号易被上游按
+	// 设备指纹缺失/漂移关联风控。uid 为空时不注入（见 injectAccountStableHeaders）。
+	c.injectAccountStableHeaders(req, a)
 }
 
 // RefreshHeaders refresh 端点专属头（X-Refresh-Token 只允许出现在这里）。
 func (c *Client) RefreshHeaders(req *http.Request, a *auth.Auth) {
 	c.CommonHeaders(req, a)
-	req.Header.Set("X-Refresh-Token", a.RefreshToken)
+	// RefreshToken 加锁读取：keepalive 刷新会在 a.mu 内改写该字段，锁外直读
+	// 构成数据竞争（同 AccessTokenValue 口径）。
+	req.Header.Set("X-Refresh-Token", a.RefreshTokenValue())
 	if a.EnterpriseID != "" {
 		req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
 	}

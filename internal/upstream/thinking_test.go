@@ -303,3 +303,61 @@ func TestInjectThinkingStringPreserved(t *testing.T) {
 		t.Errorf("stream 未强制: %s", out)
 	}
 }
+
+// TestEnsureDeepSeekEffortNullEmptyFallback reasoning_effort null/空串形态回归：
+// 旧实现「键存在即已有档位」——null/"" 命中 hasSnake/hasCamel 直接返回，deepseek
+// 请求落入 thinking.type=enabled 但无有效 effort 的失效形态（上游按不思考应答）；
+// 与 translateMaxCompletionTokens 对 0/null 按「未设置」处理的口径不一致。修复后
+// 只认非空 string：null/空串删除后按缺省补默认档（语义 = 未设置），显式档位不动。
+func TestEnsureDeepSeekEffortNullEmptyFallback(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantEff string // 期望 reasoning_effort；wantAbsent 时应无此字段
+	}{
+		{"null effort 按未设置补默认档",
+			`{"model":"deepseek-v4-flash","thinking":{"type":"enabled"},"reasoning_effort":null,"messages":[]}`,
+			"high"},
+		{"空串 effort 按未设置补默认档",
+			`{"model":"deepseek-v4-flash","reasoning_effort":"","messages":[]}`,
+			"high"},
+		{"camel 空串按未设置补默认档",
+			`{"model":"deepseek-v4-flash","reasoningEffort":"","messages":[]}`,
+			"high"},
+		{"显式 high 不覆盖",
+			`{"model":"deepseek-v4-flash","reasoning_effort":"high","messages":[]}`,
+			"high"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := PrepareBodyOptWithEfforts([]byte(c.body), false, nil)
+			eff, ok := objFieldString(t, out, "reasoning_effort")
+			if !ok || eff != c.wantEff {
+				t.Errorf("reasoning_effort=%q ok=%v want %q (out=%s)", eff, ok, c.wantEff, out)
+			}
+			// 补档后不得残留 null 键或空串 camel 键（双键并存/垃圾出站）。
+			var m map[string]any
+			if err := json.Unmarshal(out, &m); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if v, present := m["reasoning_effort"]; present && v == nil {
+				t.Errorf("reasoning_effort null 键残留 (out=%s)", out)
+			}
+			if v, present := m["reasoningEffort"]; present {
+				if s, isStr := v.(string); !isStr || s == "" {
+					t.Errorf("空串/非档位 camel 键残留: %v (out=%s)", v, out)
+				}
+			}
+		})
+	}
+	// thinking.type=enabled + null effort（失效形态主场景）：出站必须带有效默认档。
+	out := PrepareBodyOptWithEfforts(
+		[]byte(`{"model":"deepseek-v4-flash","thinking":{"type":"enabled"},"reasoning_effort":null,"messages":[]}`),
+		false, nil)
+	if typ, _ := getThinkingType(t, out); typ != "enabled" {
+		t.Fatalf("thinking.type=%q want enabled (out=%s)", typ, out)
+	}
+	if eff, _ := objFieldString(t, out, "reasoning_effort"); eff != "high" {
+		t.Errorf("enabled+null 形态出站 effort=%q want high（失效形态修复）(out=%s)", eff, out)
+	}
+}

@@ -151,9 +151,9 @@ func assertJSONErrorCode(t *testing.T, body, want string) bool {
 	return true
 }
 
-// TestChatLargeBodyProceeds 无请求体大小上限（max_body_mb 已移除）：任意大 body 完整
-// 读入并正常进入后续处理（打到上游），网关侧不再 413 预拦截。超限类问题交由上游
-// 自然返回错误（错误响应经既有分类链路透出，信息量更大），网关不挡上游真实行为。
+// TestChatLargeBodyProceeds 默认请求体上限（64MB）内放行：50MB+ 的合法 body 完整
+// 读入并正常进入后续处理（打到上游）。超过 max_body_mb 上限时走 MaxBytesReader
+// 就地 413（见 handler_audit_test.go 的 TestChatBodyTooLargeReturns413）。
 func TestChatLargeBodyProceeds(t *testing.T) {
 	var calls int
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {

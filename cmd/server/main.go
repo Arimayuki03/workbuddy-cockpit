@@ -165,6 +165,7 @@ func main() {
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
+	p.SetPickStrategy(pool.ParsePickStrategy(cfg.Pool.PickStrategy)) // 选号策略（weighted 默认 / credits_desc 余额严格降序）
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
@@ -183,6 +184,9 @@ func main() {
 			// realm 感知闭包：带前缀模型名按 realm 过滤可用账号（跨 realm 不泄漏，
 			// 见 wiring.go）；裸名走 cn（现状零回归）。
 			AvailableForModel: realmAwareAvailableForModel(p),
+			// 策略感知首次分配：credits_desc 时新会话绑余额最高号（而非哈希打散），
+			// weighted 返回 nil 保持现状（见 wiring.go / session.Config 注释）。
+			PreferredForModel: realmAwareStickyPreferred(p),
 		})
 		sessRouter.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
 		sessRouter.StartGC()
@@ -390,6 +394,10 @@ func main() {
 		Live: live,
 		// global realm 开关（handler 侧第三道闸：modelList 据此决定是否列 global 名单）。
 		GlobalEnabled: cfg.Global.Enabled,
+		// 请求体上限（config max_body_mb × 1MB）：此前漏接线导致该配置静默无效、
+		// handler 恒为默认 64MB。<=0 时传 0 走 handler 兜底回落默认（handler.go
+		// maxBodyBytes 对非正值回落 64MB，口径一致）。
+		MaxBodyBytes: int64(cfg.MaxBodyMB) << 20,
 		// /admin 管理面（本地 tasks/credits/shutdown + 上游 accounts 运维端点共用
 		// admin.enabled 开关；缺省关闭。本地端点开启后 loopback + api_key 双重限制）。
 		// OnShutdown=stop：POST /admin/shutdown 等价一次 Ctrl+C，走既有 flush→close→

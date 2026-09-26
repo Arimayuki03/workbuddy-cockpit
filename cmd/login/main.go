@@ -25,6 +25,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -247,7 +248,7 @@ func runPoll(base, origin, realm, statePath string, client *http.Client, out io.
 	headers := commonHeaders(origin)
 	// handlePollLogin：auth/token 是权威登录状态端点，
 	// pending 时业务 code 非 0（"login ing"），完成时 code=0 + token bundle
-	tokRaw, status, errTok := doJSON(client, http.MethodGet, base+"/v2/plugin/auth/token?state="+ls.State, headers, nil)
+	tokRaw, status, errTok := doJSON(client, http.MethodGet, base+"/v2/plugin/auth/token?state="+url.QueryEscape(ls.State), headers, nil)
 	if errTok != nil {
 		if status == 0 || status >= 500 {
 			fatal("token endpoint error: %v", errTok)
@@ -273,7 +274,7 @@ func runPoll(base, origin, realm, statePath string, client *http.Client, out io.
 		headers(r)
 		r.Header.Set("Authorization", "Bearer "+tok.AccessToken)
 	}
-	if acctRaw, _, errAcct := doJSON(client, http.MethodGet, base+"/v2/plugin/login/account?state="+ls.State, acctHeaders, nil); errAcct == nil {
+	if acctRaw, _, errAcct := doJSON(client, http.MethodGet, base+"/v2/plugin/login/account?state="+url.QueryEscape(ls.State), acctHeaders, nil); errAcct == nil {
 		_ = json.Unmarshal(acctRaw, &acct)
 	}
 	oraw, _ := json.Marshal(buildLoginOutput(tok, realm, acct))

@@ -313,11 +313,38 @@ func (a *Auth) SaveAtomic() error {
 	if err != nil {
 		return err
 	}
-	tmp := a.FilePath + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	return writeFileAtomic(a.FilePath, raw)
+}
+
+// writeFileAtomic 原子写文件，口径与 pool.writeStateFileSync 一致：
+// OpenFile(tmp) → Write → f.Sync()（防掉电后 rename 了半截内容，Windows 上
+// Sync 落到 FlushFileBuffers 同样有效）→ Close → Rename；任一步失败逐级
+// Remove(tmp)，不留残片（WriteFile 失败会让 .tmp 残留，污染目录）。
+func writeFileAtomic(fp string, raw []byte) error {
+	tmp := fp + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, a.FilePath)
+	if _, err := f.Write(raw); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, fp); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // ExportDoc 返回与 SaveAtomic 落盘同形的嵌套凭据文档（供账号导出）。
@@ -385,6 +412,12 @@ func LoadDir(dir string) ([]*Auth, error) {
 		}
 		a, err := Parse(raw)
 		if err != nil {
+			continue
+		}
+		// 缺 uid 的凭证文件跳过（Parse 保持向后兼容不拒绝）：uid 是池内的账号主键，
+		// 空 UID 的文件都进来会被合并成单个 UID="" 账号（多份凭证互相覆盖）。
+		if strings.TrimSpace(a.UID) == "" {
+			log.Printf("WARN: 跳过缺 uid 的凭证文件 %s（请补 account.uid 或删除该文件）", f)
 			continue
 		}
 		a.FilePath = f

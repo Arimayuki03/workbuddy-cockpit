@@ -790,7 +790,7 @@ func runModelChat(p *Panel, a *auth.Auth) (string, error) {
 		},
 		"stream": true,
 	})
-	rc, status, respBody, err := p.cfg.Upstream.ChatStream(a, body, "", upstream.ChatMeta{})
+	rc, status, respBody, err := p.cfg.Upstream.ChatStreamContext(context.Background(), a, body, "", upstream.ChatMeta{})
 	if err != nil {
 		return "", fmt.Errorf("对话请求: %w", err)
 	}
@@ -1172,10 +1172,39 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 			out = append(out, item)
 			continue
 		}
-		if before.Claimed || before.Current >= before.Target && before.Target > 0 {
+		if before.Claimed {
 			item["status"] = "skipped"
 			item["message"] = "已完成（" + taskProgressText(before) + "）"
 			out = append(out, item)
+			continue
+		}
+		// 达标未领（与单任务口、执行队列同口径）：直接领奖，跳过 act.run——
+		// expert/skill 系动作是真实对话，重跑只烧配额不涨进度。
+		if before.Target > 0 && before.Current >= before.Target {
+			var credit, energy int64
+			var cerr error
+			if isMPTaskCode(act.TaskCode) {
+				credit, energy, cerr = p.cfg.Upstream.ClaimRewardMP(a, act.TaskCode)
+			} else {
+				credit, energy, cerr = p.cfg.Upstream.ClaimReward(a, act.TaskCode)
+			}
+			if cerr != nil {
+				item["status"] = "error"
+				item["message"] = "达标但领奖失败: " + cerr.Error()
+			} else {
+				item["status"] = "done"
+				item["claimed"] = true
+				item["credit"] = credit
+				item["energy"] = energy
+				if credit > 0 || energy > 0 {
+					item["message"] = fmt.Sprintf("已达标（%s），自动领奖 +%d 分 +%d 能",
+						taskProgressText(before), credit, energy)
+				} else {
+					item["message"] = "已达标，奖励此前已领取"
+				}
+			}
+			out = append(out, item)
+			time.Sleep(reportGap)
 			continue
 		}
 		msg, err := act.run(p, a)

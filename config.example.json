@@ -73,6 +73,7 @@
     "token": ""
   },
   "pool": {
+    "pick_strategy": "weighted",
     "max_in_flight": 3,
     "max_in_flight_global": 2,
     "breaker_threshold": 3,

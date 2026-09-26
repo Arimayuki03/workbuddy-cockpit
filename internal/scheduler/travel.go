@@ -68,6 +68,13 @@ func travelDay(t time.Time) string {
 // 场景由 RunActivityNow 覆盖）。内部走 runTravel，取背景 ctx（不可取消，
 // 语义与引入前 time.Sleep 版一致）。
 func (s *Scheduler) RunTravelNow() {
+	// panel 裸 goroutine 入口：任务体 panic 不应击穿整个网关进程（与 RunCheckinNow
+	// 同理，runBatch/RunKindNow 的 recover 不覆盖本入口）。
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("scheduler: task travel panic: %v", r)
+		}
+	}()
 	s.runTravel(context.Background())
 }
 

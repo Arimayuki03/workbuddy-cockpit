@@ -8,9 +8,13 @@
 //
 // 实现口径（大整数保真）：Append/Rewrite 用 map[string]json.RawMessage 透传——
 // 只解码/重编码真正要改写的部分（messages 数组的增删），其余字段（顶层与消息内）
-// 保持 RawMessage 原样字节。旧实现经 map[string]any 往返会把 JSON 数字统一
+// 的**值**保持 RawMessage 原样字节。旧实现经 map[string]any 往返会把 JSON 数字统一
 // float64 化，>2^53 的大整数（seed、metadata、工具 JSON Schema 整型枚举等）被
-// 静默改写；本实现未改写部分字节级不变（含键序、空白与未知字段）。
+// 静默改写；本实现未改写部分的值字节级不变（未知字段值原样透传）。
+// 编码层面说明：顶层输出经 json.Marshal(map[string]json.RawMessage) 重编码——键按
+// 字典序排序、空白压缩、HTML 字符（< > &）转义，与 map[string]any 的编码行为一致；
+// 即顶层键序/空白与原始输入不同，但这是既有行为，上游不做字节级指纹匹配，
+// 重编码无功能影响。
 package prompt
 
 import (
@@ -111,8 +115,9 @@ func remarshalWithMessages(obj map[string]json.RawMessage, msgs []json.RawMessag
 //     匹配，与 Rewrite 删除口径一致）的消息；遇第一条非 system/developer
 //     消息（含非对象消息、无 role 消息）即停；
 //   - 插入点 = 连续块末尾之后（块长 0 时即 messages 最前）；
-//   - 所有既有消息（含开头块、中途 system、user/assistant/tool）保持原始字节
-//     ——客户端项目规范/工具约定与网关提示词并用，大整数与未知字段不被改写。
+//   - 所有既有消息（含开头块、中途 system、user/assistant/tool）的值内容保持
+//     原样（RawMessage 透传，大整数与未知字段不被改写；编码层面顶层会整体
+//     重编码，见包注释）——客户端项目规范/工具约定与网关提示词并用。
 //
 // 守卫与 Rewrite 逐条一致：空 body / 空 systemPrompt / 坏 JSON → 原样返回
 // （绝不失败）；无 messages 字段或 messages 类型不符 → messages=[网关 system]，
@@ -169,8 +174,8 @@ func Append(body []byte, systemPrompt string) []byte {
 // Rewrite 解析 OpenAI 请求体并替换系统提示词：
 //   - 删除 messages 中所有 role 为 system/developer 的消息；
 //   - 在 messages 头部插入一条 {"role":"system","content":systemPrompt}；
-//   - 其余字段与 user/assistant/tool 消息保持原始字节（RawMessage 透传，
-//     大整数与未知字段不被 float64 往返改写）。
+//   - 其余字段与 user/assistant/tool 消息的值内容保持原样（RawMessage 透传，
+//     大整数与未知字段不被 float64 往返改写；编码层面顶层会整体重编码，见包注释）。
 //
 // 解析失败 → 原样返回（绝不失败）：Rewrite 是出站改写的关键路径，
 // 任何解析错误都不应阻塞请求转发，让上游按其原始语义处理。

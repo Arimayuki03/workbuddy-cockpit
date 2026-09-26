@@ -74,6 +74,11 @@ func (l *loginLimiter) allow(ip string) bool {
 		delete(l.entries, ip)
 		return true
 	}
+	// 条目惰性过期：命中即检查 windowStart 与锁定态，计数窗口已过的未锁定
+	// 条目直接删除，避免低频失败 IP 的条目在 map 中永久滞留（无界增长）。
+	if time.Now().Sub(e.windowStart) > loginFailWindow {
+		delete(l.entries, ip)
+	}
 	return true
 }
 
@@ -132,7 +137,8 @@ func (p *Panel) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	key := p.apiKey()
 	if key == "" {
-		// 未启用鉴权的部署没有"登录"概念：直接发一个长效会话，manager 壳可正常进入。
+		// 未启用鉴权的部署没有"登录"概念：不发 cookie，后续请求经
+		// VerifyBearer（空 key 恒真）放行（issueSession 对空 key 是 no-op，保留调用以明示意图）。
 		p.issueSession(w, "")
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "username": "admin", "role": "admin"})
 		return
@@ -224,12 +230,18 @@ func (p *Panel) handleGetModelMap(w http.ResponseWriter, r *http.Request) {
 // SetModelMap 立即生效 → SaveConfig 闭包写回 config.json（深合并原子写，
 // 键 model_map）→ 返回生效表。写盘失败仍返回生效表（内存已生效；
 // 重启后回落 config 值），错误随 ok:false 提示。
+// map 键缺失或显式 null 返回 400（畸形请求不得静默清空并持久化空表）；
+// {"map":{}} 是合法的「清空所有映射」操作，照常放行。
 func (p *Panel) handleSetModelMap(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Map map[string]string `json:"map"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, loginBodyLimit)).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid body: "+err.Error())
+		return
+	}
+	if body.Map == nil {
+		writeErr(w, http.StatusBadRequest, "map required")
 		return
 	}
 	server.SetModelMap(body.Map)

@@ -160,7 +160,8 @@
     "requestsShort": "Req.",
     "name": "Name",
     "paid": "Charged",
-    "unknown": "Unknown"
+    "unknown": "Unknown",
+    "usedShort": "Used"
   },
   "dashboard": {
     "title": "Dashboard",
@@ -206,7 +207,8 @@
     "creditsExpiryDaily": "{amount} credits expire by {time} (daily total {amount})",
     "failedRequests": "Failed requests",
     "degradedHint": "{count} account(s) currently degraded after consecutive failures",
-    "noCooling": "No accounts cooling"
+    "noCooling": "No accounts cooling",
+    "creditsUsedHint": "{used} used · {n} accounts covered"
   },
   "stats": {
     "title": "Usage",
@@ -344,7 +346,8 @@
     "importNone": "No accounts were imported (see reasons below)",
     "importSummary": "Import finished: {n} succeeded, {s} skipped",
     "importTooLarge": "File too large (20MB limit)",
-    "importReadError": "Failed to read file, please retry"
+    "importReadError": "Failed to read file, please retry",
+    "creditsUsedTitle": "Credits consumed in the current cycle (all plans combined)"
   },
   "keys": {
     "title": "API keys",
@@ -905,6 +908,7 @@
     "cfgNotLoaded": "Upstream configuration not loaded; editing is disabled",
     "mapNewAlias": "Add model alias",
     "mapNewAliasDesc": "Let downstream call a model by a name you already know. For example point `gpt-4o-mini` at `glm-5.2`.",
+    "mapRealmNote": "The target list follows the current edition (realm); after switching between CN / global, check that mapping targets match the current edition.",
     "mapAlias": "Name used downstream",
     "mapTarget": "Model actually called",
     "mapAdd": "Add mapping",
@@ -936,7 +940,10 @@
     "savedRestart": "Saved; some fields need a restart",
     "restartHint": "Prompt / outbound identity / global routing are read at boot and need a restart; everything else is applied live",
     "advancedNote": "On save the backend deep-merges and atomically replaces the file; unknown keys are preserved.",
-    "reloaded": "Reloaded"
+    "reloaded": "Reloaded",
+    "cfgLoadFailed": "Failed to load configuration",
+    "cfgLoadFailedDesc": "The upstream configuration could not be read. The form below is hidden so defaults are not mistaken for your current settings; retry once the service is reachable.",
+    "retryLoad": "Retry"
   },
   "phrases": {
     "请求失败": "Request failed",
@@ -1018,13 +1025,10 @@
     "熔断冷却上限": "Breaker cooldown cap",
     "反复熔断会指数退避延长，这是封顶值（格式如 6h）": "Repeated trips extend the cooldown exponentially; this caps it (format: 6h)",
     "闲置补偿 / 小时": "Idle weight / hour",
-    "账号每闲置 1 小时增加一点调度权重，让久未使用的账号优先被选中": "Each idle hour adds a little scheduling weight so long-unused accounts are picked first",
     "闲置补偿上限": "Idle weight cap",
-    "闲置加成的封顶值，避免某个账号权重无限增大": "Caps the idle bonus so one account's weight cannot grow without bound",
     "快过期积分窗口": "Expiring-credits window",
     "成本档位探索周期": "Cost-tier exploration interval",
     "上游的选号优化：长时间只用高成本档位时，每隔这么久会改走一次低成本档位探测，成功就留在低档（省钱）。留空 = 用上游默认 30m，填 0 = 关闭该优化": "An upstream account-picking optimisation: when only a high-cost tier has been used for a while, it switches to a low-cost tier to probe once every this interval, and stays there if it succeeds (saving credits). Empty = upstream default 30m, 0 = disable this optimisation",
-    "到期时间落在此窗口内的积分会被标记为「快过期」，选号时优先消耗掉，避免白白过期。留空或填 0 = 关闭该优化": "Credits expiring inside this window are marked as expiring soon and consumed first when picking an account, so they are not wasted. Empty or 0 disables the optimisation",
     "出站请求指纹脱敏": "Outbound fingerprint sanitising",
     "对发往上游的请求做轻量脱敏，降低被判定异常的概率。除非在排查问题，否则建议保持开启": "Lightly sanitises outbound requests to reduce the chance of being flagged as anomalous. Keep it on unless you are debugging",
     "会话粘性": "Session stickiness",
@@ -1084,6 +1088,13 @@
     "国际版": "Global edition",
     "国际版（workbuddy.ai）路由开关与基址。关闭即锁死纯 CN": "Routing switch and base URLs for the Global edition (workbuddy.ai). Turning it off locks the deployment to China only",
     "国际版单账号最大并发": "Max concurrency per global-edition account",
+    "到期时间落在此窗口内的积分会被标记为「快过期」，选号时优先消耗掉，避免白白过期。填 0 = 关闭该优化（留空 = 恢复默认 7 天）": "Credits expiring inside this window are marked as expiring soon and consumed first when picking an account, so they are not wasted. 0 disables the optimisation (empty restores the default 7 days)",
+    "账号每闲置 1 小时增加一点调度权重，让久未使用的账号优先被选中。该值最小 0.1（后端不允许为 0，想关闭闲置补偿请调小至下限）": "Each idle hour adds a little scheduling weight so long-unused accounts are picked first. Minimum 0.1 (the backend rejects 0; to disable the idle bonus set it to the minimum)",
+    "闲置加成的封顶值，避免某个账号权重无限增大。该值最小 0.5（后端不允许为 0）": "Caps the idle bonus so one account's weight cannot grow without bound. Minimum 0.5 (the backend rejects 0)",
+    "选号策略": "Account selection strategy",
+    "weighted（默认）：按积分、快过期积分与闲置时长三因子加权随机，多账号分摊流量；credits_desc：始终优先选积分余额最大的账号，用尽/不可用才顺延次高——先把大余额号用掉，其余账号近乎闲置。仅改变「选谁」，冷却、熔断、并发上限与会话粘性照常生效": "weighted (default): weighted-random across credits, expiring credits and idle time, spreading load over accounts; credits_desc: always picks the account with the largest credit balance first, falling to the next only when it is exhausted/unavailable — drains the biggest balance first while other accounts stay mostly idle. Only changes \"who gets picked\"; cooldowns, breaker, concurrency limits and session stickiness still apply.",
+    "weighted（智能加权，默认）": "weighted (smart weighting, default)",
+    "credits_desc（余额优先，从大到小）": "credits_desc (balance-first, high to low)",
     "国际版单独用这个上限。国际版的风控更严，官方默认压到 2——并发越高越容易被判为异常流量。填 0 表示用默认值 2（注意与上面那个「0 = 不限制」不同）": "The global edition uses this limit separately. It is subject to stricter anti-abuse checks and officially defaults to 2 — higher concurrency is more likely to be flagged as abnormal traffic. Setting 0 means \"use the default 2\" (note this differs from the \"0 = unlimited\" above).",
     "passthrough：原样透传客户端传来的 system 消息；custom：网关用自有提示词替换它；append：两者并用——在开头连续的 system/developer 块之后插入网关 system，既有消息逐字不动": "passthrough: client system messages pass through unchanged; custom: the gateway replaces them with its own prompt; append: both — the gateway system is inserted after the leading system/developer blocks, leaving existing messages untouched",
     "默认 passthrough 会把下游的 system prompt 原样送给上游。若你依赖网关自己的提示词来稳定行为（或避免 system 指纹被判异常），请改为 custom；若既要保留客户端原始 system、又要网关的提示词生效，用 append。": "The default passthrough sends the downstream system prompt upstream as-is. Switch to custom if you rely on the gateway prompt to stabilise behaviour (or to avoid the system fingerprint being flagged); use append when you want to keep the client system message and have the gateway prompt take effect too.",

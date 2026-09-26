@@ -128,7 +128,7 @@ func TestExtractKeyPriority(t *testing.T) {
 		{`{"conversation_id":"top"}`, "top"},                                                   // 顶层 conversation_id
 		// P1-anti-monopoly：user_id 不再是粘性键（对话级粒度修正，键序四键全 conversation 维度）。
 		{`{"metadata":{"user_id":"mu"}}`, ""},    // user_id 单独出现 → 空（不生成粘性）
-		{`{"user_id":"mu"}}`, ""},                // 顶层 user_id 从未支持，保持空
+		{`{"user_id":"mu"}`, ""}, // 顶层 user_id 从未支持，保持空（合法 JSON，非字符串 conversation 维度键）
 		{`{"metadata":{"conversation_id":123}}`, ""}, // 非字符串 → 空
 		{`not-json`, ""}, // 非法 JSON → 空
 		// issue #35：客户端实际发 camelCase conversationId，ExtractKey 必须识别。

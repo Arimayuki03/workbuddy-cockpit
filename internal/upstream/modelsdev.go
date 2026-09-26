@@ -25,6 +25,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -259,19 +260,28 @@ func (f *modelsDevFetcher) fetchDoc(client *http.Client, baseOverride string) {
 }
 
 // parseModelsDevDoc 解析 models.dev api.json：{provider:{models:{id:{limit:{context,
-// output}}}}} → 裸 id 索引。同名多 provider 采值优先级四级：官方 vendor 源
-//（modelsDevVendorSources）> 票数众数 > provider 字典序 > 先出现。
-// 第 3 级 provider 字典序是确定性 tie-break：聚合时维护候选的最小 provider 名
+// output}}}}} → 裸 id 索引。同名多 provider 采值优先级五级：官方 vendor 源
+//（modelsDevVendorSources）> 票数众数 > minProvider 字典序 > fullID 字典序 > 先出现。
+// 第 3 级 minProvider 是确定性 tie-break：聚合时维护候选的最小 provider 名
 //（minProvider，同 doc 稳定的选择器身份），消灭 map 迭代序随机化导致的
 //「同票先到先得」值抖动（同 binary 两次拉取同一文档可能落不同的值进 model.json，
-// /v1/models 的 context_length 不可复现）。不引入「值字典序」——那会把
-//「选谁」变成「选什么值」的启发式，语义不如 provider 名干净。
+// /v1/models 的 context_length 不可复现）。第 4 级 fullID 字典序兜底残余抖动：
+// 同 provider 的多个命名空间 id（openai/gpt-5.5 与 azure/gpt-5.5）在 minProvider
+// 相同时第 3 级失效，best 仍会落入 map 迭代序——记录候选来源 fullID，平手时按
+// 字典序决胜。不引入「值字典序」——那会把「选谁」变成「选什么值」的启发式，
+// 语义不如来源名干净。
 func parseModelsDevDoc(raw []byte) (map[string]modelsDevEntry, error) {
+	// limit 数字用 json.RawMessage 承接：聚合文档是 217 个 provider 手工/自动混合
+	// 维护，个别模型 limit.context/output 为字符串（"128000"、"unlimited"）或小数
+	// 字面量（200000.0），直接向 int64 解码会整份文档 UnmarshalTypeError 失败
+	// （4.7MB 全丢）。json.Number 仍不够——非数值字符串（"unlimited"）在 unmarshal
+	// 阶段就报 invalid number literal 同样连坐整文档；RawMessage 宽进（任何字面量
+	// 都不失败），逐条整型化+校验在下面循环里做，单条坏值跳过不连坐。
 	var doc map[string]struct {
 		Models map[string]struct {
 			Limit *struct {
-				Context int64 `json:"context"`
-				Output  int64 `json:"output"`
+				Context json.RawMessage `json:"context"`
+				Output  json.RawMessage `json:"output"`
 			} `json:"limit"`
 		} `json:"models"`
 	}
@@ -279,13 +289,15 @@ func parseModelsDevDoc(raw []byte) (map[string]modelsDevEntry, error) {
 		return nil, fmt.Errorf("models.dev doc: %w", err)
 	}
 	// 同名 id 的候选值收集：vendorOfficial 标记官方源，votes 计众数，
-	// minProvider 维护该候选已见的最小 provider 名（tie-break 用）。
+	// minProvider 维护该候选已见的最小 provider 名（tie-break 用），
+	// fullID 维护该候选已见的字典序最小完整模型 id（minProvider 平手时决胜用）。
 	type candidate struct {
 		entry       modelsDevEntry
 		vendor      bool
 		votes       int
 		aggKey      string // 去重聚合 key（同值多 provider 只计票不重复存）
 		minProvider string
+		minFullID   string
 	}
 	byModel := map[string][]candidate{}
 	for provider, pv := range doc {
@@ -300,8 +312,18 @@ func parseModelsDevDoc(raw []byte) (map[string]modelsDevEntry, error) {
 			if id == "" {
 				continue
 			}
-			// 值校验（任务书 §2）：正数 + 量级上限，脏值不进索引。
-			ctx, out := mv.Limit.Context, mv.Limit.Output
+			// 整型化 + 值校验（任务书 §2）：json.RawMessage 兼容任意字面量形态，
+			// 数字→整值、字符串整值与 .0 结尾小数接受，其余（字符串数字以外的
+			// 字符串、带小数尾巴、科学计数法、null/bool/对象等）为脏数据，单条
+			// 拒绝不进索引（其余模型不受影响，不整文档失败）。
+			ctx, okCtx := modelsDevLimitValue(mv.Limit.Context)
+			if !okCtx {
+				continue
+			}
+			out, okOut := modelsDevLimitValue(mv.Limit.Output)
+			if !okOut {
+				continue
+			}
 			if ctx <= 0 || ctx > modelsDevValueMax {
 				continue
 			}
@@ -320,6 +342,9 @@ func parseModelsDevDoc(raw []byte) (map[string]modelsDevEntry, error) {
 					if provider < cs[i].minProvider {
 						cs[i].minProvider = provider
 					}
+					if fullID < cs[i].minFullID {
+						cs[i].minFullID = fullID
+					}
 					dup = true
 					break
 				}
@@ -331,6 +356,7 @@ func parseModelsDevDoc(raw []byte) (map[string]modelsDevEntry, error) {
 					votes:       1,
 					aggKey:      key,
 					minProvider: provider,
+					minFullID:   fullID,
 				})
 			}
 		}
@@ -339,7 +365,8 @@ func parseModelsDevDoc(raw []byte) (map[string]modelsDevEntry, error) {
 	for id, cs := range byModel {
 		best := 0
 		for i, c := range cs {
-			// 优先级：官方 vendor 源 > 票数众数 > provider 字典序（tie-break 确定性）。
+			// 优先级（五级）：官方 vendor 源 > 票数众数 > minProvider 字典序
+			// > fullID 字典序 > 先出现（兜底，实际被前四级覆盖）。
 			cur := cs[best]
 			better := false
 			if c.vendor && !cur.vendor {
@@ -347,6 +374,8 @@ func parseModelsDevDoc(raw []byte) (map[string]modelsDevEntry, error) {
 			} else if c.vendor == cur.vendor && c.votes > cur.votes {
 				better = true
 			} else if c.vendor == cur.vendor && c.votes == cur.votes && c.minProvider < cur.minProvider {
+				better = true
+			} else if c.vendor == cur.vendor && c.votes == cur.votes && c.minProvider == cur.minProvider && c.minFullID < cur.minFullID {
 				better = true
 			}
 			if better {
@@ -356,4 +385,62 @@ func parseModelsDevDoc(raw []byte) (map[string]modelsDevEntry, error) {
 		out[id] = cs[best].entry
 	}
 	return out, nil
+}
+
+// modelsDevLimitValue json.RawMessage → int64 整型化（单条宽容解析，绝不失败上抛）：
+//   - JSON 数字字面量：整值直取；小数仅接受纯零尾（200000.0、200000.00），
+//     带小数尾巴（200000.5）与科学计数法（1.28e5）视为脏值拒绝；
+//   - JSON 字符串：内容须为纯数字整值（"128000"）——聚合站常见的字符串数字形态；
+//     字符串小数/科学计数法/其他文本（"unlimited"）拒绝；
+//   - null / bool / 数组 / 对象等：拒绝。
+//
+// 返回 false = 脏值，调用方按条目级跳过处理。负数由调用方按字段口径另行拒绝
+//（context 需正数、output 需非负）。
+func modelsDevLimitValue(raw json.RawMessage) (int64, bool) {
+	s := strings.TrimSpace(string(raw))
+	s = strings.Trim(s, " \t\r\n")
+	if s == "" {
+		return 0, false
+	}
+	// 字符串形态：剥引号后按纯数字整值解析（json.Unmarshal 数字字面量不会带引号，
+	// 带引号即字符串形态——合法引号由 encoding/json 保证成对且转义已解码）。
+	if strings.HasPrefix(s, `"`) {
+		if len(s) < 2 || !strings.HasSuffix(s, `"`) {
+			return 0, false
+		}
+		inner := s[1 : len(s)-1]
+		// JSON 字符串不含未转义引号，转义序列（\" \\ 等）必非纯数字。
+		for i := 0; i < len(inner); i++ {
+			if inner[i] == '\\' {
+				return 0, false
+			}
+		}
+		s = inner
+	}
+	if s == "" {
+		return 0, false
+	}
+	// 拒绝科学计数法（e/E）——json.Unmarshal 只会在真 JSON 文档里产生合法字面量，
+	// 这里只做形态判定，无需再验证 JSON 语法。
+	if strings.ContainsAny(s, "eE") {
+		return 0, false
+	}
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		// 小数形态：小数点后必须全为零（200000.0、200000.00）才算整值。
+		frac := s[i+1:]
+		for j := 0; j < len(frac); j++ {
+			if frac[j] != '0' {
+				return 0, false
+			}
+		}
+		s = s[:i]
+	}
+	if s == "" || s == "-" || s == "+" {
+		return 0, false
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }

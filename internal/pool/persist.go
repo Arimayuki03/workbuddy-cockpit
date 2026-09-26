@@ -22,8 +22,8 @@ var flushInterval = 5 * time.Second
 const persistLogEvery = 100
 
 // persistWriter 单池「锁外写盘」的同步原语：独立保存互斥（写盘串行）+ 代数序
-// （最后写者胜）+ 在途写等待组（Flush/Close 收尾）。磁盘 IO 已整体移出 p.mu
-// （每 5s flush 不再阻塞 pick 热路径），p.mu 只负责内存快照的一致性。
+// （最后写者胜）+ 按代关闭的 done channel（Flush 收尾）。磁盘 IO 已整体移出
+// p.mu（每 5s flush 不再阻塞 pick 热路径），p.mu 只负责内存快照的一致性。
 type persistWriter struct {
 	// seqMu/seq 快照代数源。分配点均在 p.mu 临界区内（快照与取号同临界区，
 	// 代数序 == 快照序），seqMu 只是显式同步边界，防未来出现锁外取号的误用。
@@ -33,17 +33,66 @@ type persistWriter struct {
 	// 记录已落盘的最大代数：代数更小的迟到写直接跳过（旧快照不得覆盖新快照）。
 	mu        sync.Mutex
 	completed uint64
-	// wg 在途异步写计数：saveLocked 锁内 Add，写盘 goroutine Done；
-	// Flush（持 p.mu）Wait——Add 同样必须先拿 p.mu，故不存在 Add 与 Wait
-	// 竞争「计数已归零」的窗口（sync.WaitGroup 的重用红线不触及）。
-	wg sync.WaitGroup
+	// dones 各代快照的写盘完成信号（seq → 写盘 goroutine close 的 chan）。
+	// 替代旧 sync.WaitGroup 实现：wg.Add 在 p.mu 内、wg.Wait 在 p.mu 外，
+	// 慢路径 Wait 与后续 Add 构成 WaitGroup 文档明令的重用竞争（"new Add
+	// calls must happen after all previous Wait calls have returned"）——
+	// Flush 可能在并发写完成前提前返回，"返回时 state.json 已反映本次快照"
+	// 的同步语义失效。按代发独立 chan 后每个等待者只看自己那一代，无共享
+	// 计数器即无重用红线；dones 只在 p.mu 内写（saveLocked 取号同临界区），
+	// Flush 在 p.mu 外只读 wait 已存在的 chan，安全。
+	dones map[uint64]chan struct{}
 }
 
-// nextSeq 分配下一个快照代数。调用方必须已持 p.mu（见 seqMu 注释）。
-func (w *persistWriter) nextSeq() uint64 {
+// nextSeq 分配下一个快照代数并登记该代的完成信号 chan（调用方把 chan 交给
+// 写盘 goroutine，写完 close）。调用方必须已持 p.mu（见 seqMu 注释）。
+func (w *persistWriter) nextSeq() (chan struct{}, uint64) {
 	w.seqMu.Lock()
 	defer w.seqMu.Unlock()
 	w.seq++
+	if w.dones == nil {
+		w.dones = map[uint64]chan struct{}{}
+	}
+	done := make(chan struct{})
+	w.dones[w.seq] = done
+	return done, w.seq
+}
+
+// waitThrough 等待 ≤ seq 的所有代数写盘收尾。Flush 调用（p.mu 外）：
+// 只读 map 里已存在的 chan（saveLocked 已在 p.mu 内登记），后启动的更大
+// 代数不在等待范围（它们只会写更新的快照，不影响"本次 Flush 视角的最新态
+// 已落盘"）。同步语义：Flush 返回时，自己见到的最新快照代已写完或写失败
+// （失败经 notePersistFail 回挂 dirty，由下一轮 flusher 重试——与既有契约一致）。
+func (w *persistWriter) waitThrough(seq uint64) {
+	// 快照 chan 列表：p.mu 外读 dones 需要与 saveLocked 的登记互斥。
+	// nextSeq 分配在 p.mu 内，Flush 也在 p.mu 内取当前 seq（见 Flush 实现），
+	// 故 dones 的 map 读写天然被 p.mu 串行化，此处无需另拿锁——除了
+	// 启动期的 flusher goroutine 持 p.mu 写，与本函数并发读的场景：
+	// Flush 的 seq 快照同样在 p.mu 内完成，读 chan 引用集合在锁内拷贝。
+	// 这里收到的 chs 已是快照，锁外 wait 安全。
+	for _, ch := range w.snapshotDonesThrough(seq) {
+		<-ch
+	}
+}
+
+// snapshotDonesThrough 返回 ≤ seq 的全部代数完成 chan（调用方持有 p.mu 或
+// 已确保与 nextSeq 互斥；chan 引用集合为快照，返回后 map 再变不影响本集合）。
+func (w *persistWriter) snapshotDonesThrough(seq uint64) []chan struct{} {
+	w.seqMu.Lock()
+	defer w.seqMu.Unlock()
+	out := make([]chan struct{}, 0, len(w.dones))
+	for s, ch := range w.dones {
+		if s <= seq {
+			out = append(out, ch)
+		}
+	}
+	return out
+}
+
+// currentSeq 返回当前代数（不含等待语义；Flush 在 p.mu 内取快照用）。
+func (w *persistWriter) currentSeq() uint64 {
+	w.seqMu.Lock()
+	defer w.seqMu.Unlock()
 	return w.seq
 }
 
@@ -166,15 +215,19 @@ func (p *Pool) Close() {
 
 // Flush 同步把内存状态落盘（幂等：无变更不写盘）。供进程退出前调用。
 // 持 p.mu 只做快照+取代数，磁盘 IO（可能慢数百 ms）在锁外由 saveLocked 完成，
-// 并等在途写收尾——返回时 state.json 已反映本次快照（同步语义不变，测试
-// Flush→New 重载可依赖）。
+// 并等"自己见到的最新代数"写盘收尾——返回时 state.json 已反映本次快照
+// （同步语义不变，测试 Flush→New 重载可依赖）。等待实现为按代 close 的
+// done channel（见 persistWriter.dones 注释）：旧 wg.Add/Wait 的 Add 在锁内、
+// Wait 在锁外，极端交错下构成 WaitGroup 重用红线，已被替换。
 func (p *Pool) Flush() {
 	p.mu.Lock()
 	if p.dirty.Swap(false) {
 		p.saveLocked()
 	}
+	// 在 p.mu 内取当前代数快照：此后启动的写盘（更大代数）不在本次等待范围。
+	seq := p.persistWriterOf().currentSeq()
 	p.mu.Unlock()
-	p.persistWriterOf().wg.Wait()
+	p.persistWriterOf().waitThrough(seq)
 }
 
 // load 从本地 state.json 读回持久化状态（无文件/解析失败静默跳过，零状态启动）。
@@ -331,10 +384,9 @@ func (p *Pool) saveLocked() {
 		return
 	}
 	w := p.persistWriterOf()
-	seq := w.nextSeq()
-	w.wg.Add(1)
+	done, seq := w.nextSeq()
 	go func() {
-		defer w.wg.Done()
+		defer close(done)
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		if seq <= w.completed {

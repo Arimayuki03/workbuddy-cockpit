@@ -43,6 +43,18 @@ type Config struct {
 	// 模型级限额后对**其他模型**仍可用（issue #31 豁免），此时若只按账号级可用性
 	// 校验，会话会被钉在这个号上反复失败——正是"限额后换不动号"的观感来源。
 	AvailableForModel func(model string) []string
+	// PreferredForModel 按请求模型返回"首次分配优先序"（可选）。nil 或返回空时
+	// 回落既有哈希打散（行为与引入前一致）。
+	//
+	// 为什么需要：粘性首次分配原本是 hashIndex 哈希打散（设计初衷是多会话分摊
+	// 流量），完全绕过 pool 的选号策略——credits_desc（余额从大到小）下新会话
+	// 仍会被随机分到低余额号，直到绑定号不可用才重分配，"余额优先"对新会话
+	// 形同虚设。注入后（wiring 接 pool.StickyPreferredForModelRealm）：
+	// credits_desc 时返回按余额降序的可用账号，每个新会话都绑序首（最高余额
+	// 号；并发的权威闸门是账号在途上限而非粘性，撞限自愈闭环见 ResolveForModel
+	// 注释）；weighted 返回 nil，粘性保持哈希打散零改动。既有绑定（含 Redis
+	// 恢复的）不受影响——优先序只决定"给新会话绑谁"，不动"已绑定的继续用"。
+	PreferredForModel func(model string) []string
 }
 
 // Router 会话粘性路由器。
@@ -52,6 +64,13 @@ type Router struct {
 	cfg     Config
 	stop    chan struct{}
 }
+
+// maxEntries 单路由器粘性条目上限：防异常客户端逐请求换会话键（随机
+// conversationId 等）在 TTL 窗口内无限累积条目吃干内存。量级对齐 TTL 30m——
+// 正常客户端 30 分钟内的会话数远小于该值，正常路径永远不会触达淘汰分支。
+// 写满时 Bind 按 lastActive 淘汰最旧条目；ResolveForModel 分配路径不淘汰
+//（最多多占一个槽位，GC 周期兜底回收过期条目）。
+const maxEntries = 10000
 
 // New 构建路由器。若 cfg.Store 为 nil 则用 Noop（纯内存）；cfg.Available 为 nil 视为空池。
 // TTL/GCInterval 非正取默认（30m / 5m）——main 从 config 解析后传入，这里兜底。
@@ -142,13 +161,19 @@ func (r *Router) LoadFromStore() {
 // 可用性校验，会话会被钉在一个"对当前模型不可用"的号上反复失败。
 func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	now := time.Now()
-	available := r.availableSet(model)
+	// available 惰性构建：仅当快路径命中且未过期（或慢路径 re-check 命中）时
+	// 才调用可用性回调建集合——键不存在/粘性未命中的请求不必白建（原实现
+	// 在查 entries 之前无条件构建，多数未命中请求白付一次回调开销）。
+	var available map[string]bool
 
 	// ── Fast path: RLock 快查 ──────────────────────────────
 	r.mu.RLock()
 	e, found := r.entries[key]
 	r.mu.RUnlock()
 	if found && !expired(e, now, r.cfg.TTL) {
+		if available == nil {
+			available = r.availableSet(model)
+		}
 		if available[e.uid] {
 			r.touch(key, e.uid, now)
 			return e.uid, true
@@ -162,6 +187,9 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 
 	// re-check：并发同 key 可能已被其他 goroutine 分配好。
 	if e2, found2 := r.entries[key]; found2 && !expired(e2, now, r.cfg.TTL) {
+		if available == nil {
+			available = r.availableSet(model)
+		}
 		if available[e2.uid] {
 			r.entries[key] = entry{uid: e2.uid, lastActive: now}
 			return e2.uid, true
@@ -178,6 +206,35 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	bound := map[string]bool{}
 	for _, v := range r.entries {
 		bound[v.uid] = true
+	}
+	// 策略感知优先序（credits_desc 余额降序）：新会话优先绑序首（最高余额号），
+	// 序首已被其他会话绑定则沿序下探——与 pool.pick 的"最高者不可用才顺延次高"
+	// 同向。序内候选必须仍在当前可用集（uids）里（序是 Available 之外的独立
+	// 快照，冷却/占满可能刚发生）；全序被绑或序外候选才回落哈希打散。
+	// weighted（回调 nil 或返回空）不进此分支，哈希打散零改动。
+	// 注意 bound 只含本路由器内的会话绑定：允许两个并发会话短暂共享同一最高
+	// 余额号——账号在途上限（max_in_flight）才是并发的权威闸门，粘性的职责
+	// 是会话连续性不是并发分摊；真撞上限时 PickByUIDForModel 返回 nil，handler
+	// 解绑重分配，自愈闭环（与绑定额满的既有语义一致）。
+	if r.cfg.PreferredForModel != nil {
+		if pref := r.cfg.PreferredForModel(model); len(pref) > 0 {
+			availableSet := make(map[string]bool, len(uids))
+			for _, u := range uids {
+				availableSet[u] = true
+			}
+			for _, u := range pref {
+				if availableSet[u] {
+					// 命中优先序：绑定 + 镜像（与下方哈希分支同口径）。
+					prev, existed := r.entries[key]
+					r.entries[key] = entry{uid: u, lastActive: now}
+					if existed && prev.uid != u {
+						r.cfg.Store.DelBind(key)
+					}
+					r.cfg.Store.SetBind(key, u, redisstore.MaxMirrorTTL)
+					return u, true
+				}
+			}
+		}
 	}
 	var idle []string
 	for _, u := range uids {
@@ -196,7 +253,11 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	if existed && prev.uid != uid {
 		r.cfg.Store.DelBind(key)
 	}
-	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
+	// 镜像 TTL 与内存 TTL 解耦：redisstore.MaxMirrorTTL(7d)。镜像的职责是扛长停机
+	// 重启(防丢粘性),内存 TTL(30m)只管在线滚动——停机超 30m 后内存 map 清空,
+	// 镜像若同 TTL 也已过期,LoadFromStore 恢复 0 条,镜像在其最需要的长停机场景
+	// 失效。恢复侧按 lastActive=now 重置内存 TTL,旧绑定复活无副作用。
+	r.cfg.Store.SetBind(key, uid, redisstore.MaxMirrorTTL)
 	return uid, true
 }
 
@@ -211,7 +272,7 @@ func (r *Router) touch(key, uid string, now time.Time) {
 	if cur, ok := r.entries[key]; ok && cur.uid == uid {
 		r.entries[key] = entry{uid: uid, lastActive: now}
 		r.mu.Unlock()
-		r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
+		r.cfg.Store.SetBind(key, uid, redisstore.MaxMirrorTTL) // 镜像 TTL 解耦(7d,见 Bind 注释)
 		return
 	}
 	r.mu.Unlock()
@@ -220,15 +281,36 @@ func (r *Router) touch(key, uid string, now time.Time) {
 // Bind 显式把会话 key 绑定到 uid（幂等覆盖旧值），并异步镜像到 redisstore。
 // 供"粘性跟随最终成功号"用：请求成功返回前，把会话重绑到实际成功的账号，让多轮对话下一跳稳定
 // 收敛到"对该会话持续成功的号"（对齐 antigravity 语义）。空 key 直接返回（无会话则不绑）。
+//
+// 写入前检查容量上限 maxEntries：写满时按 lastActive 淘汰最旧条目（全扫一遍取
+// 最小，N=10000 时每次绑定的全扫开销可接受），并同步 DelBind 镜像。防异常
+// 客户端逐请求换键在 TTL 窗口内无界泛洪 entries。
 func (r *Router) Bind(key, uid string) {
 	if key == "" || uid == "" {
 		return
 	}
 	now := time.Now()
+	evicted := ""
 	r.mu.Lock()
+	if _, exists := r.entries[key]; !exists && len(r.entries) >= maxEntries {
+		// 新键且已满：按 lastActive 淘汰最旧条目（TTL 内最久未活跃的会话）。
+		var oldest time.Time
+		first := true
+		for k, e := range r.entries {
+			if first || e.lastActive.Before(oldest) {
+				evicted, oldest, first = k, e.lastActive, false
+			}
+		}
+		if evicted != "" {
+			delete(r.entries, evicted)
+		}
+	}
 	r.entries[key] = entry{uid: uid, lastActive: now}
 	r.mu.Unlock()
-	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
+	if evicted != "" {
+		r.cfg.Store.DelBind(evicted)
+	}
+	r.cfg.Store.SetBind(key, uid, redisstore.MaxMirrorTTL) // 镜像 TTL 解耦(7d,见 resolve 注释)
 }
 
 // Unbind 解除会话绑定（请求失败时调用，让该会话下次重新分配）。返回是否存在。
@@ -454,9 +536,9 @@ func strOrEmpty(v any) string {
 // Parsed 一次解析请求体得到的全部派生值（handler 热路径的"解析一次、多处复用"）：
 // 此前 handler 对同一 body 依次做 peek + ExtractKey + StickyFallbackKey + TurnKey +
 // hasImagePart + ResolveConversationID 六轮全量 JSON 解码（MB 级请求体上每轮都是
-// 一遍完整 unmarshal）。ParseRequest 单次解码出顶层 map 与 messages 骨架后，
-// 各字段在同一份结果上求值，字段值与旧独立函数**逐字段等价**（每个字段委托
-// 既有实现或同口径复刻，行为契约不变）。
+// 一遍完整 unmarshal）。ParseRequest 两次解码（原六次：顶层 map 与 messages 骨架
+// 各一遍）后，各字段在同一份结果上求值，字段值与旧独立函数**逐字段等价**（每个
+// 字段委托既有实现或同口径复刻，行为契约不变）。
 type Parsed struct {
 	// Stream / Model 出站路由需要的顶层形态（旧 peek 结构）。
 	Stream bool
@@ -475,7 +557,8 @@ type Parsed struct {
 	HasImage bool
 }
 
-// ParseRequest 解析请求体一次并填充 Parsed。畸形 JSON（顶层非对象/语法错误）时
+// ParseRequest 两次解码（顶层 map + messages 骨架，原六次全量解码）并填充
+// Parsed。畸形 JSON（顶层非对象/语法错误）时
 // 各字段取旧函数路径的同款零值：Stream=false、Model=""、SessKey/StickyKey/
 // TurnKey/ConversationID=""、HasImage=false（与各函数逐个喂坏 body 的行为一致）。
 func ParseRequest(body []byte) Parsed {
@@ -572,24 +655,28 @@ func ParseRequest(body []byte) Parsed {
 
 	// 图片形态：与 hasImagePart 同口径（messages[].content[] 的 type=="image_url"）。
 	// hasImagePart 的 peek struct 要求所有 content 都是数组：任一消息 content 为
-	// 字符串/null 会导致整体 unmarshal 失败 → false。这里复刻该口径：任意一条
-	// 消息 content 解不出 parts 数组即视为"判不出带图"，停止检测。
+	// 字符串等类型会导致**整体** unmarshal 失败 → 恒 false——即便图片出现在更早
+	// 的消息里。等价复刻：一遍扫描同时记录「全部 content 解得出 parts 数组」与
+	// 「扫到图」，仅当全部解出才采用扫描结果；不能扫到图就提前返回，否则
+	// 「图片在前、字符串 content 在后」的混合 body 会误判 true（M3 等价性）。
+	sawImage, allParsed := false, true
 	for _, m := range skel.Messages {
 		var parts []struct {
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(m.Content, &parts); err != nil {
+			allParsed = false
 			break
 		}
 		for _, part := range parts {
 			if part.Type == "image_url" {
-				p.HasImage = true
+				sawImage = true
 				break
 			}
 		}
-		if p.HasImage {
-			break
-		}
+	}
+	if allParsed {
+		p.HasImage = sawImage
 	}
 	return p
 }

@@ -23,7 +23,7 @@ type effortCap struct {
 // cnEffortFallback CN / CodeBuddy 面静态兜底表。
 // 三档模型 defaultEffort 均为 high（product.ts CODEBUDDY_FALLBACK_MODELS 逐条 defaultReasoningEffort）。
 var cnEffortFallback = map[string]effortCap{
-	"deepseek-v4-flash":   {efforts: []string{"low", "high", "max"}},
+	"deepseek-v4-flash":   {efforts: []string{"low", "high", "max"}, defaultEffort: "high"},
 	"deepseek-v4.1-flash": {efforts: []string{"low", "high", "max"}, defaultEffort: "high"},
 	"deepseek-v4-pro":     {efforts: []string{"low", "high", "xhigh"}, defaultEffort: "high"},
 	"hy4-preview":         {efforts: []string{"high"}, defaultEffort: "high"},
@@ -136,8 +136,12 @@ func globalEffortMap(remoteEfforts map[string][]string, remoteDefaults map[strin
 			efforts[id] = v
 		}
 	}
+	// 默认档覆盖与 EffortListing 的「default ∈ efforts」防御同口径：仅当远端也
+	// 下发了该模型档位（remoteEfforts 非空）才覆盖默认档——否则会拼出
+	// 「档位是静态、默认档是 remote」的跨源矛盾组合（remote 默认档可能 ∉ 静态档位，
+	// 客户端按宣称的默认档请求会被降级管线判为非法档位）。
 	for id, v := range remoteDefaults {
-		if v != "" {
+		if v != "" && len(remoteEfforts[id]) > 0 {
 			defs[id] = v
 		}
 	}

@@ -186,17 +186,24 @@ func injectThinking(obj map[string]any, defaultEffort string) {
 }
 
 // ensureDeepSeekEffort 缺 effort 档位时补默认档（snake 优先，camel 兜底）。
-// 已有任一 effort → 不覆盖（显式档位不做任何改写，降级交给 normalizeReasoningEffort）。
+// 「已有档位」只认非空 string（与 translateMaxCompletionTokens 对 0/null 按
+// 「未设置」处理的口径对齐）：null/空串/纯空白串不算已有档位——deepseek 上游对
+// thinking.type=enabled 且无有效 effort 的请求按不思考应答，null/空串若被当作
+// 「显式档位」放行会落入失效形态。此类键删除后按缺省补默认档（语义 = 未设置）。
+// 非空档位 → 不覆盖（显式档位不做任何改写，降级交给 normalizeReasoningEffort）。
 // defaultEffort 空串 → 回退 defaultDeepSeekEffort（硬编码 "high"）。
 func ensureDeepSeekEffort(obj map[string]any, defaultEffort string) {
-	_, hasSnake := obj["reasoning_effort"]
-	if hasSnake {
+	hasEffort := func(key string) bool {
+		v, ok := obj[key].(string)
+		return ok && strings.TrimSpace(v) != ""
+	}
+	if hasEffort("reasoning_effort") || hasEffort("reasoningEffort") {
 		return
 	}
-	_, hasCamel := obj["reasoningEffort"]
-	if hasCamel {
-		return
-	}
+	// null / 空串 / 非字符串（非档位）键清理：补档前删净，避免与默认档双键并存
+	// 或 null 键残留出站。
+	delete(obj, "reasoning_effort")
+	delete(obj, "reasoningEffort")
 	if defaultEffort == "" {
 		defaultEffort = defaultDeepSeekEffort
 	}

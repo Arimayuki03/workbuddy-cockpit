@@ -131,12 +131,20 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 		}(i, st.UID)
 	}
 	wg.Wait()
-	pending := 0
+	// 禁用账号 continue 后 items[i] 保持零值（uid 为空），输出前压掉——
+	// 与 schoolVouchers 的 `it.UID != ""` 过滤同口径。
+	res := make([]scanAccountItem, 0, len(items))
 	for _, it := range items {
+		if it.UID != "" {
+			res = append(res, it)
+		}
+	}
+	pending := 0
+	for _, it := range res {
 		pending += len(it.Growth) + len(it.School)
 	}
 	log.Printf("panel: 队列扫描完成：全部账号待办 %d 项（成长+开学季）", pending)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": items, "pending_count": pending})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": res, "pending_count": pending})
 }
 
 // ---------------------------------------------------------------------------
@@ -710,6 +718,7 @@ func (p *Panel) schoolStatus(w http.ResponseWriter, r *http.Request) {
 	out := make([]acctView, 0, len(states))
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	sem := make(chan struct{}, 3) // 3 并发上限，与 schoolVouchers 同口径
 	for _, st := range states {
 		if st.Disabled {
 			continue
@@ -721,6 +730,8 @@ func (p *Panel) schoolStatus(w http.ResponseWriter, r *http.Request) {
 		wg.Add(1)
 		go func(a *auth.Auth) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			v := acctView{UID: a.UID, Nickname: a.Nickname}
 			// D4 门控：global 账号无开学季活动，不发起任何上游调用。
 			if a.IsGlobal() {

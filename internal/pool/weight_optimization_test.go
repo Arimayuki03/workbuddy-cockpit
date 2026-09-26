@@ -160,7 +160,7 @@ func TestPickWeightedUsesFullSetMaxCredits(t *testing.T) {
 		t.Fatalf("pick=%v want u2", got)
 	}
 	// 白盒：eligible 单元素 + 预计算权重的定点值。u2 的权重（全集口径）：
-	// 1.0 基础 + 5.0 credits(500/1000*10) + 5.0 idle(1h, max 5) + 1.5 无记录 = 12.5 → wi=12_500_000。
+	// 1.0 基础 + 5.0 credits(500/1000*10) + 5.0 idle(1h, max 5) = 11.0 → wi=11_000_000。
 	// 子集口径（max=500）则 credits 项=10 → 权重 17.5。通过抽签分布无法区分单元素，
 	// 改由 weightOf 口径测试（TestWeightOfMaxCreditsPassedVerbatim）覆盖。
 }

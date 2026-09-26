@@ -814,3 +814,82 @@ func TestFetchDocNilClientDoesNotHitNetwork(t *testing.T) {
 		t.Fatalf("nil client 时 doc 应保持 nil（拉取失败语义），got %d 条", len(doc))
 	}
 }
+
+// TestParseModelsDevDocDirtyLimitValueSkipsEntryOnly 整文档容错（json.RawMessage 宽进严出）：
+// 聚合文档任一模型 limit.context/output 为字符串（"128000" 乃至 "unlimited"）或小数
+// 字面量（200000.0）时，旧实现向 int64 解码整份 4.7MB 文档 UnmarshalTypeError 失败；
+// 修复后**宽容解析**（json.RawMessage 承接，任何字面量都不在 unmarshal 阶段失败）
+// + 逐条整型化校验：字符串整值（"128000"）与 .0 结尾小数（200000.0）是合法形态
+// **正常入索引**；非数字字符串（"unlimited"——json.Number 方案仍会整文档炸掉的关键
+// 形态）、带小数尾巴（200000.5）、科学计数法（1.28e5）、null、bool、负 output 是
+// 脏值**单条跳过**，好值模型不受影响。
+func TestParseModelsDevDocDirtyLimitValueSkipsEntryOnly(t *testing.T) {
+	raw := `{
+		"p": {
+			"models": {
+				"str-context":        {"limit": {"context": "128000", "output": 8192}},
+				"unlimited-context":  {"limit": {"context": "unlimited", "output": 8192}},
+				"frac-context":       {"limit": {"context": 200000.5, "output": 8192}},
+				"exp-context":        {"limit": {"context": 1.28e5, "output": 8192}},
+				"null-context":       {"limit": {"context": null, "output": 8192}},
+				"bool-context":       {"limit": {"context": true, "output": 8192}},
+				"neg-output":         {"limit": {"context": 100000, "output": -1}},
+				"str-output-bad":     {"limit": {"context": 100000, "output": "unlimited"}},
+				"good-model":         {"limit": {"context": 1000000, "output": 131072}},
+				"good-str-both":      {"limit": {"context": "262144", "output": "4096"}},
+				"good-float-context": {"limit": {"context": 200000.0, "output": 8192}}
+			}
+		}
+	}`
+	doc, err := parseModelsDevDoc([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse: %v（单条坏值不得整文档失败）", err)
+	}
+	for _, bad := range []string{"unlimited-context", "frac-context", "exp-context", "null-context", "bool-context", "neg-output", "str-output-bad"} {
+		if _, ok := doc[bad]; ok {
+			t.Errorf("%s: 脏值条目必须跳过", bad)
+		}
+	}
+	// 字符串整值是聚合站常见形态（provider 上报 "128000"）：接受为整值。
+	if e, ok := doc["str-context"]; !ok || e.Context != 128000 || e.Output != 8192 {
+		t.Errorf("str-context（字符串整值）: %+v ok=%v want 128000/8192", e, ok)
+	}
+	if e, ok := doc["good-model"]; !ok || e.Context != 1000000 || e.Output != 131072 {
+		t.Errorf("good-model: %+v ok=%v（好值模型必须正常入索引）", e, ok)
+	}
+	if e, ok := doc["good-str-both"]; !ok || e.Context != 262144 || e.Output != 4096 {
+		t.Errorf("good-str-both（字符串整值）: %+v ok=%v want 262144/4096", e, ok)
+	}
+	if e, ok := doc["good-float-context"]; !ok || e.Context != 200000 || e.Output != 8192 {
+		t.Errorf("good-float-context（.0 结尾小数）: %+v ok=%v want 200000/8192", e, ok)
+	}
+}
+
+// TestParseModelsDevDocFullIDTieBreakDeterministic 第 4 级 tie-break（fullID 字典序）：
+// 同 provider 下同名模型的两个命名空间 id（openai/gpt-5.5 与 azure/gpt-5.5，均非
+// 官方 vendor 名单成员）报不同 limit——两候选同 vendor(false) 同票(1) 同
+// minProvider("p")，第 3 级失效，best 旧实现落入内层 map 迭代序（抖动）。修复后
+// 按 fullID 字典序收敛到 azure/gpt-5.5（azure < openai）。跑 100 次（Go 每轮
+// map 迭代起点随机）结果必须恒同。
+func TestParseModelsDevDocFullIDTieBreakDeterministic(t *testing.T) {
+	raw := `{"p":{"models":{
+		"openai/gpt-5.5":{"limit":{"context":400000,"output":128000}},
+		"azure/gpt-5.5":{"limit":{"context":200000,"output":64000}}
+	}}}`
+	run := func() modelsDevEntry {
+		doc, err := parseModelsDevDoc([]byte(raw))
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		return doc["gpt-5.5"]
+	}
+	first := run()
+	if first.Context != 200000 || first.Output != 64000 {
+		t.Errorf("fullID tie-break: %+v want 200000/64000（fullID 字典序 azure/ < openai/ 一方）", first)
+	}
+	for i := 0; i < 100; i++ {
+		if got := run(); got != first {
+			t.Fatalf("fullID tie-break 不确定: run %d got %+v want %+v", i, got, first)
+		}
+	}
+}

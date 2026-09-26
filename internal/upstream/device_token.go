@@ -26,11 +26,10 @@ const deviceTokenFileMaxLen = 1024
 
 // deviceTokenFileCache 缓存 device token 文件读取结果（path → token+读取时刻）。
 type deviceTokenFileCache struct {
-	mu       sync.Mutex
-	path     string
-	token    string
-	readAt   time.Time
-	lastErr  error
+	mu     sync.Mutex
+	path   string
+	token  string
+	readAt time.Time
 }
 
 var dtFileCache = &deviceTokenFileCache{}
@@ -54,14 +53,12 @@ func readDeviceTokenFile(path string) string {
 	dtFileCache.path = path
 	tok, err := readTrimmedFile(path, deviceTokenFileMaxLen)
 	if err != nil {
-		// 读失败：清空缓存 token，避免注入过期/错误的值。
+		// 读失败：清空缓存 token，避免注入过期/错误的值（静默降级不注入）。
 		dtFileCache.token = ""
-		dtFileCache.lastErr = err
 		dtFileCache.readAt = time.Now()
 		return ""
 	}
 	dtFileCache.token = tok
-	dtFileCache.lastErr = nil
 	dtFileCache.readAt = time.Now()
 	return tok
 }

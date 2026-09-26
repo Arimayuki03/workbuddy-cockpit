@@ -56,7 +56,7 @@ func main() {
 func collect(authDir string, up *upstream.Client) []accountResult {
 	files, _ := auth.LoadAuthFiles(authDir)
 	accounts := make([]accountResult, 0, len(files))
-	for _, f := range files {
+	for i, f := range files {
 		raw, err := os.ReadFile(f)
 		if err != nil {
 			continue
@@ -82,7 +82,10 @@ func collect(authDir string, up *upstream.Client) []accountResult {
 			res.OK = true
 		}
 		accounts = append(accounts, res)
-		time.Sleep(200 * time.Millisecond)
+		// 仅在还有下一个账号时限速 sleep：最后一个账号后多等 200ms 纯属浪费。
+		if i < len(files)-1 {
+			time.Sleep(200 * time.Millisecond)
+		}
 	}
 	return accounts
 }

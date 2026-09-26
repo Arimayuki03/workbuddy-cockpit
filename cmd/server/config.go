@@ -148,6 +148,11 @@ type Config struct {
 		// 错误策略）。默认 "30m"（≤48 次/天/模型）；"0" 关停（完全回到现状行为）；
 		// 空值回落默认。
 		CostExploreInterval string `json:"cost_explore_interval"`
+		// PickStrategy 选号策略（issue: 手动按余额选号）："weighted"（默认，三因子
+		// 加权随机）| "credits_desc"（余额严格降序：候选按缓存 credits 从大到小取，
+		// 最高者不可用顺延次高；绕过权重/Top5/成本分层，冷却/熔断/在途/轮换保留）。
+		// 面板设置页可在线切换（热生效，免重启）。
+		PickStrategy string `json:"pick_strategy"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -239,6 +244,8 @@ func Default() *Config {
 	c.Pool.ExpiringSoon = "168h" // 快过期窗口默认 7 天：官方活动奖励积分多在两周内过期
 	// costTier 探索默认 30m（issue #136：垄断破除 + 搭车改道零新增请求）；"0" 关停。
 	c.Pool.CostExploreInterval = "30m"
+	// 选号策略默认 weighted（三因子加权随机，历史行为）。
+	c.Pool.PickStrategy = "weighted"
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
@@ -366,6 +373,13 @@ func (c *Config) normalize() error {
 	if c.SoftRateMaxDur, err = time.ParseDuration(c.Cooldown.SoftRateMax); err != nil {
 		return fmt.Errorf("cooldown.soft_rate_max: %w", err)
 	}
+	// 空值回落默认（与 soft_rate_max / degrade_cooldown 同风格：显式 "" 不应直接启动失败）。
+	if c.Pool.BreakerCooldown == "" {
+		c.Pool.BreakerCooldown = "30m"
+	}
+	if c.Pool.BreakerCooldownMax == "" {
+		c.Pool.BreakerCooldownMax = "6h"
+	}
 	if c.BreakerCooldownDur, err = time.ParseDuration(c.Pool.BreakerCooldown); err != nil {
 		return fmt.Errorf("pool.breaker_cooldown: %w", err)
 	}
@@ -425,6 +439,16 @@ func (c *Config) normalize() error {
 	}
 	if c.CostExploreIntervalDur, err = time.ParseDuration(c.Pool.CostExploreInterval); err != nil {
 		return fmt.Errorf("pool.cost_explore_interval: %w", err)
+	}
+	// 选号策略：空值回落 weighted；非空但非 weighted/credits_desc 报错
+	// （fail-fast 与 prompt.mode 同风格，防止拼错策略名静默回落）。
+	switch strings.ToLower(strings.TrimSpace(c.Pool.PickStrategy)) {
+	case "":
+		c.Pool.PickStrategy = "weighted"
+	case "weighted", "credits_desc":
+		c.Pool.PickStrategy = strings.ToLower(strings.TrimSpace(c.Pool.PickStrategy))
+	default:
+		return fmt.Errorf("pool.pick_strategy: %q 不是合法值（weighted / credits_desc）", c.Pool.PickStrategy)
 	}
 	if c.CostExploreIntervalDur < 0 {
 		c.CostExploreIntervalDur = 0

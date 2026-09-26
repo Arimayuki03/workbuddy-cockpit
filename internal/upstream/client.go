@@ -715,7 +715,9 @@ type Client struct {
 	// 与 HTTP 共享同一个 *http.Transport 实例，连接池不重复。
 	ChatHTTP *http.Client
 
-	// HeaderTimeout 聊天 SSE 首字节前（响应头）超时；<=0 表示未设置（回落 HTTP.Timeout）。
+	// HeaderTimeout 聊天 SSE 首字节前（响应头）超时：由 cmd/server/main.go 写入
+	// 共享 Transport.ResponseHeaderTimeout 的载体字段；<=0 的回落发生在 config
+	// normalize（cmd/server/config.go），本结构内无回落逻辑。
 	HeaderTimeout time.Duration
 	// IdleTimeout 聊天 SSE 流中空闲超时；<=0 表示禁用空闲监控。
 	IdleTimeout time.Duration
@@ -734,6 +736,13 @@ type Client struct {
 	// globalModels 缓存 global 模型名目录纯动态探测结果（1h TTL + 5min 负缓存），
 	// 见 global_models.go。按实例持有，测试新建 Client 即隔离。
 	globalModels fetchGlobalModelsCache
+
+	// globalProbing/globalProbeDone global 模型目录探测门闩（singleflight 自实现，
+	// 不引 x/sync 依赖）：并发冷启动时只有持门闩者真正探测，其余进入者等待
+	// done 关闭后重查缓存。保护 fetchGlobalModelsOnce 的锁外探测段（probe 自身
+	// 已是 3 路并发，无门闩时 N 个 /v1/models 同时 miss = N 倍重复探测）。
+	globalProbing   bool
+	globalProbeDone chan struct{}
 
 	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
 	// 面板热改字段：运行期读侧一律走 HotFields 快照（见 hotMu），直读仅限启动期装配。
@@ -917,10 +926,10 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []b
 		efforts, defs = globalEffortMap(efforts, defs)
 	}
 	// 脱敏开关走热改快照（panel 热改 SanitizeFingerprints 后新请求立即生效）。
-	body = PrepareBodyOptWithEffortsAndDefault(body, c.HotFields().SanitizeFingerprints, efforts, defs)
-	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
-	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
-	body = InjectPromptCacheKey(body, uid, conversationID)
+	// 三趟序列化折叠（G-payload）：prompt_cache_key 注入与 global 兜底 system 原本
+	// 各自独立 parse/marshal（本函数 → InjectPromptCacheKey → ensureConsoleSystem），
+	// 现与管线共享同一 pass——一次 unmarshal + 一次 marshal 完成全部改写。
+	body = prepareBodyPass(body, c.HotFields().SanitizeFingerprints, efforts, defs, uid, conversationID, realmKey(realm) == "global")
 	return body
 }
 
@@ -1050,7 +1059,14 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 		return nil, fmt.Errorf("parse failed: %w (body: %s)", err, truncate(string(raw), 120))
 	}
 	if env.Code != 0 {
-		kind := Classify(resp.StatusCode, env.Msg)
+		// Classify 喂**全信封原文**（与上方 ≥400 路径同口径）：结构化 code 判定
+		// （IsSessionDead 12153 / hasBusinessCode 14018 / IsModelBlocked 11102 等）按
+		// code 字段解析，只喂 env.Msg 时 code 字段丢失，200 信封 + code≠0 场景下这些
+		// 判定不可达（如 200 + code=12153 会被退化成 ErrClient 只换号不罚，死号留在
+		// 池内反复被选中）。信封 JSON 必含 code 字段，全原文喂入后结构化解析照常生效。
+		// Msg 组装格式保持不变（code=%d msg=%s）：IsAlreadyCheckin 等下游按 Msg 匹配，
+		// 不受分类口径调整影响。
+		kind := Classify(resp.StatusCode, string(raw))
 		if kind == ErrNone {
 			kind = ErrClient
 		}
@@ -1153,7 +1169,10 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	// 实测 JWT exp-iat 与 expiresIn 严格自洽（R-F），超量级值只会是上游脏数据，
 	// 照写会把 ExpiresAt 推到荒谬未来 → NeedsRefresh 永假 → token 永不刷新
 	// 反而真过期失效。
-	if tok.ExpiresIn > 0 && time.Duration(tok.ExpiresIn)*time.Second < refreshTokenExpiresInMax {
+	// 秒数直接比较防 int64 溢出回绕（对照 parseRetryNumber 同型守卫）：若先做
+	// time.Duration(tok.ExpiresIn)*time.Second，ExpiresIn > MaxInt64/1e9 时乘积回绕
+	// 为负，"< refreshTokenExpiresInMax" 恒真 → ExpiresAt 被写到过去 → 刷新风暴。
+	if tok.ExpiresIn > 0 && tok.ExpiresIn < int64(refreshTokenExpiresInMax/time.Second) {
 		a.ExpiresAt = time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second).Unix()
 	}
 	return nil
@@ -1163,11 +1182,13 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 const chatCompletionsPath = "/v2/chat/completions"
 
 // ChatStream 发 chat 请求并返回原始 SSE body 流（调用方负责 Close）。
-// DeptestOnly: 全库仅 upstream 包测试引用；生产全走 ChatStreamContext
-// （handler 传 r.Context()）。迁 export_test.go 不可行——测试需要真实
-// HTTP 回放走完整 chatPaths/monitorBody 链路，与生产共用同一实现。
-// 等价于 ChatStreamContext(context.Background(), ...)：不带调用方取消语义。
-// 新调用方应优先用 ChatStreamContext 传入请求 ctx（客户端断连即中断在途调用、释放租约）。
+// 生产两处调用（upstream/blackcat.go 夜猫、panel/autotask.go）已迁移到
+// ChatStreamContext（各自传 context.Background()，等价原语义）；主链路
+// （handler）走 ChatStreamContext 传 r.Context()。现仅 upstream 包测试引用，
+// 迁 export_test.go 不可行——测试需要真实 HTTP 回放走完整 chatPaths/
+// monitorBody 链路，与生产共用同一实现。
+// 新调用方一律直接用 ChatStreamContext 传入请求 ctx（客户端断连即中断在途调用、
+// 释放租约），本函数不再新增生产调用方。
 //
 // global chat 自 #119 实测后固定走 /v2（/console 挂腾讯云 WAF body 内容规则，
 // 反引号 printf/whoami 等命令执行特征确定性 403；/v2 同 base 不挂该规则，实测等价端点）。
@@ -1192,13 +1213,10 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// ensureConsoleSystem 在 prepareBody 后统一套用全局脚本：首条消息非 system 时前置
-	// 兜底 system（防 console 域上游 code 11-128；#119 后 global 出站固定 /v2，
-	// 该兜底保留——上游对 /v2 是否需要 system 无实测反证，删了无回滚路径）。
+	// 兜底 system 注入已折叠进 prepareBody 的同一 pass（G-payload 三趟序列化折叠）：
+	// prepareBody 末参 globalConsole=true 时在管线内完成 ensureConsoleSystem 语义
+	// （防 console 域上游 code 11-128；#119 后 global 出站固定 /v2，该兜底保留）。
 	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
-	if c.globalOn(a) {
-		prepared = ensureConsoleSystem(prepared)
-	}
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 + 尾部
 	// 不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。

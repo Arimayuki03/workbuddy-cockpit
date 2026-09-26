@@ -30,6 +30,13 @@ const (
 // panel 移植的全量入口（panel.schoolRunAll 触发）。命名避开既有 RunSchoolNow
 // （school.go 的 python 脚本口径），两个语义并存互不覆盖。
 func (s *Scheduler) RunSchoolNowAll() {
+	// panel 裸 goroutine 入口：任务体 panic 不应击穿整个网关进程（与 RunCheckinNow
+	// 同理，runBatch/RunKindNow 的 recover 不覆盖本入口）。
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("scheduler: task school-api panic: %v", r)
+		}
+	}()
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
 			continue
@@ -59,6 +66,10 @@ func (s *Scheduler) RunSchoolAccountNow(a *auth.Auth) {
 //   - chat_3_times（每日 +50c+1抽）：viewed + 3 条 chat_request_send 埋点
 //     （conversationId 任意，无需真实会话）。
 //   - expert_use（每日 +50c+1抽）：viewed + mp 事件链（专家召唤 ×3 + 对话）。
+//
+// tasks 快照只拉一次，下传四个子任务做初始状态判定（in_period 判据与任务状态
+// 出自同一次 GET /tasks）；动作后的达成复核仍走 schoolPollDone 实时重拉，口径不变
+// ——此前四个子任务各自重复拉一遍，单账号单轮 5 次上游往返纯属浪费。
 func (s *Scheduler) schoolAccount(a *auth.Auth) {
 	tasks, inPeriod, err := s.cfg.Upstream.SchoolTasks(a)
 	if err != nil {
@@ -68,11 +79,10 @@ func (s *Scheduler) schoolAccount(a *auth.Auth) {
 	if !inPeriod {
 		return // 活动已结束，静默
 	}
-	_ = tasks
-	s.schoolShareTask(a)
-	s.schoolDesktopTask(a)
-	s.schoolChatTimesTask(a)
-	s.schoolExpertTask(a)
+	s.schoolShareTask(a, tasks)
+	s.schoolDesktopTask(a, tasks)
+	s.schoolChatTimesTask(a, tasks)
+	s.schoolExpertTask(a, tasks)
 	// 抽奖：把余额全抽完（含本次活动新领的次数）。
 	chances, err := s.cfg.Upstream.SchoolChances(a)
 	if err != nil {
@@ -90,11 +100,8 @@ func (s *Scheduler) schoolAccount(a *auth.Auth) {
 }
 
 // schoolShareTask 完成 share_invite：share-complete 上报 → 轮询 → 领奖。
-func (s *Scheduler) schoolShareTask(a *auth.Auth) {
-	tasks, _, err := s.cfg.Upstream.SchoolTasks(a)
-	if err != nil {
-		return
-	}
+// tasks 为 schoolAccount 拉的同一轮快照（初始状态判定用）。
+func (s *Scheduler) schoolShareTask(a *auth.Auth, tasks []upstream.SchoolTask) {
 	share := findSchoolTask(tasks, "share_invite")
 	if share == nil || share.Status == "claimed" {
 		return
@@ -131,11 +138,8 @@ func (s *Scheduler) schoolPollDone(a *auth.Auth, code string) bool {
 }
 
 // schoolChatTimesTask 完成 chat_3_times：viewed → 3 条埋点 → 轮询 → 领奖。
-func (s *Scheduler) schoolChatTimesTask(a *auth.Auth) {
-	tasks, _, err := s.cfg.Upstream.SchoolTasks(a)
-	if err != nil {
-		return
-	}
+// tasks 为 schoolAccount 拉的同一轮快照（初始状态判定用）。
+func (s *Scheduler) schoolChatTimesTask(a *auth.Auth, tasks []upstream.SchoolTask) {
 	t := findSchoolTask(tasks, "chat_3_times")
 	if t == nil || t.Status == "claimed" || (t.TargetCount > 0 && t.Progress >= t.TargetCount && t.Status == "completed") {
 		return
@@ -167,11 +171,8 @@ func (s *Scheduler) schoolChatTimesTask(a *auth.Auth) {
 
 // schoolExpertTask 完成 expert_use：viewed → 专家事件链 → 轮询 → 领奖。
 // 开学季专家（16-BackToSchool 分类）：论文写作导师。
-func (s *Scheduler) schoolExpertTask(a *auth.Auth) {
-	tasks, _, err := s.cfg.Upstream.SchoolTasks(a)
-	if err != nil {
-		return
-	}
+// tasks 为 schoolAccount 拉的同一轮快照（初始状态判定用）。
+func (s *Scheduler) schoolExpertTask(a *auth.Auth, tasks []upstream.SchoolTask) {
 	t := findSchoolTask(tasks, "expert_use")
 	if t == nil || t.Status == "claimed" || (t.TargetCount > 0 && t.Progress >= t.TargetCount) {
 		return
@@ -201,11 +202,8 @@ func (s *Scheduler) schoolExpertTask(a *auth.Auth) {
 }
 
 // schoolDesktopTask 完成 desktop_chat_1_time：viewed 激活 → 真实 chat → 六事件链。
-func (s *Scheduler) schoolDesktopTask(a *auth.Auth) {
-	tasks, _, err := s.cfg.Upstream.SchoolTasks(a)
-	if err != nil {
-		return
-	}
+// tasks 为 schoolAccount 拉的同一轮快照（初始状态判定用）。
+func (s *Scheduler) schoolDesktopTask(a *auth.Auth, tasks []upstream.SchoolTask) {
 	t := findSchoolTask(tasks, "desktop_chat_1_time")
 	if t == nil || t.Status == "claimed" || (t.TargetCount > 0 && t.Progress >= t.TargetCount) {
 		return

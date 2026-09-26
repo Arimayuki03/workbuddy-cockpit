@@ -88,11 +88,14 @@ export default function DashboardPage() {
   // 后组件重渲染，这里自然跟随——没有独立 setState 时序，也不会出现
   // 「先渲染池快照值、约 1 秒后被实时值覆盖」的闪变。
   const liveCredits: Record<string, number> = {};
+  // 已用积分（packages 查到才有）：供积分卡片 hint 展示「已用合计」。
+  const liveUsed: Record<string, number> = {};
   // 到期积分明细（按时间升序收集，供「按天归并」与最近一笔两种口径共用）。
   const expiries: {at: number; amount: number}[] = [];
   if (packages) {
     for (const row of packages.accounts) {
       if (typeof row.remain === 'number' && !row.error) liveCredits[row.uid] = row.remain;
+      if (typeof row.used === 'number' && !row.error) liveUsed[row.uid] = row.used;
       for (const p of row.packages ?? []) {
         if (!p.end_time) continue;
         const at = Date.parse(p.end_time);
@@ -191,20 +194,24 @@ export default function DashboardPage() {
    */
   const degraded = scoped.filter(isDegraded).length;
 
-  /** 池计数按当前版本（/status 的 realm_totals；缺失时退回 overview 顶层汇总） */
+  /** 池计数按当前版本（/status 的 realm_totals；缺失时从账号明细现数同口径回落） */
   const pool = useMemo(() => {
     const perRealm = upstream?.realm_totals?.[realm];
     if (perRealm) {
       return {known: true as const, ...perRealm};
     }
+    // overview 顶层五元组是全池双 realm 计数，直接用会把另一个版本的号算进来。
+    // cooling 从 scoped 账号明细现数（Account.cooling 由后端按 until/breaker/
+    // degrade 三截止置位，与 CountsDetailed 同口径）；total/healthy/disabled 无法
+    // 从明细重建同口径计数，只能保留全池回落——known=false 的展示路径已标注「—」。
     return {
       total: overview?.total ?? 0,
       healthy: overview?.healthy ?? 0,
-      cooling: overview?.cooling ?? 0,
+      cooling: scoped.filter((a) => a.cooling).length,
       disabled: overview?.disabled ?? 0,
       known: false as const,
     };
-  }, [upstream, overview, realm]);
+  }, [upstream, overview, realm, scoped]);
 
   /**
    * series 点按当前版本过滤。桶在后端按 (realm, scope) 聚合并带 realm 标注：
@@ -273,6 +280,9 @@ export default function DashboardPage() {
   const creditsKnown = scoped.filter((a) => typeof credOf(a) === 'number');
   const totalCredits = creditsKnown.reduce((sum, a) => sum + (credOf(a) || 0), 0);
   const creditsLow = creditsKnown.filter((a) => (credOf(a) || 0) < 200).length;
+  // 已用积分合计：与余额同源（packages），只在查到至少一个账号时显示。
+  const usedKnown = scoped.filter((a) => typeof liveUsed[a.uid] === 'number');
+  const totalUsed = usedKnown.reduce((sum, a) => sum + (liveUsed[a.uid] || 0), 0);
   // 7 天内的到期算紧急。取渲染时刻即可：本页每 30 秒重渲染一次。
   const expiryUrgent = !!nextExpiry && nextExpiry.at - Date.now() < 7 * 86400_000;
 
@@ -352,22 +362,45 @@ export default function DashboardPage() {
           }
           // 值里带上最近到期：额度高但下周作废，比额度低更值得注意
           value={creditsKnown.length ? fmtNumber(totalCredits) : '—'}
+          // hint 分段拼接：已用合计（数据同步后恒显示）+ 警告（低余额或紧急到期，
+          // 二者取一）——警告不该把「已用」整个挤掉，两者用分隔符并列。
           hint={
             !creditsKnown.length
               ? t('dashboard.waitingUpstream')
-              : creditsLow > 0
-                ? t('dashboard.creditsLow', {count: creditsLow, n: creditsLow})
-                : nextExpiry
-                  ? expiryDailyMerge && mergedExpiries.length > 1
-                    ? t('dashboard.creditsExpiryDaily', {
-                        time: fmtDateTime(nextExpiry.at),
-                        amount: fmtNumber(nextExpiry.amount),
-                      })
-                    : t('dashboard.creditsExpiry', {
-                        time: fmtDateTime(nextExpiry.at),
-                        amount: fmtNumber(nextExpiry.amount),
-                      })
-                  : t('dashboard.creditsCovered', {count: creditsKnown.length, n: creditsKnown.length})
+              : (() => {
+                  const parts: string[] = [];
+                  if (usedKnown.length) {
+                    parts.push(t('dashboard.creditsUsedHint', {used: fmtNumber(totalUsed), count: usedKnown.length, n: usedKnown.length}));
+                  }
+                  if (creditsLow > 0) {
+                    parts.push(t('dashboard.creditsLow', {count: creditsLow, n: creditsLow}));
+                  } else if (expiryUrgent && nextExpiry) {
+                    parts.push(
+                      expiryDailyMerge && mergedExpiries.length > 1
+                        ? t('dashboard.creditsExpiryDaily', {
+                            time: fmtDateTime(nextExpiry.at),
+                            amount: fmtNumber(nextExpiry.amount),
+                          })
+                        : t('dashboard.creditsExpiry', {
+                            time: fmtDateTime(nextExpiry.at),
+                            amount: fmtNumber(nextExpiry.amount),
+                          }),
+                    );
+                  }
+                  if (parts.length) return parts.join(t('common.listSeparator'));
+                  if (nextExpiry) {
+                    return expiryDailyMerge && mergedExpiries.length > 1
+                      ? t('dashboard.creditsExpiryDaily', {
+                          time: fmtDateTime(nextExpiry.at),
+                          amount: fmtNumber(nextExpiry.amount),
+                        })
+                      : t('dashboard.creditsExpiry', {
+                          time: fmtDateTime(nextExpiry.at),
+                          amount: fmtNumber(nextExpiry.amount),
+                        });
+                  }
+                  return t('dashboard.creditsCovered', {count: creditsKnown.length, n: creditsKnown.length});
+                })()
           }
           icon={Coins}
           tone={

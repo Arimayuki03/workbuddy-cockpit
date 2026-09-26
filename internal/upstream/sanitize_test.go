@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -75,6 +76,150 @@ func TestUpstreamErrorCodeRewritten(t *testing.T) {
 	}
 	if !strings.Contains(out, "11-128") {
 		t.Errorf("error code not rewritten as expected: %q", out)
+	}
+}
+
+// fpCode 构造上游拦截指纹串（裸五位数字错误码 11·128，无分隔符形态），
+// rewrite 后形态为插连字符版本 11-128。用拼接构造避免两种形态在源码里
+// 肉眼不可分（终端渲染合并）导致误改。
+var fpCode = "11" + "128"
+
+// fpCodeRewritten rewrite 后的形态（插入连字符）。
+var fpCodeRewritten = "11-128"
+
+// 回归（H-sanitize）：请求体顶层 tools 数组的工具定义（name/description/
+// parameters schema）此前完全不在出站脱敏覆盖内，携带指纹的工具定义原样
+// 出站 → 上游请求体级逐字匹配拦截整单 400。经 sanitizeTools 后无指纹残留。
+func TestSanitizeToolsStripsFingerprints(t *testing.T) {
+	code := fpCode
+	codeRew := fpCodeRewritten
+	tools := []any{
+		// OpenAI tools 形态：{"type":"function","function":{...}}
+		map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "query_error " + code,
+				"description": "Look up upstream error " + code + " meaning",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"code":    map[string]any{"type": "string", "description": "error code like " + code},
+						"paren":   map[string]any{"type": "string", "description": "pad " + codeRew + " stays padded"},
+					},
+				},
+			},
+		},
+		// 旧版 functions 形态：{name,description,parameters} 直接在项上
+		map[string]any{
+			"name":        code + "_tool",
+			"description": "uses " + code + " internally",
+		},
+	}
+	if !sanitizeTools(tools) {
+		t.Fatal("sanitizeTools 未报告任何改动")
+	}
+	fn := tools[0].(map[string]any)["function"].(map[string]any)
+	if got := fn["name"].(string); strings.Contains(got, code) {
+		t.Errorf("tools.function.name 未净化: %q", got)
+	}
+	if got := fn["description"].(string); strings.Contains(got, code) {
+		t.Errorf("tools.function.description 未净化: %q", got)
+	}
+	// parameters schema：结构保留（type/properties），指纹串改写为连字符形态。
+	params := fn["parameters"].(map[string]any)
+	if params["type"] != "object" {
+		t.Errorf("parameters schema 结构被破坏: type=%v", params["type"])
+	}
+	props := params["properties"].(map[string]any)
+	codeDesc := props["code"].(map[string]any)["description"].(string)
+	if strings.Contains(codeDesc, code) || !strings.Contains(codeDesc, codeRew) {
+		t.Errorf("parameters 内指纹未按预期改写: %q", codeDesc)
+	}
+	// 已是 rewrite 后形态的文本不再被二次改写（幂等）。
+	parenDesc := props["paren"].(map[string]any)["description"].(string)
+	if !strings.Contains(parenDesc, codeRew) {
+		t.Errorf("parameters 无害文本被误改: %q", parenDesc)
+	}
+	flat := tools[1].(map[string]any)
+	if got := flat["name"].(string); strings.Contains(got, code) {
+		t.Errorf("functions 顶层 name 未净化: %q", got)
+	}
+	if got := flat["description"].(string); strings.Contains(got, code) {
+		t.Errorf("functions 顶层 description 未净化: %q", got)
+	}
+}
+
+// samePointer 反射判两个 any 是否持有同一 map 指针（map 不可 == 比较，非 nil 情形）。
+func samePointer(a, b any) bool {
+	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
+	return va.Kind() == reflect.Map && vb.Kind() == reflect.Map && va.Pointer() == vb.Pointer()
+}
+
+// 无指纹的 tools 数组不改动、不报告（零分配路径）：sanitizeTools 返回 false，
+// 且 name/description/parameters 原值不变。
+func TestSanitizeToolsCleanNoChange(t *testing.T) {
+	params := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{"type": "string", "description": "file path"},
+		},
+	}
+	tools := []any{
+		map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "read_file",
+				"description": "Read a file from disk",
+				"parameters":  params,
+			},
+		},
+	}
+	if sanitizeTools(tools) {
+		t.Fatal("无指纹的 tools 被报告为有改动（应走零分配原样路径）")
+	}
+	fn := tools[0].(map[string]any)["function"].(map[string]any)
+	if fn["name"] != "read_file" || fn["description"] != "Read a file from disk" {
+		t.Errorf("clean tools 被误改: %v", fn)
+	}
+	if got, ok := fn["parameters"]; !ok || got == nil {
+		t.Fatalf("clean parameters 缺失: %v", fn)
+	} else if _, same := got.(map[string]any); !same {
+		t.Fatalf("clean parameters 类型被改: %T", got)
+	}
+	// 无指纹时 sanitizeText 原串返回（零分配路径），parameters 不得被序列化重建：
+	// 断言仍是同一个 map 对象（samePointer 反射指针等价；map 不可 == 比较）。
+	if got := fn["parameters"]; !samePointer(got, params) {
+		t.Errorf("clean parameters 被重建（应原对象原样）: %v", got)
+	}
+	// 非 []any 输入安全返回 false。
+	if sanitizeTools("not-a-list") || sanitizeTools(nil) || sanitizeTools(map[string]any{}) {
+		t.Error("非数组输入应返回 false")
+	}
+}
+
+// 集成：完整请求体经 PrepareBodyOpt 净化后顶层 tools/functions 无指纹残留；
+// sanitize=false 时原样保留（开关有效）。
+func TestPrepareBodyOptSanitizesTopLevelTools(t *testing.T) {
+	code := fpCode
+	body := []byte(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}],` +
+		`"tools":[{"type":"function","function":{"name":"q_` + code + `","description":"err ` + code + `","parameters":{"type":"object"}}}],` +
+		`"functions":[{"name":"legacy_` + code + `","description":"legacy ` + code + `"}]}`)
+	out := PrepareBodyOpt(body, true)
+	if strings.Contains(string(out), "q_"+code) || strings.Contains(string(out), "legacy_"+code) {
+		t.Errorf("wire body 顶层工具定义指纹残留: %s", out)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatal(err)
+	}
+	tf := obj["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
+	if tf["parameters"].(map[string]any)["type"] != "object" {
+		t.Errorf("parameters schema 结构被破坏: %v", tf["parameters"])
+	}
+	// 关闭脱敏：指纹原样保留。
+	off := string(PrepareBodyOpt(body, false))
+	if !strings.Contains(off, "q_"+code) {
+		t.Error("sanitize=false 应原样保留 tools 指纹")
 	}
 }
 

@@ -33,7 +33,22 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 
 // PrepareBodyOptWithEffortsAndDefault 在 PrepareBodyOptWithEfforts 基础上按模型
 // reasoning.defaultEffort 补默认档（缺显式 effort 时优先用模型声明档，空串/未知回退硬编码）。
+//
+// 热路径三趟序列化折叠（修复 G-payload）：InjectPromptCacheKey 与 ensureConsoleSystem
+// 原本各自独立 parse/marshal（prepareBody → InjectPromptCacheKey → ensureConsoleSystem
+// 三趟全量 unmarshal/marshal，MB 级 body 上每趟都是完整往返）。现折叠进同一 pass：
+// promptCacheKey/globalConsole 由调用方（prepareBody）传入，与管线其余步骤共享
+// 同一份 obj 的 map 级操作，一次 unmarshal + 一次 marshal 完成全部改写。
+// 两参数为可选：空串/false 时与旧封装行为完全一致（测试锚点零漂移）。
 func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string) []byte {
+	return prepareBodyPass(src, sanitize, efforts, defaultEfforts, "", "", false)
+}
+
+// prepareBodyPass 单趟解析+单趟序列化的完整管线（PromptCacheKey/globalConsole 折叠）。
+// promptCacheKeyUID/promptCacheKeyConv 为 prompt_cache_key 注入的账号段与会话段
+// （空则跳过注入，与旧封装一致）；globalConsole 为 true 时按 ensureConsoleSystem
+// 语义在首条非 system 时前置兜底 system。
+func prepareBodyPass(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string, promptCacheKeyUID, promptCacheKeyConv string, globalConsole bool) []byte {
 	if len(src) == 0 {
 		return src
 	}
@@ -87,6 +102,38 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	if sanitize {
 		if msgs, ok := obj["messages"].([]any); ok {
 			sanitizeMessages(msgs)
+		}
+		if tv, ok := obj["tools"].([]any); ok {
+			sanitizeTools(tv)
+		}
+		if fv, ok := obj["functions"].([]any); ok {
+			sanitizeTools(fv)
+		}
+	}
+	// prompt_cache_key 注入（原 InjectPromptCacheKey 独立趟）：客户端已显式带 key
+	// 时绝不覆盖；body 里的 conversation_id / conversationId 优先于入参会话段
+	// 做哈希源（与原优先级 1/2/3 完全同口径）。
+	if promptCacheKeyUID != "" {
+		if existing, ok := obj["prompt_cache_key"].(string); !ok || existing == "" {
+			conv := promptCacheKeyConv
+			if v := strField(obj, "conversation_id"); v != "" {
+				conv = v
+			} else if v := strField(obj, "conversationId"); v != "" {
+				conv = v
+			}
+			obj["prompt_cache_key"] = buildCacheKey(promptCacheKeyUID, conv)
+		}
+	}
+	// globalConsole 兜底 system 注入（原 ensureConsoleSystem 独立趟）：首条消息非
+	// system 时在 messages 最前补一条 fallback（防 console 域上游 code 11-128）。
+	if globalConsole {
+		if msgs, ok := obj["messages"].([]any); ok && len(msgs) > 0 {
+			first, ok := msgs[0].(map[string]any)
+			if ok {
+				if role, _ := first["role"].(string); !strings.EqualFold(strings.TrimSpace(role), "system") {
+					obj["messages"] = append([]any{map[string]any{"role": "system", "content": "You are a helpful assistant."}}, msgs...)
+				}
+			}
 		}
 	}
 	out, err := json.Marshal(obj)

@@ -84,7 +84,7 @@ type Scheduler struct {
 	// 因此不热改路径的行为与引入前逐位一致。
 	hoursMu sync.RWMutex
 	hoursTab [kindCount][]int
-	// enabled 六类任务的可热改排程开关：New 时从 Config.*Disabled 取反初始化，
+	// enabled 七类任务的可热改排程开关：New 时从 Config.*Disabled 取反初始化，
 	// 之后 SetEnabled 原子改写并经 wake 唤醒 Run 重排定时器（热生效免重启）。
 	// nextWake 只读本组标志，不再读 cfg 的 Disabled bool（cfg 保持不可变快照语义）。
 	enabled [kindCount]atomic.Bool
@@ -122,29 +122,34 @@ func (s *Scheduler) SetQueueRunner(fn func()) {
 // kindCount 与 taskKind 枚举数量一致（checkin/travel/activity/keepalive/school/cat/queue）。
 const kindCount = 7
 
+// clampHours 归一化排程小时表：空回落默认；逐项剔除越界值（h<0 || h>23，剔一条
+// 记一条 WARN）；剔除后为空再回落默认。config 直载的越界小时（如 25）若不拦，
+// 会经 nextFire→time.Date 归一化成意外时点（25 点静默漂移为次日 1 点），这里在
+// New 装配期一次性钳掉。SetHours 热改路径已有同口径 0-23 拒绝校验，不受影响。
+func clampHours(in []int, def []int) []int {
+	out := make([]int, 0, len(in))
+	for _, h := range in {
+		if h < 0 || h > 23 {
+			log.Printf("scheduler: 排程小时 %d 越界（合法 0-23），已剔除", h)
+			continue
+		}
+		out = append(out, h)
+	}
+	if len(out) == 0 {
+		return append([]int(nil), def...)
+	}
+	return out
+}
+
 // New 构建。
 func New(cfg Config) *Scheduler {
-	if len(cfg.CheckinHours) == 0 {
-		cfg.CheckinHours = []int{9, 21}
-	}
-	if len(cfg.TravelHours) == 0 {
-		cfg.TravelHours = []int{9, 21}
-	}
-	if len(cfg.ActivityHours) == 0 {
-		cfg.ActivityHours = []int{10}
-	}
-	if len(cfg.KeepaliveHours) == 0 {
-		cfg.KeepaliveHours = []int{22}
-	}
-	if len(cfg.SchoolHours) == 0 {
-		cfg.SchoolHours = []int{12}
-	}
-	if len(cfg.CatHours) == 0 {
-		cfg.CatHours = []int{1}
-	}
-	if len(cfg.QueueHours) == 0 {
-		cfg.QueueHours = []int{10}
-	}
+	cfg.CheckinHours = clampHours(cfg.CheckinHours, []int{9, 21})
+	cfg.TravelHours = clampHours(cfg.TravelHours, []int{9, 21})
+	cfg.ActivityHours = clampHours(cfg.ActivityHours, []int{10})
+	cfg.KeepaliveHours = clampHours(cfg.KeepaliveHours, []int{22})
+	cfg.SchoolHours = clampHours(cfg.SchoolHours, []int{12})
+	cfg.CatHours = clampHours(cfg.CatHours, []int{1})
+	cfg.QueueHours = clampHours(cfg.QueueHours, []int{10})
 	// 0/缺省 = 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
 	if cfg.ActivityReportCount <= 0 {
 		cfg.ActivityReportCount = 1
@@ -304,7 +309,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 	for {
 		next, kinds := s.nextWake(time.Now())
 		if next.IsZero() {
-			// 六类任务全部禁用：不空转，等退出信号或热改启用通知。
+			// 七类任务全部禁用：不空转，等退出信号或热改启用通知。
 			select {
 			case <-ctx.Done():
 				return
@@ -369,7 +374,8 @@ func (s *Scheduler) dispatch(ctx context.Context, k taskKind) {
 
 // runOne 单类任务真正执行体 + 观测记录（running/lastRun/lastOut）。
 // 调用方必须已持有 runMu[k]（定时 dispatch 阻塞排队；手动 RunKindNow TryLock 独占）。
-// checkin 分支把 RunCheckinNow 的 CheckinAll 结果收进摘要；撞车仅记日志的旧语义不变。
+// checkin 分支把 RunCheckinNow 的 CheckinAll 结果收进摘要，成功后追加连登管家尾段
+// （runStreakBonusTail，与 RunCheckinNow 完整语义对齐）；撞车仅记日志的旧语义不变。
 func (s *Scheduler) runOne(ctx context.Context, k taskKind) {
 	s.running[k].Store(true)
 	started := time.Now()
@@ -381,6 +387,9 @@ func (s *Scheduler) runOne(ctx context.Context, k taskKind) {
 			log.Printf("scheduled checkin skipped: %v", err)
 			summary = "skipped: " + err.Error()
 		} else {
+			// 与 RunCheckinNow 尾部对齐：签到成功后跑连登管家（全档兑换 + 抽完，
+			// 按天幂等）。此前定时路径漏掉该尾段，只有手动触发能领。
+			s.runStreakBonusTail(ctx)
 			summary = summarizeCheckin(out)
 		}
 	case taskTravel:
@@ -396,7 +405,7 @@ func (s *Scheduler) runOne(ctx context.Context, k taskKind) {
 		s.RunSchoolNow()
 		summary = "done"
 	case taskCat:
-		s.RunCatNow()
+		s.runCat(ctx)
 		summary = "done"
 	case taskQueue:
 		summary = s.RunQueueNow()
@@ -430,19 +439,29 @@ func summarizeCheckin(out []CheckinOutcome) string {
 // 签到成功后追加连登管家（runStreakBonusTail 尾段：全档兑换 + 抽完抽奖次数；按天幂等，
 // 与活跃上报侧的 claimGrowthRewards 共用同一 rewardClaimed 日闸）——panel 连登管家
 // 并入签到尾部，不新增 schedule 键（设计文档 §3.8）。
+//
+// panel 裸 goroutine 直接调用的公开入口（与 runBatch/RunKindNow 的 recover 同理）：
+// 任务体横跨上游 JSON 解析等外部输入，任何一处 panic 都不该击穿整个网关进程，
+// recover 后按任务失败口径记录，让调用方与进程继续。
 func (s *Scheduler) RunCheckinNow() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("scheduler: task checkin panic: %v", r)
+		}
+	}()
 	if _, err := s.CheckinAll(); err != nil {
 		log.Printf("scheduled checkin skipped: %v", err)
 		return
 	}
-	s.runStreakBonusTail()
+	s.runStreakBonusTail(context.Background())
 }
 
 // runStreakBonusTail 签到尾段：逐可用账号执行连登管家（补签保连登 → 全档兑换 → 抽完）。
-// 由 RunCheckinNow 尾部调用；单号失败只该号 WARN，不影响其他账号；账号间限速
-// activityAccountDelay（与活跃上报同口径）。签到失败/撞车（ErrBusy）时跳过——
-// 管家依赖签到刚建立的当日活跃态，撞车场景说明另一处签到正在跑，其尾部自会触发。
-func (s *Scheduler) runStreakBonusTail() {
+// 由 RunCheckinNow 尾部与 runOne 的 taskCheckin 分支调用；单号失败只该号 WARN，
+// 不影响其他账号；账号间限速 activityAccountDelay（sleepCtx：取消时立即放弃后续
+// 账号，与活跃上报同口径）。签到失败/撞车（ErrBusy）时跳过——管家依赖签到刚建立
+// 的当日活跃态，撞车场景说明另一处签到正在跑，其尾部自会触发。
+func (s *Scheduler) runStreakBonusTail(ctx context.Context) {
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
 			continue
@@ -460,7 +479,9 @@ func (s *Scheduler) runStreakBonusTail() {
 		s.makeupYesterday(a) // 补签保连登（幂等写：无漏签/无卡静默）
 		// 全档兑换 + 抽完抽奖次数。复用活跃上报侧的挑档/抽取实现（streakClaimTiers）。
 		s.streakClaimTiers(a)
-		time.Sleep(activityAccountDelay)
+		if !sleepCtx(ctx, activityAccountDelay) {
+			return // 优雅停机：不等限速睡满，剩余账号下轮再领
+		}
 	}
 }
 
@@ -597,9 +618,16 @@ func joinDetail(existing, add string) string {
 // 豁免 adoptTriedToday 当日防抖（旅行排程 09 点已领养过且 skip，10 点上报补满后
 // 不能依赖下一轮旅行领养，就地闭环）。
 // RunActivityNow 立即对池内所有可用账号执行对话活跃上报（无 ctx 的外部入口：
-// cmd/activity 一次性触发、测试）。内部走 runActivity，取背景 ctx（不可取消，
-// 语义与引入前 time.Sleep 版一致）。
+// cmd/activity 一次性触发、cmd/task、panel 裸 goroutine、测试）。内部走
+// runActivity，取背景 ctx（不可取消，语义与引入前 time.Sleep 版一致）。
 func (s *Scheduler) RunActivityNow() {
+	// panel 裸 goroutine 入口：任务体 panic 不应击穿整个网关进程（与 RunCheckinNow
+	// 同理，runBatch/RunKindNow 的 recover 不覆盖本入口）。
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("scheduler: task activity panic: %v", r)
+		}
+	}()
 	s.runActivity(context.Background())
 }
 
@@ -938,7 +966,7 @@ var kindNames = [kindCount]string{"checkin", "travel", "activity", "keepalive", 
 
 var kindLabels = [kindCount]string{"签到", "猫猫旅行", "活跃上报", "Token 保活", "开学季", "夜猫子", "任务队列"}
 
-// Kinds 返回六类任务的字符串标识（枚举顺序），供外部遍历与参数校验。
+// Kinds 返回七类任务的字符串标识（枚举顺序），供外部遍历与参数校验。
 func Kinds() []string {
 	out := make([]string, 0, kindCount)
 	out = append(out, kindNames[:]...)

@@ -9,7 +9,7 @@
 // 端点（chatBase，BillingHeaders）：
 //   - GET  /v2/activity/growth/tasks                全量任务列表（含 progress/accept_status）
 //   - POST /v2/activity/growth/tasks/accept         {"task_codes":[...]} not_accepted → accepted
-//   - POST /v2/activity/growth/tasks/reward/claim   {"task_code":"..."} 完成态领奖
+//   - POST /v2/activity/growth/tasks/reward/claim   （已废弃：CLI 域路径不存在，见 ClaimReward 注释）
 //
 // 语义要点：
 //   - accept 是"报名"，不产生进度；进度由服务端行为事件点亮（如 chat_request_send 上报、
@@ -19,6 +19,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 
@@ -93,7 +94,8 @@ func (c *Client) ClaimRewardMP(a *auth.Auth, taskCode string) (credit, energy in
 		"/activity/growth/tasks/"+url.PathEscape(taskCode)+"/claim", nil)
 	if err != nil {
 		// chat 域对该路径 400（部分任务/租户形态）→ Web 域降级（已实测可领）。
-		if ue, ok := err.(*Error); ok && ue.Status == http.StatusBadRequest {
+		var ue *Error
+		if errors.As(err, &ue) && ue.Status == http.StatusBadRequest {
 			return c.ClaimReward(a, taskCode)
 		}
 		return 0, 0, err
@@ -110,6 +112,11 @@ func parseClaimReward(data json.RawMessage) (credit, energy int64, err error) {
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return 0, 0, err
+	}
+	// 幂等口径与 ClaimReward（Web 域）对齐：重复领取不算错误，但 credit/energy 是
+	// 上游回显的历史奖励，不是"本次到账"，返回 0 防虚报。
+	if resp.AlreadyClaimed {
+		return 0, 0, nil
 	}
 	return resp.Credit, resp.Energy, nil
 }
@@ -196,18 +203,21 @@ func (c *Client) AcceptTasks(a *auth.Auth, taskCodes []string) error {
 // 一直返回 400 "task not completed"，是此前领奖失败的真实原因。
 // 本实现返回 (credit, energy, err)：credit/energy 为本次到账奖励（已领取过时为 0）。
 func (c *Client) ClaimReward(a *auth.Auth, taskCode string) (credit, energy int64, err error) {
+	// Origin/Referer 与 URL 同源（realm 感知的 webBase），global 账号不出现
+	// "AI 域 URL + CN 域来源头"的不自洽形态。
+	base := c.webBase(a)
 	req, err := http.NewRequest(http.MethodPost,
-		c.webBase(a)+"/activity/growth/tasks/"+url.PathEscape(taskCode)+"/claim", nil)
+		base+"/activity/growth/tasks/"+url.PathEscape(taskCode)+"/claim", nil)
 	if err != nil {
 		return 0, 0, err
 	}
-	// Web 端请求头形状（对照浏览器实际请求）：Origin/Referer 指向 workbuddy.cn 成长中心，
+	// Web 端请求头形状（对照浏览器实际请求）：Origin/Referer 指向成长中心页，
 	// 带 x-client-platform: web 标记来源端。
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", "https://www.workbuddy.cn")
-	req.Header.Set("Referer", "https://www.workbuddy.cn/profile/growth-center")
+	req.Header.Set("Origin", base)
+	req.Header.Set("Referer", base+"/profile/growth-center")
 	req.Header.Set("x-client-platform", "web")
 	if ua := c.userAgent(a); ua != "" {
 		req.Header.Set("User-Agent", ua)

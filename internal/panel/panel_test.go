@@ -9,6 +9,7 @@ import (
 
 	"workbuddy2api/internal/httpauth"
 	"workbuddy2api/internal/pool"
+	"workbuddy2api/internal/server"
 )
 
 // newSmokePool overview 冒烟的最小依赖：空池（无账号、无上游调用）。
@@ -161,5 +162,44 @@ func TestLogoutClearsCookie(t *testing.T) {
 	}
 	if !cleared {
 		t.Error("logout must expire wb_session cookie")
+	}
+}
+
+// TestSetModelMapValidation model-map 写接口的畸形请求防护：
+// map 键缺失（{"foo":1}）或显式 null（{"map":null}）→ 400，且不得清空生效表
+// （此前 nil 会触发 SetModelMap(nil) 静默清空映射并随 SaveConfig 落盘空表）；
+// {"map":{}} 是合法的「清空所有映射」操作 → 200，生效表变空。
+func TestSetModelMapValidation(t *testing.T) {
+	p := New(Config{Version: "test", APIKey: "test-key"})
+	server.SetModelMap(map[string]string{"a": "b"})
+	t.Cleanup(func() { server.SetModelMap(nil) })
+
+	post := func(body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/settings/model-map", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer test-key")
+		p.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 畸形形态 1：map 键缺失。
+	if rec := post(`{"foo":1}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf(`{"foo":1}: code=%d want 400 body=%s`, rec.Code, rec.Body.String())
+	}
+	// 畸形形态 2：map 显式 null。
+	if rec := post(`{"map":null}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf(`{"map":null}: code=%d want 400 body=%s`, rec.Code, rec.Body.String())
+	}
+	// 两次畸形请求后生效表必须原封不动。
+	if view := server.ModelMapView(); len(view) != 1 || view["a"] != "b" {
+		t.Fatalf("model map mutated by invalid requests: %v", view)
+	}
+
+	// 合法空表：显式清空所有映射 → 200。
+	if rec := post(`{"map":{}}`); rec.Code != http.StatusOK {
+		t.Fatalf(`{"map":{}}: code=%d want 200 body=%s`, rec.Code, rec.Body.String())
+	}
+	if view := server.ModelMapView(); len(view) != 0 {
+		t.Fatalf(`{"map":{}} should clear map, got %v`, view)
 	}
 }

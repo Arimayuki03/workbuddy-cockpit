@@ -95,6 +95,10 @@ type creditReport struct {
 	Accounts []creditAccount `json:"accounts"`
 }
 
+// adminEndpointCount registerAdmin 注册的 /admin 路由条数（上方 HandleFunc 调用数，
+// 启动日志观测口径——与路由注册同处一个函数，增删路由时同步维护）。
+const adminEndpointCount = 7
+
 // registerAdmin 注册全部 /admin 路由（NewHandler 在 cfg.Admin.Enabled 时调用）。
 func (h *Handler) registerAdmin() {
 	h.adm = &adminState{manual: map[string]bool{}}
@@ -110,7 +114,7 @@ func (h *Handler) registerAdmin() {
 	h.mux.HandleFunc("PATCH /admin/credits-interval", h.withAdmin(h.adminCreditsIntervalPatch))
 	h.mux.HandleFunc("POST /admin/shutdown", h.withAdmin(h.adminShutdown))
 	log.Printf("admin API 已启用（loopback only，%d 个端点，积分查询冷却 %s）",
-		7, h.cfg.Admin.CreditRefreshMinInterval)
+		adminEndpointCount, h.cfg.Admin.CreditRefreshMinInterval)
 }
 
 // withAdmin 在既有 Bearer 鉴权前再垫一道 loopback 闸。
@@ -142,6 +146,12 @@ func decodeAdminJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "请求体 JSON 不合法: "+err.Error())
+		return false
+	}
+	// 尾部残余校验（audit）：Decode 只消费首个 JSON 值，{"kind":"checkin"}garbage
+	// 这类拼接体会被静默截断放行——拒绝之，防止半截请求被当成合法意图。
+	if dec.More() {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "请求体 JSON 不合法: 尾部存在多余内容")
 		return false
 	}
 	return true
@@ -579,7 +589,19 @@ func patchConfigHours(path, key string, hours []int) (bool, error) {
 // PATCH /admin/credits-interval 都经 patchConfigScalar 落盘：无互斥时并发 PATCH
 // 各自基于旧字节做 splice，后落盘者覆盖先落盘者的改动（补丁丢失）而两个响应仍都
 // 报 persisted=true。adminState.mu 只管运行态字段，覆盖不到落盘路径，故设包级锁。
+//
+// 跨包共享（C-config 双写路径修复）：面板 saveConfig 的整文件重写（cmd/server
+// panel_config.go）也经 ConfigMu() 拿同一把锁——admin splice 与面板整写并发时
+// 互相丢补丁（admin 基于旧字节的 splice 落盘可被面板基于旧字节的整文件 rename
+// 回滚，或反向），两条写路径收敛到同一临界区后互斥。
 var patchConfigMu sync.Mutex
+
+// ConfigMu 返回 config.json 写路径的共享互斥（cmd/server 的面板 saveConfig 用）。
+// 调用方必须在完整读-改-写跨度内持锁（ReadFile → merge/splice → tmp+rename），
+// 与 patchConfigScalar 的临界区口径一致。
+func ConfigMu() *sync.Mutex {
+	return &patchConfigMu
+}
 
 // patchConfigScalar 把配置文件里二级对象 section.key 的标量值原子替换（或插入），
 // 其余字节原样保留——对用户的 config.json 是影响最小化：只有目标那一处变。
@@ -621,6 +643,15 @@ func patchConfigScalar(path, section, key string, lit []byte) (bool, error) {
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return false, fmt.Errorf("open tmp: %w", err)
+	}
+	// 权限位对齐原文件（audit）：rename 会整体替换目录项，tmp 的 0o600 会覆盖掉
+	// 原config.json 的权限位（如 0o644）——按原文件 mode 补一次 chmod。
+	if info, statErr := os.Stat(path); statErr == nil {
+		if chmodErr := os.Chmod(tmp, info.Mode().Perm()); chmodErr != nil {
+			f.Close()
+			os.Remove(tmp)
+			return false, fmt.Errorf("chmod tmp: %w", chmodErr)
+		}
 	}
 	if _, err := f.Write(newRaw); err != nil {
 		f.Close()

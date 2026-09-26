@@ -25,7 +25,9 @@ import (
 //
 // 安全约束——按账号隔离：
 //   - 生成键格式 `wb2a-<uid8>-<convHex>`
-//   - uid8 是账号 UID 前 8 字符，跨账号绝不相同 → 跨账号缓存键绝不碰撞
+//   - uid8 仅作可读前缀（账号 UID 前 8 字符，不同账号可能相同，不承担隔离职责）；
+//     跨账号隔离由 convHex = sha256(完整 uid|conversation) 保证——uid 参与会话段哈希，
+//     uid8 相同只影响可读性，不影响隔离正确性
 //   - 跨账号复用同一 cache key 会让上游命中错账号的前缀缓存、泄露对方对话，故 uid 是硬隔离因子
 //
 // 入参 uid 为账号 UID（空则用 "-"，但仍会注入键；调用方应保证传真实 UID）。
@@ -62,9 +64,10 @@ func InjectPromptCacheKey(body []byte, uid, conversationID string) []byte {
 
 // buildCacheKey 生成 `wb2a-<uid8>-<convHex>` 格式的稳定 cache key。
 //
-// uid8 提供账号隔离段；convHex = sha256(uid + conversationID)[:16] 的 hex 提供会话段
-// （同账号同会话稳定、不同会话不同）。会话源为空时 convHex 仍由 uid 单独哈希，
-// 保证跨账号绝不碰撞但同一空会话不复用（空会话 = 新会话语义）。
+// uid8 仅作可读前缀；跨账号隔离由 convHex = sha256(uid + conversationID)[:16] 的 hex
+// 保证（完整 uid 参与会话段哈希，uid8 相同不影响隔离）——同账号同会话稳定、不同会话
+// 不同。会话源为空时 convHex 仍由 uid 单独哈希，保证跨账号不碰撞但同一空会话不复用
+// （空会话 = 新会话语义）。
 func buildCacheKey(uid, conversation string) string {
 	uid8 := uid
 	if len(uid8) > 8 {
