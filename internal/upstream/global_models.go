@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -111,18 +112,26 @@ func (c *Client) FetchGlobalModelInfos(a *auth.Auth) []ModelInfo {
 // 冷 / 过期 / 窄表形态 / 未探测 → nil。不发起任何上游探测——与
 // FetchGlobalModelInfos 的差异点（那个在 miss 时触发探测，服务 /v1/models；
 // 本方法服务 /v1/stats 的倍率透出，只读已有数据）。
+// 返回 slices.Clone 浅拷贝：调用方 append/改写不会污染缓存 backing array。
 func (c *Client) GlobalModelInfosSnapshot() []ModelInfo {
 	c.globalModels.Lock()
 	defer c.globalModels.Unlock()
 	if len(c.globalModels.infos) == 0 || time.Since(c.globalModels.fetched) >= globalModelsTTL {
 		return nil
 	}
-	return c.globalModels.infos
+	return slices.Clone(c.globalModels.infos)
 }
 
 // fetchGlobalModelsOnce 单次探测决策（缓存命中/负缓存/触发探测），返回 (names, infos)。
 // 纯动态：成功 = 探测结果去重（不与任何静态名单合并）；一切失败 = nil（不回落静态）。
 // infos 仅对象形态成功探测时非 nil。
+//
+// 探测段带 singleflight 门闩（globalProbing + globalProbeDone，chan 自实现，无
+// x/sync 依赖）：锁内查缓存/负缓存 miss 后，第一个进入者标记 probing 并持 done
+// chan 锁外探测；并发进入者看到 probing 就等 done 关闭后重查缓存——probe 自身
+// 已是 3 路并发，无门闩时 N 个 /v1/models 同时 miss 会 N 倍重复打上游。等待者
+// 重查仍 miss（持门闩者失败且负缓存已写入的窗口）按 miss 口径返回 nil，下次
+// TTL/冷却内已有结论。
 func (c *Client) fetchGlobalModelsOnce(a *auth.Auth) (names []string, infos []ModelInfo) {
 	if !c.globalOn(a) {
 		// 逃生门兜底：账号不路由 global 上游 → 不探测（零上游调用）。
@@ -131,7 +140,9 @@ func (c *Client) fetchGlobalModelsOnce(a *auth.Auth) (names []string, infos []Mo
 
 	c.globalModels.Lock()
 	if len(c.globalModels.names) > 0 && time.Since(c.globalModels.fetched) < globalModelsTTL {
-		names, infos := c.globalModels.names, c.globalModels.infos
+		// 缓存命中：返回 slices.Clone 浅拷贝——共享 backing array 时调用方
+		// append/改写会污染缓存（后续所有命中者都读到被改写的数据）。
+		names, infos := slices.Clone(c.globalModels.names), slices.Clone(c.globalModels.infos)
 		c.globalModels.Unlock()
 		return names, infos
 	}
@@ -140,7 +151,33 @@ func (c *Client) fetchGlobalModelsOnce(a *auth.Auth) (names []string, infos []Mo
 		c.globalModels.Unlock()
 		return nil, nil
 	}
+	if c.globalProbing {
+		// 已有探测进行中（singleflight 等待侧）：等持门闩者收尾后重查缓存。
+		done := c.globalProbeDone
+		c.globalModels.Unlock()
+		if done != nil {
+			<-done
+		}
+		c.globalModels.Lock()
+		defer c.globalModels.Unlock()
+		if len(c.globalModels.names) > 0 && time.Since(c.globalModels.fetched) < globalModelsTTL {
+			return slices.Clone(c.globalModels.names), slices.Clone(c.globalModels.infos)
+		}
+		// 仍 miss（持门闩者失败，负缓存口径）：不重复探测（其已写 lastFail，
+		// 下轮进入者会走负缓存分支），直接按失败返回。
+		return nil, nil
+	}
+	// 第一个进入者：持门闩，锁外探测。
+	c.globalProbing = true
+	c.globalProbeDone = make(chan struct{})
 	c.globalModels.Unlock()
+	defer func() {
+		c.globalModels.Lock()
+		c.globalProbing = false
+		close(c.globalProbeDone)
+		c.globalProbeDone = nil
+		c.globalModels.Unlock()
+	}()
 
 	names, infos, efforts, defaults, err := c.probeGlobalModels(a)
 	if err != nil || len(names) == 0 {
@@ -177,7 +214,8 @@ func (c *Client) fetchGlobalModelsOnce(a *auth.Auth) (names []string, infos []Mo
 	c.globalModels.fetched = time.Now()
 	c.globalModels.lastFail = time.Time{}
 	c.globalModels.Unlock()
-	return merged, infos
+	// 返回值同样浅拷贝：merged/infos 即缓存本体，调用方 append/改写不得波及缓存。
+	return slices.Clone(merged), slices.Clone(infos)
 }
 
 // probeGlobalModels 发起一次 global 模型目录探测（v3-config-merge）：
@@ -426,7 +464,7 @@ func parseGlobalModelNames(raw []byte) (names []string, infos []ModelInfo, effor
 	// 营销信息，用在免费试用版上会误导下游展示）；firstUseTimeKey/trialDays 属账号级
 	// 试用状态，不透出。CN 侧 data.models 已含同 id 时去重跳过，行为不变。
 	var obj struct {
-		Models []dynModelEntry `json:"models"`
+		Models                []dynModelEntry `json:"models"`
 		ProductFeaturesConfig struct {
 			ModelTrialBanner struct {
 				Banners []struct {

@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"time"
 
 	"workbuddy2api/internal/auth"
 )
@@ -42,8 +41,9 @@ func (c *Client) webBase(a *auth.Auth) string {
 
 // ReportChatActivityModel 同 ReportChatActivity，但可指定上报携带的模型：供「体验某模型」
 // 类任务对齐实际模型（如 Model_chat_GLM5.2 需 requestModelId=glm-5.2 与独立 requestID）。
-// panel report.go 同名方法快照拷贝；主仓库 report.go 的 chatRequestEvent 形状与 panel
-// 一致，仅落点为 RootRequestID=requestID（panel 语义），不改 report.go 既有 ReportChatActivity。
+// RootRequestID 落点为 requestID（panel 语义，school 任务链按 root 聚合各步骤），
+// 与 ReportChatActivity 的 conversationID 落点（growth 活跃上报语义）通过
+// buildChatRequestEvent 的 rootToRequestID 参数显式区分——差异原因已收敛到构造器注释。
 func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, requestID, modelID, modelName string) error {
 	if requestID == "" {
 		requestID = conversationID
@@ -54,51 +54,7 @@ func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, requestID
 	if modelName == "" {
 		modelName = modelID
 	}
-	now := time.Now().UnixMilli()
-	ev := chatRequestEvent{
-		EventCode:             "chat_request_send",
-		Timestamp:             now,
-		ReportDelay:           0,
-		Mode:                  "craft",
-		ConversationID:        conversationID,
-		RequestID:             requestID,
-		InputLength:           12,
-		RequestModelID:        modelID,
-		RequestModelName:      modelName,
-		IsPlan:                false,
-		IsAutoExecuteTerminal: false,
-		IsAutoModify:          false,
-		CodebaseEnable:        false,
-		MaxToken:              0,
-		MaxSteps:              0,
-		Temperature:           0,
-		MaxRetries:            0,
-		MentionContexts:       []any{},
-		KnowledgeID:           []any{},
-		KnowledgeName:         []any{},
-		CodebaseID:            "",
-		MentionContextCount:   0,
-		Command:               "",
-		ExpertID:              "",
-		RecommendID:           "",
-		SkillID:               "",
-		SkillCount:            0,
-		TotalCount:            0,
-		FileURI:               "",
-		PresentAt:             now,
-		TraceID:               "",
-		RootRequestID:         requestID,
-		ParentConversationID:  conversationID,
-		AgentName:             "default",
-		AgentType:             "conversation",
-		UserID:                a.UID,
-	}
-	raw, err := json.Marshal([]chatRequestEvent{ev})
-	if err != nil {
-		return err
-	}
-	_, err = c.billingJSON(a, http.MethodPost, reportPath, json.RawMessage(raw))
-	return err
+	return c.reportChatEvent(a, buildChatRequestEvent(a, conversationID, requestID, modelID, modelName, true))
 }
 
 // mpPlatform 小程序口径头值：小程序限定任务（Sequential_Tasks_1 / school_season）

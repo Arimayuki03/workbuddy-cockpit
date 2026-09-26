@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"sort"
 	"strconv"
@@ -27,7 +28,15 @@ import (
 var ErrEmptyURL = errors.New("upstash url 未配置")
 
 // keyTTL 粘性会话镜像 + 状态快照的默认 TTL（redis 侧兜底，防脏数据长期滞留）。
+// 也是粘性镜像的**解耦 TTL**：session 侧以 MaxMirrorTTL 引用（防重启丢粘性）。
 const keyTTL = 7 * 24 * time.Hour
+
+// MaxMirrorTTL 粘性会话镜像的最大 TTL（= keyTTL，7 天）。session 路由用此值
+// 写镜像：内存 TTL(默认 30m)只管在线滚动续期，镜像必须扛得住长停机重启
+// （否则"防重启丢粘性"在停机超内存 TTL 后失效——LoadFromStore 恢复 0 条）。
+// 恢复时 LoadFromStore 已按 lastActive=now 重置内存 TTL，旧绑定复活无副作用
+// （绑的是 uid，池内账号仍在即可继续服务）。
+const MaxMirrorTTL = keyTTL
 
 // writeConcurrencyLimit fire-and-forget 异步写的在途上限（发现 4：写 goroutine
 // 无信号量限制，高写入速率下可瞬时堆积）。超过的排队不丢弃——写语义不变（见 goWrite）。
@@ -85,7 +94,9 @@ func New(url, token string) Store {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := client.Ping(ctx).Err(); err != nil {
-		log.Printf("[redisstore] 警告: upstash 连接失败 (%v)，降级 Noop（纯内存模式）", err)
+		// 依赖版本行为差异：dial 错误通常只含 host:port，但不赌——错误原文先过
+		// redactURL 再入日志（err.Error() 里若内嵌完整连接串也不泄凭证）。
+		log.Printf("[redisstore] 警告: upstash 连接失败 (%v)，降级 Noop（纯内存模式）", redactURL(err.Error()))
 		_ = client.Close()
 		return Noop{}
 	}
@@ -129,8 +140,9 @@ func Probe(url, token string) error {
 // normalizeURL 把 url+token 归一化为可直接 ParseURL 的完整 rediss:// URL。
 // 若 url 本身已含 scheme（rediss://、redis://、https://...upstash.io 等）：
 //   - rediss:// 或 redis:// 原样返回（已是完整连接串）
-//   - 其余（如 https://xxx.upstash.io）剥掉 "://" 前缀只取 host，再按
-//     "rediss://default:<token>@<host>:6379" 组装
+//   - 其余（如 https://xxx.upstash.io）剥掉 "://" 前缀只取主机段（路径丢弃，
+//     不把路径拼进 host），已带端口的裸 host 不重复补 :6379，再按
+//     "rediss://default:<token>@<host>[:port]" 组装
 func normalizeURL(url, token string) string {
 	if len(url) >= 8 && (url[:8] == "rediss:/" || url[:7] == "redis:/") {
 		return url
@@ -138,6 +150,14 @@ func normalizeURL(url, token string) string {
 	host := url
 	if i := strings.Index(host, "://"); i >= 0 {
 		host = host[i+3:]
+	}
+	// 带路径的地址（Upstash REST 风格）：路径不属于 host，剥掉。
+	if i := strings.Index(host, "/"); i >= 0 {
+		host = host[:i]
+	}
+	// 已带端口（host:port）则不再补 :6379，防拼出 host:6379:6379。
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return "rediss://default:" + token + "@" + host
 	}
 	return "rediss://default:" + token + "@" + host + ":6379"
 }
@@ -365,6 +385,11 @@ func (u *Upstash) LoadBinds() map[string]string {
 			continue
 		}
 		out[strings.TrimPrefix(key, bindPrefix)] = v
+	}
+	// SCAN/GET 中途超时会静默截断：不查 iter.Err 时部分映射被当完整状态恢复
+	// （粘性丢绑无排障线索）。结果仍返回（启动恢复尽力而为），但至少日志可见。
+	if err := iter.Err(); err != nil {
+		log.Printf("[redisstore] LoadBinds 扫描不完整: %v（返回部分结果）", err)
 	}
 	return out
 }

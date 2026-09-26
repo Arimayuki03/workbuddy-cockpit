@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"sync/atomic"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -27,6 +29,9 @@ import (
 )
 
 const schoolBase = "/portal/activity/school"
+
+// uuidFallbackCounter 熵源故障兜底用的进程内自增序列（见 uuidV4 兜底分支）。
+var uuidFallbackCounter atomic.Uint64
 
 // schoolJSON 学院活动 API 请求（剥信封，业务 code≠0 返回带 msg 的 error）。
 // body 直传 billingJSON（其内 marshal 一次）——不得在此预编码 []byte：
@@ -124,8 +129,13 @@ func uuidV4() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		// 熵源故障兜底：仍输出合法形态（服务端只当一次性幂等键，不校验真随机性）。
-		for i := range b {
-			b[i] = byte(time.Now().UnixNano() >> (i % 8 * 8))
+		// 高 8 字节放 UnixNano、低 8 字节放「进程内自增计数器<<16 | pid」——同进程内
+		// 每次调用严格不同（draw_uuid 为幂等键，重复会被上游按重放吞掉）。
+		now := time.Now().UnixNano()
+		seq := uuidFallbackCounter.Add(1)<<16 | uint64(os.Getpid())
+		for i := 0; i < 8; i++ {
+			b[i] = byte(now >> (i * 8))
+			b[8+i] = byte(seq >> (i * 8))
 		}
 	}
 	b[6] = (b[6] & 0x0f) | 0x40 // version 4
@@ -157,15 +167,18 @@ func mpEventBase(a *auth.Auth) map[string]any {
 		"os":           "windows",
 		"osVersion":    "11",
 		"arch":         "x64",
-		"machineId":    "0655736a-607f-4d9d-b430-58176ee9a090",
+		"machineId":    deriveID(a, "machine"), // 按账号派生,避免池级设备指纹关联;与 desktop 事件口径一致
 		"timezone":     "Asia/Shanghai",
 		"userId":       a.UID,
 		"userNickname": a.Nickname,
 	}
 }
 
-// ReportMPEvent 以小程序指纹向 www.codebuddy.cn/v2/report 批量上报事件。
+// ReportMPEvent 以小程序指纹向 /v2/report 批量上报事件。
 func (c *Client) ReportMPEvent(a *auth.Auth, events ...map[string]any) error {
+	if a.IsGlobal() { // 客户端防线:mp 事件仅 CN 域(与 trial.go 客户端侧防线口径一致)
+		return fmt.Errorf("mp report: global 账号不支持(mp 事件仅 CN 域)")
+	}
 	if len(events) == 0 {
 		return fmt.Errorf("mp report: no events")
 	}
@@ -185,7 +198,7 @@ func (c *Client) ReportMPEvent(a *auth.Auth, events ...map[string]any) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, c.BillingBaseCN+mpReportPath, bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, c.billingBase(a)+mpReportPath, bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}

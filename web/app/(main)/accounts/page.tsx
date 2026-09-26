@@ -20,7 +20,7 @@ import {
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {accountApi, errText} from '@/lib/api';
-import {useCachedAsync, peekCache, putCache} from '@/lib/data-cache';
+import {useCachedAsync} from '@/lib/data-cache';
 import type {Account, CreditPackage, OverviewResponse, PackagesResponse} from '@/lib/types';
 import {fmtNumber} from '@/lib/format';
 import {
@@ -137,16 +137,18 @@ export default function AccountsPage() {
   // 实时积分与包明细从 packages 缓存派生；packages 拉取失败时静默降级：
   // 仍显示池快照的 credits（原始语义），包明细退化为空（倒计时自然消失）。
   const packages = packagesCache.data;
-  const {liveCredits, packs} = useMemo(() => {
+  const {liveCredits, liveUsed, packs} = useMemo(() => {
     const credits: Record<string, number> = {};
+    const used: Record<string, number> = {};
     const packMap: Record<string, CreditPackage[]> = {};
     if (packages) {
       for (const row of packages.accounts) {
         packMap[row.uid] = row.packages ?? [];
         if (typeof row.remain === 'number' && !row.error) credits[row.uid] = row.remain;
+        if (typeof row.used === 'number' && !row.error) used[row.uid] = row.used;
       }
     }
-    return {liveCredits: credits, packs: packMap};
+    return {liveCredits: credits, liveUsed: used, packs: packMap};
   }, [packages]);
 
   // 包明细镜像到 state：CreditCountdown 只在 packages 变化时需要新值，
@@ -263,18 +265,6 @@ export default function AccountsPage() {
         checkin_message?: string;
       };
       const ok = res.ok !== false;
-      // 签到会返回刷新后的实时积分，直接就地写入缓存并重渲染，省一次请求
-      if (typeof res.credits === 'number') {
-        const cached = peekCache<OverviewResponse>('overview');
-        if (cached) {
-          putCache('overview', {
-            ...cached.data,
-            accounts: cached.data.accounts.map((a) =>
-              a.uid === uid ? {...a, credits: res.credits as number} : a,
-            ),
-          });
-        }
-      }
       (ok ? notify.ok : notify.err)(res.message || res.checkin_message || okMsg);
       await load();
       window.dispatchEvent(new Event('workbuddy-manager:accounts-changed'));
@@ -428,10 +418,11 @@ export default function AccountsPage() {
     );
   }
 
-  /** 积分余额 + 到期倒计时 */
+  /** 积分余额 + 已用 + 到期倒计时 */
   function renderCredits(a: Account) {
     const value = liveCredits[a.uid] ?? a.credits;
     const hasValue = typeof value === 'number';
+    const used = liveUsed[a.uid];
     return (
       <span className="inline-flex items-center gap-1.5">
         <span
@@ -449,6 +440,16 @@ export default function AccountsPage() {
         >
           {hasValue ? fmtNumber(value as number) : '—'}
         </span>
+        {/* 已用积分（packages 查到才显示）：与余额并列成「余额 / 已用」 */}
+        {typeof used === 'number' && (
+          <span
+            className="text-xs tabular-nums text-muted-foreground"
+            title={t('accounts.creditsUsedTitle')}
+          >
+            <span className="mx-0.5 text-muted-foreground/40">/</span>
+            {t('metric.usedShort')} {fmtNumber(used)}
+          </span>
+        )}
         <CreditCountdown packages={creditPacks[a.uid]} />
       </span>
     );

@@ -40,8 +40,9 @@ func (p *Pool) NoteFailures(uid string) {
 	p.dirty.Store(true)
 }
 
-// degradeDurationLocked 返回降权时长（当前实现为固定 degradeCooldown，钳到
-// [defaultDegradeCooldown, degradeCooldownMax]）。不做指数升级：触发计数在达阈时
+// degradeDurationLocked 返回降权时长（当前实现为固定 degradeCooldown）：非正值
+// 回落默认 10m（defaultDegradeCooldown）；上限钳 degradeCooldownMax（用户配置的
+// 小值不抬升到默认下界，尊重显式配置）。不做指数升级：触发计数在达阈时
 // 清零、不持久化历史触发次数，档位不可推导；固定时长已满足「临时出池一段时间」
 // 的语义（真持续坏号会在下一轮 5 连败里再降一次）。调用方必须已持有 p.mu。
 func (p *Pool) degradeDurationLocked() time.Duration {

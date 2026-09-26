@@ -218,6 +218,8 @@ export interface PackageRow {
   nickname: string;
   realm: string;
   remain: number;
+  /** 已用积分（所有套餐已用额度合计，ResourceSummary 口径） */
+  used: number;
   size: number;
   packages: CreditPackage[];
   error?: string;

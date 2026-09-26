@@ -9,12 +9,14 @@
 //     主仓库 report.go 只有 ReportChatActivity——该底座能力在 desktop_bridge.go 补齐。
 //
 // 判据（WorkBuddy-Daily 项目实测口径 + 本网关验证）：black_cat 要求在
-// **23:00–08:00（本地时区）窗口内**完成 3 次 glm-5.2 对话并上报 chat 事件链；
+// **23:00–08:00（CST，Asia/Shanghai——窗口按上游服务端时区计数，固定 +8）窗口内**
+// 完成 3 次 glm-5.2 对话并上报 chat 事件链；
 // 窗口外行为不计分。真实对话走网关既有 ChatStream（glm-5.2），事件链用
 // ReportChatActivityModel（chat_5 同款上报形状）。
 package upstream
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,9 +25,12 @@ import (
 	"workbuddy2api/internal/auth"
 )
 
-// InNightWindow 当前是否处于夜猫子计数窗口（23:00–08:00 本地时区）。
+// InNightWindow 当前是否处于夜猫子计数窗口（23:00–08:00，上游按 CST/Asia/Shanghai
+// 口径计数——与 growth_bonus.go cstShanghai / scheduler travelDay 的固定 +8 先例统一）。
+// 此前 now.Hour() 依赖进程本地时区，非 CST 主机（裸二进制部署）窗口错位
+// （23-08 本地 = 07-16 CST），夜猫对话全部不计分。
 func InNightWindow(now time.Time) bool {
-	h := now.Hour()
+	h := now.In(cstShanghai).Hour()
 	return h >= 23 || h < 8
 }
 
@@ -57,7 +62,7 @@ func (c *Client) RunNightChats(a *auth.Auth, need int) (int64, error) {
 			"messages": []map[string]any{{"role": "user", "content": "1+1等于几？直接回答。"}},
 			"stream":   true,
 		})
-		rc, status, respBody, err := c.ChatStream(a, body, "", ChatMeta{})
+		rc, status, respBody, err := c.ChatStreamContext(context.Background(), a, body, "", ChatMeta{})
 		if err != nil || status >= 400 {
 			if rc != nil {
 				rc.Close()

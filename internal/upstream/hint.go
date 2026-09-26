@@ -139,10 +139,22 @@ func isInvalidImageData(body string) bool {
 
 // codeMarker JSON code 字段命中（`"code":N` / `"code": N` / `"code":"N"` 形态，
 // 与 IsModelBlocked 的 code 判定同容差口径）。lower 须为小写 body。
+// 数字形态命中后校验紧随其后的字节非 ASCII 数字：防止更长业务码前缀误命中
+// （如 `"code":111334` 是 111334 的码，不得因前缀关系撞上 11133 的 marker）。
+// 字符串形态自带闭合引号边界，更长数字码天然不命中。
 func codeMarker(lower, code string) bool {
 	for _, v := range []string{`"code":` + code, `"code": ` + code, `"code":"` + code + `"`, `"code": "` + code + `"`, `"code":" ` + code + `"`, `"code": '` + code + `'`} {
-		if strings.Contains(lower, v) {
-			return true
+		for pos := 0; ; {
+			idx := strings.Index(lower[pos:], v)
+			if idx < 0 {
+				break
+			}
+			pos += idx
+			end := pos + len(v)
+			if end >= len(lower) || lower[end] < '0' || lower[end] > '9' {
+				return true
+			}
+			pos++ // 紧随数字（更长码前缀）→ 误命中候选，跳过此位置继续找
 		}
 	}
 	return false

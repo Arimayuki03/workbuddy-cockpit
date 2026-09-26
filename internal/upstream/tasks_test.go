@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"workbuddy2api/internal/auth"
@@ -15,11 +14,12 @@ import (
 // 后者路径不存在，曾导致长期 400 "task not completed" 误判为"上游不支持领取"。
 func TestClaimRewardWebEndpoint(t *testing.T) {
 	var gotPath, gotMethod, gotBody string
-	var gotPlatform, gotReferer string
+	var gotPlatform, gotReferer, gotOrigin string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath, gotMethod = r.URL.Path, r.Method
 		gotPlatform = r.Header.Get("x-client-platform")
 		gotReferer = r.Header.Get("Referer")
+		gotOrigin = r.Header.Get("Origin")
 		buf := make([]byte, 64)
 		n, _ := r.Body.Read(buf)
 		gotBody = string(buf[:n])
@@ -50,8 +50,13 @@ func TestClaimRewardWebEndpoint(t *testing.T) {
 	if gotPlatform != "web" {
 		t.Errorf("x-client-platform=%q want web", gotPlatform)
 	}
-	if !strings.Contains(gotReferer, "workbuddy.cn") {
-		t.Errorf("Referer=%q 应指向 workbuddy.cn", gotReferer)
+	// Origin/Referer 从 webBase(a) 派生（realm 感知），与领奖 URL 同源：
+	// 测试注入 WebBaseCN=httptest 地址，故应回显该地址，而非硬编码 workbuddy.cn。
+	if gotReferer != srv.URL+"/profile/growth-center" {
+		t.Errorf("Referer=%q 应为 webBase 派生 %q", gotReferer, srv.URL+"/profile/growth-center")
+	}
+	if gotOrigin != srv.URL {
+		t.Errorf("Origin=%q 应与领奖 URL 同源 %q", gotOrigin, srv.URL)
 	}
 }
 

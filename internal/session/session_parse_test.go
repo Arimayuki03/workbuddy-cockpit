@@ -97,6 +97,12 @@ func TestParseRequestEquivalence(t *testing.T) {
 		`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{}}]}]}`,
 		// 首条 user 空内容：fallback 不往后找
 		`{"messages":[{"role":"user","content":""},{"role":"user","content":"second"}]}`,
+		// M3 等价性破口形态：图片消息在前、字符串 content 消息在后的混合 body。
+		// 旧 hasImagePart 因字符串 content 整体 unmarshal 失败恒 false；修复前
+		// ParseRequest 遇到图片即 break 返回 true——两者不等价。
+		`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"u"}}]},{"role":"user","content":"text after"}]}`,
+		// 反向：字符串在前、图片在后——旧实现同样整体失败恒 false。
+		`{"messages":[{"role":"user","content":"text before"},{"role":"user","content":[{"type":"image_url","image_url":{"url":"u"}}]}]}`,
 	}
 	for i, body := range bodies {
 		want := parseFields([]byte(body))

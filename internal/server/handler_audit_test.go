@@ -231,7 +231,7 @@ func TestChatUsageBucketGlobalRealm(t *testing.T) {
 // countingTransport 包装 http.DefaultTransport 统计外发请求数（versionHTTPClient
 // 是包级可变变量，可直接替换 client；upstreamReleaseAPI 是 const 不可换，用
 // 归位缓存时间控制首次拉取——首次真实外发打 GitHub 会在无网环境失败并走回退
-// 路径，但 fail 也会写 lastError 而不写 fetched……因此改测纯时间门语义：
+// 路径，但 fail 不写 fetched……因此改测纯时间门语义：
 // 预置缓存（fetched=now），force 在间隔内必须直接回缓存、零外发。
 func TestCheckUpdateForceMinInterval(t *testing.T) {
 	var mu sync.Mutex
@@ -247,7 +247,6 @@ func TestCheckUpdateForceMinInterval(t *testing.T) {
 	versionCheck.mu.Lock()
 	versionCheck.snapshot = UpdateCheck{Current: "v1.0.0", Latest: "v9.9.9", ChangelogURL: "https://example.invalid/releases/latest"}
 	versionCheck.fetched = time.Now() // 刚刚检查过：60s 时间门生效中
-	versionCheck.lastError = ""
 	versionCheck.mu.Unlock()
 	t.Cleanup(func() {
 		versionCheck.mu.Lock()

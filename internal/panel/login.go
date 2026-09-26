@@ -289,6 +289,8 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	if rm, buckets, err := p.cfg.Upstream.UserResourceDetailed(a, p.cfg.ExpiringSoonWindow); err == nil {
 		remain, total = rm, buckets.Total()
 		p.cfg.Pool.ReenableIfCredits(acct.UID, rm)
+		// 分桶补写：与 scheduler 签到口径一致（先解冻再补快过期子集）。
+		p.cfg.Pool.SetCreditsDetailed(acct.UID, rm, buckets.Expiring)
 	}
 
 	// state 已在开头原子认领时删除（无 TOCTOU 窗口），这里直接进入收尾日志。

@@ -72,6 +72,7 @@ func (r *Ring) Write(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, line := range strings.Split(strings.TrimRight(string(p), "\r\n"), "\n") {
+		line = strings.TrimSuffix(line, "\r") // CRLF 源：\n 切分后行尾残留 \r
 		if line == "" {
 			continue
 		}

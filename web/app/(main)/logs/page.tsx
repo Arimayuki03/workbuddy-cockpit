@@ -156,9 +156,8 @@ export default function LogsPage() {
 
   // 系统日志展示条目：频道 → 关键词 → 条数截取 → 时间方向，纯前端即时过滤。
   // 条数与请求日志共用 limit 状态：环形缓冲固定容量 500（服务端全量返回），
-  // 上限在前端截取。entries 是时间升序，两个方向都从**尾部**取——尾部就是
-  // 最新：desc 保留最新 N 条（缓冲满时 slice(0,N) 会取到最旧的，最新日志
-  // 反而不可见），asc 保留最旧 N 条（滚动追实时的窗口语义）。
+  // 上限在前端截取。entries 是时间升序，asc/desc 均截取最新 N 条（ring 尾部，
+  // 尾部就是最新），仅展示方向不同：asc 从旧到新铺开、desc 反转后新→旧。
   const sysFiltered = useMemo(() => {
     let entries = sysEntries;
     if (channel !== ALL_CHANNEL) entries = entries.filter((e) => e.ch === channel);
@@ -167,9 +166,7 @@ export default function LogsPage() {
     const capped =
       Number(limit) >= 1000 || entries.length <= Number(limit)
         ? entries
-        : sysOrder === 'asc'
-          ? entries.slice(-Number(limit)) // 正序保留最旧 N 条（追实时）
-          : entries.slice(-Number(limit)); // 倒序同样从尾部取：保留最新 N 条
+        : entries.slice(-Number(limit));
     const sorted = [...capped];
     sorted.reverse(); // ring 快照是时间升序；倒序即新→旧
     return sysOrder === 'asc' ? sorted.reverse() : sorted;

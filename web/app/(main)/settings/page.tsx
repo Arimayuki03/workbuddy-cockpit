@@ -22,12 +22,13 @@ import {useI18n} from '@/lib/i18n/provider';
 import {t as tGlobal, tp as tpGlobal} from '@/lib/i18n';
 import {RichText} from '@/lib/i18n/rich-text';
 import {settingsApi, modelApi, errText} from '@/lib/api';
-import {peekCache, useCachedAsync} from '@/lib/data-cache';
+import {peekCache, putCache, useCachedAsync} from '@/lib/data-cache';
 import type {ConfigGetResponse, ModelMapResponse, UpdateCheck} from '@/lib/types';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {Skeleton} from '@/components/ui/skeleton';
 import {useAuth} from '@/lib/auth-context';
+import {useRealm} from '@/lib/realm-context';
 import {CopyButton} from '@/components/ui/copy-button';
 import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
@@ -299,6 +300,19 @@ const COOLDOWN_FIELDS: Field[] = [
 
 const POOL_FIELDS: Field[] = [
   {
+    key: 'pick_strategy',
+    kind: 'select',
+    label: '选号策略',
+    desc: 'weighted（默认）：按积分、快过期积分与闲置时长三因子加权随机，多账号分摊流量；'
+      + 'credits_desc：始终优先选积分余额最大的账号，用尽/不可用才顺延次高——先把大余额号用掉，'
+      + '其余账号近乎闲置。仅改变「选谁」，冷却、熔断、并发上限与会话粘性照常生效',
+    options: [
+      {value: 'weighted', label: 'weighted（智能加权，默认）'},
+      {value: 'credits_desc', label: 'credits_desc（余额优先，从大到小）'},
+    ],
+    def: 'weighted',
+  },
+  {
     key: 'max_in_flight',
     kind: 'num',
     label: '单账号最大并发',
@@ -348,8 +362,9 @@ const POOL_FIELDS: Field[] = [
     key: 'idle_weight_per_hour',
     kind: 'num',
     label: '闲置补偿 / 小时',
-    desc: '账号每闲置 1 小时增加一点调度权重，让久未使用的账号优先被选中',
-    min: 0,
+    desc: '账号每闲置 1 小时增加一点调度权重，让久未使用的账号优先被选中。'
+      + '该值最小 0.1（后端不允许为 0，想关闭闲置补偿请调小至下限）',
+    min: 0.1,
     max: 10,
     step: 0.1,
     def: 0.5,
@@ -358,8 +373,8 @@ const POOL_FIELDS: Field[] = [
     key: 'idle_weight_max',
     kind: 'num',
     label: '闲置补偿上限',
-    desc: '闲置加成的封顶值，避免某个账号权重无限增大',
-    min: 0,
+    desc: '闲置加成的封顶值，避免某个账号权重无限增大。该值最小 0.5（后端不允许为 0）',
+    min: 0.5,
     max: 100,
     step: 0.5,
     def: 5,
@@ -368,7 +383,7 @@ const POOL_FIELDS: Field[] = [
     key: 'expiring_soon',
     kind: 'duration',
     label: '快过期积分窗口',
-    desc: '到期时间落在此窗口内的积分会被标记为「快过期」，选号时优先消耗掉，避免白白过期。留空或填 0 = 关闭该优化',
+    desc: '到期时间落在此窗口内的积分会被标记为「快过期」，选号时优先消耗掉，避免白白过期。填 0 = 关闭该优化（留空 = 恢复默认 7 天）',
     offWhenZero: true,
     def: '168h',
   },
@@ -729,12 +744,26 @@ function emptyForm(): Record<Section, Record<string, FieldValue>> {
   };
 }
 
-/** 装配期字段：后端保存后会带回「需重启才生效」的段名集合 */
+/** 装配期字段：后端保存后会带回「需重启才生效」的字段名集合 */
 const RESTART_SECTIONS = new Set(['prompt', 'upstream', 'global']);
+
+/**
+ * 保存响应的 restart_required 是否命中本页的装配期段。
+ * 后端（panel_config.go restartRequiredFields）返回的是**字段级**名字：
+ * 'prompt.mode' / 'upstream.timeout_seconds' / 'global.enabled'…——整串
+ * 匹配段名 Set 恒为 false，会漏报「需重启」。这里按「段名本身或段名.
+ * 前缀」匹配。
+ */
+function needsRestartBySection(saved: string[] | undefined): boolean {
+  return (saved ?? []).some((s) =>
+    [...RESTART_SECTIONS].some((p) => s === p || s.startsWith(p + '.')),
+  );
+}
 
 export default function SettingsPage() {
   const {t, tp} = useI18n();
   const {isAdmin} = useAuth();
+  const {realm} = useRealm();
   const [cfg, setCfg] = useState<ConfigGetResponse | null>(null);
   const [models, setModels] = useState<string[]>([]);
 
@@ -786,7 +815,15 @@ export default function SettingsPage() {
       mapCache.refresh(),
       updateCache.refresh(),
     ]);
-    if (c.status === 'fulfilled' && c.value) applyConfig(c.value);
+    // 配置是整页表单的数据源：拉取失败绝不能静默——否则页面会用默认值
+    // 渲染出一张「看起来可保存」的表单，误导用户把默认值当成当前配置。
+    // 失败时 toast 报错；渲染层看到「加载结束但 cfgReady=false」会显示
+    // 错误态 + 重试按钮，不渲染默认值表单。
+    if (c.status === 'rejected') {
+      notify.err(errText(c.reason));
+    } else if (c.value) {
+      applyConfig(c.value);
+    }
     if (mm.status === 'fulfilled' && mm.value) {
       // 后端响应是 {ok, map} 信封（session.go handleGetModelMap）：
       // 存整个信封会让「模型映射」表格把嵌套对象当行数据渲染，点击标签页即
@@ -811,7 +848,28 @@ export default function SettingsPage() {
       upstream: pickValues(UPSTREAM_FIELDS, root.upstream),
       global: pickValues(GLOBAL_FIELDS, root.global),
     };
-    setForm(picked);
+    // 保存一个分组成功后 load() 会整表 applyConfig。若直接全量覆盖，
+    // 其他分组里未保存的编辑会被无提示清空——这里在 setState 前先算出
+    // 脏分组（isDirty 依赖当前 form 与 original.current，必须先读后写）：
+    // 脏分组保留用户编辑中的值，非脏分组用服务端值；被保存的分组此刻已
+    // 与 original 一致（clean），会正常拿到刚保存的服务端值。
+    const dirtyGroups = new Set<Section>(
+      GROUPS.map((g) => g.id).filter((id) => {
+        const cur = form[id];
+        const org = original.current[id];
+        return Object.keys(cur).some((k) => cur[k] !== org[k]);
+      }),
+    );
+    setForm((prev) => {
+      const merged = {...prev};
+      for (const id of Object.keys(picked) as Section[]) {
+        // 脏分组保留编辑中的值，其余用服务端值
+        merged[id] = dirtyGroups.has(id) ? {...prev[id]} : {...picked[id]};
+      }
+      return merged;
+    });
+    // original 一律用服务端值：被保存的分组会因此变 clean，其余脏分组的
+    // 用户编辑相对新 original 仍然算脏，编辑不会丢也不会被误判为已保存。
     original.current = Object.fromEntries(
       Object.entries(picked).map(([k, v2]) => [k, {...v2}]),
     ) as Record<Section, Record<string, FieldValue>>;
@@ -845,10 +903,12 @@ export default function SettingsPage() {
 
   /** 模型列表（模型映射的目标下拉用）。
    *  reload 必传 true 强制绕过缓存重拉——models 页缓存的 TTL 会让「点刷新」
-   *  静默短路成读旧缓存，按钮看起来毫无反应；默认挂载加载才允许读缓存。 */
+   *  静默短路成读旧缓存，按钮看起来毫无反应；默认挂载加载才允许读缓存。
+   *  缓存键跟随当前 realm（models 页按 `models:${realm}` 分域缓存）：映射
+   *  目标下拉优先展示当前版本域的模型，未命中再不带 realm 拉双域混合兜底。 */
   const loadModels = useCallback(async (reload = false) => {
     if (!reload) {
-      const cached = peekCache<import('@/lib/types').PanelModelsResponse>('models:cn');
+      const cached = peekCache<import('@/lib/types').PanelModelsResponse>(`models:${realm}`);
       if (cached?.data?.models?.length) {
         setModels(cached.data.models.map((m) => m.id));
         return;
@@ -860,7 +920,7 @@ export default function SettingsPage() {
     } catch {
       setModels([]);
     }
-  }, []);
+  }, [realm]);
 
   useEffect(() => {
     load();
@@ -889,8 +949,15 @@ export default function SettingsPage() {
           ...(upstashForm.token.trim() ? {token: upstashForm.token.trim()} : {}),
         },
       };
-      await settingsApi.saveConfig(patch);
-      notify.ok(t('settings.upstashSaved'), t('settings.applying'));
+      const saved = await settingsApi.saveConfig(patch);
+      // upstash.* 由 redisstore 在装配期构建（后端 restartRequiredFields
+      // 明确带 'upstash'），保存不会热生效——按需重启口径提示，不再一律
+      // 报「正在自动应用」误导用户。
+      if (saved?.restart_required?.includes('upstash')) {
+        notify.warn(t('settings.savedRestart'), t('settings.restartHint'));
+      } else {
+        notify.ok(t('settings.upstashSaved'), t('settings.applying'));
+      }
       setUpstashForm((f) => ({...f, token: ''}));
       await load();
     } catch (e) {
@@ -936,7 +1003,7 @@ export default function SettingsPage() {
       const def = GROUPS.find((g) => g.id === group);
       if (!def) return;
       const saved = await settingsApi.saveConfig({[def.section]: patch});
-      const needRestart = (saved?.restart_required ?? []).some((s) => RESTART_SECTIONS.has(s));
+      const needRestart = needsRestartBySection(saved?.restart_required);
       if (needRestart) {
         notify.warn(t('settings.savedRestart'), t('settings.restartHint'));
       } else {
@@ -990,6 +1057,9 @@ export default function SettingsPage() {
       // 重启回落 config 值），必须按失败提示服务端错误——不能静默当成功。
       const res = await settingsApi.saveModelMap(next);
       setModelMap(res?.map ?? next);
+      // 缓存里存的正是 {ok, map} 信封，与 GET 响应同构（load 拆信封的约定）。
+      // 不写回的话 15s TTL 内切走再切回会用旧表回填，刚删的条目「复活」。
+      putCache('settings:modelMap', res ?? {ok: true, map: next});
       if (res?.ok === false) {
         notify.err(res.error || t('settings.saveFailed'), t('settings.modelMapHotOnly'));
       } else {
@@ -1074,7 +1144,8 @@ export default function SettingsPage() {
 
           {/* 可视化设置卡片。首载未拿到配置时整块显示骨架分组占位：
               之前会先用默认值渲染真实开关（def: true 等），配置到达后表单
-              集体翻转，看起来像「设置自己变了」 */}
+              集体翻转，看起来像「设置自己变了」。加载结束仍未拿到配置
+              （接口失败/不可达）则显示错误态 + 重试，绝不渲染默认值表单。 */}
           {!cfgReady && configCache.loading ? (
             <>
               {GROUPS.slice(0, 4).map((g) => (
@@ -1097,6 +1168,20 @@ export default function SettingsPage() {
                 </div>
               ))}
             </>
+          ) : !cfgReady ? (
+            <div className="rounded-[20px] bg-muted p-4">
+              <EmptyState
+                icon={TriangleAlert}
+                title={t('settings.cfgLoadFailed')}
+                description={t('settings.cfgLoadFailedDesc')}
+                className="flex flex-col items-center justify-center py-8 text-center"
+              >
+                <Button variant="outline" size="sm" className="rounded-full" disabled={busy} onClick={reloadAll}>
+                  <RefreshCw className={busy ? 'animate-spin' : ''} />
+                  {t('settings.retryLoad')}
+                </Button>
+              </EmptyState>
+            </div>
           ) : (
           GROUPS.map((g) => {
             const dirty = isDirty(g.id);
@@ -1171,8 +1256,15 @@ export default function SettingsPage() {
                               value={String(form[g.id][f.key] ?? f.def)}
                               disabled={!isAdmin || !cfgReady}
                               onChange={(e) => {
-                                const n = Number(e.target.value);
-                                setField(g.id, f.key, Number.isFinite(n) ? n : f.def);
+                                // 中间态（"-"、清空）保留原字符串让用户继续输，
+                                // 顶掉成默认值会打断输入；非法值由 fieldError
+                                // 即时提示、toWire 提交时拒绝。
+                                const v = e.target.value;
+                                setField(
+                                  g.id,
+                                  f.key,
+                                  v === '' ? '' : Number.isFinite(Number(v)) ? Number(v) : v,
+                                );
                               }}
                               className={
                                 'h-8 w-20 bg-background text-right tabular-nums' +
@@ -1403,6 +1495,8 @@ export default function SettingsPage() {
             <div className="mb-1 text-sm font-medium">{t('settings.mapNewAlias')}</div>
             <div className="mb-3 text-[11px] text-muted-foreground">
               <RichText text={t('settings.mapNewAliasDesc')} />
+              {/* 映射目标列表跟随当前版本域（realm）；切换版本后建议重选目标 */}
+              <div>{t('settings.mapRealmNote')}</div>
             </div>
             <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-4">
               <div className="space-y-1.5">

@@ -9,11 +9,6 @@ import (
 // 修复 G1——末条/首条 user 消息纯图片（无 text part）时 TurnKey /
 // StickyFallbackKey 返回空串 → 聚合头请求级随机碎片化 + 粘性兜底失效。
 
-// imgBody 构造纯图片/图文混合 body（末条 user 在 index=turnIdx 处）。
-func imgBody(turnIdx int, text string, urls ...string) []byte {
-	return nil
-}
-
 // TestTurnKeyImageOnlyStable 锚点1：纯图末条 user 同 body ×2 同键
 // （RED：现返回 ""，聚合链退化请求级随机）。
 func TestTurnKeyImageOnlyStable(t *testing.T) {

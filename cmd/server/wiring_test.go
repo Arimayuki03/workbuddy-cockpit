@@ -91,6 +91,29 @@ func TestRealmAwareAvailableForModelDefaultOnCNZeroRegression(t *testing.T) {
 	}
 }
 
+// TestRealmAwareStickyPreferred 断言粘性首次分配的策略感知闭包：
+// credits_desc 时按 realm 过滤出余额降序列表；weighted 返回 nil。
+func TestRealmAwareStickyPreferred(t *testing.T) {
+	p := realmPool(t)
+	p.SetCredits("cn1", 9000)
+	p.SetCredits("g1", 100)
+
+	// weighted（默认）：nil——粘性保持哈希打散。
+	fn := realmAwareStickyPreferred(p)
+	if got := fn("cn:glm-5.2"); got != nil {
+		t.Errorf("weighted: preferred=%v want nil", got)
+	}
+
+	// credits_desc：cn 前缀只见 cn1；global 前缀只见 g1（realm 不泄漏）。
+	p.SetPickStrategy(pool.StrategyCreditsDesc)
+	if got := fn("cn:glm-5.2"); !reflect.DeepEqual(got, []string{"cn1"}) {
+		t.Errorf("credits_desc: preferred(cn)=%v want [cn1]", got)
+	}
+	if got := fn("global:gpt-5.4"); !reflect.DeepEqual(got, []string{"g1"}) {
+		t.Errorf("credits_desc: preferred(global)=%v want [g1]", got)
+	}
+}
+
 // TestModelJSONPath model.json 路径推导（context_length 四级查找链第 3 级接线）：
 // 与 state.json 同目录同名换缀（Docker ./data volume 持久化）；空 state 路径 →
 // 空串（禁用落盘，内存 + 种子仍可用）。

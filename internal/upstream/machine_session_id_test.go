@@ -112,3 +112,38 @@ func TestChatHeadersCarriesMachineSessionID(t *testing.T) {
 		t.Errorf("X-Session-ID = %q, want deriveAccountStableID(u9, session)", got)
 	}
 }
+
+// TestBillingHeadersCarriesMachineSessionID BillingHeaders 补注入账号级设备头
+// （billing 域 report/travel/checkin/balance/growth 未走 CommonHeaders）：对齐
+// CommonHeaders 全覆盖承诺与官方 hub wb_accounts.py:250-251 的全出站注入行为，
+// 防 billing 路径因设备指纹缺失/漂移被上游多号关联风控。
+func TestBillingHeadersCarriesMachineSessionID(t *testing.T) {
+	a := &auth.Auth{AccessToken: "at", UID: "u-bill"}
+	req := mustRequest(t)
+	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
+	c.BillingHeaders(req, a)
+
+	if got := req.Header.Get("X-Machine-ID"); got != deriveAccountStableID("u-bill", "machine") {
+		t.Errorf("X-Machine-ID = %q, want deriveAccountStableID(u-bill, machine)", got)
+	}
+	if got := req.Header.Get("X-Session-ID"); got != deriveAccountStableID("u-bill", "session") {
+		t.Errorf("X-Session-ID = %q, want deriveAccountStableID(u-bill, session)", got)
+	}
+}
+
+// TestBillingHeadersEmptyUIDSkipsMachineSessionID uid 为空（匿名 billing 请求）→
+// 不注入两头（与 CommonHeaders 的空 uid 口径一致，见 injectAccountStableHeaders）。
+func TestBillingHeadersEmptyUIDSkipsMachineSessionID(t *testing.T) {
+	req := mustRequest(t)
+	c := &Client{}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
+	c.BillingHeaders(req, &auth.Auth{AccessToken: "at", UID: ""})
+
+	if got := req.Header.Get("X-Machine-ID"); got != "" {
+		t.Errorf("X-Machine-ID = %q, want empty (empty uid)", got)
+	}
+	if got := req.Header.Get("X-Session-ID"); got != "" {
+		t.Errorf("X-Session-ID = %q, want empty (empty uid)", got)
+	}
+}

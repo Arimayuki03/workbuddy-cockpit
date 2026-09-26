@@ -388,7 +388,7 @@ func TestSetDegradeInjection(t *testing.T) {
 	}
 }
 
-// TestModelExemptDegradeWindow modelExempt 的 degrade 轴判定（servableLocked 的
+// TestModelExemptDegradeWindow modelExempt 的 degrade 轴判定（servableFrom 的
 // modelExempt 分支补 degradeUntil 过期判定的单元锚点）：
 //   - 纯 6004 模型冷却 → 豁免成立（issue #31 探活语义零回归）；
 //   - 降权窗口内 → 豁免失效（降权账号对所有模型不可选，探活不得按豁免计入）；

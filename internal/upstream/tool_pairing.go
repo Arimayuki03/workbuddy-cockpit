@@ -29,9 +29,13 @@ package upstream
 //	→ assistant tool_calls=[c00 c01] | tool c00 | tool c01 | X
 //
 // 结果顺序保持不变（同批 tool_call 的原相对顺序 = 结果顺序），不引入新的顺序敏感
-// 问题。无插入消息时零改动零分配（返回原 slice）。
+// 问题。无插入消息时零改动零分配（返回原 slice）：两遍法——先走 hasInsertedBetween
+// 零分配预扫（与下方组遍历同判定），无插入物直接返回原 slice，有才分配 out 重排。
 func repackToolResultBlocks(messages []any) ([]any, bool) {
 	if len(messages) < 3 {
+		return messages, false
+	}
+	if !hasInsertedBetween(messages) {
 		return messages, false
 	}
 	out := make([]any, 0, len(messages))
@@ -105,6 +109,77 @@ func repackToolResultBlocks(messages []any) ([]any, bool) {
 		return messages, false
 	}
 	return out, true
+}
+
+// hasInsertedBetween 零分配预扫：判断是否存在会被重排的插入物。判定口径与
+// repackToolResultBlocks 的组遍历逐行同构——同一 break 条件、同一推进规则，仅把
+// out/results/between 三个 slice 换成计数器/布尔（changed 触发点 = 收集 want 结果时
+// sawNonTool 已置位）。命中才进入重排分配；全程只读不写、不建 map（id 归属走
+// wantedCallID 线性扫描，批量通常 ≤10），无插入物的常规请求在此零分配短路。
+func hasInsertedBetween(messages []any) bool {
+	i := 0
+	for i < len(messages) {
+		m, ok := messages[i].(map[string]any)
+		if !ok || m["role"] != "assistant" {
+			i++
+			continue
+		}
+		tcs, hasCalls := m["tool_calls"].([]any)
+		if !hasCalls || len(tcs) == 0 {
+			i++
+			continue
+		}
+		i++ // 跳过组头 assistant
+		results := 0
+		sawNonTool := false
+		for i < len(messages) {
+			mm, ok := messages[i].(map[string]any)
+			if !ok {
+				break
+			}
+			role, _ := mm["role"].(string)
+			if role == "tool" {
+				id, _ := mm["tool_call_id"].(string)
+				if !wantedCallID(tcs, id) {
+					break
+				}
+				if sawNonTool {
+					return true // 同批结果被插入物打断后又来结果：需要重排
+				}
+				results++
+				i++
+				continue
+			}
+			if results == 0 {
+				break // 首个 want 结果之前的消息不是插入物（原实现 break 不吞）
+			}
+			// 下一组 assistant.tool_calls 是新的组头，绝不能当插入物吞掉（见上）。
+			if role == "assistant" {
+				if next, _ := mm["tool_calls"].([]any); len(next) > 0 {
+					break
+				}
+			}
+			sawNonTool = true
+			i++
+		}
+	}
+	return false
+}
+
+// wantedCallID id 是否属于该批 tool_calls（零分配线性扫描；want 语义与
+// repackToolResultBlocks 的 map 一致：空 id 恒不命中）。
+func wantedCallID(tcs []any, id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, tci := range tcs {
+		if tc, ok := tci.(map[string]any); ok {
+			if cid, _ := tc["id"].(string); cid == id {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // cleanupOrphanToolCalls 剔除无法配对的 tool_call 与 tool 结果（所有模型，独立于

@@ -331,7 +331,7 @@ func (p *Pool) AuthByUID(uid string) *auth.Auth {
 // AvailableUIDs 返回当前 healthy 且未占满在途名额的账号 UID 列表（按 UID 排序，稳定输出）。
 // 供会话粘性路由（internal/session）做快路径命中校验 + 双段分配；无可用返回空切片。
 func (p *Pool) AvailableUIDs() []string {
-	return p.availableUIDsLocked("", func(e *entry, now time.Time) bool { return e.healthy(now) })
+	return p.availableUIDsFrom("", func(e *entry, now time.Time) bool { return e.healthy(now) })
 }
 
 // AvailableUIDsForModel 同 AvailableUIDs，但把健康口径换成 healthyForModel：
@@ -342,14 +342,15 @@ func (p *Pool) AvailableUIDs() []string {
 // realm=="" 退化语义锚点测试。
 // 供会话粘性按模型分配与命中校验；model 为空时等价于 AvailableUIDs。
 func (p *Pool) AvailableUIDsForModel(model string) []string {
-	return p.availableUIDsLocked("",
+	return p.availableUIDsFrom("",
 		func(e *entry, now time.Time) bool { return e.healthyForModel(now, model) })
 }
 
-// availableUIDsLocked 是 AvailableUIDs 四变体（AvailableUIDs/ForModel/ForRealm/
+// availableUIDsFrom 是 AvailableUIDs 四变体（AvailableUIDs/ForModel/ForRealm/
 // ForModelRealm）共用的遍历实现：realm 过滤（""=全池）+ 可替换健康口径（healthy /
-// healthyForModel）+ 在途占满过滤，输出按 UID 排序（稳定）。调用方必须不持锁。
-func (p *Pool) availableUIDsLocked(realm string, health func(e *entry, now time.Time) bool) []string {
+// healthyForModel）+ 在途占满过滤，输出按 UID 排序（稳定）。调用方必须不持锁
+// （本方法自取 RLock，无 Locked 后缀）。
+func (p *Pool) availableUIDsFrom(realm string, health func(e *entry, now time.Time) bool) []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
@@ -464,20 +465,20 @@ func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, di
 // 按过期口径判定（窗口内不豁免，与 disabled/breakerUntil 同为豁免的否定条件），
 // 否则该混合账号会让 /healthz 返回 200 而其对所有模型 chat 实际 503。
 func (p *Pool) ServableNow() bool {
-	return p.servableLocked("")
+	return p.servableFrom("")
 }
 
 // ServableForRealm 报告某 realm 是否可服务：存在至少一个该 realm 的 healthy 且未占满在途名额的账号。
 // 与 ServableNow 同口径（healthy 或模型豁免、排除 inFlightFull），仅叠加 Realm()==realm 谓词。
 // realm=="" 退化为 ServableNow（现状语义）。供 /healthz 按 realm 暴露 CN/global 各自可达性。
 func (p *Pool) ServableForRealm(realm string) bool {
-	return p.servableLocked(realm)
+	return p.servableFrom(realm)
 }
 
-// servableLocked 是 ServableNow / ServableForRealm 共用的遍历实现：
+// servableFrom 是 ServableNow / ServableForRealm 共用的遍历实现：
 // 存在至少一个（realm 匹配、未占满在途名额、healthy 或模型豁免形态）的账号即 true。
-// realm=="" 不加 realm 谓词（全池）。调用方必须不持锁。
-func (p *Pool) servableLocked(realm string) bool {
+// realm=="" 不加 realm 谓词（全池）。调用方必须不持锁（本方法自取 RLock，无 Locked 后缀）。
+func (p *Pool) servableFrom(realm string) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
@@ -517,8 +518,10 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 	_, reason := cooledReasonLocked(e, now)
 	st := Status{
 		UID: uid,
-		// 限额台账（issue #36）：仅「带解析时间 6004 的模型级软冷却」仍在生效时非空，
-		// 每模型一行（modelCooldowns 内未到期的条目），多模型同时限流全部展示。
+		// 限额台账（issue #36）：「带解析时间 6004 的模型级软冷却」与「11102 负缓存」
+		// 共用 modelCooldowns 机制，两类未到期条目均入台账（见 BlockModelBackoff：
+		// 11102 条目以自身 reason 出现在 /status，运维可见），每模型一行，
+		// 多模型同时限流全部展示。
 		// 到期判据 = 该模型的独立冷却 until 未过；条件满足才输出，随到期自然消失，
 		// 普通软冷却（无模型级表）/硬冷却不产生台账（零回归）。
 		RateLimitedModels: p.rateLimitedModelsLocked(e, now),

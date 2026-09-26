@@ -4,6 +4,7 @@
 package pool
 
 import (
+	"log"
 	"strings"
 	"time"
 )
@@ -100,6 +101,7 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 			if e.modelCooldowns == nil {
 				e.modelCooldowns = map[string]modelCooldown{}
 			}
+			logModelCooldownOverwriteLocked(e, uid, model, reason)
 			e.modelCooldowns[model] = modelCooldown{
 				Until:   p.cappedSoftUntilLocked(now, resetAt),
 				ResetAt: resetAt,
@@ -167,12 +169,33 @@ func (p *Pool) BlockModelBackoff(uid, model, reason string) {
 	if e.modelCooldowns == nil {
 		e.modelCooldowns = map[string]modelCooldown{}
 	}
+	logModelCooldownOverwriteLocked(e, uid, model, reason)
 	e.modelCooldowns[model] = modelCooldown{
 		Until:  now.Add(ttl),
 		Reason: reason,
 		Hits:   hits,
 	}
 	p.dirty.Store(true)
+}
+
+// logModelCooldownOverwriteLocked 模型级冷却条目的类型对账日志：同一 (账号, 模型) 槽
+// 只有一条 modelCooldowns，6004（模型限流，reason 恒为 "6004 model rate limit"）与
+// 11102（负缓存，reason 恒以 "11102" 开头，见 upstream.ModelBlockReason）两类写入
+// 会互相整条覆盖（清空对方 TTL/ResetAt/Hits）。生产中该槽语义应基本同型（同一模型
+// 同时既"被限流"又"无此模型"自相矛盾），覆盖罕见；真发生时打一条日志供运维对账
+// （上游状态翻转或分类歧义的信号），不改变覆盖行为本身、不引入新字段/持久化格式。
+// 调用方必须已持有 p.mu，且在写入 e.modelCooldowns[model] 之前调用。
+func logModelCooldownOverwriteLocked(e *entry, uid, model, newReason string) {
+	old, ok := e.modelCooldowns[model]
+	if !ok {
+		return
+	}
+	oldIs11102 := strings.HasPrefix(old.Reason, "11102")
+	newIs11102 := strings.HasPrefix(newReason, "11102")
+	if oldIs11102 == newIs11102 {
+		return // 同型覆盖（6004→6004 / 11102→11102）：TTL 正常刷新，不对账
+	}
+	log.Printf("[pool] model cooldown 覆盖: uid=%s model=%s old=%q new=%q", uid, model, old.Reason, newReason)
 }
 
 // BlockModelClear 清除 (账号, 模型) 的 11102 负缓存条目（该模型实测又通了）。半开探测或正常

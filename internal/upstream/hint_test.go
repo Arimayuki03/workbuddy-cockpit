@@ -157,6 +157,40 @@ func TestGatewayHintMarkerTolerance(t *testing.T) {
 	}
 }
 
+// TestCodeMarkerNoLongerCodePrefixHit 11133/11135 数字码边界：更长业务码（如 111334）
+// 不得因前缀关系误命中 11133/11135 的 hint 判定（codeMarker 数字形态命中后须校验
+// 紧随字节非数字）。
+func TestCodeMarkerNoLongerCodePrefixHit(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+	}{
+		{"111334 不命中 11133（紧凑）", `{"code":111334,"msg":"some other error"}`},
+		{"111334 不命中 11133（空格）", `{"code": 111334,"msg":"some other error"}`},
+		{"1113340 不命中 11133", `{"code":1113340,"msg":"x"}`},
+		{"211335 不命中 11135", `{"code":211335,"msg":"x"}`},
+		{"111354 不命中 11135", `{"code":111354,"msg":"x"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isModelParamInvalid(c.msg); got {
+				t.Errorf("isModelParamInvalid(%q)=true, longer code must not hit 11133 marker", c.msg)
+			}
+			if got := isInvalidImageData(c.msg); got {
+				t.Errorf("isInvalidImageData(%q)=true, longer code must not hit 11135 marker", c.msg)
+			}
+			// 端到端：ErrClient 下无 marker → 无 hint。
+			if got := GatewayHint(ErrClient, c.msg, HintContext{}); got != "" {
+				t.Errorf("GatewayHint(ErrClient, %q)=%q, want empty", c.msg, got)
+			}
+		})
+	}
+	// 正例锚点：真码仍命中（边界校验不伤正常判定）。
+	if !isModelParamInvalid(body11133) || !isInvalidImageData(body11135) {
+		t.Error("boundary check broke real 11133/11135 hits")
+	}
+}
+
 // TestStreamHintAttachesGatewayHint SSE error 帧附加 gateway_hint：message 原文
 // 不动、既有键（code/requestId）保留、新增并列字段；hintFn 惰性（只有 error 帧
 // 才调用）；干净帧不受影响。

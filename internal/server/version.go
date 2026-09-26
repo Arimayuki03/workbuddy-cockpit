@@ -23,10 +23,9 @@ func AppVersion() string { return appVersion }
 
 // versionCheckState 检查结果缓存（6 小时：与 manager 口径一致，避免每次进面板都打 GitHub）。
 type versionCheckState struct {
-	mu        sync.Mutex
-	fetched   time.Time
-	snapshot  UpdateCheck
-	lastError string
+	mu       sync.Mutex
+	fetched  time.Time
+	snapshot UpdateCheck
 }
 
 var versionCheck versionCheckState
@@ -70,7 +69,7 @@ func (h *Handler) handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 	force := r.URL.Query().Get("force") == "true"
 
 	versionCheck.mu.Lock()
-	cached, cacheTime, lastErr := versionCheck.snapshot, versionCheck.fetched, versionCheck.lastError
+	cached, cacheTime := versionCheck.snapshot, versionCheck.fetched
 	if force && !cacheTime.IsZero() && time.Since(cacheTime) < versionForceMinInterval {
 		// force 最小间隔：60s 内重复 force 直接回缓存（Cached=true 标注），不外发请求。
 		cached.Cached = true
@@ -100,7 +99,7 @@ func (h *Handler) handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		_ = lastErr // 上次成功的结果已回退；错误只进日志（低频路径，WARN 一行足够）
+		// 上次成功的结果已回退；错误只进日志（低频路径，WARN 一行足够）
 		log.Printf("WARN: [server] check-update: %v（回退缓存值 %s）", err, cached.Latest)
 		cached.Cached = true
 		cached.CheckedAt = cacheTime.Format(time.RFC3339)
@@ -115,7 +114,7 @@ func (h *Handler) handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 		ChangelogURL: "https://github.com/Arimayuki03/workbuddy-cockpit/releases/latest",
 	}
 	versionCheck.mu.Lock()
-	versionCheck.snapshot, versionCheck.fetched, versionCheck.lastError = snap, time.Now(), ""
+	versionCheck.snapshot, versionCheck.fetched = snap, time.Now()
 	versionCheck.mu.Unlock()
 	writeJSON(w, http.StatusOK, snap)
 }

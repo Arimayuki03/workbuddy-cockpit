@@ -6,6 +6,7 @@
 package upstream
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 )
@@ -18,8 +19,8 @@ var sanitizeFeatures = []string{
 	"You are Claude Code",        // 身份句（截断前缀即可命中）
 	"Main branch (",              // 注入指令句（截断前缀即可命中）
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
-	"github.com/anthropics/",     // 反馈句里的 Anthropic 仓库链接
-	"11128",                      // 上游反探测：裸数字错误码
+	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
+	"11128",                                           // 上游反探测：裸数字错误码
 }
 
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
@@ -203,6 +204,55 @@ func sanitizeMessages(messages []any) bool {
 		if tc, ok := m["tool_calls"]; ok {
 			if sanitizeToolCalls(tc) {
 				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// sanitizeTools 净化顶层 tools/functions 数组（H-sanitize）：工具定义的
+// name/description/parameters 同样可能携带指纹（编码 agent 的错误码查询类工具
+// 是常见载体），请求体级逐字匹配拦截（sanitize.go:70-75）会覆盖这些字段，
+// 原样出站即整单 400。parameters 是 JSON schema 对象——序列化后走 sanitizeText
+// 再回写（序列化失败则跳过该项，不破坏 schema 结构）。任一命中返回 true。
+func sanitizeTools(v any) bool {
+	list, ok := v.([]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, item := range list {
+		tool, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		// OpenAI tools 形态：{"type":"function","function":{"name","description","parameters"}}
+		// 与 OpenAI functions 形态：{"name","description","parameters"} 同构——
+		// 有 function 子对象则进子对象，否则直接在项上操作。
+		target := tool
+		if fn, ok := tool["function"].(map[string]any); ok {
+			target = fn
+		}
+		for _, key := range []string{"name", "description"} {
+			if s, ok := target[key].(string); ok {
+				if ns := sanitizeText(s); ns != s {
+					target[key] = ns
+					changed = true
+				}
+			}
+		}
+		// parameters 是 JSON schema 对象：序列化后走 sanitizeText（schema 文本
+		// 同样可能含指纹），序列化失败跳过该项（不破坏结构）。
+		if params, ok := target["parameters"]; ok && params != nil {
+			raw, err := json.Marshal(params)
+			if err == nil {
+				if ns := sanitizeText(string(raw)); ns != string(raw) {
+					var rebuilt any
+					if json.Unmarshal([]byte(ns), &rebuilt) == nil {
+						target["parameters"] = rebuilt
+						changed = true
+					}
+				}
 			}
 		}
 	}

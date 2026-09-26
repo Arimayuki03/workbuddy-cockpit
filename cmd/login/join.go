@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,12 +72,18 @@ func runJoin(base, origin, realm string, client *http.Client) {
 		Domain       string `json:"domain"`
 	}
 	// 可打断退出：用户按任意键（含直接回车）即中止轮询，不登录不落盘。
+	// EOF/读错误（脚本调用 stdin=/dev/null 等非交互场景）直接退出 goroutine：
+	// os.Stdin.Read 在 EOF 后恒返回 n=0，无 err 检查会 100% CPU 空转。
 	stop := make(chan struct{})
 	go func() {
 		buf := make([]byte, 1)
 		for {
-			if n, _ := os.Stdin.Read(buf); n > 0 {
+			n, err := os.Stdin.Read(buf)
+			if n > 0 {
 				close(stop)
+				return
+			}
+			if err != nil {
 				return
 			}
 		}
@@ -92,7 +99,7 @@ pollLoop:
 			break pollLoop
 		default:
 		}
-		tokRaw, _, errTok := doJSON(client, http.MethodGet, base+"/v2/plugin/auth/token?state="+st.State, headers, nil)
+		tokRaw, _, errTok := doJSON(client, http.MethodGet, base+"/v2/plugin/auth/token?state="+url.QueryEscape(st.State), headers, nil)
 		if errTok == nil {
 			if err := json.Unmarshal(tokRaw, &tok); err == nil && tok.AccessToken != "" {
 				break // 登录完成
@@ -119,7 +126,7 @@ pollLoop:
 		headers(r)
 		r.Header.Set("Authorization", "Bearer "+tok.AccessToken)
 	}
-	if acctRaw, _, errAcct := doJSON(client, http.MethodGet, base+"/v2/plugin/login/account?state="+st.State, acctHeaders, nil); errAcct == nil {
+	if acctRaw, _, errAcct := doJSON(client, http.MethodGet, base+"/v2/plugin/login/account?state="+url.QueryEscape(st.State), acctHeaders, nil); errAcct == nil {
 		_ = json.Unmarshal(acctRaw, &acct)
 	}
 	if acct.UID == "" {

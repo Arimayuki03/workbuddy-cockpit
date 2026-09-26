@@ -36,6 +36,11 @@ const flushInterval = 30 * time.Second
 // maxBuckets 桶数硬上限。超过时立即触发一次折叠，避免异常流量把内存/文件撑爆。
 const maxBuckets = 400_000
 
+// bucketLimit 生效的桶数上限（Rollup 强制折叠与 Start 前置检查共用）。
+// 初始值 = maxBuckets；独立成 var 仅供测试调小——构造 40 万个桶验证强制折叠
+// 代价过高，小上限下同路径可复现。生产代码不得改写。
+var bucketLimit = maxBuckets
+
 // hourLayout / dayLayout 分片键的时间格式（本地时区，与用户直觉一致）。
 const (
 	hourLayout = "2006-01-02T15"
@@ -74,6 +79,12 @@ type Recorder struct {
 	buckets map[string]*bucket // key: scope|realm|uid|model
 	dirty   bool
 	started time.Time
+
+	// writeMu 落盘 IO 段互斥（面板 Save 与后台 ticker 并发 flush 的撕裂写防护）：
+	// 两个 flush 并发执行时共享同一 .tmp 路径，WriteFile/TRUNCATE/Rename 交叉后
+	// Rename 可能把"半截 B"的内容以最终文件名落地，产生损坏的 usage.json。
+	// 只串行化 IO 段；快照仍走 mu（不扩大 mu 临界区，写盘不阻塞 Add）。
+	writeMu sync.Mutex
 
 	startOnce   sync.Once
 	startedFlag atomic.Bool
@@ -116,7 +127,7 @@ func (r *Recorder) Start() {
 					r.mu.Lock()
 					n := len(r.buckets)
 					r.mu.Unlock()
-					if n > maxBuckets {
+					if n > bucketLimit {
 						r.Rollup(time.Now())
 					}
 					r.flush(false)
@@ -204,6 +215,11 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 
 // Rollup 把超出 hourlyKeep 的小时桶折叠为日桶（按本地日历日）。
 // 幂等：同一小时反复折叠不会重复计数（先累加再删源桶）。
+//
+// 桶数超限时强制折叠：hourlyKeep 口径只折叠 90 天前的桶，账号×模型×2160 小时片
+// 超过 maxBuckets 时「按期折叠」退化为空操作，内存无界。此时按时间升序从最旧的
+// 未到期小时桶开始折叠为日桶，直到桶数 ≤ maxBuckets*0.8（留 20% 余量，避免
+// 每 30s 的 flush 前置检查每轮都触发折叠）。
 func (r *Recorder) Rollup(now time.Time) {
 	if r == nil {
 		return
@@ -226,6 +242,45 @@ func (r *Recorder) Rollup(now time.Time) {
 		day := "d:" + ts.Format(dayLayout)
 		moves = append(moves, move{from: k, to: day + "|" + b.Realm + "|" + b.UID + "|" + b.Model})
 	}
+
+	// 强制折叠（桶数超限）：近期小时桶按 Scope（即时间）升序，从最旧的开始折叠
+	// 为日桶，直到桶数 ≤ bucketLimit*0.8（留 20% 余量，防每次 30s 检查都触发）。
+	// 净桶数变化 = 删源桶 -1，新建日桶 +1：用 projected 模拟应用 moves 后的桶数
+	// 决定何时收手，剩余可折叠的近期小时桶数是天然上界，防死循环。
+	if len(r.buckets) > bucketLimit {
+		limit := bucketLimit * 8 / 10
+		var recent []*bucket
+		for _, b := range r.buckets {
+			if !strings.HasPrefix(b.Scope, "h:") {
+				continue
+			}
+			if ts, err := time.ParseInLocation(hourLayout, strings.TrimPrefix(b.Scope, "h:"), time.Local); err == nil && !ts.Before(cutoff) {
+				recent = append(recent, b)
+			}
+		}
+		sort.Slice(recent, func(i, j int) bool { return recent[i].Scope < recent[j].Scope })
+		projected := len(r.buckets)
+		created := map[string]bool{} // moves 应用后将新建的日桶键
+		forced := 0
+		for _, b := range recent {
+			if projected <= limit {
+				break
+			}
+			day := "d:" + b.Scope[2:12]
+			dst := day + "|" + b.Realm + "|" + b.UID + "|" + b.Model
+			moves = append(moves, move{from: b.Scope + "|" + b.Realm + "|" + b.UID + "|" + b.Model, to: dst})
+			forced++
+			if r.buckets[dst] == nil && !created[dst] {
+				created[dst] = true // 删源 +1 建桶，净 0
+			} else {
+				projected-- // 日桶已存在（或本轮已建），仅删源，净 -1
+			}
+		}
+		if forced > 0 {
+			log.Printf("[usage] 桶数超限（%d > %d），强制折叠最旧小时桶 %d 个", len(r.buckets), bucketLimit, forced)
+		}
+	}
+
 	for _, m := range moves {
 		src := r.buckets[m.from]
 		if src == nil {
@@ -268,6 +323,14 @@ func (r *Recorder) load() error {
 	}
 	var f file
 	if err := json.Unmarshal(raw, &f); err != nil {
+		// 文件损坏：先改名隔离（保留人工抢救机会），否则下一轮 flush 会用
+		// 从零开始的内存态覆盖原文件，历史用量永久丢失。隔离失败仅打日志继续。
+		broken := r.path + ".broken-" + time.Now().Format("20060102-150405")
+		if rerr := os.Rename(r.path, broken); rerr != nil {
+			log.Printf("[usage] 隔离损坏文件失败（%s 继续在原位）: %v", r.path, rerr)
+		} else {
+			log.Printf("[usage] 检测到损坏的用量文件，已隔离为 %s（从零开始）", broken)
+		}
 		return err
 	}
 	for i := range f.Buckets {
@@ -307,6 +370,12 @@ func (r *Recorder) flush(force bool) {
 		markDirty()
 		return
 	}
+	// IO 段在 writeMu 临界区内执行：面板 Save（flush(true)）与后台 ticker
+	// （flush(false)）可能并发到达，二者共享同一 .tmp 路径——WriteFile(A) /
+	// WriteFile(B, TRUNC) / Rename 交叉时，Rename 落地的可能是对方写到一半的
+	// 临时文件（撕裂写，usage.json 损坏）。锁只护 IO 段，快照仍走 mu。
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o755); err != nil {
 		log.Printf("[usage] 建目录失败: %v", err)
 		markDirty()
@@ -417,7 +486,7 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 		return Snapshot{Series: []Point{}, Generated: time.Now().Format(time.RFC3339)}
 	}
 	allTime := hours <= 0 // 面板「启动以来」档：排行与时序都吃全部桶
-	if !allTime && (hours <= 0 || hours > 24*60) {
+	if !allTime && hours > 24*60 {
 		hours = 72
 	}
 

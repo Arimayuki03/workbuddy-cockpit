@@ -10,6 +10,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -332,6 +334,11 @@ var dynamicModelsCache struct {
 	ids      []upstream.ModelInfo
 	fetched  time.Time // 最近一次成功拉取时间
 	lastFail time.Time // 最近一次拉取失败时间（负缓存）
+	// single-flight 门闩：缓存过期瞬间并发 /v1/models 会把 miss 放大为 N 组上游
+	// 目录拉取（每组企业端点 + /v3/config 两路并发）。fetching=true 表示有 goroutine
+	// 正在拉取，后来者在其 done 上等结果后重查（双检），只放行第一个。
+	fetching bool
+	done     chan struct{}
 }
 
 const (
@@ -520,18 +527,26 @@ func (h *Handler) fetchGlobalModels() ([]string, *auth.Auth) {
 
 // rewriteModel 把 outbound chat body 的 model 字段替换为 bare（保留其余字段原样）。
 // 仅当 bare != 原 model 时由 chatCompletions 调用；body 不可解析时原样返回（不二次错误化）。
+// 顶层走 map[string]json.RawMessage（与 prompt.go remarshalWithMessages 同口径）：
+// 其余键的值是原样字节透传，不经 any/float64 往返——大整数（>2^53，如 id 值）
+// 不被精度损坏；重编码与旧 map[string]any 一样按键字典序输出，序列化稳定。
 func rewriteModel(body []byte, bare string) []byte {
 	if len(body) == 0 || bare == "" {
 		return body
 	}
-	var obj map[string]any
+	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return body
 	}
-	if cur, ok := obj["model"].(string); !ok || cur == bare {
+	var cur string
+	if raw, ok := obj["model"]; !ok || json.Unmarshal(raw, &cur) != nil || cur == bare {
 		return body
 	}
-	obj["model"] = bare
+	newModel, err := json.Marshal(bare)
+	if err != nil {
+		return body
+	}
+	obj["model"] = newModel
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return body
@@ -545,18 +560,43 @@ func rewriteModel(body []byte, bare string) []byte {
 // 只从 CN realm 账号拉取（PickExcludingForRealm(nil,"","cn")）：全局账号的模型列表
 // 未必与 CN 一致，动态模型表只服务 CN 前缀（global 走独立探测）。
 func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
-	dynamicModelsCache.RLock()
+	dynamicModelsCache.Lock()
 	if len(dynamicModelsCache.ids) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsTTL {
 		out := dynamicModelsCache.ids
-		dynamicModelsCache.RUnlock()
+		dynamicModelsCache.Unlock()
 		return out
 	}
 	// 失败负缓存：冷却期内不再请求上游。
 	if !dynamicModelsCache.lastFail.IsZero() && time.Since(dynamicModelsCache.lastFail) < modelsFetchFailCooldown {
-		dynamicModelsCache.RUnlock()
+		dynamicModelsCache.Unlock()
 		return nil
 	}
-	dynamicModelsCache.RUnlock()
+	// single-flight：已有 goroutine 在拉取 → 等它结束后重查（双检），不再放行一组的
+	// 并发放大。等不到结果（拉取方 panic 兜底/极端时序）也只退化为本 goroutine 自行
+	// 拉取一次，语义与修复前一致。
+	if dynamicModelsCache.fetching {
+		done := dynamicModelsCache.done
+		dynamicModelsCache.Unlock()
+		if done != nil {
+			<-done
+		}
+		return h.fetchDynamicModels()
+	}
+	dynamicModelsCache.fetching = true
+	dynamicModelsCache.done = make(chan struct{})
+	dynamicModelsCache.Unlock()
+	// 拉取方出口：置位 + close(done)，唤醒等待者重查（defer 兜底 panic 路径，
+	// 门闩永不悬挂）。
+	finishFetch := func() {
+		dynamicModelsCache.Lock()
+		if dynamicModelsCache.fetching {
+			dynamicModelsCache.fetching = false
+			close(dynamicModelsCache.done)
+			dynamicModelsCache.done = nil
+		}
+		dynamicModelsCache.Unlock()
+	}
+	defer finishFetch()
 
 	acct := h.cfg.Pool.PickExcludingForRealm(nil, "", "cn")
 	if acct == nil {
@@ -587,14 +627,29 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// （#41 截断防御语义：客户端断流不把半截 JSON 冤枉罚号）。
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, h.maxBodyBytes()))
 	if err != nil {
+		// 读体失败路径的轻量观测：此前在这里就地返回，请求完全不进 metrics/
+		// 请求日志/表格日志（观测面盲区）。构造最小 chatStat（仅 model/mode/status）
+		// 走 done() 单一埋点补齐三类面板数据；ParseRequest 对坏 body 安全取零值。
 		var mbe *http.MaxBytesError
+		status := http.StatusBadRequest
 		if errors.As(err, &mbe) {
-			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large",
+			status = http.StatusRequestEntityTooLarge
+		}
+		parsedErr := session.ParseRequest(body)
+		_, realmErr := resolveModel(parsedErr.Model)
+		st := newChatStat(time.Now(), parsedErr, realmErr)
+		st.status = status
+		if status == http.StatusRequestEntityTooLarge {
+			st.setError("request body exceeds limit")
+			st.done()
+			writeOpenAIError(w, status, "request_too_large",
 				fmt.Sprintf("request body exceeds limit (%d MB); reduce context/messages or raise max_body_mb",
 					h.maxBodyBytes()>>20))
 			return
 		}
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
+		st.setError("read body: " + err.Error())
+		st.done()
+		writeOpenAIError(w, status, "invalid_request", "read body: "+err.Error())
 		return
 	}
 	// 调试开关：设置 WB2A_DUMP_REQ 即把上游侧收到的原始请求体落盘，供离线二分定位指纹命中行。
@@ -602,8 +657,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 只落"大请求"（≥4MB 固定阈值，原 max_body_mb/2 语义的接替）：小探针
 	// （{"input":"hi"} 之类）会覆盖掉真正要看的对话请求。
 	if os.Getenv("WB2A_DUMP_REQ") != "" && len(body) >= dumpReqMinBytes {
-		if err := os.WriteFile("/app/data/last_request.json", body, 0o600); err != nil {
-			log.Printf("ERR: [server] dump req: %v", err)
+		// 落盘路径经环境变量注入（原 "/app/data/last_request.json" 是容器专属路径，
+		// 非 Linux 容器部署必然 EPERM/不存在）；未设置回落工作目录相对路径。
+		dumpPath := os.Getenv("WB2A_DUMP_REQ_PATH")
+		if dumpPath == "" {
+			dumpPath = "data/last_request.json"
+		}
+		if err := os.MkdirAll(filepath.Dir(dumpPath), 0o700); err != nil {
+			log.Printf("ERR: [server] dump req: mkdir %s: %v (%s)", filepath.Dir(dumpPath), err, runtime.GOOS)
+		}
+		if err := os.WriteFile(dumpPath, body, 0o600); err != nil {
+			log.Printf("ERR: [server] dump req: write %s: %v (set WB2A_DUMP_REQ_PATH, platform %s)",
+				dumpPath, err, runtime.GOOS)
 		}
 	}
 	// 热路径单次解析（audit：此前对同一 body 依次做 peek / ExtractKey /
@@ -783,6 +848,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 降级重试不占轮转名额：passthrough/append 首遇内容拦截 → 换 Degraded 中性
+	// 提示词**同请求内**重试一次。若走 continue 让 i 自增，MaxRotate=1 的配置会在
+	// 重试前就退出循环，客户端收到 503 no_healthy_account 而非约定的 400
+	// content_blocked（MaxRotate 是换号预算，不是同号降级重试预算）。豁免天然
+	// 一次性：degradedApplied 置位后本分支不再进入，不会钉死循环。
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
@@ -791,6 +861,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if acct == nil || (realm != "" && acct.Realm() != realm) {
 				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）或 realm 不符 → 解绑。
 				unbindSticky()
+				// realm 不符时必须置空：否则 acct 非 nil 直接出站，realm 闸失效。
+				// Session 仅注入 Available（无 AvailableForModel）时粘性分配本身不带
+				// realm 维度，跨 realm 绑定会漏到出站；置空强制回落下方 realm 感知轮换。
+				acct = nil
 			}
 		}
 		if acct == nil {
@@ -912,9 +986,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				h.degrade.Trigger()
 				body = prompt.Rewrite(body, prompt.Degraded)
 				degradedApplied = true
-				delete(tried, acct.UID) // 单账号池也能拿到重试机会（降级重试占一次名额）
+				delete(tried, acct.UID) // 同号重试：从 tried 摘除，单账号池也能立即重试
 				releaseHeld()
 				log.Printf("WARN: [server] content-blocked (likely fingerprint false positive) -> degraded prompt retry")
+				// 降级重试不消耗轮转名额（i-- 后 continue 抵消循环自增）。该分支仅在
+				// degradedApplied 首置位时进入一次，豁免天然一次性，不会钉死循环。
+				i--
 				continue
 			}
 			if kind == upstream.ErrContentBlocked {
@@ -1010,6 +1087,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadGateway
 				log.Printf("WARN: [server] stream acct=%s model=%s: empty upstream stream (200+0 frames)", logfmt.Label(acct.UID, acct.Nickname), bareModel)
 			}
+			if st.status == http.StatusOK {
+				// 最终 200：清空轮转中途失败留下的 errSummary（setError 首个错误优先
+				// 策略在换号重试成功时不清除）——面板请求日志 200 行不应带错误摘要。
+				st.errSummary = ""
+			}
 			st.ttfb = stats.TTFB()
 			// usage 缺失时保留 chatStat.toks 的 -1 哨兵（观测缺失 → 显示 "-"），
 			// 不写入零值——否则「没观测到 usage」被伪造成「测得 0 token」，
@@ -1050,6 +1132,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, resp)
 		st.status = http.StatusOK
+		// 最终 200：清空轮转中途失败留下的 errSummary（同流式出口，见上）。
+		st.errSummary = ""
 		st.toks = completionTokens(resp)
 		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
 		if credit, total, ok := usageCreditTotal(resp); ok {
@@ -1087,6 +1171,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusTooManyRequests
 			code = "rate_limit_exceeded"
 			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
+		case upstream.ErrContentBlocked:
+			// 内容拦截落到末端（防御兜底：如降级重试豁免后仍拦但轮转预算耗尽）→
+			// 与循环内第二分支同口径：400 content_blocked，客户端应看到
+			// 确定的审核结果而非误导性的 503 no_healthy_account。
+			status = http.StatusBadRequest
+			code = "content_blocked"
 		case upstream.ErrWafBlock:
 			if h.wafIP.active() {
 				// IP 级拦截措辞（fail-fast 终止路径）：空 body 时给出明确可读文案——
@@ -1238,7 +1328,13 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 			h.cfg.Pool.Disable(uid, "account banned by upstream (11140 request illegal), re-login required")
 			return
 		}
-		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), "account fault (14017)")
+		// 兜底 reason 不再硬编码 14017：ErrAccountFault 家族不止 14017 一种来源，
+		// 其他账号级故障被误标会误导排障——body 里确有 14017 才标注。
+		reason := "account fault"
+		if strings.Contains(body, "14017") {
+			reason = "account fault (14017)"
+		}
+		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), reason)
 	case upstream.ErrServer:
 		// 5xx 上游故障：Classify 已把 ≥500 判为 ErrServer，在此喂熔断计数（不再手写 status>=500）。
 		h.cfg.Pool.NoteError(uid)

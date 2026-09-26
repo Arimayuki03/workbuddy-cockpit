@@ -19,3 +19,14 @@ func realmAwareAvailableForModel(p *pool.Pool) func(model string) []string {
 		return p.AvailableUIDsForModelRealm(bare, realm)
 	}
 }
+
+// realmAwareStickyPreferred 构造会话粘性首次分配的策略感知优先序闭包：
+// 与 realmAwareAvailableForModel 同一 realm 剥前缀口径，交给池的
+// StickyPreferredForModelRealm——credits_desc 时返回余额降序可用列表
+// （首名 = pick 同快照会选中的最高余额号），weighted 返回 nil（哈希打散不变）。
+func realmAwareStickyPreferred(p *pool.Pool) func(model string) []string {
+	return func(model string) []string {
+		realm, bare := server.ResolveModel(model)
+		return p.StickyPreferredForModelRealm(bare, realm)
+	}
+}

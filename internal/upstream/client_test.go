@@ -515,6 +515,76 @@ func TestRefreshSessionDead(t *testing.T) {
 	}
 }
 
+// TestDoJSONEnvelopeCode12153SessionDead 200 信封 + code≠0 路径按**全信封原文**分类
+// （与 ≥400 路径同口径）：修复前该路径只喂 env.Msg 给 Classify，code 字段丢失，
+// 结构化判定（IsSessionDead 12153 / hasBusinessCode 14018 等）在 200 信封场景不可达，
+// 200 + code=12153 会被退化成 ErrClient 只换号不罚——死号留在池内反复被选中。
+// 修复后信封 JSON 含 code 字段，IsSessionDead 的结构化解析照常命中。
+func TestDoJSONEnvelopeCode12153SessionDead(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":12153,"msg":"Offline user session not found"}`), nil
+	})
+	_, err := c.billingJSON(&auth.Auth{AccessToken: "at"}, http.MethodGet, "/v2/billing/meter/get-user-resource", nil)
+	var ue *Error
+	if !errors.As(err, &ue) || ue.Kind != ErrSessionDead {
+		t.Fatalf("200 envelope code=12153: want ErrSessionDead, got %v", err)
+	}
+	if ue.Status != 200 {
+		t.Errorf("status=%d want 200", ue.Status)
+	}
+	// Msg 组装格式保持 code=%d msg=%s 不变（IsAlreadyCheckin 等下游按 Msg 匹配）。
+	if !strings.Contains(ue.Msg, "code=12153") || !strings.Contains(ue.Msg, "msg=") {
+		t.Errorf("Msg=%q want code=12153 msg=... 形态（格式不得变化）", ue.Msg)
+	}
+}
+
+// TestDoJSONEnvelopeCodeOnly12153SessionDead 仅 code 无 msg 的极简信封也要命中
+// session dead：修复前只喂 env.Msg（空串）时该形态完全不可判，是最纯粹的
+// 「结构化 code 判定缺失」回归锚点。
+func TestDoJSONEnvelopeCodeOnly12153SessionDead(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":12153}`), nil
+	})
+	_, err := c.billingJSON(&auth.Auth{AccessToken: "at"}, http.MethodGet, "/v2/billing/meter/get-user-resource", nil)
+	var ue *Error
+	if !errors.As(err, &ue) || ue.Kind != ErrSessionDead {
+		t.Fatalf("200 envelope code-only 12153: want ErrSessionDead, got %v", err)
+	}
+}
+
+// TestDoJSONEnvelopeCode12153NotBareSubstring 结构化判定不因口径放宽而误伤：
+// 200 信封里裸 "12153" 撞在 requestId/时间戳等非 code 字段上仍不得判 session dead
+// （chat 路径单次即 Disable，误判=永久禁号；与 TestIsSessionDead 不命中形态同口径）。
+func TestDoJSONEnvelopeCode12153NotBareSubstring(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":1,"msg":"internal error","requestId":"req-1712121531234"}`), nil
+	})
+	_, err := c.billingJSON(&auth.Auth{AccessToken: "at"}, http.MethodGet, "/v2/billing/meter/get-user-resource", nil)
+	var ue *Error
+	if !errors.As(err, &ue) {
+		t.Fatalf("want *Error, got %T %v", err, err)
+	}
+	if ue.Kind == ErrSessionDead {
+		t.Fatalf("requestId 撞串不得判 session dead（kind=%v）", ue.Kind)
+	}
+	if ue.Kind != ErrClient {
+		t.Errorf("kind=%v want ErrClient（无命中兜底语义不变）", ue.Kind)
+	}
+}
+
+// TestDoJSONEnvelopeAlreadyCheckinMsgUnchanged 200 信封 + code=14001「今日已签到」：
+// Classify 口径换全 body 后，Msg 组装格式不变（code=%d msg=%s），IsAlreadyCheckin
+// 按 Msg 匹配的下游语义零回归（签到补签路径依赖该判定，见 scheduler.go IsAlreadyCheckin）。
+func TestDoJSONEnvelopeAlreadyCheckinMsgUnchanged(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":14001,"msg":"今日已签到"}`), nil
+	})
+	err := c.DailyCheckin(&auth.Auth{AccessToken: "at"})
+	if err == nil || !IsAlreadyCheckin(err) {
+		t.Fatalf("err=%v want IsAlreadyCheckin=true（Msg 格式不变，幂等判定零回归）", err)
+	}
+}
+
 func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
 	var gotAuth, gotUID, gotProduct string
 	var gotBody []byte

@@ -636,9 +636,16 @@ readLoop:
 				return werr
 			}
 		case trimmed != "":
-			// 注释/其他行：原样透传
+			// 注释/其他行：原样透传。尾行无换行时（err==io.EOF 时 ReadString 返回
+			// 不带 "\n" 的残行）补写一个，避免与循环后兜底的 "data: [DONE]\n\n"
+			// 拼在同一行破坏帧分隔。
 			if _, werr := io.WriteString(w, line); werr != nil {
 				return werr
+			}
+			if !strings.HasSuffix(line, "\n") {
+				if _, werr := io.WriteString(w, "\n"); werr != nil {
+					return werr
+				}
 			}
 			if fl != nil {
 				fl.Flush()

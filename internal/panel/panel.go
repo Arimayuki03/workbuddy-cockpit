@@ -604,13 +604,17 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.cfg.Pool.ReenableIfCredits(uid, remain)
+	// 分桶补写：快过期子集供三因子选号的 ×8 权重因子，与 scheduler.go 签到口径一致
+	// （先解冻再补分桶；SetCreditsDetailed 会把 expiring 钳到 [0, credits]）。
+	p.cfg.Pool.SetCreditsDetailed(uid, remain, buckets.Expiring)
 	resp["credits"] = remain
 	resp["credits_total"] = buckets.Total()
 	log.Printf("panel: checkin uid=%s msg=%q credits=%d/%d", uid, checkinMsg, remain, buckets.Total())
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// accountBalance 单号余额刷新：UserResource → SetCredits（不触碰冷却状态）。
+// accountBalance 单号余额刷新：UserResourceDetailed → SetCreditsDetailed
+// （总量+快过期分桶，与 scheduler 签到/余额刷新口径一致；不触碰冷却状态）。
 func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.cfg.Pool.AuthByUID(uid)
@@ -623,7 +627,7 @@ func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "user resource: "+err.Error())
 		return
 	}
-	p.cfg.Pool.SetCredits(uid, remain)
+	p.cfg.Pool.SetCreditsDetailed(uid, remain, buckets.Expiring)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credits": remain, "credits_total": buckets.Total()})
 }
 

@@ -7,7 +7,7 @@
 //	POST /billing/area/get-country-code {filterForbidden:1} → 可取国家列表
 //	POST /billing/area/get-user-area-info {action:getUserAreaInfo} → 检测当前地区
 //	POST /console/login/account {attributes:{countryCode,countryFullName,countryName}} → 提交地区（幂等）
-//	GET  /auth/realms/copilot/overseas/user/register?userId=<uid> → 注册激活（code:200 成功；code:500 "region required" 需补地区）
+//	GET  /auth/realms/copilot/overseas/user/register?userId=<uid> → 注册激活（code:200 成功；msg 含 "region required"（典型 code:500）需补地区；其余 code:500 类按服务端故障处理，不触发补地区链路）
 //	POST /billing/ide/trial → 一次性加油包（幂等码 14051，见 trial.go）
 //
 // 响应体注意：get-country-code / get-user-area-info 的 data 是 JSON 字符串
@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"workbuddy2api/internal/auth"
@@ -163,7 +164,7 @@ func (c *Client) GlobalRegisterStatus(a *auth.Auth) (activated bool, needsRegion
 		return false, false, "", fmt.Errorf("register status: only global accounts")
 	}
 	req, err := c.globalRegisterReq(http.MethodGet,
-		c.globalRegisterBase()+"/auth/realms/copilot/overseas/user/register?userId="+a.UID,
+		c.globalRegisterBase()+"/auth/realms/copilot/overseas/user/register?"+url.Values{"userId": {a.UID}}.Encode(),
 		a.AccessTokenValue(), nil)
 	if err != nil {
 		return false, false, "", err
@@ -176,9 +177,15 @@ func (c *Client) GlobalRegisterStatus(a *auth.Auth) (activated bool, needsRegion
 	switch {
 	case code == 200:
 		return true, false, "register success", nil
-	case code == 500 || strings.Contains(strings.ToLower(m), "region required"):
+	case strings.Contains(strings.ToLower(m), "region required"):
+		// msg 精确匹配优先：仅上游明确说"缺地区"才算 needsRegion。
+		// 旧口径 code==500 一律判 needsRegion，会把上游其他 500 类服务端故障
+		// 误分类进"需补地区"，GlobalCompleteRegistration 对故障账号执行提交地区+
+		// 二次激活的完整链路后仍失败，诊断失真。
 		return false, true, m, nil
 	default:
+		// code==500 且 msg 不含 region required：服务端故障，按"未激活但无需补地区"
+		// 处理（调用方仅报错误，不触发补地区链路）。
 		return false, false, m, nil
 	}
 }

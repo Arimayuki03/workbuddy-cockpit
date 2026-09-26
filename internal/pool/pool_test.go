@@ -23,8 +23,8 @@ func withNoPickGap(t *testing.T) {
 
 func TestPickHighestCredits(t *testing.T) {
 	withNoPickGap(t)
-	// 三因子加权（credits 比例×10 + 闲置 + 成功率）：积分悬殊时高积分账号应被多数选中，
-	// 但不再像纯 credits 加权那样接近 99%（闲置补偿 + 成功率中性 1.5 拉平了基线）。
+	// 三因子加权（credits 比例×10 + 快过期占比×8 + 闲置补偿）：积分悬殊时高积分账号应被多数选中，
+	// 但不再像纯 credits 加权那样接近 99%（闲置补偿 + 基础 1.0 拉平了基线）。
 	p := New("")
 	a1 := &auth.Auth{UID: "u1"}
 	a2 := &auth.Auth{UID: "u2"}

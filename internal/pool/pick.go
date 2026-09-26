@@ -1,4 +1,5 @@
-// 选号：Pick 簇（healthy 三因子加权 Top5 短名单 + 加权随机 + 全冷却兜底 + 在途占满过滤）。
+// 选号：Pick 簇（healthy 三因子加权 Top5 短名单 + 加权随机 + 全冷却兜底 + 在途占满过滤
+// + 可切换的余额严格降序策略）。
 package pool
 
 import (
@@ -12,6 +13,27 @@ import (
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/logfmt"
 )
+
+// PickStrategy 选号策略（pool.pick_strategy 配置项）。
+type PickStrategy string
+
+const (
+	// StrategyWeighted 三因子加权随机（默认，历史行为）。
+	StrategyWeighted PickStrategy = "weighted"
+	// StrategyCreditsDesc 余额严格降序：候选按缓存 credits 降序取最高，
+	// 最高者不可用（熔断/冷却/降权/在途占满）时顺延次高（issue: 手动按余额选号）。
+	StrategyCreditsDesc PickStrategy = "credits_desc"
+)
+
+// ParsePickStrategy 解析策略字符串；空串与非法定值回落 weighted（与 normalize 缺省口径一致）。
+func ParsePickStrategy(s string) PickStrategy {
+	switch PickStrategy(s) {
+	case StrategyCreditsDesc:
+		return StrategyCreditsDesc
+	default:
+		return StrategyWeighted
+	}
+}
 
 // Pick 单一选号入口（无请求级轮换、无 realm 过滤，模型感知）。
 // DeptestOnly: 全库仅 pool 包测试引用；生产选号全走 PickExcludingForRealm /
@@ -69,6 +91,46 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
 		return p.pickEarliestExpiryLocked(tried, now, realm)
 	}
+	// credits_desc 策略（pool.pick_strategy=credits_desc）：余额严格降序——
+	// 完全绕过三因子权重 / Top5 短名单 / 成本分层探索（快过期补偿与闲置补偿
+	// 都不再参与决策），候选按缓存 credits 降序取最高，highest 刚被用过
+	// （< minPickGap）时沿序顺延次高；全序刚被用过时回退取序首（严格序冠军，
+	// 非 LRU——该策略下没有饿死问题，字面语义优先）。平局按闲置时长降序
+	// 再按 uid 升序兜底稳定；零余额排最后不排除（与 weighted 不查 credits
+	// 的过滤口径一致：402 硬冷却才是余额耗尽的权威排除信号）。
+	// tried/健康判定/在途占满/tried 轮换/全冷却兜底全部保留——只替换"排谁在前"。
+	if p.pickStrategy == StrategyCreditsDesc {
+		sort.Slice(cands, func(i, j int) bool {
+			if cands[i].credits != cands[j].credits {
+				return cands[i].credits > cands[j].credits
+			}
+			// 平局：闲得久的排前面（与闲置补偿同向），uid 升序保证稳定全序。
+			li, lj := cands[i].lastUsed, cands[j].lastUsed
+			switch {
+			case li.IsZero() && !lj.IsZero():
+				return true // 从未使用 → 闲置最久
+			case !li.IsZero() && lj.IsZero():
+				return false
+			case !li.IsZero() && !lj.IsZero() && !li.Equal(lj):
+				return li.Before(lj)
+			}
+			return cands[i].a.UID < cands[j].a.UID
+		})
+		for _, e := range cands {
+			if now.Sub(e.lastUsed) >= minPickGap {
+				e.lastUsed = now // 锁内即时标记：并发下第 2..N 个请求沿余额序顺延（Q7-A）
+				p.pickSeq++
+				e.usedSeq = p.pickSeq
+				return e.a
+			}
+		}
+		// 全序都在防撞号窗口内：回退严格序冠军（序首即最高余额号）。
+		e := cands[0]
+		e.lastUsed = now
+		p.pickSeq++
+		e.usedSeq = p.pickSeq
+		return e.a
+	}
 	// top5 短名单按三因子权重降序截断（而非 credits 单纯降序）：否则闲置补偿
 	// 根本进不了短名单决策，低 credits 但久置的账号会永远排不进 top5。
 	// maxCredits 统一用**全集口径**（tier 过滤前的全部 healthy 候选）：截断排序与
@@ -118,8 +180,9 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	// tier 1-only——探索=搭车改道，把一个既有真实用户请求改道给未知号（零新增
 	// 上游请求；IP 维度零增量，WAF 友好）。成功 → NoteModelCost 首观测 → 毕业
 	// （tier 0/2，下一轮 pick 立即生效）；失败 → 既有错误策略照常，无探测风暴。
-	// hasTier1 复用本循环上方 costTier 的预计算口径（每候选一次的契约不变）——
-	// 下方 ws 构建循环顺带置位，不在判定处再算一遍。timer 同锁写入：并发 pick
+	// hasTier1 探索判定处对 tier 1 存在性独立扫一遍（不复用上方 bestTier 扫描的
+	// 预计算，也不由 ws 构建循环置位；每候选 costTier 最多 2 次，仅 tier 0 垄断 +
+	// 探索窗口满足时发生，非热路径）。timer 同锁写入：并发 pick
 	// 串行进入写锁，只有一个进入者能通过窗口判定（天然防重复探索）。
 	// key = realm + "\x1f" + reqModel：同模型名可跨域，探索节奏按 (域, 模型)
 	// 独立；realm==""（Pick 老语义）单独成键。
@@ -151,7 +214,9 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	// RandomSource）。权重全等或存在并列时，按字典序截断会让 uid 靠后的账号永远
 	// 进不了 top5（惊群测试 c00 集中 79/100 的根因：c05..c09 被字典序截断、LRU
 	// 兜底又只在 top5 内转）。洗牌用独立的 time-seeded 源，只在截断边界制造等
-	// 权重随机次序，不影响加权抽签本身的确定性。
+	// 权重随机次序，不影响加权抽签本身的确定性。洗牌序号记入 ws.shuf，排序
+	// 比较器第三分支优先按 shuf 兜底——旧实现洗牌后按 uid 排，等权重时完全
+	// 洗回字典序，洗牌沦为死代码（未洗牌时仍回落 uid 决胜，见比较器注释）。
 	if len(ws) > 5 {
 		eq := false
 		for i := 1; i < len(ws); i++ {
@@ -163,6 +228,12 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		if eq {
 			shuf := rand.New(rand.NewPCG(uint64(now.UnixNano()), uint64(len(ws))))
 			shuf.Shuffle(len(ws), func(i, j int) { ws[i], ws[j] = ws[j], ws[i] })
+			// 洗牌后按新物理位置赋 shuf：比较器按 shuf 升序即**保留洗牌序**。
+			// 若赋在 Shuffle 之前，按 shuf 排序会把数组还原回构建序，Fisher-Yates
+			// 依旧死代码（随机性退化为 map 遍历序这一隐式行为）。
+			for i := range ws {
+				ws[i].shuf = i
+			}
 		}
 	}
 	sort.SliceStable(ws, func(i, j int) bool {
@@ -174,25 +245,33 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		if ws[i].w != ws[j].w {
 			return ws[i].w > ws[j].w
 		}
-		return ws[i].e.a.UID < ws[j].e.a.UID // 稳定兜底（洗牌后此项几乎不触发）
+		// 第三分支：洗牌序号优先、uid 兜底。洗牌时各候选 shuf 是 0..n-1 的互异
+		// 置换 → 按 shuf 恢复随机序，等权重账号随机竞争 top5 截断边界（旧实现
+		// 直接按 uid 排，把洗牌完全抵消回字典序，洗牌沦为死代码）；未洗牌时
+		// shuf 全 0、此比较恒 false → 回落 uid 升序，保持与旧实现相同的确定性
+		// 全序（TestPickDeterministicViaSetRandomSource 锚定：注入随机源 + 权重
+		// 并列时选号必须确定，map 遍历序不稳定，不能用 SliceStable 构建序兜底）。
+		if ws[i].shuf != ws[j].shuf {
+			return ws[i].shuf < ws[j].shuf
+		}
+		return ws[i].e.a.UID < ws[j].e.a.UID
 	})
 	cands = cands[:0]
 	for _, c := range ws {
 		cands = append(cands, c.e)
 	}
-	// candsAll 保留截断前的全候选（权重降序），供 LRU 兜底在全量范围选最旧者，
+	// candsAll 全候选（权重降序），供 LRU 兜底在全量范围选最旧者，
 	// 避免 top5 字典序截断把等权重靠后账号饿死（惊群根因之一）。
+	// 截断已删（历史死代码，无任何读者），cands 不再被截断，此别名仅为
+	// 下方 LRU 兜底语义命名保留。
 	candsAll := cands
-	if len(cands) > 5 {
-		cands = cands[:5]
-	}
 	// 防并发撞号：在持锁内基于「上次选中时刻」过滤，但同一批并发 goroutine 会串行进入
 	// 本函数（写锁），每个进入者都把 lastUsed 置为 now —— 于是同一瞬间的第 2..N 个
 	// 进入者看到前一个账号 lastUsed==now（距今 0 < minPickGap），被自然挤向其他账号。
 	// 关键：lastUsed 在锁内赋值，使时间窗口判定在并发下可重入（此前 Acquire 在锁外，
 	// 多个 goroutine 在窗口内同时通过校验造成惊群，TestPickAntiThunderingHerd 实证）。
 	// 注意：先截断后过滤（截断边界内被挤出的号不回填）——与旧实现语义严格一致。
-	eligible := make([]weighted, 0, len(cands))
+	eligible := make([]weighted, 0, len(ws))
 	for _, we := range ws[:min(len(ws), 5)] {
 		if now.Sub(we.e.lastUsed) >= minPickGap {
 			eligible = append(eligible, we)
@@ -319,6 +398,7 @@ type weighted struct {
 	w      float64
 	tier   int     // costTier 结果缓存（0 免费 / 1 无观测 / 2 收费）
 	cost1k float64 // CostPer1k 缓存（tier 2 排序用；tier 0/1 恒 0）
+	shuf   int     // 等权重洗牌时的随机序号（未洗牌恒 0：比较器第三分支回退稳定语义）
 }
 
 // expiringWeight 快过期积分占比的权重系数（三因子之一，issue:积分过期）。

@@ -85,3 +85,45 @@ func TestEffortListingDefaultNotInEffortsOmitted(t *testing.T) {
 		t.Errorf("defaultEffort=%q want empty (max ∉ efforts)", def)
 	}
 }
+
+// TestEffortListingDeepSeekV4FlashDefault CN 三档模型 deepseek-v4-flash 的静态默认档
+// 与注释口径一致（defaultEffort 均为 high，档位含 high）。
+func TestEffortListingDeepSeekV4FlashDefault(t *testing.T) {
+	efforts, def := EffortListing("cn", "deepseek-v4-flash", nil, "")
+	if !reflect.DeepEqual(efforts, []string{"low", "high", "max"}) {
+		t.Errorf("efforts=%v want [low high max]", efforts)
+	}
+	if def != "high" {
+		t.Errorf("defaultEffort=%q want high", def)
+	}
+}
+
+// TestGlobalEffortMapDefaultOverrideGated globalEffortMap 的远端默认档覆盖与
+// EffortListing 的跨源防御同口径：仅当远端也下发了该模型档位（remoteEfforts[id]
+// 非空）才覆盖默认档，不得拼出「档位是静态、默认档是 remote」的矛盾组合。
+func TestGlobalEffortMapDefaultOverrideGated(t *testing.T) {
+	// deepseek-v4.1-flash global 静态档位 ['high'] 无默认档；远端只给了默认档
+	// 没给档位 → 默认档不得落 defs（否则 high 之外无档位可回退，矛盾组合）。
+	efforts, defs := globalEffortMap(
+		nil,
+		map[string]string{"deepseek-v4.1-flash": "max"},
+	)
+	if !sameStrings(efforts["deepseek-v4.1-flash"], []string{"high"}) {
+		t.Errorf("static efforts must stay: %v want [high]", efforts["deepseek-v4.1-flash"])
+	}
+	if defs["deepseek-v4.1-flash"] != "" {
+		t.Errorf("default without remote efforts must be dropped, got %q", defs["deepseek-v4.1-flash"])
+	}
+
+	// 远端档位+默认档成对下发 → 正常覆盖（静态表没有的远端新模型也成立）。
+	efforts, defs = globalEffortMap(
+		map[string][]string{"gpt-5.4": {"low", "high"}},
+		map[string]string{"gpt-5.4": "low"},
+	)
+	if !sameStrings(efforts["gpt-5.4"], []string{"low", "high"}) {
+		t.Errorf("remote efforts must override: %v want [low high]", efforts["gpt-5.4"])
+	}
+	if defs["gpt-5.4"] != "low" {
+		t.Errorf("remote default with matching remote efforts must win, got %q", defs["gpt-5.4"])
+	}
+}
