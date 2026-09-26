@@ -49,8 +49,8 @@ type scanAccountItem struct {
 
 // growthPending 任务是否"未完成且可自动化"。
 func growthPending(t upstream.Task) bool {
-	if t.Claimed {
-		return false
+	if t.Claimed || t.Locked {
+		return false // Locked：Sequential 族每日零点解锁一环，锁定环 accept 不落账（吸收 panel 修复）
 	}
 	if t.Target > 0 && t.Current >= t.Target {
 		return false // 达标未领：也入队（队列执行后会自动领）

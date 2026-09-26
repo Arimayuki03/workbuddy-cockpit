@@ -281,7 +281,9 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		// completion_tokens（部分上游末帧缺 total），网关合成补齐——否则严格按
 		// schema 校验的客户端收不到 total_tokens。已有 total 或二者缺一不补
 		// （不臆造：单边有值无法合成可信的 total）。
-		resp["usage"] = ensureUsageTotal(usage)
+		// 别名归一（usage.go）：缓存命中量在 details/扁平别名间取最大真值回写全部
+		// 别名，防止严格按单一别名口径的下游把真实命中读成 0。
+		resp["usage"] = normalizeUsageCacheAliases(ensureUsageTotal(usage))
 	}
 	return resp, nil
 }
@@ -517,8 +519,10 @@ func normalizeFrame(obj map[string]any) map[string]any {
 		}
 		out["choices"] = nchs
 	}
-	if u, ok := obj["usage"]; ok {
-		out["usage"] = u
+	if u, ok := obj["usage"].(map[string]any); ok {
+		// 末帧 usage 缓存别名归一（usage.go）：流式与聚合同口径，防止下游按
+		// 单一别名读到 0（details 有真值、扁平别名留 0 的上游实测形态）。
+		out["usage"] = normalizeUsageCacheAliases(u)
 	} else {
 		out["usage"] = nil
 	}

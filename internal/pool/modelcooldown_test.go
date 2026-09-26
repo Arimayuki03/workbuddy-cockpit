@@ -182,17 +182,24 @@ func TestModelCooldownsPreservedByNoteSuccess(t *testing.T) {
 	}
 }
 
-// TestModelCooldownsClearedByRevive 签到解冻（reviveCoolingLocked）→ 模型级 6004 冷却清零。
-func TestModelCooldownsClearedByRevive(t *testing.T) {
+// TestModelCooldownsKeptByRevive 签到解冻（reviveCoolingLocked）→ 模型级 6004 冷却保留。
+// 语义收敛（吸收 panel #55 同源修复）：6004 台账对齐上游重置墙钟，与账号余额正交；
+// 余额恢复（签到/余额刷新）只证明 billing 通道健康，不得抹掉模型限流冷却——否则
+// expiring==0 的账号每次余额刷新都被误判健康，重新选中再撞 429。
+// 账号级冷却（until/coolKind）仍随解冻清除（这是解冻的本义），见 TestReenableIfCredits。
+func TestModelCooldownsKeptByRevive(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.CooldownSoftForModel("u1", 600*time.Second, time.Now().Add(time.Hour), "glm-5.3", "6004")
 	p.ReenableIfCredits("u1", 500)
 	p.mu.RLock()
-	n := len(p.byUID["u1"].modelCooldowns)
+	mc, ok := p.byUID["u1"].modelCooldowns["glm-5.3"]
 	p.mu.RUnlock()
-	if n != 0 {
-		t.Errorf("revive 后 modelCooldowns=%d want 0", n)
+	if !ok {
+		t.Fatal("revive 后 modelCooldowns 被清——6004 台账不应随签到解冻消失")
+	}
+	if !time.Now().Before(mc.Until) {
+		t.Errorf("revive 后 glm-5.3 冷却截止=%v，应保持未来时刻（未被触碰）", mc.Until)
 	}
 }
 
