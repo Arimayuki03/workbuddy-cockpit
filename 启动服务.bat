@@ -70,8 +70,8 @@ echo     [2] 每日签到
 echo     [3] 猫猫旅行巡检
 echo     [4] 活跃上报（N 连发 + 领猫联动）
 echo     [5] 夜猫子任务（python）
-echo     [6] 全部按顺序跑一遍（含小程序成长，垫底执行）
-echo     [7] 小程序成长任务（python）
+echo     [6] 小程序成长任务（python）
+echo     [7] 全部按顺序跑一遍（含小程序成长，垫底执行）
 echo     [q] 返回主菜单
 echo  ============================================
 echo.
@@ -81,8 +81,8 @@ if /i "%t%"=="2" (.\task.exe checkin & goto :task_done)
 if /i "%t%"=="3" (.\task.exe travel & goto :task_done)
 if /i "%t%"=="4" (.\task.exe activity & goto :task_done)
 if /i "%t%"=="5" (.\task.exe cat & goto :task_done)
-if /i "%t%"=="6" (.\task.exe all & goto :task_done)
-if /i "%t%"=="7" (.\task.exe minichat & goto :task_done)
+if /i "%t%"=="7" (.\task.exe all & goto :task_done)
+if /i "%t%"=="6" (.\task.exe minichat & goto :task_done)
 if /i "%t%"=="q" goto :menu
 goto :task
 
