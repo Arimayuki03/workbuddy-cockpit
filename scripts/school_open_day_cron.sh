@@ -36,11 +36,13 @@ fi
 # ---- 模式 -> 实际命令 ----
 MODE="${1:-}"
 case "$MODE" in
-    school) CMD=( "$PY" scripts/school_open_day_2026.py ALL --run --yes ) ;;
+    school)
+	echo "开学季任务已下线（活动 2026-09-24 结束）。本入口保留仅为兼容旧 crontab，可直接移除该行。" >&2
+	exit 0 ;;
     cat)    CMD=( "$PY" scripts/task_runner.py ALL --yes --only black_cat ) ;;
     *)
         echo "用法: $0 {school|cat}" >&2
-        echo "  school  12:00 开学任务：任务+claim+自动抽空抽奖" >&2
+        echo "  school  （已下线：活动 2026-09-24 结束，仅为兼容保留）" >&2
         echo "  cat     01:00 夜猫窗口(23-08 CST)补 1 次" >&2
         exit 2
         ;;
