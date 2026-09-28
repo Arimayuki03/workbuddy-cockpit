@@ -69,10 +69,9 @@ echo     [1] 令牌保活（按需 refresh 全部账号）
 echo     [2] 每日签到
 echo     [3] 猫猫旅行巡检
 echo     [4] 活跃上报（N 连发 + 领猫联动）
-echo     [5] （开学季任务已下线：活动 2026-09-24 结束）
-echo     [6] 夜猫子任务（python）
-echo     [7] 全部按顺序跑一遍（含小程序成长，垫底执行）
-echo     [8] 小程序成长任务（python）
+echo     [5] 夜猫子任务（python）
+echo     [6] 全部按顺序跑一遍（含小程序成长，垫底执行）
+echo     [7] 小程序成长任务（python）
 echo     [q] 返回主菜单
 echo  ============================================
 echo.
@@ -81,13 +80,9 @@ if /i "%t%"=="1" (.\task.exe keepalive & goto :task_done)
 if /i "%t%"=="2" (.\task.exe checkin & goto :task_done)
 if /i "%t%"=="3" (.\task.exe travel & goto :task_done)
 if /i "%t%"=="4" (.\task.exe activity & goto :task_done)
-if /i "%t%"=="5" (
-    echo  开学季任务已下线（活动 2026-09-24 结束）
-    goto :task_done
-)
-if /i "%t%"=="6" (.\task.exe cat & goto :task_done)
-if /i "%t%"=="7" (.\task.exe all & goto :task_done)
-if /i "%t%"=="8" (.\task.exe minichat & goto :task_done)
+if /i "%t%"=="5" (.\task.exe cat & goto :task_done)
+if /i "%t%"=="6" (.\task.exe all & goto :task_done)
+if /i "%t%"=="7" (.\task.exe minichat & goto :task_done)
 if /i "%t%"=="q" goto :menu
 goto :task
 
