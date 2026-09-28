@@ -470,6 +470,7 @@ function BreakdownPanel({
               <TableHead className="pl-0 text-[11px] text-muted-foreground">{t('metric.name')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">{t('metric.requestsShort')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">Token</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('stats.creditCol')}</TableHead>
               <TableHead className="pr-0 text-[11px] text-muted-foreground">{t('stats.avgLatency')}</TableHead>
             </TableRow>
           </TableHeader>
@@ -503,6 +504,22 @@ function BreakdownPanel({
                   )}
                 </TableCell>
                 <TableCell className="text-xs tabular-nums">{fmtCompact(it.total_tokens)}</TableCell>
+                {/* 积分列：实测扣费（credit_samples>0 才有观测，缺失≠0 显示 —），
+                    行内小字标注单价「积分/1M Token」（配对 token 折算） */}
+                <TableCell className="text-xs tabular-nums">
+                  {(it.credit_samples ?? 0) > 0 ? (
+                    <>
+                      {fmtCredit(it.credit)}
+                      {(it.credits_per_1m_tokens ?? 0) > 0 && (
+                        <div className="text-[10px] text-muted-foreground">
+                          {fmtCredit(it.credits_per_1m_tokens)}/1M
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-muted-foreground/70">—</span>
+                  )}
+                </TableCell>
                 <TableCell className="pr-0 text-xs tabular-nums text-muted-foreground">
                   {it.avg_latency_ms ? Math.round(it.avg_latency_ms) + 'ms' : '—'}
                 </TableCell>

@@ -137,6 +137,10 @@ func recordUsageBucket(s *chatStat) {
 		HasTotal:         s.toks >= 0,
 		LatencyMs:        s.ttfb.Milliseconds(),
 		HasLatency:       s.ttfb > 0,
+		// 实测扣费积分（上游 usage.credit）：hasCredit 区分「缺失」与「显式 0」，
+		// 显式 0 是合法免费观测（tier0 限免），与成本账本同一纪律。
+		Credit:    s.credit,
+		HasCredit: s.hasCredit,
 	}, s.toks >= 0)
 }
 

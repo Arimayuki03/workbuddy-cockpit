@@ -1,13 +1,15 @@
-// taskcenter.go 面板「任务中心」：全账号任务扫描 + 执行队列（可配并发）+
-// 开学季独立状态。解决"不知道哪些账号有哪些任务没做"与"开学季状态不可见"。
+// taskcenter.go 面板「任务中心」：全账号任务扫描 + 执行队列（可配并发）。
+// 解决"不知道哪些账号有哪些任务没做"。
 //
 // 语义：
-//   - 扫描（scan_all）：并发拉取每账号的成长任务列表 + 开学季任务列表，
-//     汇总出"未完成且可自动化"的待办清单（只读，不执行）。
+//   - 扫描（scan_all）：并发拉取每账号的成长任务列表，汇总出"未完成且可自动化"
+//     的待办清单（只读，不执行）。
 //   - 执行队列（run_queue + queue）：把待办项按账号分组排队执行——账号内
 //     串行（复用 per-account 锁，与单任务/一键完成互斥），账号间并发
 //     （concurrency 信号量限制，默认 1）。队列状态可轮询。
-//   - 开学季（school/status + school/run_all）：独立状态视图 + 一键闭环。
+//
+// 开学季活动（2026-09-13~09-24）已结束，school 任务视图与一键闭环已下线
+// （吸收 panel 729247b 口径，券码查询保留）。
 package panel
 
 import (
@@ -28,23 +30,12 @@ import (
 // 扫描（只读）
 // ---------------------------------------------------------------------------
 
-// schoolTaskView 开学季任务条目（面板展示口径）。
-type schoolTaskView struct {
-	Code   string `json:"task_code"`
-	Status string `json:"status"` // pending | in_progress | completed | claimed
-	Prog   int    `json:"progress"`
-	Target int    `json:"target_count"`
-}
-
 // scanAccountItem 单账号扫描结果。
 type scanAccountItem struct {
-	UID       string           `json:"uid"`
-	Nickname  string           `json:"nickname"`
-	Growth    []upstream.Task  `json:"growth,omitempty"`
-	GrowthErr string           `json:"growth_error,omitempty"`
-	School    []schoolTaskView `json:"school,omitempty"`
-	SchoolErr string           `json:"school_error,omitempty"`
-	InPeriod  bool             `json:"in_period"`
+	UID       string          `json:"uid"`
+	Nickname  string          `json:"nickname"`
+	Growth    []upstream.Task `json:"growth,omitempty"`
+	GrowthErr string          `json:"growth_error,omitempty"`
 }
 
 // growthPending 任务是否"未完成且可自动化"。
@@ -58,19 +49,7 @@ func growthPending(t upstream.Task) bool {
 	return autoActionFor(t.TaskCode) != nil
 }
 
-// schoolPending 开学季任务是否待办（排除学生认证）。
-func schoolPending(t upstream.SchoolTask) bool {
-	switch t.TaskCode {
-	case "task_student_verify":
-		return false // 需微信学生真实认证
-	case "desktop_chat_1_time":
-		return t.Status != "claimed"
-	default:
-		return t.Status != "claimed" && t.Status != "completed"
-	}
-}
-
-// tasksScanAll 扫描全部账号：成长任务（未完成+可自动化）+ 开学季（未完成）。
+// tasksScanAll 扫描全部账号：成长任务（未完成+可自动化）。
 // 只读操作，并发拉取（账号数个位数）。
 func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 	states := p.cfg.Pool.List()
@@ -89,7 +68,7 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 			}
 			it := &items[i]
 			it.UID, it.Nickname = uid, a.Nickname
-			// D4 门控：global 账号无 CN 成长/开学季任务体系，不发起任何上游调用。
+			// D4 门控：global 账号无 CN 成长任务体系，不发起任何上游调用。
 			if a.IsGlobal() {
 				return
 			}
@@ -116,18 +95,6 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-			if stasks, inPeriod, err := p.cfg.Upstream.SchoolTasks(a); err != nil {
-				it.SchoolErr = err.Error()
-			} else {
-				it.InPeriod = inPeriod
-				for _, t := range stasks {
-					if schoolPending(t) {
-						it.School = append(it.School, schoolTaskView{
-							Code: t.TaskCode, Status: t.Status, Prog: t.Progress, Target: t.TargetCount,
-						})
-					}
-				}
-			}
 		}(i, st.UID)
 	}
 	wg.Wait()
@@ -141,9 +108,9 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 	}
 	pending := 0
 	for _, it := range res {
-		pending += len(it.Growth) + len(it.School)
+		pending += len(it.Growth)
 	}
-	log.Printf("panel: 队列扫描完成：全部账号待办 %d 项（成长+开学季）", pending)
+	log.Printf("panel: 队列扫描完成：全部账号待办 %d 项（成长）", pending)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": res, "pending_count": pending})
 }
 
@@ -184,24 +151,28 @@ func (p *Panel) queue() *queueState {
 // 防 oversized/恶意 body 拖内存）。
 const queueBodyLimit = 1 << 16
 
-// tasksRunQueue 启动执行队列：{concurrency:1-4, growth:bool, school:bool}。
-// 先做一次扫描，把全部待办项排队（growth 按账号内 autoActions 顺序执行，
-// school 逐账号跑闭环），账号内串行、账号间受并发信号量约束。
+// tasksRunQueue 启动执行队列：{concurrency:1-4, growth:bool}。
+// 先做一次扫描，把全部待办项排队（growth 按账号内 autoActions 顺序执行），
+// 账号内串行、账号间受并发信号量约束。school 开关已随活动下线移除；
+// body 里的 school 字段仍接受但忽略（老前端调用零回归）。
 // body 带 io.LimitReader 上限且解码错误显式返回 400：坏 body 静默吞掉会让
-// 结构体保持零值、走默认分支（growth+school 全账号任务）——意外触发全账号
+// 结构体保持零值、走默认分支（全账号任务）——意外触发全账号
 // 扫描比拒绝一次请求严重得多。
 func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Concurrency int  `json:"concurrency"`
 		Growth      bool `json:"growth"`
-		School      bool `json:"school"`
+		School      bool `json:"school"` // 已下线：接受但忽略（老前端兼容）
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, queueBodyLimit)).Decode(&body); err != nil && r.ContentLength != 0 {
 		writeErr(w, http.StatusBadRequest, "invalid body: "+err.Error())
 		return
 	}
+	// 两个开关都未带时保留旧默认全量口径；school-only 请求（老前端/过期脚本）
+	// 不再强制 growth=true——school 已下线，落到 startTaskQueue(false) 自然
+	// 返回 started=false，而不是被放大成全账号 growth 队列（与调用方本意相反）。
 	if !body.Growth && !body.School {
-		body.Growth, body.School = true, true
+		body.Growth = true
 	}
 	if body.Concurrency < 1 {
 		body.Concurrency = 1
@@ -209,7 +180,7 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	if body.Concurrency > 4 {
 		body.Concurrency = 4
 	}
-	total, seq, started, err := p.startTaskQueue(body.Concurrency, body.Growth, body.School)
+	total, seq, started, err := p.startTaskQueue(body.Concurrency, body.Growth)
 	if err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
 		return
@@ -219,13 +190,16 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": false, "message": "全部账号没有待办任务"})
 		return
 	}
-	log.Printf("panel: 队列启动：%d 项（并发 %d，成长 %v 开学季 %v）", total, body.Concurrency, body.Growth, body.School)
+	log.Printf("panel: 队列启动：%d 项（并发 %d）", total, body.Concurrency)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true, "total": total, "seq": seq})
 }
 
 // tasksCancelQueue 手动取消执行队列：置 cancelReq 标记，runQueueItems 的执行
-// 循环据此把剩余 pending 待办标为 cancelled。幂等——重复取消同样返回成功；
-// 队列未在跑返回 409。进行中的条目不打断（自然完成当前动作后停止）。
+// 循环据此把剩余 pending 待办标为 cancelled；同时广播中断信号（abortRunningTasks），
+// 正在执行的长条目（mp 真人节奏补报，45s/条分钟级占锁）在条目间隙感知后提前退出，
+// 保留进度下次续报——此前的「进行中条目不打断」在 45s 节奏下意味着取消后仍占锁
+// 数分钟，体验上等于取消失效。幂等——重复取消同样返回成功；
+// 队列未在跑返回 409。
 func (p *Panel) tasksCancelQueue(w http.ResponseWriter, r *http.Request) {
 	q := p.queue()
 	q.mu.Lock()
@@ -236,7 +210,8 @@ func (p *Panel) tasksCancelQueue(w http.ResponseWriter, r *http.Request) {
 	}
 	q.cancelReq = true
 	q.mu.Unlock()
-	log.Printf("panel: 队列取消请求：剩余待办停止调度")
+	p.abortRunningTasks()
+	log.Printf("panel: 队列取消请求：剩余待办停止调度，进行中条目将在间隙退出")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cancelled": true})
 }
 
@@ -248,7 +223,7 @@ func (p *Panel) tasksCancelQueue(w http.ResponseWriter, r *http.Request) {
 // 占位必须在扫描之前：此前「检查 running」与「置位 running」之间隔着一次
 // 秒级全账号扫描，手动触发与定时排程撞车会跑出双队列，且旧队列的
 // queueMarkAt 按索引写新队列的 items 切片，执行状态互相污染。
-func (p *Panel) startTaskQueue(concurrency int, wantGrowth, wantSchool bool) (total, seq int, started bool, err error) {
+func (p *Panel) startTaskQueue(concurrency int, wantGrowth bool) (total, seq int, started bool, err error) {
 	q := p.queue()
 	// 检查与置位同一临界区完成（原子占位）：扫描期间后续的启动请求一律 409。
 	q.mu.Lock()
@@ -258,6 +233,10 @@ func (p *Panel) startTaskQueue(concurrency int, wantGrowth, wantSchool bool) (to
 	}
 	q.running = true
 	q.mu.Unlock()
+	// 新一轮执行的中断信号通道（上一轮取消时关闭的通道不复用——关闭是终态，
+	// 复用会让新队列一启动就被旧信号打断）。仅在真正开跑前重置，扫描失败回滚
+	// 时多占一个通道无副作用。
+	p.resetAbort()
 	// 扫描失败 / 无待办 / 组队为空时回滚占位；顺带清掉占位期间收到的取消
 	// 请求——队列没真正开跑，取消意图不能残留到下一轮。
 	defer func() {
@@ -272,9 +251,8 @@ func (p *Panel) startTaskQueue(concurrency int, wantGrowth, wantSchool bool) (to
 	// 扫描待办（复用扫描逻辑的拉取部分）。
 	states := p.cfg.Pool.List()
 	type acct struct {
-		a      *auth.Auth
-		grow   []upstream.Task
-		school bool
+		a    *auth.Auth
+		grow []upstream.Task
 	}
 	var accts []queueAccount
 	var wg sync.WaitGroup
@@ -288,10 +266,10 @@ func (p *Panel) startTaskQueue(concurrency int, wantGrowth, wantSchool bool) (to
 			continue
 		}
 		wg.Add(1)
-		go func(a *auth.Auth, wantSchool bool) {
+		go func(a *auth.Auth) {
 			defer wg.Done()
 			one := queueAccount{a: a}
-			// D4 门控：global 账号无 CN 成长/开学季任务体系，不发起任何上游调用。
+			// D4 门控：global 账号无 CN 成长任务体系，不发起任何上游调用。
 			if a.IsGlobal() {
 				return
 			}
@@ -321,22 +299,12 @@ func (p *Panel) startTaskQueue(concurrency int, wantGrowth, wantSchool bool) (to
 					})
 				}
 			}
-			if wantSchool && p.cfg.Scheduler != nil {
-				if stasks, _, err := p.cfg.Upstream.SchoolTasks(a); err == nil {
-					for _, t := range stasks {
-						if schoolPending(t) { // 认证等不可做任务已在口径外
-							one.school = true
-							break
-						}
-					}
-				}
-			}
-			if len(one.grow) > 0 || one.school {
+			if len(one.grow) > 0 {
 				mu.Lock()
 				accts = append(accts, one)
 				mu.Unlock()
 			}
-		}(a, wantSchool)
+		}(a)
 	}
 	wg.Wait()
 
@@ -345,9 +313,6 @@ func (p *Panel) startTaskQueue(concurrency int, wantGrowth, wantSchool bool) (to
 	for _, one := range accts {
 		for _, t := range one.grow {
 			items = append(items, queueItem{UID: one.a.UID, Nickname: one.a.Nickname, Kind: "growth", Code: t.TaskCode, Status: "pending"})
-		}
-		if one.school {
-			items = append(items, queueItem{UID: one.a.UID, Nickname: one.a.Nickname, Kind: "school", Code: "school_daily", Status: "pending"})
 		}
 	}
 	if len(items) == 0 {
@@ -418,11 +383,8 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 				p.queueMarkAt(i, "running", "")
 				var msg string
 				var err error
-				switch kind {
-				case "growth":
+				if kind == "growth" {
 					msg, err = p.runGrowthQueued(one.a, code)
-				case "school":
-					msg, err = p.runSchoolQueued(one.a)
 				}
 				if err != nil {
 					p.queueMarkAt(i, "error", err.Error())
@@ -438,14 +400,13 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 
 // queueAccount 队列执行的账号单元（runQueueItems 参数）。
 type queueAccount struct {
-	a      *auth.Auth
-	grow   []upstream.Task
-	school bool
+	a    *auth.Auth
+	grow []upstream.Task
 }
 
 // ScheduledQueueRunner 定时排程入口（scheduler 第七类任务 taskQueue 到点回调，
 // main 装配期经 Scheduler.SetQueueRunner 注入）：扫描全账号待办并启动执行队列。
-// 成长任务 + 开学季闭环都做，并发固定 2（定时无人值守，宁稳勿激）。
+// 并发固定 2（定时无人值守，宁稳勿激）。
 // 队列已在跑（手动点过还没跑完）记日志跳过，等下个时点；无待办同样静默完成。
 func (p *Panel) ScheduledQueueRunner() {
 	pending, err := p.pendingCount()
@@ -457,7 +418,7 @@ func (p *Panel) ScheduledQueueRunner() {
 		log.Printf("panel: 定时队列：全部账号无待办任务")
 		return
 	}
-	total, _, started, err := p.startTaskQueue(2, true, true)
+	total, _, started, err := p.startTaskQueue(2, true)
 	if err != nil {
 		log.Printf("panel: 定时队列跳过: %v", err)
 		return
@@ -469,7 +430,7 @@ func (p *Panel) ScheduledQueueRunner() {
 	log.Printf("panel: 定时队列已启动：%d 项（并发 2）", total)
 }
 
-// pendingCount 只读扫描全账号待办总数（成长 + 开学季，与 startTaskQueue 同口径）。
+// pendingCount 只读扫描全账号待办总数（成长，与 startTaskQueue 同口径）。
 // 供定时入口决定"无待办不启队列"；扫描失败返回错误（宁可下个时点再试，不误启）。
 func (p *Panel) pendingCount() (int, error) {
 	states := p.cfg.Pool.List()
@@ -516,13 +477,6 @@ func (p *Panel) pendingCount() (int, error) {
 						if growthPending(t) && !seen[t.TaskCode] {
 							n++
 						}
-					}
-				}
-			}
-			if stasks, _, err := p.cfg.Upstream.SchoolTasks(a); err == nil {
-				for _, t := range stasks {
-					if schoolPending(t) {
-						n++
 					}
 				}
 			}
@@ -660,27 +614,6 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 	return msg, nil
 }
 
-// runSchoolQueued 单账号开学季闭环（scheduler 四任务 + 抽奖）。
-func (p *Panel) runSchoolQueued(a *auth.Auth) (string, error) {
-	if p.cfg.Scheduler == nil {
-		return "", fmt.Errorf("scheduler 不可用")
-	}
-	p.cfg.Scheduler.RunSchoolAccountNow(a)
-	// 闭环后回读开学季状态做汇总。
-	tasks, _, err := p.cfg.Upstream.SchoolTasks(a)
-	if err != nil {
-		return "闭环已执行（状态回读失败）", nil
-	}
-	done := 0
-	for _, t := range tasks {
-		if t.Status == "claimed" || (t.TaskCode != "task_student_verify" && t.Progress >= t.TargetCount && t.TargetCount > 0) {
-			done++
-		}
-	}
-	log.Printf("panel: 队列 school uid=%s: 闭环完成（%d/%d 项完成）", a.UID, done, len(tasks))
-	return fmt.Sprintf("开学季闭环完成（%d/%d 项已完成，抽奖已抽完）", done, len(tasks)), nil
-}
-
 // tasksQueueStatus 队列状态（轮询用）。
 func (p *Panel) tasksQueueStatus(w http.ResponseWriter, r *http.Request) {
 	q := p.queue()
@@ -701,87 +634,8 @@ func (p *Panel) tasksQueueStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// 开学季独立视图
+// 我的券码（开学季残留物，历史券码仍可查）
 // ---------------------------------------------------------------------------
-
-// schoolStatus 全账号开学季任务状态（含抽奖余额）。
-func (p *Panel) schoolStatus(w http.ResponseWriter, r *http.Request) {
-	states := p.cfg.Pool.List()
-	type acctView struct {
-		UID      string           `json:"uid"`
-		Nickname string           `json:"nickname"`
-		InPeriod bool             `json:"in_period"`
-		Tasks    []schoolTaskView `json:"tasks"`
-		Chances  int              `json:"chances"`
-		Err      string           `json:"error,omitempty"`
-	}
-	out := make([]acctView, 0, len(states))
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	sem := make(chan struct{}, 3) // 3 并发上限，与 schoolVouchers 同口径
-	for _, st := range states {
-		if st.Disabled {
-			continue
-		}
-		a := p.cfg.Pool.AuthByUID(st.UID)
-		if a == nil {
-			continue
-		}
-		wg.Add(1)
-		go func(a *auth.Auth) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			v := acctView{UID: a.UID, Nickname: a.Nickname}
-			// D4 门控：global 账号无开学季活动，不发起任何上游调用。
-			if a.IsGlobal() {
-				v.Err = "global realm（无开学季活动）"
-				mu.Lock()
-				out = append(out, v)
-				mu.Unlock()
-				return
-			}
-			tasks, inPeriod, err := p.cfg.Upstream.SchoolTasks(a)
-			if err != nil {
-				v.Err = err.Error()
-			} else {
-				v.InPeriod = inPeriod
-				for _, t := range tasks {
-					v.Tasks = append(v.Tasks, schoolTaskView{
-						Code: t.TaskCode, Status: t.Status, Prog: t.Progress, Target: t.TargetCount,
-					})
-				}
-			}
-			v.Chances, _ = p.cfg.Upstream.SchoolChances(a)
-			mu.Lock()
-			out = append(out, v)
-			mu.Unlock()
-		}(a)
-	}
-	wg.Wait()
-	sort.Slice(out, func(i, j int) bool { return out[i].Nickname < out[j].Nickname })
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": out})
-}
-
-// schoolRunAll 一键执行全部账号开学季闭环（异步，进度看任务频道日志）。
-// 按类型 TryLock 防重入：闭环逐账号向上游打全套请求，重复触发会叠加
-// 全账号扫描，已在跑时返回 409 友好提示（与 panel.go 批量动作同口径）。
-func (p *Panel) schoolRunAll(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Scheduler == nil {
-		writeErr(w, http.StatusNotImplemented, "scheduler not available")
-		return
-	}
-	if !p.tryLockBatch("school") {
-		writeErr(w, http.StatusConflict, "同类任务正在执行（开学季全账号闭环），请等本轮结束后再试")
-		return
-	}
-	go func() {
-		defer p.unlockBatch("school")
-		p.cfg.Scheduler.RunSchoolNowAll() // panel 纯 API 口径全量闭环（school_api.go）
-	}()
-	log.Printf("panel: 开学季全账号闭环已触发")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
-}
 
 // schoolVouchers 我的券码：逐 CN 账号查开学季 /vouchers（3 并发，与 packages
 // 同款限流），失败只在对应账号标 error。global 账号无开学季，不发上游调用。

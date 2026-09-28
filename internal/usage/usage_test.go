@@ -53,8 +53,9 @@ func TestRollupIdempotent(t *testing.T) {
 	if after.Totals.Requests != 3 || after.Totals.PromptTokens != 15 {
 		t.Fatalf("折叠后 totals = %d/%d, want 3/15", after.Totals.Requests, after.Totals.PromptTokens)
 	}
-	if len(after.Series) != 2 || after.Series[0].Scope != "day" || after.Series[1].Scope != "hour" {
-		t.Fatalf("series = %+v, want 日点在前 + 小时点在后", after.Series)
+	// 24h 时序只画窗口内的小时点（100 天前的桶折叠为日桶后同样被窗口过滤）。
+	if len(after.Series) != 1 || after.Series[0].Scope != "hour" {
+		t.Fatalf("series = %+v, want 仅今日小时点（时序按窗口过滤）", after.Series)
 	}
 
 	r.Rollup(time.Now())
@@ -78,23 +79,45 @@ func TestFlushLoadRoundtrip(t *testing.T) {
 	}
 	raw, _ := os.ReadFile(path)
 	var f file
-	if err := json.Unmarshal(raw, &f); err != nil || f.Version != 1 || len(f.Buckets) != 1 {
-		t.Fatalf("落盘文件异常: err=%v buckets=%d", err, len(f.Buckets))
+	if err := json.Unmarshal(raw, &f); err != nil || f.Version != usageFileVersion || len(f.Buckets) != 1 {
+		t.Fatalf("落盘文件异常: err=%v version=%d buckets=%d", err, f.Version, len(f.Buckets))
 	}
 }
 
-// Snapshot 把小时窗口外的细粒度并入日点，时序不出现空洞。
-func TestSnapshotStitching(t *testing.T) {
+// Snapshot 数字档的时序严格按窗口过滤：窗口外的小时点不画、日桶不上图，
+// 横轴不出现窗口外的日期（回归背景：曾经窗口外小时点折叠成日点继续下图、
+// 日桶无条件下图，选 24h 图上仍挂着历史日期，与时间筛选对不上）。
+func TestSnapshotSeriesWindowFilter(t *testing.T) {
 	r := New("")
 	now := time.Now()
-	r.Add(now.Add(-48*time.Hour), "cn", "u", "m", Delta{PromptTokens: 5, HasPromptTokens: true}, true) // 窗口(24h)外 → 日点
+	r.Add(now.Add(-48*time.Hour), "cn", "u", "m", Delta{PromptTokens: 5, HasPromptTokens: true}, true) // 24h 窗口外 → 不上图
 	r.Add(now, "cn", "u", "m", Delta{PromptTokens: 3, HasPromptTokens: true}, true)                    // 窗口内 → 小时点
-	s := r.Snapshot(24, nil)
-	if len(s.Series) != 2 || s.Series[0].Scope != "day" || s.Series[1].Scope != "hour" {
-		t.Fatalf("series = %+v", s.Series)
+	// 40 天前的日桶：数字档不上图，全量档保留。
+	day := now.AddDate(0, 0, -40).Format(dayLayout)
+	r.mu.Lock()
+	r.buckets["d:"+day+"|cn|u|m"] = &bucket{Scope: "d:" + day, Realm: "cn", UID: "u", Model: "m", Req: 1, PT: 90, TT: 90}
+	r.mu.Unlock()
+
+	s24 := r.Snapshot(24, nil)
+	if len(s24.Series) != 1 || s24.Series[0].Scope != "hour" {
+		t.Fatalf("24h series = %+v, want 仅窗口内 1 个小时点", s24.Series)
 	}
-	if s.Series[0].PromptTokens != 5 || s.Series[1].PromptTokens != 3 {
-		t.Fatalf("series tokens = %d/%d, want 5/3", s.Series[0].PromptTokens, s.Series[1].PromptTokens)
+	if s24.Series[0].PromptTokens != 3 {
+		t.Fatalf("24h series tokens = %d, want 3（窗口外数据不得计入）", s24.Series[0].PromptTokens)
+	}
+
+	s72 := r.Snapshot(72, nil)
+	if len(s72.Series) != 2 {
+		t.Fatalf("72h series = %+v, want 窗口内 2 个小时点（48h 前的小时点在 72h 窗口内）", s72.Series)
+	}
+
+	// 全量档：近 30 天小时粒度 + 更早日点，长期趋势不丢。
+	sAll := r.Snapshot(0, nil)
+	if len(sAll.Series) != 3 {
+		t.Fatalf("全量档 series = %+v, want 3 个点（48h 小时点 + 今日小时点 + 40 天前日点）", sAll.Series)
+	}
+	if sAll.Series[0].Scope != "day" || sAll.Series[0].PromptTokens != 90 {
+		t.Fatalf("全量档 series[0] = %+v, want 40 天前日点/90", sAll.Series[0])
 	}
 }
 
@@ -121,19 +144,16 @@ func TestSnapshotRealmDimension(t *testing.T) {
 	r.Add(now, "global", "u2", "glm-5.2", Delta{PromptTokens: 7, HasPromptTokens: true}, true)
 
 	s := r.Snapshot(24, nil)
-	// 24h 窗口：昨天的点被折叠为日点（1），今天的两个域各一个小时点（2）。
-	if len(s.Series) != 3 {
-		t.Fatalf("series = %d 个点, want 3（日点 + 双域小时点）", len(s.Series))
-	}
-	if s.Series[0].Realm != "cn" || s.Series[0].Scope != "day" {
-		t.Fatalf("series[0] = %s/%s, want day/cn", s.Series[0].Scope, s.Series[0].Realm)
+	// 24h 窗口：昨天的 cn 点被窗口过滤（1 个点），今天的两个域各一个小时点（2）。
+	if len(s.Series) != 2 {
+		t.Fatalf("series = %d 个点, want 2（双域小时点；窗口外日期不上图）", len(s.Series))
 	}
 	// 同一天的双域点相邻（realm 升序 cn < global），时间升序保持。
-	if s.Series[1].Realm != "cn" || s.Series[2].Realm != "global" {
-		t.Fatalf("双域小时点应相邻且按域升序: %s, %s", s.Series[1].Realm, s.Series[2].Realm)
+	if s.Series[0].Realm != "cn" || s.Series[1].Realm != "global" {
+		t.Fatalf("双域小时点应相邻且按域升序: %s, %s", s.Series[0].Realm, s.Series[1].Realm)
 	}
-	if s.Series[1].PromptTokens != 10 || s.Series[2].PromptTokens != 7 {
-		t.Fatalf("series tokens = %d/%d, want 10/7", s.Series[1].PromptTokens, s.Series[2].PromptTokens)
+	if s.Series[0].PromptTokens != 10 || s.Series[1].PromptTokens != 7 {
+		t.Fatalf("series tokens = %d/%d, want 10/7", s.Series[0].PromptTokens, s.Series[1].PromptTokens)
 	}
 
 	// by_model 按 (realm, model) 拆行：同裸名两行，Key 是裸名、Realm 单独标注。
@@ -295,7 +315,7 @@ func TestFlushConcurrentNoTearing(t *testing.T) {
 	if err := json.Unmarshal(raw, &f); err != nil {
 		t.Fatalf("并发 flush 后落盘文件非法 JSON（撕裂写）: %v\n前 120 字节: %q", err, raw[:min(len(raw), 120)])
 	}
-	if f.Version != 1 || len(f.Buckets) != 1 {
+	if f.Version != usageFileVersion || len(f.Buckets) != 1 {
 		t.Fatalf("落盘内容异常: version=%d buckets=%d", f.Version, len(f.Buckets))
 	}
 }
@@ -335,5 +355,87 @@ func TestRollupForcedWhenOverLimit(t *testing.T) {
 	if s.Totals.Requests != int64(limit+1) || s.Totals.PromptTokens != int64(limit+1)*10 {
 		t.Fatalf("折叠后 totals = %d/%d, want %d/%d（数据丢失）",
 			s.Totals.Requests, s.Totals.PromptTokens, limit+1, (limit+1)*10)
+	}
+}
+
+// credit 维度（吸收 panel PR #69 口径）：桶累计 credit + 配对 token 单价折算。
+// TestCreditAggregationHasCredit 显式 credit 累计：Credit/CreditSamples 落进
+// totals，CreditsPer1MTokens = sum(credit)/sum(配对 token)*1e6。
+func TestCreditAggregationHasCredit(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	// 两次请求各扣 1.5 credit、各 1000 token → 单价 = 3/2000*1e6 = 1500。
+	r.Add(now, "cn", "u", "m", Delta{TotalTokens: 1000, HasTotal: true, Credit: 1.5, HasCredit: true}, true)
+	r.Add(now, "cn", "u", "m", Delta{TotalTokens: 1000, HasTotal: true, Credit: 1.5, HasCredit: true}, true)
+
+	s := r.Snapshot(24, nil)
+	if s.Totals.CreditSamples != 2 || s.Totals.Credit != 3.0 {
+		t.Fatalf("credit 聚合 = %f/%d, want 3.0/2", s.Totals.Credit, s.Totals.CreditSamples)
+	}
+	if s.Totals.CreditsPer1MTokens != 1500 {
+		t.Errorf("CreditsPer1MTokens = %f, want 1500", s.Totals.CreditsPer1MTokens)
+	}
+}
+
+// TestCreditAggregationMissingNotZero 上游没给 credit（HasCredit=false）时不算
+// 观测：CreditSamples 不增、不产生配对 token——缺失≠0，前端据此显示「—」。
+func TestCreditAggregationMissingNotZero(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	r.Add(now, "cn", "u", "m", Delta{TotalTokens: 500, HasTotal: true}, true)
+
+	s := r.Snapshot(24, nil)
+	if s.Totals.CreditSamples != 0 || s.Totals.Credit != 0 {
+		t.Fatalf("无观测时 credit = %f/%d, want 0/0", s.Totals.Credit, s.Totals.CreditSamples)
+	}
+	if s.Totals.CreditsPer1MTokens != 0 {
+		t.Errorf("无配对样本时单价应 0, got %f", s.Totals.CreditsPer1MTokens)
+	}
+}
+
+// TestCreditAggregationExplicitZeroIsObserved 显式 credit:0 是合法免费观测
+//（tier0 限免）：计入样本数，单价为 0 但 CreditSamples>0 有别于「无观测」。
+func TestCreditAggregationExplicitZeroIsObserved(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	r.Add(now, "cn", "u", "m", Delta{TotalTokens: 800, HasTotal: true, Credit: 0, HasCredit: true}, true)
+
+	s := r.Snapshot(24, nil)
+	if s.Totals.CreditSamples != 1 {
+		t.Fatalf("显式 0 应计观测, samples=%d", s.Totals.CreditSamples)
+	}
+}
+
+// TestCreditSurvivesRollup 小时桶折叠为日桶后 credit 不丢（Rollup 合并段同步
+// 累加 Cr/CreditN）。
+func TestCreditSurvivesRollup(t *testing.T) {
+	r := New("")
+	old := time.Now().Add(-2 * hourlyKeep) // 90 天折叠线外
+	r.Add(old, "cn", "u", "m", Delta{TotalTokens: 1000, HasTotal: true, Credit: 2.0, HasCredit: true}, true)
+	r.Rollup(time.Now())
+
+	s := r.Snapshot(0, nil)
+	if s.Totals.CreditSamples != 1 || s.Totals.Credit != 2.0 {
+		t.Fatalf("折叠后 credit = %f/%d, want 2.0/1（折叠丢失 credit）",
+			s.Totals.Credit, s.Totals.CreditSamples)
+	}
+}
+
+// TestV1FileWithoutCreditLoads v1 落盘文件（无 cr/cn 字段）恢复后行为不变：
+// credit 视为无观测（零值），请求/token 原样保留——版本升级无需迁移代码。
+func TestV1FileWithoutCreditLoads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.json")
+	v1 := `{"version":1,"saved":"2026-09-01T00:00:00Z","buckets":[` +
+		`{"s":"d:2026-09-01","r":"cn","u":"u1","m":"m","q":3,"p":30,"c":0,"t":30,"l":0,"ln":0,"v":0,"vn":0}]}`
+	if err := os.WriteFile(path, []byte(v1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := New(path)
+	s := r.Snapshot(0, nil)
+	if s.Totals.Requests != 3 || s.Totals.TotalTokens != 30 {
+		t.Fatalf("v1 恢复 totals = %d/%d, want 3/30", s.Totals.Requests, s.Totals.TotalTokens)
+	}
+	if s.Totals.CreditSamples != 0 {
+		t.Errorf("v1 桶应视为无 credit 观测, samples=%d", s.Totals.CreditSamples)
 	}
 }

@@ -299,9 +299,8 @@ export default function TasksPage() {
   }
 
   const isCN = (realm ?? 'cn') === 'cn';
-  const scanOptions = (scan ?? []).filter((it) => it.growth?.length || it.school?.length);
+  const scanOptions = (scan ?? []).filter((it) => it.growth?.length);
   const filteredScan = selectedUid === 'all' ? scanOptions : scanOptions.filter((it) => it.uid === selectedUid);
-  const hasSchoolPending = filteredScan.some((it) => it.school?.length);
 
   return (
     <div className="flex flex-col gap-4 md:gap-6">
@@ -420,9 +419,7 @@ export default function TasksPage() {
                 {queue.items.map((it, i) => (
                   <TableRow key={`${it.uid}-${it.kind}-${it.code}-${i}`} className="border-b border-border/40">
                     <TableCell className="max-w-[140px] truncate pl-2 text-xs">{it.nickname || it.uid}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
-                      {it.kind === 'school' ? t('tasks.kindSchool') : t('tasks.kindGrowth')}
-                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{t('tasks.kindGrowth')}</TableCell>
                     <TableCell className="font-mono text-[11px]">{it.code}</TableCell>
                     <TableCell className={'text-xs font-medium ' + queueTone(it.status)}>
                       {queueStatusLabel(it.status, t, locale)}
@@ -523,18 +520,6 @@ export default function TasksPage() {
                     ))}
                   </div>
                 )}
-
-                {/* 开学季待办 */}
-                {!!it.school?.length && (
-                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                    <span className="text-[10px] text-muted-foreground">{t('tasks.schoolPending')}</span>
-                    {it.school.map((s) => (
-                      <Badge key={s.task_code} variant="secondary" className="rounded-md font-mono text-[10px]">
-                        {s.task_code} {s.progress}/{s.target_count}
-                      </Badge>
-                    ))}
-                  </div>
-                )}
               </div>
             ))}
           </div>
@@ -628,14 +613,6 @@ export default function TasksPage() {
             </div>
           )}
         </section>
-      )}
-
-      {/* 开学季入口提示（活动页有完整视图） */}
-      {hasSchoolPending && (
-        <div className="flex items-start gap-2.5 rounded-[20px] border border-amber-500/30 bg-amber-500/[0.07] px-3.5 py-3 text-xs">
-          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
-          <span className="text-[11px] leading-5 text-muted-foreground">{t('tasks.schoolSeeActivity')}</span>
-        </div>
       )}
     </div>
   );

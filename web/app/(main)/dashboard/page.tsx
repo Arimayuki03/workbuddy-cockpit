@@ -139,7 +139,9 @@ export default function DashboardPage() {
     async (silent = false) => {
       const results = await Promise.allSettled([
         accountApi.status(),
-        statsApi.usage(168),
+        // 全量档（'启动以来'）：时序图自己按日归并取近 14 天，不依赖后端窗口语义
+        // ——数字档的 series 只含窗口内小时点（时间窗对时序生效），没有现成日点。
+        statsApi.usage('all'),
         overviewCache.refresh(),
         packagesCache.refresh(),
       ]);
@@ -224,20 +226,29 @@ export default function DashboardPage() {
   );
 
   // 时序图：近 14 个日点；今天已有小时点时改用逐小时点（更细）。
-  // panel 的 series 是「日点升序 + 小时点升序」拼成的连续时序。
+  // 全量档 series 是「日点升序 + 近 30 天小时点升序」：30 天内的小时点先按日归并
+  // （30 天外的已是日点），再取近 14 天——数字档的 series 只含窗口内小时点，
+  // 日点口径必须在前端自己拼，不依赖后端窗口语义。
   const chartData = useMemo(() => {
     if (!usage) return [];
     const now = new Date();
     const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-    const dayPoints = realmSeries.filter((p) => p.scope === 'day').slice(-14);
-    const dayData = dayPoints.map((p) => ({
-      day: p.t.slice(5),
-      requests: p.requests,
-      tokens: p.total_tokens,
-    }));
-    const hourPoints = realmSeries.filter(
-      (p) => p.scope === 'hour' && p.t.startsWith(todayKey),
-    );
+    // 今天的逐小时点（更细）单独拎出，其余小时点并入各自日点。
+    const byDay = new Map<string, {day: string; requests: number; tokens: number}>();
+    for (const p of realmSeries) {
+      if (p.scope !== 'day' && p.scope !== 'hour') continue;
+      if (p.scope === 'hour' && p.t.slice(0, 10) === todayKey) continue;
+      const day = p.scope === 'hour' ? p.t.slice(0, 10) : p.t;
+      const cur = byDay.get(day);
+      if (cur) {
+        cur.requests += p.requests;
+        cur.tokens += p.total_tokens;
+      } else {
+        byDay.set(day, {day: day.slice(5), requests: p.requests, tokens: p.total_tokens});
+      }
+    }
+    const dayData = Array.from(byDay.values()).sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0)).slice(-14);
+    const hourPoints = realmSeries.filter((p) => p.scope === 'hour' && p.t.startsWith(todayKey));
     if (!hourPoints.length) return dayData;
     const todayHourly = hourPoints.map((p) => ({
       day: p.t.slice(11) + ':00',

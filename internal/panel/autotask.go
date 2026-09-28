@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand/v2"
 	"net/http"
 	"strings"
 	"time"
@@ -317,6 +318,37 @@ func acceptStatusOr(t *upstream.Task) string {
 // mpActionGap mp 任务写动作间隔（accept/上报/领奖之间，防频控）。
 var mpActionGap = 2 * time.Second
 
+// sleepAbortable 可中断睡眠：done 关闭时提前返回 true（中断），睡满返回 false。
+// abort 为 nil 时退化为纯 time.Sleep（无中断源的手动路径）。
+func sleepAbortable(d time.Duration, abort chan struct{}) bool {
+	if abort == nil {
+		time.Sleep(d)
+		return false
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return false
+	case <-abort:
+		return true
+	}
+}
+
+// mpChatEventGap mp 对话事件（chat_request_send）的真人节奏间隔。上游对
+// Sequential_Tasks_3「5 次有效对话」有反作弊校验：数秒级连发的事件会先被计入
+// 进度（回读 5/5、accept_status 甚至短暂转 completed），随后被判定无效整体回滚
+// （进度回落、claim 返回 400 "task not completed"）——panel 2026-09-26 实测 2s
+// 连发 4 条全灭，45s 间隔逐条上报全存活且 claim +300c+5e 成功。每条上报前
+// sleep gap + 0~10s 抖动；首条也等（上一轮残留进度被回滚后立即重报同样无效）。
+var mpChatEventGap = 45 * time.Second
+
+// maxMPChatEvents 单账号单轮 mp 对话补报上限。need 源自上游 target 差额，
+// target 异常放大时 45s/条的节奏会把账号锁占住数小时（队列 worker 持锁贯穿
+// 整个条目）——钳到已知批量上限（Sequential 链最大 target=10，留余量），
+// 超出部分下次续报。
+const maxMPChatEvents = 12
+
 // runMPMiniChatTask growth 域小程序限定任务通用闭环：
 // mp 查询 → accept（带登记回读验证）→ mini chat 事件上报（withActivityId 决定
 // 是否带开学季 activityId：school_season 必带，Sequential_Tasks_1 不带——服务端按
@@ -349,9 +381,19 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 		}
 		return fmt.Sprintf("已领取奖励（+%dc +%de）", credit, energy), nil
 	}
-	// 判据上报：按差额补 mini chat 事件。
+	// 判据上报：按差额补 mini chat 事件。每条前 sleep mpChatEventGap+抖动——
+	// 连发会被上游反作弊判无效（见 mpChatEventGap 注释），宁可慢不可白报。
+	// need 钳 maxMPChatEvents（上游 target 异常时不至于占锁数小时）；等待期
+	// 监听队列中断信号（tasksCancelQueue 广播），提前退出保留进度下次续报。
 	need := target - t.Current
+	if need > maxMPChatEvents {
+		need = maxMPChatEvents
+	}
+	abort := p.taskAbortCh()
 	for i := int64(0); i < need; i++ {
+		if interrupted := sleepAbortable(mpChatEventGap+time.Duration(rand.Int64N(int64(10*time.Second))), abort); interrupted {
+			return fmt.Sprintf("已取消（完成 %d/%d 次，进度保留待下轮续报）", i, need), nil
+		}
 		conv := fmt.Sprintf("wb2api-mp-%d-%d", time.Now().UnixMilli(), i)
 		var ev map[string]any
 		if withActivityId {
@@ -362,7 +404,6 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 		if err := p.cfg.Upstream.ReportMPEvent(a, ev); err != nil {
 			return fmt.Sprintf("完成 %d/%d 次上报后中断: %v", i, need, err), nil
 		}
-		time.Sleep(mpActionGap)
 	}
 	// 回读（异步计分，有界轮询复用 claimPoll 预算的紧凑版：两轮各隔 3s）。
 	for i := 0; i < 2; i++ {
