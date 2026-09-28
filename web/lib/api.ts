@@ -203,10 +203,10 @@ export const taskApi = {
     ),
 
   /* ── 扫描与执行队列 ─────────────────────────────────── */
-  /** 全账号扫描（只读）：成长任务待办 + 开学季待办 */
+  /** 全账号扫描（只读）：成长任务待办 */
   scanAll: () => post<ScanAllResponse>('/api/tasks/scan_all'),
-  /** 启动执行队列。body {concurrency?: 1-4, growth?: bool, school?: bool} */
-  runQueue: (body: {concurrency?: number; growth?: boolean; school?: boolean} = {}) =>
+  /** 启动执行队列。body {concurrency?: 1-4, growth?: bool} */
+  runQueue: (body: {concurrency?: number; growth?: boolean} = {}) =>
     post<TaskRunQueueResponse>('/api/tasks/run_queue', body),
   /** 队列状态（轮询用） */
   queue: () => get<TaskQueueResponse>('/api/tasks/queue'),
@@ -214,7 +214,7 @@ export const taskApi = {
   cancelQueue: () => post<{ok: boolean; cancelled: boolean}>('/api/tasks/queue/cancel'),
 };
 
-/* ── 开学季活动（panel taskcenter.go school*）───────────── */
+/* ── 开学季券码（panel taskcenter.go schoolVouchers）──────── */
 // 任务状态与一键闭环已随活动结束（2026-09-24）下线；券码查询保留（历史券码仍可查）。
 export const schoolApi = {
   /** 我的券码（逐 CN 账号查询） */
