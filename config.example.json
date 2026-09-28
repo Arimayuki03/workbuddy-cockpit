@@ -42,7 +42,8 @@
     "queue_hours": [
       10
     ],
-    "queue_enabled": false
+    "queue_enabled": false,
+    "_note_school": "school_* 键保留仅为老配置兼容：开学季任务已随活动 2026-09-24 结束下线，school_enabled/school_hours 不再生效"
   },
   "global": {
     "enabled": true,
