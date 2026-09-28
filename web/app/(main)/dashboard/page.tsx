@@ -234,6 +234,7 @@ export default function DashboardPage() {
     const now = new Date();
     const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
     // 今天的逐小时点（更细）单独拎出，其余小时点并入各自日点。
+    // Map 键保持完整 YYYY-MM-DD（排序口径），value.day 存显示用的短标签 MM-DD。
     const byDay = new Map<string, {day: string; requests: number; tokens: number}>();
     for (const p of realmSeries) {
       if (p.scope !== 'day' && p.scope !== 'hour') continue;
@@ -247,7 +248,12 @@ export default function DashboardPage() {
         byDay.set(day, {day: day.slice(5), requests: p.requests, tokens: p.total_tokens});
       }
     }
-    const dayData = Array.from(byDay.values()).sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0)).slice(-14);
+    // 按完整日期键排序：跨年时（2025-12-30 vs 2026-09-28）按 MM-DD 短标签
+    // 字典序会乱序，slice(-14) 会把最旧的日子当「最近 14 天」。
+    const dayData = Array.from(byDay.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([, v]) => v)
+      .slice(-14);
     const hourPoints = realmSeries.filter((p) => p.scope === 'hour' && p.t.startsWith(todayKey));
     if (!hourPoints.length) return dayData;
     const todayHourly = hourPoints.map((p) => ({
