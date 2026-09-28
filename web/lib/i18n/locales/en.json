@@ -102,7 +102,7 @@
     "global": "Global edition",
     "cnTitle": "China edition (codebuddy.cn)",
     "globalTitle": "Global edition (workbuddy.ai)",
-    "note": "You are viewing the **Global edition** (workbuddy.ai). It has **no daily check-in / cat travel / back-to-school / night-cat tasks** (credits come only from the one-off trial). Keep-alive and activity reporting still run, so fewer task records are expected — nothing is missing."
+    "note": "You are viewing the **Global edition** (workbuddy.ai). It has **no daily check-in / cat travel / night-cat tasks** (credits come only from the one-off trial). Keep-alive and activity reporting still run, so fewer task records are expected — nothing is missing."
   },
   "format": {
     "never": "never",
@@ -730,7 +730,7 @@
     "scanTitle": "Pending scan",
     "pendingCount": "{n} pending",
     "scanEmptyTitle": "Nothing pending",
-    "scanEmptyDesc": "All growth and campaign tasks are done, or not scanned yet",
+    "scanEmptyDesc": "All growth tasks are done, or not scanned yet",
     "queueStart": "Run queue",
     "queueStarted": "Queue started",
     "queueStartedDetail": "{n} items queued, serial within each account",
@@ -738,7 +738,7 @@
     "queueNothingDetail": "All accounts are done",
     "queueRunning": "Running · {n} items · conc {conc}",
     "queueConfirmTitle": "Start the execution queue",
-    "queueConfirmDesc": "Scans all pending items into the queue (growth tasks + campaign loop), serial per account, concurrent across accounts. Progress is live; duplicate starts are rejected.",
+    "queueConfirmDesc": "Scans all pending items into the queue (growth tasks), serial per account, concurrent across accounts. Progress is live; duplicate starts are rejected.",
     "concurrencyN": "Concurrency {n}",
     "queueTitle": "Execution queue",
     "colCode": "Task",
@@ -770,7 +770,7 @@
     "status_locked": "Locked",
     "growthError": "Query failed",
     "globalNoTitle": "No growth tasks on the global realm",
-    "globalNoDesc": "Growth and campaign tasks exist only for CN accounts; the gateway sends no task calls for global accounts. Token keepalive still runs.",
+    "globalNoDesc": "Growth tasks exist only for CN accounts; the gateway sends no task calls for global accounts. Token keepalive still runs.",
     "colResult": "Result",
     "colStatus": "Status",
     "viewDetail": "Details",
@@ -997,10 +997,6 @@
     "定期刷新登录令牌，避免账号因长期闲置掉线": "Refreshes login tokens periodically so idle accounts do not drop offline",
     "保活时刻": "Keep-alive hours",
     "在哪些整点刷新令牌（0-23，可多个）": "Hours at which tokens are refreshed (0-23, multiple allowed)",
-    "开学季任务": "School season",
-    "自动完成开学季任务中心的活动并抽空抽奖余额（仅国内版；国际版由脚本内部跳过）": "Completes the school-season task centre activities and spends the lottery balance (China edition only; skipped internally for the Global edition)",
-    "开学季时刻": "School season hours",
-    "在哪些整点执行开学季任务（0-23，可多个）。活动未开启时会自动跳过，不算失败": "Hours at which school-season tasks run (0-23, multiple allowed). Skipped automatically — not counted as a failure — when the event is not open",
     "夜猫任务": "Night cat",
     "在夜猫窗口（23:00–08:00）补做一次夜猫任务；窗口外会自动跳过": "Runs the night-cat task once inside the night window (23:00–08:00); skipped outside the window",
     "夜猫时刻": "Night cat hours",
@@ -1069,7 +1065,6 @@
     "国际版 Billing 基址": "Global billing base URL",
     "国际版的积分 / trial 接口基址，留空用内置默认 https://www.workbuddy.ai": "Base URL for Global credit / trial endpoints; empty uses the built-in default https://www.workbuddy.ai",
     "定时任务": "Scheduled tasks",
-    "六类任务各自独立排程：签到 / 猫猫旅行 / 活跃上报 / 保活 / 开学季 / 夜猫。可分别开关并设置执行时刻。签到、旅行、活跃上报、开学季、夜猫**只对国内版账号生效**——国际版没有这些体系，只有保活照常执行": "Six task families are scheduled independently: check-in / cat travel / activity report / keep-alive / school season / night cat. Each can be toggled and given its own hours. Check-in, travel, activity report, school season and night cat **apply to China-edition accounts only** — the Global edition has none of these, only keep-alive runs as usual",
     "系统提示词": "System prompt",
     "网关如何对待客户端传来的 system / developer 消息": "How the gateway treats system / developer messages from clients",
     "限流与冷却": "Rate limits & cooldown",
@@ -1152,10 +1147,10 @@
     "请求体上限（旧版上游）": "Request body limit (older upstream)",
     "让「临时停用」只摘除转发流量（签到 / 保活照常、积分与凭证保持活跃）。不开启时停用会回退为「改文件名」，账号会完全退出账号池、任务一并停止。**需重启上游容器生效**；且上游要求 api_key 非空，否则拒绝启动": "Makes \"pause\" remove the account from traffic only (check-in / keep-alive keep running, credits and credentials stay alive). When off, pausing falls back to renaming the file — the account leaves the pool entirely and its tasks stop. **Requires restarting the upstream container**; the upstream also requires a non-empty api_key, otherwise it refuses to start.",
     "自动执行任务队列": "Run task queue on schedule",
-    "到点自动执行任务中心的「执行队列」（全账号成长任务 + 开学季闭环，等同手动点一次启动）。会真实消耗上游配额，默认关闭；手动开过且未跑完时本轮跳过": "Automatically runs the task center queue at the scheduled hours (growth tasks + school-season loop for all accounts, same as clicking Start once). It consumes real upstream quota and is off by default; a round started manually is skipped, not doubled",
     "队列时刻": "Queue hours",
     "在哪些整点自动执行任务队列（0-23，可多个）。默认 10 点；建议避开签到/上报时刻，错峰执行": "Hours to run the task queue automatically (0-23, multiple allowed). Defaults to 10:00; stagger away from check-in/report hours to avoid bursts",
-    "七类任务各自独立排程：签到 / 猫猫旅行 / 活跃上报 / 保活 / 开学季 / 夜猫 / 任务队列。可分别开关并设置执行时刻。签到、旅行、活跃上报、开学季、夜猫、任务队列**只对国内版账号生效**——国际版没有这些体系，只有保活照常执行": "Seven task families are scheduled independently: check-in / cat travel / activity report / keep-alive / school season / night cat / task queue. Each can be toggled and given its own hours. Check-in, travel, activity report, school season, night cat and the task queue **apply to China-edition accounts only** — the Global edition has none of these, only keep-alive runs as usual"
+    "到点自动执行任务中心的「执行队列」（全账号成长任务，等同手动点一次启动）。会真实消耗上游配额，默认关闭；手动开过且未跑完时本轮跳过": "Automatically runs the task center queue at the scheduled hours (growth tasks for all accounts, same as clicking Start once). It consumes real upstream quota and is off by default; a round started manually is skipped, not doubled",
+    "六类任务各自独立排程：签到 / 猫猫旅行 / 活跃上报 / 保活 / 夜猫 / 任务队列。可分别开关并设置执行时刻。签到、旅行、活跃上报、夜猫、任务队列**只对国内版账号生效**——国际版没有这些体系，只有保活照常执行": "Six task families are scheduled independently: check-in / cat travel / activity report / keep-alive / night cat / task queue. Each can be toggled and given its own hours. Check-in, travel, activity report, night cat and the task queue **apply to China-edition accounts only** — the Global edition has none of these, only keep-alive runs as usual"
   },
   "activity": {
     "title": "Back-to-School Event",

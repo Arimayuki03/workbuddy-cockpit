@@ -236,20 +236,6 @@ const SCHEDULE_FIELDS: Field[] = [
     def: [22],
   },
   {
-    key: 'school_enabled',
-    kind: 'bool',
-    label: '开学季任务',
-    desc: '自动完成开学季任务中心的活动并抽空抽奖余额（仅国内版；国际版由内部跳过）',
-    def: true,
-  },
-  {
-    key: 'school_hours',
-    kind: 'hours',
-    label: '开学季时刻',
-    desc: '在哪些整点执行开学季任务（0-23，可多个）。活动未开启时会自动跳过，不算失败',
-    def: [12],
-  },
-  {
     key: 'cat_enabled',
     kind: 'bool',
     label: '夜猫任务',
@@ -267,7 +253,7 @@ const SCHEDULE_FIELDS: Field[] = [
     key: 'queue_enabled',
     kind: 'bool',
     label: '自动执行任务队列',
-    desc: '到点自动执行任务中心的「执行队列」（全账号成长任务 + 开学季闭环，'
+    desc: '到点自动执行任务中心的「执行队列」（全账号成长任务，'
       + '等同手动点一次启动）。会真实消耗上游配额，默认关闭；手动开过且未跑完时本轮跳过',
     def: false,
   },
@@ -560,7 +546,7 @@ const GROUPS: GroupDef[] = [
     id: 'schedule',
     section: 'schedule',
     title: '定时任务',
-    desc: '七类任务各自独立排程：签到 / 猫猫旅行 / 活跃上报 / 保活 / 开学季 / 夜猫 / 任务队列。可分别开关并设置执行时刻。签到、旅行、活跃上报、开学季、夜猫、任务队列**只对国内版账号生效**——国际版没有这些体系，只有保活照常执行',
+    desc: '六类任务各自独立排程：签到 / 猫猫旅行 / 活跃上报 / 保活 / 夜猫 / 任务队列。可分别开关并设置执行时刻。签到、旅行、活跃上报、夜猫、任务队列**只对国内版账号生效**——国际版没有这些体系，只有保活照常执行',
     fields: SCHEDULE_FIELDS,
   },
   {

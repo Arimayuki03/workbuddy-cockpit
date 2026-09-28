@@ -324,7 +324,7 @@ export interface ScanAllResponse {
   pending_count: number;
 }
 
-/** 队列执行单元（kind: growth；school 已随开学季活动结束下线） */
+/** 队列执行单元（kind: growth；school 已随开学季活动结束下线，枚举不再产生） */
 export interface QueueItem {
   uid: string;
   nickname?: string;
@@ -355,7 +355,7 @@ export interface TaskRunQueueResponse {
   message?: string;
 }
 
-/* ── 开学季（panel taskcenter.go school*）────────────────── */
+/* ── 开学季券码（panel taskcenter.go schoolVouchers）──────── */
 // 任务状态视图（SchoolAccountView/SchoolStatusResponse）已随活动结束（2026-09-24）
 // 下线；券码查询保留（历史券码仍可查）。
 

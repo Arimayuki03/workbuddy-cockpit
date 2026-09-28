@@ -102,7 +102,7 @@
     "global": "国际版",
     "cnTitle": "国内版（codebuddy.cn）",
     "globalTitle": "国际版（workbuddy.ai）",
-    "note": "当前为**国际版**视图（workbuddy.ai）。国际版**没有签到 / 猫猫旅行 / 开学季 / 夜猫任务**（积分只来自一次性 trial），保活与活跃上报照常执行，因此任务类页面记录较少属正常，不是数据丢失。"
+    "note": "当前为**国际版**视图（workbuddy.ai）。国际版**没有签到 / 猫猫旅行 / 夜猫任务**（积分只来自一次性 trial），保活与活跃上报照常执行，因此任务类页面记录较少属正常，不是数据丢失。"
   },
   "format": {
     "never": "从未",
@@ -706,7 +706,7 @@
     "scanTitle": "待办扫描",
     "pendingCount": "待办 {n} 项",
     "scanEmptyTitle": "没有待办任务",
-    "scanEmptyDesc": "全部账号的成长任务与开学季任务都已完成，或尚未扫描",
+    "scanEmptyDesc": "全部账号的成长任务都已完成，或尚未扫描",
     "queueStart": "执行队列",
     "queueStarted": "队列已启动",
     "queueStartedDetail": "共 {n} 项待办入队，账号内串行执行",
@@ -714,7 +714,7 @@
     "queueNothingDetail": "全部账号任务已完成",
     "queueRunning": "执行中 · {n} 项 · 并发 {conc}",
     "queueConfirmTitle": "启动执行队列",
-    "queueConfirmDesc": "先把全部待办扫描入队（成长任务 + 开学季闭环），账号内串行、账号间并发。执行进度实时显示，重复点击会被拒绝。",
+    "queueConfirmDesc": "先把全部待办扫描入队（成长任务），账号内串行、账号间并发。执行进度实时显示，重复点击会被拒绝。",
     "concurrencyN": "并发 {n}",
     "queueTitle": "执行队列",
     "colCode": "任务",
@@ -746,7 +746,7 @@
     "status_locked": "未解锁",
     "growthError": "查询失败",
     "globalNoTitle": "国际版没有成长任务体系",
-    "globalNoDesc": "成长任务与开学季任务只对国内版账号存在；Go 侧对 global 账号不发起任何任务调用，token 保活照常执行。",
+    "globalNoDesc": "成长任务只对国内版账号存在；Go 侧对 global 账号不发起任何任务调用，token 保活照常执行。",
     "colResult": "结果",
     "colStatus": "状态",
     "viewDetail": "查看明细",
