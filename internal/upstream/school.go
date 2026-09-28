@@ -1,14 +1,7 @@
-// school.go 开学季活动（school-season，活动期 2026-09-13 ~ 09-24）纯 API 自动化。
-// 来源：panel internal/upstream/school.go 快照拷贝 + 适配（2026-09-21）。
-// 主仓库漂移处理：panel 的 clientToken()（crypto/rand uuid 形态）在主仓库不存在，
-// 且主仓库已有同族 growthClientToken(prefix)（growth_reward.go）——复用之。
-//
-// 判据（2026-09-13 小程序 MCP 逆向 + 三账号实测，protocol.md §7.11）：
-//   - share_invite（每日 +100c +1抽奖）：POST /tasks/share-complete {channel:"wechat"}
-//     即点亮——纯前端上报，服务端不校验真实分享回执。本模块的主目标。
-//   - chat_3_times / expert_use：判据绑定小程序原生沙箱会话（e2b runtime），
-//     webchat 普通会话不计数，纯 API 不做（需小程序内人工对话）。
-//   - 抽奖：POST /wheel/draw {draw_uuid}（前端生成 uuid，消耗 1 chance）。
+// school.go 开学季活动（school-season，活动期 2026-09-13 ~ 09-24，已于 09-24 结束）
+// 的 API 残留物：mp 事件族（growth 域 Sequential 任务依赖）+ 券码查询（历史券码
+// 仍可查）。任务/抽奖全链已下线（吸收 panel 729247b 口径），schoolJSON 与 uuidV4
+// 仅为券码查询保留。
 //
 // 端点基座 billingBase（www.codebuddy.cn，billing 同域）；信封 {code,msg,data}，code=0 成功。
 package upstream
@@ -19,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"sync/atomic"
 	"time"
@@ -45,83 +37,6 @@ func (c *Client) schoolJSON(a *auth.Auth, method, path string, body map[string]a
 		return json.Unmarshal(data, out)
 	}
 	return nil
-}
-
-// SchoolTask 开学季任务条目。
-type SchoolTask struct {
-	TaskCode    string `json:"task_code"`
-	Status      string `json:"status"` // pending | completed | claimed
-	Progress    int    `json:"progress"`
-	TargetCount int    `json:"target_count"`
-}
-
-// SchoolTasks 任务列表 + 活动是否在期。
-func (c *Client) SchoolTasks(a *auth.Auth) ([]SchoolTask, bool, error) {
-	var out struct {
-		Tasks    []SchoolTask `json:"tasks"`
-		InPeriod bool         `json:"in_period"`
-	}
-	if err := c.schoolJSON(a, http.MethodGet, "/tasks", nil, &out); err != nil {
-		return nil, false, err
-	}
-	return out.Tasks, out.InPeriod, nil
-}
-
-// SchoolShareComplete 上报「分享完成」（share_invite 判据，实测即点亮）。
-func (c *Client) SchoolShareComplete(a *auth.Auth) error {
-	return c.schoolJSON(a, http.MethodPost, "/tasks/share-complete",
-		map[string]any{"channel": "wechat"}, nil)
-}
-
-// SchoolTaskViewed 标记任务已查看（pending → in_progress）。desktop_chat_1_time
-// 等任务的计数前置：必须先激活（in_progress）后的行为才计数（三账号实测）。
-// taskCode 经 PathEscape 拼进 URL 路径段（与 tasks.go 同类处理对齐），防止含
-// 保留字符的任务码构造出畸形路径。
-func (c *Client) SchoolTaskViewed(a *auth.Auth, taskCode string) error {
-	return c.schoolJSON(a, http.MethodPost, "/tasks/"+url.PathEscape(taskCode)+"/viewed", map[string]any{}, nil)
-}
-
-// SchoolClaimTask 领取任务奖励（返回获得的抽奖次数）。taskCode 同 PathEscape。
-func (c *Client) SchoolClaimTask(a *auth.Auth, taskCode string) (chanceGranted int, err error) {
-	var out struct {
-		ChanceGranted int `json:"chance_granted"`
-	}
-	if err := c.schoolJSON(a, http.MethodPost, "/tasks/"+url.PathEscape(taskCode)+"/claim", map[string]any{}, &out); err != nil {
-		return 0, err
-	}
-	return out.ChanceGranted, nil
-}
-
-// SchoolChances 当前抽奖次数余额。
-func (c *Client) SchoolChances(a *auth.Auth) (int, error) {
-	var out struct {
-		Chance struct {
-			Balance int `json:"balance"`
-		} `json:"chance"`
-	}
-	if err := c.schoolJSON(a, http.MethodGet, "/config", nil, &out); err != nil {
-		return 0, err
-	}
-	return out.Chance.Balance, nil
-}
-
-// SchoolDraw 抽奖一次，返回奖品描述（prize_code + 积分）。
-// draw_uuid 为标准 uuid v4（带横线 8-4-4-4-12）：对齐 python 闭环脚本实测口径
-// （uuid.uuid4()，每轮一次性）。注意 clientToken 那种 `<prefix>-<hex>` 混合形态
-// 本端点从未被服务端成功验证过（此前请求体 base64 化全灭），勿混用。
-func (c *Client) SchoolDraw(a *auth.Auth) (string, error) {
-	var out struct {
-		PrizeCode    string `json:"prize_code"`
-		CreditAmount int    `json:"credit_amount"`
-	}
-	if err := c.schoolJSON(a, http.MethodPost, "/wheel/draw",
-		map[string]any{"draw_uuid": uuidV4()}, &out); err != nil {
-		return "", err
-	}
-	if out.CreditAmount > 0 {
-		return fmt.Sprintf("%s +%dc", out.PrizeCode, out.CreditAmount), nil
-	}
-	return out.PrizeCode, nil
 }
 
 // uuidV4 生成 RFC 4122 v4 形态 uuid（8-4-4-4-12 带横线）。版本/变体位按规范置位。
@@ -311,43 +226,6 @@ func MiniPlaybookEvents(caseID, caseName string) []map[string]any {
 		send[k] = v
 	}
 	return []map[string]any{cta, send}
-}
-
-// SchoolExpertUseEvents 构造专家召唤+对话事件链（expert_use 判据，三账号实测）。
-// expertID/expertName 为开学季分类专家（16-BackToSchool）。
-func SchoolExpertUseEvents(expertID, expertName, conversationID string) []map[string]any {
-	rid := "wb2api-" + session.NewMessageID()
-	return []map[string]any{
-		{
-			"eventCode": "expert_summon_click", "id": expertID, "name": expertID,
-			"expertTitle": expertName, "type": "16-BackToSchool", "position": 0,
-		},
-		{
-			"eventCode": "expert_summoned", "id": expertID, "name": expertID,
-			"expertTitle": expertName,
-		},
-		{
-			"eventCode": "expert_actual_use", "id": expertID, "name": expertID,
-			"expertTitle": expertName, "type": "16-BackToSchool",
-			"characterCount": 14, "expertType": "builtin",
-		},
-		{
-			"eventCode":   "chat_request_send",
-			"inputLength": 14, "isPlan": false, "isAutoExecuteTerminal": false,
-			"isAutoModify": false, "codebaseEnable": false, "maxToken": 0,
-			"maxSteps": 500, "temperature": 0, "maxRetries": 0,
-			"mentionContexts": []any{}, "knowledgeId": []any{}, "knowledgeName": []any{},
-			"codebaseId": "", "mentionContextCount": 0, "command": "",
-			"recommendId": "", "skillId": "", "skillCount": 0, "totalCount": 0,
-			"traceId": rid, "rootRequestId": rid,
-			"parentConversationId": conversationID, "conversationId": conversationID,
-			"messageId": "msg-" + rid[len(rid)-8:],
-			"agentName": "mp", "agentType": "main",
-			"expertId": expertID, "expertName": expertName,
-			"codebuddy.session_id":              conversationID,
-			"codebuddy.conversation_request_id": rid,
-		},
-	}
 }
 
 // ---- 我的券码（#/prizes?tab=vouchers，2026-09-16 接入）----

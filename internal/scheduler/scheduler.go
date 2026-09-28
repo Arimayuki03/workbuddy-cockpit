@@ -300,16 +300,91 @@ func awaitWakeupGrace(ctx context.Context, planned time.Time) bool {
 	return sleepCtx(ctx, wakeupGraceDelay)
 }
 
+// catchUpWindow 槽位补跑窗口：timer 到期对墙钟补跑时，早于 now-24h 的已过点
+// 槽位不再重放。任务动作按天幂等（签到/旅行/活跃都是当日去重），关机多天后
+// 重放整周只会逐个空跑；只补最近一天的缺口即可恢复"每天该做的都做过"。
+// 窗口下限向下对齐到本地整点（枚举步进恒为整点序列），故边界整点会被纳入。
+const catchUpWindow = 24 * time.Hour
+
+// dueBatch 一个已到点的批次：同一整点上需要执行的全部任务类型（批内并行）。
+type dueBatch struct {
+	at    time.Time
+	kinds []taskKind
+}
+
+// dueBatches 枚举 (cursor, now] 内的全部已到点批次（时间升序）。
+//
+// 背景（issue #99 同源，吸收 panel 97335bdf / manager 4022fffb）：timer 走单调
+// 时钟，睡眠（Windows Modern Standby / 笔记本合盖）期间不推进——一个睡到槽位的
+// 长 timer 被整体顺延，09:00 的签到拖到下午才触发，而此刻机器早已醒着，只因
+// 没人再对一次墙钟，中间槽位就被整段跳过（跨过多个槽位时后续槽位同样被绕过，
+// nextWake(现在) 直接排到明天）。修法：timer 到期后重新对墙钟，把跨过的槽位
+// 逐个补跑；Run 用 cursor（已派发的最后一个槽位）作起点，执行期间被跨过的
+// 槽位也能在下一轮补上。
+//
+// 口径：
+//   - 槽位恒为整点（nextFire 用 time.Date 构造），按本地整点对齐后逐小时步进。
+//     不用 Truncate：其按绝对时间对齐，在非整点时区（如 +5:30）会错位到 :30；
+//   - cursor 非零时从 cursor+1h 起枚举（cursor 槽位本身已派发，不重跑）；
+//     零值（进程首轮）从 timer 的计划槽位起——只补首个 timer 睡过的缺口，
+//     不重放启动前的历史槽位（"服务重启"不是"睡眠唤醒"，重放只会启动风暴）；
+//   - 同刻多类任务合并成一批（与 nextWake 的合并口径一致），批内并行（runBatch）；
+//   - 禁用的任务不入批（enabled 原子读，与 nextWake 同口径）。
+//
+// 已知取舍：逐小时步进在 DST 跳变日可能漏/重一个本地小时（中国无 DST）；
+// 批次执行期间又睡过去的极端场景由下一轮 cursor 补跑兜底。
+func (s *Scheduler) dueBatches(now, cursor, planned time.Time) []dueBatch {
+	start := planned
+	if !cursor.IsZero() {
+		start = cursor.Add(time.Hour)
+	}
+	// 补跑窗口下限：早于 now-24h 的槽位不再重放。
+	if window := now.Add(-catchUpWindow); start.Before(window) {
+		start = window
+	}
+	// 对齐本地整点（窗口下限可能落在半点）。
+	start = time.Date(start.Year(), start.Month(), start.Day(), start.Hour(), 0, 0, 0, start.Location())
+
+	var batches []dueBatch
+	for t := start; !t.After(now); t = t.Add(time.Hour) {
+		var kinds []taskKind
+		for k := taskKind(0); k < kindCount; k++ {
+			if !s.enabled[k].Load() {
+				continue
+			}
+			for _, h := range s.hoursOf(k) {
+				if h == t.Hour() {
+					kinds = append(kinds, k)
+					break
+				}
+			}
+		}
+		if len(kinds) > 0 {
+			batches = append(batches, dueBatch{at: t, kinds: kinds})
+		}
+	}
+	return batches
+}
+
 // Run 主循环，阻塞直到 ctx 取消。
 //
 // wake 分支（/admin 热改排程开关后由 SetEnabled 投递）：立即停掉旧 timer、
 // 从"现在"重算 nextWake——禁用即撤排、启用即补排，全程不重启进程。
 // runBatch 执行期间到达的 wake 会留在容量 1 的通道里，本批收尾后下一轮循环消费。
+//
+// 补跑（吸收 panel 97335bdf / manager 4022fffb，issue #99 同源）：timer 走单调
+// 时钟，睡眠期间不推进——睡到槽位的长 timer 在唤醒瞬间才到期，且只覆盖排程时
+// 那一个槽位，中间被跨过的槽位就此丢失（09:00 签到睡到 14:00 才触发，14:00
+// 的 nextWake 直接排到明天）。timer 到期后对墙钟枚举 (cursor, now] 内的全部
+// 已到点批次按时间升序逐批补跑；cursor 记录已派发的最后一个槽位，执行批次
+// 期间又被跨过的槽位由后续轮次接续补上，不漏不重。
 func (s *Scheduler) Run(ctx context.Context) {
+	var cursor time.Time // 已派发的最后一个槽位（补跑起点）
 	for {
-		next, kinds := s.nextWake(time.Now())
+		next, _ := s.nextWake(time.Now())
 		if next.IsZero() {
 			// 七类任务全部禁用：不空转，等退出信号或热改启用通知。
+			// 禁用期间的槽位不进 cursor（补跑窗口天然截断，重启用后从"现在"起算）。
 			select {
 			case <-ctx.Done():
 				return
@@ -326,18 +401,21 @@ func (s *Scheduler) Run(ctx context.Context) {
 			timer.Stop()
 			continue
 		case <-timer.C:
-			// 到点任务在排程时确定（不依赖唤醒时刻的小时数），迟到唤醒也不会漏跑。
-			// 迟到唤醒（睡眠跨过槽位时刻，timer 在唤醒瞬间才到期）先等网络宽限：
-			// 唤醒瞬间 DNS 未就绪，零宽限派发等于把唯一一次补跑机会打在注定失败
-			// 的窗口里（issue #152）；准点触发零延迟不受影响。
-			if !awaitWakeupGrace(ctx, next) {
-				return // ctx 取消：放弃本批，优雅退出
+			// timer 到期 ≠ 只该跑 next 那一批：睡眠会冻结 timer（单调时钟），
+			// 醒来先对墙钟，把 (cursor, now] 内跨过的全部槽位按时间升序逐批补跑
+			// （含 next 本批，同刻多类任务已合并）。cursor 在派发前推进：批次执行
+			// 中 ctx 取消/panic 时该槽位不重放（任务动作按天幂等，宁可少跑一轮
+			// 也不重复轰炸；跨过的槽位由下轮 nextWake 的正常推进兜底）。
+			for _, b := range s.dueBatches(time.Now(), cursor, next) {
+				cursor = b.at
+				// 迟到补跑先等网络宽限：唤醒瞬间 DNS 未就绪，零宽限派发等于把
+				// 唯一一次补跑机会打在注定失败的窗口里（issue #152）；准点触发
+				// 零延迟不受影响。
+				if !awaitWakeupGrace(ctx, b.at) {
+					return // ctx 取消：放弃本批，优雅退出
+				}
+				s.runBatch(ctx, b.kinds)
 			}
-			// 唤醒时全部并行派发：每类一个 goroutine，慢任务族（如活跃上报
-			// 54 号 × 5 条 ≈ 7-8 分钟睡眠）不再阻塞同槽其他任务族；返回前
-			// 等全部任务收尾（下一轮 nextWake 照旧从"现在"起算，多轮重叠
-			// 的风险与串行版相同——nextWake 只挑现在之后的时点）。
-			s.runBatch(ctx, kinds)
 		}
 	}
 }
@@ -402,8 +480,12 @@ func (s *Scheduler) runOne(ctx context.Context, k taskKind) {
 		s.RunKeepaliveNow()
 		summary = "done"
 	case taskSchool:
-		s.RunSchoolNow()
-		summary = "done"
+		// 开学季活动（2026-09-13~09-24）已结束，任务下线（吸收 panel 729247b）：
+		// 枚举位保留以兼容 /admin 热改与老 config 的 school_enabled/school_hours，
+		// 到点只记一行说明。growth 域 school_season/Sequential 链在任务队列（taskQueue）
+		// 内不受影响，上游不再下发即自动消失。
+		summary = "skipped: 开学季活动已结束（2026-09-24），任务已下线"
+		log.Printf("scheduler: %s", summary)
 	case taskCat:
 		s.runCat(ctx)
 		summary = "done"

@@ -63,6 +63,10 @@ type bucket struct {
 	LatN  int64   `json:"ln"` // 延迟样本数
 	TPS   float64 `json:"v"`  // 吐字速率累计
 	TPSN  int64   `json:"vn"` // 速率样本数
+	// Cr 实测扣费积分累计（上游 usage.credit，v2 新增）。缺失≠0：旧桶无此字段
+	// 反序列化为 0，恰好等于"无观测"——聚合侧的 CreditN 与之配套区分。
+	Cr    float64 `json:"cr,omitempty"`
+	CreditN int64 `json:"cn,omitempty"` // credit 观测样本数（累计进 Cr 的次数）
 }
 
 // file 落盘结构。
@@ -71,6 +75,10 @@ type file struct {
 	Saved   string   `json:"saved"`
 	Buckets []bucket `json:"buckets"`
 }
+
+// usageFileVersion 落盘版本：v2 = bucket 增加 credit 维度（Cr/CreditN）。v1 文件
+// 缺该字段，反序列化自然为零值（无观测），无需迁移代码；写出恒用当前版本。
+const usageFileVersion = 2
 
 // Recorder 并发安全的用量记录器。
 type Recorder struct {
@@ -159,6 +167,10 @@ type Delta struct {
 	HasLatency       bool
 	TokensPerSecond  float64
 	HasTPS           bool
+	// Credit 本次请求的真实扣费积分（上游 usage.credit）。HasCredit=false 表示
+	// 上游没给 credit（缺失≠0，不累计不污染均值）；显式 0 是合法免费观测。
+	Credit    float64
+	HasCredit bool
 }
 
 // Add 记录一次请求尝试。
@@ -209,6 +221,10 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 	if d.HasTPS {
 		b.TPS += d.TokensPerSecond
 		b.TPSN++
+	}
+	if d.HasCredit {
+		b.Cr += d.Credit
+		b.CreditN++
 	}
 	r.dirty = true
 }
@@ -302,6 +318,8 @@ func (r *Recorder) Rollup(now time.Time) {
 			dst.LatN += src.LatN
 			dst.TPS += src.TPS
 			dst.TPSN += src.TPSN
+			dst.Cr += src.Cr
+			dst.CreditN += src.CreditN
 		}
 		delete(r.buckets, m.from)
 	}
@@ -350,7 +368,7 @@ func (r *Recorder) flush(force bool) {
 		r.mu.Unlock()
 		return
 	}
-	snap := file{Version: 1, Saved: time.Now().Format(time.RFC3339), Buckets: make([]bucket, 0, len(r.buckets))}
+	snap := file{Version: usageFileVersion, Saved: time.Now().Format(time.RFC3339), Buckets: make([]bucket, 0, len(r.buckets))}
 	for _, b := range r.buckets {
 		snap.Buckets = append(snap.Buckets, *b)
 	}
@@ -407,6 +425,15 @@ type Agg struct {
 	TotalTokens   int64   `json:"total_tokens"`
 	AvgLatencyMs  float64 `json:"avg_latency_ms"`
 	AvgTPS        float64 `json:"avg_tokens_per_second"`
+	// Credit 实测扣费积分累计（上游 usage.credit）。观测样本数 CreditSamples==0
+	// 表示本组完全没有 credit 观测（旧数据/上游未下发）——前端显示「—」而非 0。
+	Credit float64 `json:"credit"`
+	// CreditSamples credit 观测样本数。
+	CreditSamples int64 `json:"credit_samples"`
+	// CreditsPer1MTokens 平均积分单价：sum(credit)/sum(matched_total_tokens)*1e6。
+	// 分母只取与 credit 同时观测到的 token 样本（CreditTokens），不用纯 token 旧
+	// 记录伪造比例（吸收 panel PR #69 口径）。无配对样本时为 0，前端显示「—」。
+	CreditsPer1MTokens float64 `json:"credits_per_1m_tokens"`
 }
 
 // aggAcc 是聚合过程中的累加器：Agg 只放已算好的结果，均值需要样本数才能
@@ -417,6 +444,11 @@ type aggAcc struct {
 	latSamples int64
 	tpsSum     float64
 	tpsSamples int64
+	// crSum/crSamples credit 观测的累计与样本数；crTokSum 记与 credit 同时
+	// 观测到的 total tokens（配对口径：credit 与 token 出自同一请求）。
+	crSum     float64
+	crSamples int64
+	crTokSum  int64
 }
 
 func (g *aggAcc) add(b *bucket) {
@@ -429,6 +461,17 @@ func (g *aggAcc) add(b *bucket) {
 	g.latSamples += b.LatN
 	g.tpsSum += b.TPS
 	g.tpsSamples += b.TPSN
+	// 桶级 credit：CreditN 是桶内观测次数，TT 是桶内全部 token。配对 token 按
+	// 比例折算（credit 样本占桶内请求的比例 × 桶 token）——桶内混合「有 credit
+	// 与无 credit」请求时无法逐请求配对，比例折算是聚合侧的最优估计；CreditN==Req
+	// 的常见情形（成功请求全有观测）恰好精确。
+	if b.CreditN > 0 {
+		g.crSum += b.Cr
+		g.crSamples += b.CreditN
+		if b.Req > 0 {
+			g.crTokSum += int64(float64(b.TT) * float64(b.CreditN) / float64(b.Req))
+		}
+	}
 }
 
 func (g *aggAcc) finish() Agg {
@@ -438,6 +481,11 @@ func (g *aggAcc) finish() Agg {
 	}
 	if g.tpsSamples > 0 {
 		a.AvgTPS = g.tpsSum / float64(g.tpsSamples)
+	}
+	a.Credit = g.crSum
+	a.CreditSamples = g.crSamples
+	if g.crTokSum > 0 {
+		a.CreditsPer1MTokens = g.crSum / float64(g.crTokSum) * 1e6
 	}
 	return a
 }
@@ -475,10 +523,11 @@ type Snapshot struct {
 }
 
 // Snapshot 聚合当前全部桶。hours 控制时间窗：>0 时 series / by_account /
-// by_model 只聚合窗口内的桶——面板的时间筛选必须对这三份视图同时生效（否则
-// 切时间窗只有图变、表不动）；hours<=0 表示「自记录以来」全量口径（面板的
-// 「启动以来」档）：排行聚合全部桶，series 保留近 30 天小时粒度（与最长数字
-// 档一致，短历史不塌成日点）、更早的折叠为日点，长期趋势不丢。
+// by_model 只聚合窗口内的桶——面板的时间筛选必须对这四份视图同时生效，
+// 时序横轴不得出现窗口外的日期（否则切 24h 图上仍挂着历史日期，筛选形同虚设）；
+// hours<=0 表示「自记录以来」全量口径（面板的「启动以来」档）：排行聚合全部桶，
+// series 保留近 30 天小时粒度（与最长数字档一致，短历史不塌成日点）、
+// 更早的折叠为日点，长期趋势不丢。
 // totals / by_realm 恒为全量累计（「累计请求」卡片的文案就是累计口径）。
 // nicks 是 uid→昵称映射，仅用于展示。
 func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
@@ -565,21 +614,25 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 				continue
 			}
 			// allTime 档保留近 30 天的小时粒度（与最长数字档一致），更早的按日归并；
-			// 数字档只保留窗口内的小时点，窗口外并日避免时序出现空洞。
+			// 数字档只保留窗口内的小时点（时间窗对时序同样生效，横轴不出现窗口外
+			// 日期），窗口外的小时点直接不画。
 			if (!allTime && !ts.Before(hourFrom)) || (allTime && !ts.Before(allHourFrom)) {
 				if hourSeries[b.Realm+"|"+scope] == nil {
 					hourSeries[b.Realm+"|"+scope] = &aggAcc{}
 				}
 				hourSeries[b.Realm+"|"+scope].add(b)
-			} else {
-				// 超出小时窗口的细粒度数据并入其所在日，避免时序出现空洞。
+			} else if allTime {
+				// 全量档超出 30 天小时粒度的细粒度数据并入其所在日，长期趋势不丢。
 				d := ts.Format(dayLayout)
 				if daySeries[b.Realm+"|"+d] == nil {
 					daySeries[b.Realm+"|"+d] = &aggAcc{}
 				}
 				daySeries[b.Realm+"|"+d].add(b)
 			}
-		} else {
+		} else if allTime {
+			// 日桶只在全量档上图。数字档的窗口上限（60 天）小于折叠线（90 天），
+			// 日桶必然在窗口外——时序按窗口过滤，不上图（此即本修复：曾经日桶
+			// 无条件下图，切 24h 图上仍挂着历史日期）。
 			if daySeries[b.Realm+"|"+scope] == nil {
 				daySeries[b.Realm+"|"+scope] = &aggAcc{}
 			}

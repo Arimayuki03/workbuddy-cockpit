@@ -1,9 +1,7 @@
-// school.go 开学季任务（脚本类）与夜猫子任务（panel 纯 API 口径）的排程执行器。
-//
-// 背景：school（12:00）与 cat（01:00 夜猫窗口）原由系统 crontab 调
-// scripts/school_open_day_cron.sh 执行——依赖外部系统 cron、容器重建可能丢失、
-// 不在 config 里配置。迁入后成为第五、第六类任务，时点由 schedule.school_hours /
-// schedule.cat_hours 配置，school_open_day_cron.sh 保留为手动触发入口。
+// school.go 脚本类任务（minichat 手动触发）与夜猫子任务（panel 纯 API 口径）的
+// 排程执行器。开学季活动（2026-09-13~09-24）已结束，school 任务随活动下线
+// （吸收 panel 729247b 口径）：taskSchool 枚举位保留（stable name "school" 兼容
+// /admin 热改与老配置），dispatch 记一条「活动已结束」日志后跳过。
 //
 // v1.2.0：cat 由 python 脚本（task_runner.py black_cat）改为 panel 移植的纯 API
 // 实现（差额探测 + 真实 glm-5.2 对话 + 事件上报），夜猫窗口判定与补足次数对齐
@@ -141,16 +139,6 @@ func runScript(name, root string, commands [][]string) {
 func scriptTimedOut(c scriptRunner) bool {
 	sc, ok := c.(*scriptCmd)
 	return ok && sc.timedOut
-}
-
-// RunSchoolNow 立即执行开学季任务：school_open_day_2026.py ALL --run --yes。
-// 全量跑任务点亮 + 领奖 + 自动抽空抽奖余额。活动下线（in_period=false）时脚本
-// 各段全量跳过、正常退出，不视为失败。失败只记 WARN。
-func (s *Scheduler) RunSchoolNow() {
-	root := repoRoot()
-	runScript("school", root, [][]string{
-		{pythonCmd(), "scripts/school_open_day_2026.py", "ALL", "--run", "--yes"},
-	})
 }
 
 // RunCatNow 立即执行夜猫子任务（panel 纯 API 口径并入，不再走 python 脚本）：

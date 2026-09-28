@@ -59,11 +59,13 @@ type cfgFile struct {
 // pool.expiring_soon 同源同值（168h）：config 缺该字段时 task 与 server 行为一致。
 const defaultExpiringSoon = "168h"
 
-const usage = `用法: task <checkin|activity|keepalive|travel|school|cat|minichat|all>
+const usage = `用法: task <checkin|activity|keepalive|travel|cat|minichat|all>
   checkin   每日签到（已签到幂等）        activity  活跃上报（N 连发+领猫联动）
-  keepalive 令牌保活（按需 refresh）      school    开学季任务（python 脚本）
-  travel    猫猫旅行巡检                 cat       夜猫子任务（python 脚本）
-  minichat  小程序成长任务（python 脚本） all       全部跑一遍（顺序见上，minichat 垫后）`
+  keepalive 令牌保活（按需 refresh）      travel    猫猫旅行巡检
+  cat       夜猫子任务（python 脚本）     minichat  小程序成长任务（python 脚本）
+  all       全部跑一遍（顺序见上，minichat 垫后）
+
+（school 开学季任务已随活动结束 2026-09-24 下线。）`
 
 func main() {
 	if len(os.Args) < 2 {
@@ -72,7 +74,7 @@ func main() {
 	}
 	kind := strings.ToLower(os.Args[1])
 	switch kind {
-	case "checkin", "activity", "keepalive", "travel", "school", "cat", "minichat", "all":
+	case "checkin", "activity", "keepalive", "travel", "cat", "minichat", "all":
 	default:
 		fmt.Fprintf(os.Stderr, "未知任务 %q\n\n%s\n", kind, usage)
 		os.Exit(2)
@@ -136,7 +138,7 @@ func main() {
 	})
 
 	if kind == "all" {
-		for _, k := range []string{"keepalive", "checkin", "travel", "activity", "school", "cat", "minichat"} {
+		for _, k := range []string{"keepalive", "checkin", "travel", "activity", "cat", "minichat"} {
 			run(sch, k)
 		}
 		log.Printf("task all: complete")
@@ -147,7 +149,7 @@ func main() {
 }
 
 // run 分派到与定时排程同体的立即执行方法（global 账号门控在 scheduler 内部
-// 统一处理：school/cat/activity/checkin 对 global 账号自动跳过，与排程口径一致）。
+// 统一处理：cat/activity/checkin 对 global 账号自动跳过，与排程口径一致）。
 func run(sch *scheduler.Scheduler, kind string) {
 	switch kind {
 	case "checkin":
@@ -158,8 +160,6 @@ func run(sch *scheduler.Scheduler, kind string) {
 		sch.RunKeepaliveNow()
 	case "travel":
 		sch.RunTravelNow()
-	case "school":
-		sch.RunSchoolNow()
 	case "cat":
 		sch.RunCatNow()
 	case "minichat":

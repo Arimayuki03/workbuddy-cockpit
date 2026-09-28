@@ -309,15 +309,6 @@ export interface TaskClaimResponse {
 
 /* ── 任务中心：扫描与执行队列（panel taskcenter.go）────────── */
 
-/** 开学季任务条目（面板展示口径） */
-export interface SchoolTaskView {
-  task_code: string;
-  /** pending | in_progress | completed | claimed */
-  status: string;
-  progress: number;
-  target_count: number;
-}
-
 /** 单账号扫描结果 */
 export interface ScanAccountItem {
   uid: string;
@@ -325,10 +316,6 @@ export interface ScanAccountItem {
   /** 未完成且可自动化的成长任务 */
   growth?: GrowthTask[];
   growth_error?: string;
-  /** 未完成的开学季任务 */
-  school?: SchoolTaskView[];
-  school_error?: string;
-  in_period?: boolean;
 }
 
 export interface ScanAllResponse {
@@ -337,11 +324,10 @@ export interface ScanAllResponse {
   pending_count: number;
 }
 
-/** 队列执行单元 */
+/** 队列执行单元（kind: growth；school 已随开学季活动结束下线） */
 export interface QueueItem {
   uid: string;
   nickname?: string;
-  /** growth | school */
   kind: string;
   code: string;
   /** pending | running | done | skipped | error | cancelled */
@@ -370,21 +356,8 @@ export interface TaskRunQueueResponse {
 }
 
 /* ── 开学季（panel taskcenter.go school*）────────────────── */
-
-export interface SchoolAccountView {
-  uid: string;
-  nickname?: string;
-  in_period: boolean;
-  tasks: SchoolTaskView[];
-  /** 剩余抽奖次数 */
-  chances: number;
-  error?: string;
-}
-
-export interface SchoolStatusResponse {
-  ok: boolean;
-  accounts: SchoolAccountView[];
-}
+// 任务状态视图（SchoolAccountView/SchoolStatusResponse）已随活动结束（2026-09-24）
+// 下线；券码查询保留（历史券码仍可查）。
 
 /** 券码行（panel schoolVouchers） */
 export interface VoucherRow {
@@ -469,6 +442,11 @@ export interface UsageAgg {
   total_tokens: number;
   avg_latency_ms: number;
   avg_tokens_per_second: number;
+  /** 实测扣费积分累计（上游 usage.credit，v2 新增）；credit_samples=0 表示无观测（旧数据） */
+  credit?: number;
+  credit_samples?: number;
+  /** 平均积分单价：sum(credit)/sum(配对 token)*1e6；无配对样本时缺省 */
+  credits_per_1m_tokens?: number;
 }
 
 /** 按维度聚合的一行（key + 可选 realm / 昵称） */

@@ -26,7 +26,6 @@ import type {
   PanelModelsResponse,
   RequestLogsResponse,
   ScanAllResponse,
-  SchoolStatusResponse,
   SystemLogsResponse,
   TaskAcceptResponse,
   TaskAutoAllResponse,
@@ -216,11 +215,8 @@ export const taskApi = {
 };
 
 /* ── 开学季活动（panel taskcenter.go school*）───────────── */
+// 任务状态与一键闭环已随活动结束（2026-09-24）下线；券码查询保留（历史券码仍可查）。
 export const schoolApi = {
-  /** 全账号开学季任务状态（含抽奖余额） */
-  status: () => get<SchoolStatusResponse>('/api/school/status'),
-  /** 一键执行全部账号开学季闭环（异步，进度看任务频道日志） */
-  runAll: () => post<BatchStartResponse>('/api/school/run_all'),
   /** 我的券码（逐 CN 账号查询） */
   vouchers: () => get<VouchersResponse>('/api/school/vouchers'),
 };

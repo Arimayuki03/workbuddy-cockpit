@@ -1,14 +1,10 @@
 package scheduler
 
 import (
-	"bytes"
 	"context"
-	"errors"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -55,24 +51,6 @@ func equalArgs(a, b []string) bool {
 	return true
 }
 
-// TestNextWakeSchoolSlot 开学季任务在 school_hours（默认 12 点）处有独立时点。
-func TestNextWakeSchoolSlot(t *testing.T) {
-	s := New(Config{
-		CheckinHours:      []int{9},
-		TravelDisabled:    true,
-		ActivityDisabled:  true,
-		KeepaliveDisabled: true,
-		SchoolHours:       []int{12},
-	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 14, 11, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 14, 12, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v（school 12:00 独立时点）", at, want)
-	}
-	if len(kinds) != 1 || kinds[0] != taskSchool {
-		t.Errorf("kinds=%v want [school]", kinds)
-	}
-}
-
 // TestNextWakeCatSlot 夜猫子任务在 cat_hours（默认 1 点）处有独立时点。
 func TestNextWakeCatSlot(t *testing.T) {
 	s := New(Config{
@@ -112,26 +90,19 @@ func TestNextWakeSchoolCatDisabled(t *testing.T) {
 	}
 }
 
-// TestRunSchoolNowBuildsCommand RunSchoolNow 构造
-// python3 scripts/school_open_day_2026.py ALL --run --yes，工作目录设为仓库根。
-func TestRunSchoolNowBuildsCommand(t *testing.T) {
-	// 防环境泄漏：WB2A_PYTHON 若在测试机已设置会改写 pythonCmd()，使默认值断言失败。
-	t.Setenv("WB2A_PYTHON", "")
+// TestDispatchSchoolSkipsAfterRetirement 开学季活动结束（2026-09-24）后：
+// dispatch(taskSchool) 不再执行任何脚本，只记一条「活动已结束」说明。
+// taskSchool 枚举位保留（stable name "school" 兼容 /admin 热改与老 config）。
+func TestDispatchSchoolSkipsAfterRetirement(t *testing.T) {
 	f := installFakeExec(t)
 	s := New(Config{})
-	s.RunSchoolNow()
-	if f.lastName != "python3" {
-		t.Errorf("name=%q want python3", f.lastName)
+	s.dispatch(context.Background(), taskSchool)
+	if f.runN != 0 {
+		t.Errorf("活动下线后不应执行任何脚本，runN=%d", f.runN)
 	}
-	want := []string{"scripts/school_open_day_2026.py", "ALL", "--run", "--yes"}
-	if !equalArgs(f.lastArgs, want) {
-		t.Errorf("args=%v want %v", f.lastArgs, want)
-	}
-	if f.lastDir != repoRoot() {
-		t.Errorf("dir=%q want repo root %q", f.lastDir, repoRoot())
-	}
-	if _, err := os.Stat(filepath.Join(f.lastDir, "scripts", "school_open_day_2026.py")); err != nil {
-		t.Errorf("仓库根 %q 内应有 scripts/school_open_day_2026.py: %v", f.lastDir, err)
+	// runOne 把摘要包装成 "<summary> (耗时 …)"，断言 lastOut 不再是 done。
+	if got := s.lastOut[taskSchool].Load().(string); strings.HasPrefix(got, "done") {
+		t.Errorf("lastOut=%q want skipped 摘要（活动已结束）", got)
 	}
 }
 
@@ -194,35 +165,6 @@ func TestRunCatNowInsideNightWindowZeroNeed(t *testing.T) {
 	}
 }
 
-// TestDispatchSchoolCatAndFailureWarnsOnly dispatch 把 school/cat 分发给对应脚本；
-// 脚本失败只记 WARN（不 panic/不向上抛），且不影响后续任务继续分发。
-// TestDispatchSchoolAndFailureWarnsOnly dispatch 把 school 分发给脚本；
-// 脚本失败只记 WARN（不 panic/不向上抛），且不影响后续任务继续分发。
-// cat 已是纯 API 实现（不走 newScriptCmd），此处只验证 school 脚本链路。
-func TestDispatchSchoolAndFailureWarnsOnly(t *testing.T) {
-	t.Setenv("WB2A_PYTHON", "")
-	f := installFakeExec(t)
-	f.err = errors.New("boom boom")
-	s := New(Config{})
-
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	log.SetFlags(0)
-	t.Cleanup(func() {
-		log.SetOutput(os.Stderr)
-		log.SetFlags(log.LstdFlags)
-	})
-
-	s.dispatch(context.Background(), taskSchool)
-	if f.runN != 1 || f.lastArgs[0] != "scripts/school_open_day_2026.py" {
-		t.Errorf("dispatch(school) 未执行: runN=%d last=%v", f.runN, f.lastArgs)
-	}
-	out := buf.String()
-	if !strings.Contains(out, "WARN") || !strings.Contains(out, "scripts/school_open_day_2026.py") {
-		t.Errorf("school 失败未按 WARN 记录:\n%s", out)
-	}
-}
-
 // TestPythonCmd WB2A_PYTHON 覆盖解释器名：缺省/空白回落 "python3"（保持
 // 容器与既有测试的行为不变），显式设置时取其值（Windows 等仅有 python 的环境）。
 func TestPythonCmd(t *testing.T) {
@@ -246,3 +188,7 @@ func TestPythonCmd(t *testing.T) {
 		t.Errorf("trim pythonCmd()=%q want /usr/bin/python3.10", got)
 	}
 }
+
+// guard：os 与 http 包仍被同文件其余测试引用（编译期存在性兜底，防误删 import）。
+var _ = os.Getenv
+var _ = http.StatusOK

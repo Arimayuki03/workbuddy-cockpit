@@ -110,6 +110,38 @@ type Panel struct {
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
 	q         *queueState
+
+	// abortMu/abortCh 长动作中断广播：队列取消（tasksCancelQueue）时关闭通道，
+	// 正在执行的 mp 真人节奏等待（每条 45s+，不可打断的分钟级占锁）在条目间隙
+	// select 到关闭即提前退出，保留进度下次续报。容量 0 一次性信号；下一次
+	// startTaskQueue 重新置一个新通道。nil 通道 select 永远阻塞（无队列的
+	// 纯手动路径零开销）。
+	abortMu sync.Mutex
+	abortCh chan struct{}
+}
+
+// taskAbortCh 返回当前的中断信号通道（nil = 无中断源）。
+func (p *Panel) taskAbortCh() chan struct{} {
+	p.abortMu.Lock()
+	defer p.abortMu.Unlock()
+	return p.abortCh
+}
+
+// abortRunningTasks 广播中断信号（队列取消时调用）；幂等，重复调用无效果。
+func (p *Panel) abortRunningTasks() {
+	p.abortMu.Lock()
+	defer p.abortMu.Unlock()
+	if p.abortCh != nil {
+		close(p.abortCh)
+		p.abortCh = nil
+	}
+}
+
+// resetAbort 为新一轮队列执行重置中断通道。
+func (p *Panel) resetAbort() {
+	p.abortMu.Lock()
+	defer p.abortMu.Unlock()
+	p.abortCh = make(chan struct{})
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -250,8 +282,8 @@ func (p *Panel) routes() {
 	p.api("POST", "/api/tasks/run_queue", "/api/tasks/run_queue", p.tasksRunQueue)
 	p.api("POST", "/api/tasks/queue/cancel", "/api/tasks/queue/cancel", p.tasksCancelQueue)
 	p.api("GET", "/api/tasks/queue", "/api/tasks/queue", p.tasksQueueStatus)
-	p.api("GET", "/api/school/status", "/api/school/status", p.schoolStatus)
-	p.api("POST", "/api/school/run_all", "/api/school/run_all", p.schoolRunAll)
+	// school/status 与 school/run_all 已随开学季活动结束（2026-09-24）下线；
+	// 券码查询保留（历史券码仍可查）。
 	p.api("GET", "/api/school/vouchers", "/api/school/vouchers", p.schoolVouchers)
 	p.api("POST", "/api/checkin_all", "/api/checkin_all", p.checkinAll)
 	p.api("POST", "/api/travel_all", "/api/travel_all", p.travelAll)
@@ -761,7 +793,8 @@ func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 // usage 返回逐请求用量聚合。hours 查询参数控制时间窗（默认 72；"all" 或 <=0
 // 表示自记录以来全量，即「启动以来」档的模型/账号排行；数字上限 1440=60 天）：
 // series / by_account / by_model 只聚合窗口内的桶（面板的时间筛选对图和表同时生效）；
-// totals / by_realm 恒为全量累计。窗口外的小时点在 series 中自动折叠为日点，长期趋势不丢。
+// totals / by_realm 恒为全量累计。「启动以来」档的时序保留近 30 天小时粒度，
+// 更早折叠为日点，长期趋势不丢。
 func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Usage == nil {
 		writeErr(w, http.StatusNotImplemented, "usage recorder not available")
