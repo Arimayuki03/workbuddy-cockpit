@@ -7,7 +7,6 @@ import {schoolApi, errText} from '@/lib/api';
 import type {VoucherRow} from '@/lib/types';
 import {fmtDateTime} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
-import {CardRowsSkeleton} from '@/components/common/layout/LoadSkeleton';
 import {CopyButton} from '@/components/ui/copy-button';
 import {useT} from '@/lib/i18n/provider';
 import {Button} from '@/components/ui/button';
@@ -41,7 +40,6 @@ export default function ActivityPage() {
     }
   }, []);
 
-  const currentVouchers = vouchers;
 
   return (
     <div className="flex flex-col gap-4 md:gap-6">
@@ -72,13 +70,9 @@ export default function ActivityPage() {
       </div>
 
       <section className="overflow-hidden rounded-[20px] bg-muted">
-        {vouchersBusy && !vouchers.length ? (
-          <CardRowsSkeleton rows={4} />
-        ) : (
-          <div className="px-4 py-6 text-center text-xs text-muted-foreground">
-            {t('activity.endedVoucherHint')}
-          </div>
-        )}
+        <div className="px-4 py-6 text-center text-xs text-muted-foreground">
+          {t('activity.endedVoucherHint')}
+        </div>
       </section>
 
       {/* 券码抽屉：逐账号券码 + 二维码（复制给店员核销） */}
@@ -94,9 +88,9 @@ export default function ActivityPage() {
                 <Loader2 className="h-4 w-4 animate-spin" />
                 {t('common.loading')}
               </div>
-            ) : currentVouchers.length ? (
+            ) : vouchers.length ? (
               <div className="space-y-4">
-                {currentVouchers.map((row) => (
+                {vouchers.map((row) => (
                   <div key={row.uid} className="rounded-2xl bg-muted p-3">
                     <div className="mb-2 flex items-center justify-between gap-2">
                       <span className="truncate text-sm font-medium">{row.nickname || row.uid}</span>
