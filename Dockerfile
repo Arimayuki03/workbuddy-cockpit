@@ -4,9 +4,13 @@
 #   1) node:22       前端面板静态导出（npm ci && npm run build:export → web/out）
 #   2) golang:1.26   go:embed 内嵌前端产物（-tags embed_panel）+ 全部 CLI 二进制
 #   3) alpine:3.20   运行时（python3/bash/时区，与原镜像一致）
+# 前两段钉 --platform=$BUILDPLATFORM（构建机原生）+ Go 按 TARGETOS/TARGETARCH
+# 交叉编译：多架构构建不再走 QEMU 模拟——v1.15.0 实测模拟 arm64 里 next/font
+# 拉 Google Fonts 三次重试全部 ETIMEDOUT 致镜像构建失败；静态导出产物与
+# CGO_ENABLED=0 二进制均平台无关，原生构建完全等价且更快。
 
 # ---------- 1. 前端静态导出 ----------
-FROM node:22-alpine AS frontend
+FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend
 WORKDIR /web
 # 先拷 manifest 单独 npm ci：依赖未变时利用层缓存
 COPY web/package.json web/package-lock.json ./
@@ -16,23 +20,27 @@ COPY web/ ./
 RUN npm run build:export
 
 # ---------- 2. Go 编译（内嵌面板） ----------
-FROM golang:1.26-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 # 版本注入：CI 打 tag 构建时传 --build-arg VERSION=vX.Y.Z；本地/无 tag 构建回落 dev。
 ARG VERSION=dev
+# 目标平台（buildx 注入）：Go 交叉编译到 TARGETOS/TARGETARCH
+ARG TARGETOS
+ARG TARGETARCH
+ENV CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH}
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 # 静态产物就位（embed 目录：internal/panel/dist）后再编译，-tags embed_panel 启用内嵌。
 COPY --from=frontend /web/out/ ./internal/panel/dist/
-RUN CGO_ENABLED=0 go build -trimpath -tags embed_panel \
+RUN go build -trimpath -tags embed_panel \
       -ldflags="-s -w -X workbuddy2api/internal/server.appVersion=${VERSION}" \
       -o /out/wb2api ./cmd/server \
- && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/signin_bin ./cmd/signin \
- && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/login ./cmd/login \
- && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/credit ./cmd/credit \
- && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/trial_bin ./cmd/trial \
- && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/activity_bin ./cmd/activity
+ && go build -trimpath -ldflags="-s -w" -o /out/signin_bin ./cmd/signin \
+ && go build -trimpath -ldflags="-s -w" -o /out/login ./cmd/login \
+ && go build -trimpath -ldflags="-s -w" -o /out/credit ./cmd/credit \
+ && go build -trimpath -ldflags="-s -w" -o /out/trial_bin ./cmd/trial \
+ && go build -trimpath -ldflags="-s -w" -o /out/activity_bin ./cmd/activity
 
 # ---------- 3. 运行时 ----------
 FROM alpine:3.20
