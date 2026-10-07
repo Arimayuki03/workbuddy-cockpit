@@ -158,3 +158,5 @@ jobs:
           gh release view "${GITHUB_REF_NAME}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create "${GITHUB_REF_NAME}" --generate-notes --repo "$GITHUB_REPOSITORY"
           gh release upload "${GITHUB_REF_NAME}" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+
+# workflow-index-kick: 仓库重建后促使 Actions 重新索引
