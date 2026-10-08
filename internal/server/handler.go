@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,6 +20,8 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/httpauth"
+	"workbuddy2api/internal/iputil"
+	"workbuddy2api/internal/keystore"
 	"workbuddy2api/internal/livecfg"
 	"workbuddy2api/internal/logfmt"
 	"workbuddy2api/internal/pool"
@@ -91,6 +95,25 @@ type Config struct {
 	// 用 http.MaxBytesReader 包裹请求体，超限就地 413，不再无上限读入内存。
 	// <=0 回落默认 64MB。
 	MaxBodyBytes int64
+	// IPRules 入站 IP 黑白名单规则引擎（security 段，iprules.go；可选）。
+	// nil = 无规则恒放行（零配置零回归）——Evaluate/NoteBlocked 是 nil 安全的
+	// 指针方法，withAuth 直接调用无需判空。
+	IPRules *IPBlockRules
+	// KeyStore 多密钥分发库（wbk_ 密钥，keystore.go；可选）。nil = 未配密钥库，
+	// withAuth 只认全局 api_key（行为与 v1.15.1 逐位一致）。非 nil 时：Bearer
+	// 不匹配全局 key 且形如 wbk_ 前缀的密钥走 Resolve 定位 + Rejections 判定，
+	// 命中把快照塞 request context 供分段校验（keystore_auth.go 三段协议）。
+	KeyStore *keystore.Store
+	// TrustedProxyCIDRs 可信代理网段（config security.trusted_proxy_cidrs 的
+	// iputil.ParseTrustedCIDRs 归一化产物；非法条目由 config 层 fail-fast）。
+	// 空 = 完全不信任 X-Forwarded-For / X-Real-IP 转发头，客户端 IP 恒取 TCP
+	// 对端地址（防伪造头绕过 IP 管控，零配置即此安全默认）。
+	TrustedProxyCIDRs []netip.Prefix
+	// TrustedProxyHops 可信代理层数（XFF 从右往左取第 N 跳；<1 按 1 处理）。
+	TrustedProxyHops int
+	// RequestClientInfo 采集调用来源（client_ip / user_agent）进请求日志环形缓冲
+	// 与 JSONL 归档（config logging.request_client_info；默认 false 不采集）。
+	RequestClientInfo bool
 	// Static 前端静态托管 FS（v1.2.0，manager 壳 go:embed 产物；nil = 不注册）。
 	// 非 nil 时挂载到根 "/"：ServeMux 最长前缀匹配保证既有路由（/v1/*、/admin/*、
 	// /status、/api/* 已注册路径）优先，静态 handler 只兜住其余路径。
@@ -165,6 +188,10 @@ type Handler struct {
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
+	// trustedCIDRs / trustedHops 可信代理解析参数（Config.TrustedProxyCIDRs/Hops
+	// 的平移，requestClientIP 单一取值点用）。
+	trustedCIDRs []netip.Prefix
+	trustedHops  int
 }
 
 // NewHandler 构建 handler。
@@ -184,7 +211,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.MaxBodyBytes <= 0 {
 		cfg.MaxBodyBytes = defaultMaxBodyBytes
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), trustedCIDRs: cfg.TrustedProxyCIDRs, trustedHops: cfg.TrustedProxyHops}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
@@ -225,12 +252,49 @@ func NewHandler(cfg Config) *Handler {
 	return h
 }
 
+// MountAnthropic 挂载 Anthropic Messages 协议路由（/v1/messages 与
+// /v1/messages/count_tokens，anthropic.go）。对齐 responses.go 的 MountResponses
+// 导出模式：NewHandler 不隐式挂载（anthropic_test.go 等测试显式调用本方法会与
+// 隐式注册重名 panic），由 main 在 h.MountResponses() 同位接线 h.MountAnthropic()。
+func (h *Handler) MountAnthropic() { h.mountAnthropic(h.mux) }
+
+// IPRulesSpec IP 规则的对外输入形态（cmd/server 装配用；与 iprules.go 内部
+// ipRuleSpec 同构——内部类型不导出，避免泄漏进包外 API 面）。
+type IPRulesSpec struct {
+	Blacklist     []string `json:"ip_blacklist"`
+	Whitelist     []string `json:"ip_whitelist"`
+	WhitelistMode bool     `json:"ip_whitelist_mode"`
+}
+
+// NewIPRules 构建 IP 规则引擎并按需持久化（main 装配用，转调 NewIPBlockRules）。
+// filePath 为落盘路径（空 = 纯内存）；spec 是初始规则种子（非法条目跳过并进
+// 错误清单，不阻塞构建——语义见 iprules.go）。
+func NewIPRules(filePath string, spec IPRulesSpec) (*IPBlockRules, []string) {
+	return NewIPBlockRules(filePath, ipRuleSpec{
+		Blacklist:     spec.Blacklist,
+		Whitelist:     spec.Whitelist,
+		WhitelistMode: spec.WhitelistMode,
+	})
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// 入站 IP 规则（security 段，鉴权链最前——iprules.go 执行顺序契约）：
+		// 黑白名单判定先于 api_key 校验，被拒请求不进鉴权、不进业务、不出站。
+		// IPRules 为 nil（未配置）时 Evaluate 恒放行（nil 安全的指针方法），
+		// 额外开销一次指针判空，零配置零回归。/healthz 不经 withAuth，探活不受拦。
+		ip := iputil.RequestClientIP(r, h.trustedCIDRs, h.trustedHops)
+		if allowed, reason := h.cfg.IPRules.Evaluate(ip); !allowed {
+			h.cfg.IPRules.NoteBlocked(ip, r.URL.Path, reason)
+			log.Printf("WARN: [server] ip rules: blocked %s %s reason=%s", ip, r.URL.Path, reason)
+			writeOpenAIError(w, http.StatusForbidden, "ip_blocked",
+				"request blocked by access rules ("+reason+")")
+			return
+		}
 		// 密钥经 apiKey() 读取：Live 非 nil 时走 livecfg 快照——面板改 api_key 后
 		// 下一个请求即用新值（免重启，与 panel 侧 apiKey() 同语义同口径）。
 		if key := h.apiKey(); key != "" {
@@ -248,6 +312,22 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 			if !bearerOK {
+				// wbk_ 分发密钥分支（keystore_auth.go 段1）：Bearer 不匹配全局 key
+				// 且形如 wbk_ 前缀时走密钥库 Resolve。命中 → 先查 Rejections（与
+				// 请求无关的首个拒绝：停用/过期/配额/限流，模型解析前就能报），
+				// 无拒绝把快照与客户端 IP 塞 request context 供段2 校验/段3 记账；
+				// 未命中/出错 → 与全局 key 失败同口径 401。KeyStore nil 时整段跳过
+				//（行为与 v1.15.1 一致）。
+				if bearer := bearerToken(r); looksLikeDistribKey(bearer) {
+					if k, ok := h.resolveDistribKey(bearer); ok {
+						if rej := h.keyRejections(k); rej != nil {
+							writeKeyRejection(w, rej)
+							return
+						}
+						next(w, withKeyState(r, &keyStoreState{key: k, ip: ip}))
+						return
+					}
+				}
 				writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 				return
 			}
@@ -294,9 +374,10 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	// (域, 模型) 的最近探索时刻（键 "realm|model"）。与 accounts[].model_costs
 	// 行对照即可读出「探索→毕业」全链路（单一事实来源，不做双表示）。零回归只增键。
 	exploreEvents, exploreLast := h.cfg.Pool.CostExploreStatus()
-	// realm_totals 按域分组的计数汇总（双 realm 并存时运维一眼看到各域可用性）：
-	// 只新增字段，既有 total/healthy/cooling/disabled/in_flight_full 汇总键不变（零回归）。
-	writeJSON(w, http.StatusOK, map[string]any{
+	// credit_floor / model_locks（积分保底接线）：floor=生效值（0=关），locks 是
+	// 当前有未过期模型级冷却的 (域, 模型) 汇总。锁视图无锁时 nil，按现有 /status
+	// 的「零值省略」风格整体省略（不透出 null）。
+	statusBody := map[string]any{
 		"accounts":       h.cfg.Pool.List(),
 		"total":          total,
 		"healthy":        healthy,
@@ -314,7 +395,14 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 			"events_total": exploreEvents,
 			"per_model":    exploreLast,
 		},
-	})
+	}
+	if floor := h.cfg.Pool.CreditFloor(); floor > 0 {
+		statusBody["credit_floor"] = floor
+	}
+	if locks := h.cfg.Pool.ModelLockView(); locks != nil {
+		statusBody["model_locks"] = locks
+	}
+	writeJSON(w, http.StatusOK, statusBody)
 }
 
 // countsMapFrom 把 CountsDetailed 五元组编码为 /status realm_totals 的字段对象。
@@ -347,10 +435,12 @@ const (
 )
 
 // models 返回模型列表：纯动态（缓存 1h），失败/无号返回空列表（无静态兜底）。
+// wbk_ 分发密钥上下文（withAuth 段1 塞入）时按密钥 realm + 模型白名单裁剪
+//（keystore_auth.go filterModelsForKey；无密钥/未接线时原样输出，零回归）。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data":   h.modelList(),
+		"data":   h.filterModelsForKey(r, h.modelList()),
 	})
 }
 
@@ -638,6 +728,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		parsedErr := session.ParseRequest(body)
 		_, realmErr := resolveModel(parsedErr.Model)
 		st := newChatStat(time.Now(), parsedErr, realmErr)
+		st.noteClientInfo(r, h.cfg.RequestClientInfo) // 调用来源采集（开关关=no-op）
 		st.status = status
 		if status == http.StatusRequestEntityTooLarge {
 			st.setError("request body exceeds limit")
@@ -682,10 +773,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
 	realm, bareModel := resolveModel(parsed.Model)
 
+	// wbk_ 分发密钥段2 校验（keystore_auth.go）：模型映射/realm 解析之后、轮转上游
+	// 之前——Validate 判 IP 白名单/MaxIPs/realm/模型白名单（后两者要 mappedModel，
+	// withAuth 段1 做不了）。拒绝按 Status/Reason 返 OpenAI 错误体（400/403/429，
+	// rate_limited 带 Retry-After）。被拒请求不进轮转、不记账（issue #52）。
+	if rej := h.validateKeyForRequest(r, bareModel, realm, time.Now()); rej != nil {
+		writeKeyRejection(w, rej)
+		return
+	}
+
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	// realm 先记请求模型域（cn/global；global: 前缀请求若最终由 CN 号兜底服务，
 	// 选号成功处会以账号实际 Realm() 覆盖——用量分桶按账号归属域计）。
 	st := newChatStat(time.Now(), parsed, realm)
+	st.noteClientInfo(r, h.cfg.RequestClientInfo) // 调用来源采集（开关关=no-op）
 	defer st.done()
 
 	tried := map[string]bool{}
@@ -946,13 +1047,32 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = uerr.Status
 		}
 		if uerr == nil && terr != nil {
+			// 上游超时 / 停滞：**不换号、不罚号**，立即止损（吸收自 panel commit 55d1e4d1）。
+			//
+			// 超时不是账号的问题：同一份请求换到别的号，撞上的是同一个慢上游，只会把
+			// 客户端拖到 MaxRotate × ResponseHeaderTimeout（现役 60s 时最坏约 4 分钟），
+			// 期间还给一串健康号喂连败计数。此前全仓没有任何超时识别，超时和网络抖动
+			// 共用同一条换号路径。判定三态见 isUpstreamTimeout：
+			//   - net.Error.Timeout()（ResponseHeaderTimeout / Client.Timeout）；
+			//   - 显式 deadline（context.DeadlineExceeded / os.ErrDeadlineExceeded）；
+			//   - 客户端仍在但 ctx 被取消——那只能是我们自己的空闲看门狗（monitorBody
+			//     IdleTimeout）掐的流，即上游停滞。客户端主动断连时 r.Context() 已取消，
+			//     走下方抖动分支。
+			if isUpstreamTimeout(terr, r.Context().Err() != nil) {
+				st.status = http.StatusServiceUnavailable
+				st.setError("upstream timeout: " + terr.Error())
+				lastErr = fmt.Errorf("%w: %v", errUpstreamTimeout, terr)
+				log.Printf("WARN: [server] upstream timeout acct=%s: %v (rotation stopped, account not penalized)",
+					logfmt.Label(acct.UID, acct.Nickname), terr)
+				break
+			}
 			// 网络层抖动：只换号，不喂熔断计数（传输层错误对连续失败连坐熔断过于严苛）。
 			// 连败兜底（issue #114）：喂连败计数——连不上上游是「不知道原因的失败」，
 			// 连败 N 次临时出池，单次/偶发不罚（NoteFailures 内部达阈才动作）。
 			// 上游 client 已打 transport error 日志。
 			// 客户端主动断连（请求方 ctx 已取消/结束）连带的上游调用中断不是账号故障，
 			// 不计连败：否则粘性会话下远程客户端可借反复断连逐号打满阈值触发降权出池
-			// （判据见 isClientDisconnect；上游自身超时不误过滤）。
+			// （判据见 isClientDisconnect；上游自身超时已在上方止损分支拦截）。
 			st.status = http.StatusServiceUnavailable
 			st.setError("transport: " + terr.Error())
 			lastErr = terr
@@ -1040,6 +1160,34 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadRequest
 				return
 			}
+			// 请求体解析失败（11101）：立即透传上游原文回 400，**不轮转**。
+			//
+			// 语义变更（吸收自 workbuddy2api-panel commit fd5c5a6b / issue #99 实案）：
+			//   旧语义：不罚账号但仍轮转——理由是「不同账号可能有不同的模型权限，
+			//   换号再试一次」。
+			//   新语义：立即 400 透传、终止轮转——11101 是请求体解析失败，同一份
+			//   body 换任何账号都是同样的解析结果（模型权限差异影响的是 11102
+			//   「该后端无此模型」，不是 body 解析）。继续轮转有两个实害：
+			//   ① 每号一次上游调用 + rotateBackoff 占用，MaxRotate 倍放大无效请求；
+			//   ② 轮转耗尽后末端落到「其余保持 503」，把**确定性失败**伪装成
+			//      「账号不可用、稍后再试」（503 no_healthy_account 语义），客户端
+			//      据此对必然失败的请求无限重试。issue #99 实案即该形态。
+			// 不罚号：请求的问题不是账号的问题（applyErrorPolicy ErrBadParams 分支
+			// 零动作，fail 只释放租约/解粘性）。
+			if kind == upstream.ErrBadParams {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					// 空 body 兜底：无上游原文可透传，保留可读分类文案（不编造原文）。
+					msg = "chat request body was rejected by upstream"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "bad_params", msg,
+					h.hintOf(upstream.ErrBadParams, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				st.setError(fmt.Sprintf("http %d: %s", status, string(respBody)))
+				return
+			}
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 5755fe3 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
@@ -1058,15 +1206,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
-		h.cfg.Pool.NoteSuccess(acct.UID)
-		// 11102 负缓存清命：该账号该模型实测成功，立即解除避让（不必等 TTL 到期）。
-		// BlockModelClear 按 "11102" reason 前缀识别，只清 11102 条目、不碰 6004 独立冷却。
-		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-		// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
-		// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
-		if stickyKey != "" && h.cfg.Session != nil {
-			h.cfg.Session.Bind(stickyKey, acct.UID)
-		}
+		// 成功判定与粘性绑定一律**延后到这一跳真正成功之后**（吸收自 panel commit
+		// 01ecb4a6，见下方流式/非流式分支）：上游「200 已开流 + 一帧 error」是真实
+		// 形态（6004 限流、内容拦截、审核），此前在读第一帧之前就 NoteSuccess +
+		// 清 11102 负缓存 + 绑粘性 → 被限流的号记成健康、粘性把会话钉死在它身上，
+		// 后续每一轮都打同一个限流号。
 		if parsed.Stream {
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
 			st.status = http.StatusOK
@@ -1074,18 +1218,54 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// gateway_hint（SSE）：成功状态 200 已开流，中途 error 帧透传时附加
 			// hint 字段（hintFn 惰性求值——正常流零开销，只有真撞到 error 帧才
 			// 组装请求上下文做判定）。
+			// errFrame：上游 error 帧原文（WithErrorFrameObserver 旁路采集，
+			// 透传字节不变），流尾据此分类处置账号。
+			var errFrame string
 			sErr := upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
 				return h.hintContext(bareModel, reqHasImage)
-			}))
-			if upstream.IsEmptyStreamError(sErr) {
+			}), upstream.WithErrorFrameObserver(func(payload string) { errFrame = payload }))
+			switch {
+			case upstream.IsEmptyStreamError(sErr):
 				// 上游 200 但空流（0 有效帧）：StreamHint 已写 error 帧 + [DONE]
 				// 兜底（HTTP 头已发出只能 200），但这是上游缺陷不是成功——日志/
 				// 状态收敛到 502 观测，与非流式 Aggregate 空流→502 upstream_parse
 				// 同语义（此前 `_ =` 吞错把失败流记成 200，运维看到假成功）。
 				// 只认 IsEmptyStreamError：客户端断连的写失败不误标（人已走，
-				// 502 观测没有意义）。
+				// 502 观测没有意义）。**不记成功**（此前 NoteSuccess 在流前已执行）。
 				st.status = http.StatusBadGateway
 				log.Printf("WARN: [server] stream acct=%s model=%s: empty upstream stream (200+0 frames)", logfmt.Label(acct.UID, acct.Nickname), bareModel)
+			case errFrame != "":
+				// 上游以 error 帧报错（6004 限流 / 内容拦截 / 审核）：按帧内容分类并
+				// 处置账号——**不记成功、不清 11102 负缓存、不绑粘性**，粘性号则解绑
+				// （此前这些动作在流开始前就做了，于是一个正在限流的号被当成健康号，
+				// 粘性还会把整个会话钉在它身上，后续每轮都失败）。HTTP 头已发出只能
+				// 200（error 帧已透传），日志/状态收敛 503 观测失败。
+				kind := upstream.FrameKind(errFrame)
+				h.applyErrorPolicy(acct.UID, kind, errFrame, bareModel, nil)
+				fail(acct.UID)
+				st.status = http.StatusServiceUnavailable
+				st.setError("upstream error frame: " + logfmt.Truncate(errFrame, 200))
+				log.Printf("WARN: [server] stream acct=%s model=%s: upstream error frame kind=%s payload=%s",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel, kind, logfmt.Truncate(errFrame, 200))
+			case sErr != nil:
+				// 客户端写失败（断连）：上游帧无恙，账号健康——账号侧照常记成功
+				//（与 default 同语义），wire 200 已发出，仅流不完整。
+				h.cfg.Pool.NoteSuccess(acct.UID)
+				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
+				if stickyKey != "" && h.cfg.Session != nil {
+					h.cfg.Session.Bind(stickyKey, acct.UID)
+				}
+			default:
+				// 真成功：这一跳读完且上游没有报错，才记成功并让粘性跟上。
+				// 11102 负缓存清命：该账号该模型实测成功，立即解除避让（不必等 TTL 到期）。
+				// BlockModelClear 按 "11102" reason 前缀识别，只清 11102 条目、不碰 6004 独立冷却。
+				// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
+				// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
+				h.cfg.Pool.NoteSuccess(acct.UID)
+				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
+				if stickyKey != "" && h.cfg.Session != nil {
+					h.cfg.Session.Bind(stickyKey, acct.UID)
+				}
 			}
 			if st.status == http.StatusOK {
 				// 最终 200：清空轮转中途失败留下的 errSummary（setError 首个错误优先
@@ -1118,6 +1298,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 不算合法成本观测（缺失≠0），仅记一条 WARN 协助排障，绝不写入账本。
 				log.Printf("WARN: [server] stream usage without credit acct=%s model=%s (no cost observation)", logfmt.Label(acct.UID, acct.Nickname), bareModel)
 			}
+			// wbk_ 分发密钥段3 记账（keystore_auth.go）：最终 200 且 usage 口径确认后
+			// 才计入限流窗口/用量/来源 IP（issue #52：被拒请求不占额度）；error 帧/
+			// 空流/写失败分支在上方已收束到非 200 观测或直接 return，不会走到这里。
+			// tokens/credits 取上游 usage 真实口径（与成本账本同源），credit 缺失传 0
+			//（RecordUse 内部「缺失不计入」）。
+			if st.status == http.StatusOK {
+				tokUse, creditUse := keyUsageOf(st)
+				h.recordKeyUse(r, tokUse, creditUse)
+			}
 			rc.Close()
 			return
 		}
@@ -1128,6 +1317,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			st.status = http.StatusBadGateway
 			st.setError("aggregate: " + err.Error())
+			// 非流式聚合失败**不记成功、不绑粘性**（延后绑定语义：此前 NoteSuccess
+			// 在流开始前已执行，聚合撞出流内 error 帧也记成功——限流号被当成健康号）。
+			// 错误形态分类：*upstream.Error 是 Aggregate 归类的流内 error 帧
+			// （FrameKind 判 Kind、Msg 装 payload 原文）→ applyErrorPolicy 按帧内容
+			// 处置账号（6004 冷却等），粘性号解绑；空流哨兵（errEmptyStream）是上游
+			// 缺陷非账号问题，零动作。
+			var aerr *upstream.Error
+			if errors.As(err, &aerr) {
+				h.applyErrorPolicy(acct.UID, aerr.Kind, aerr.Msg, bareModel, aerr)
+				fail(acct.UID)
+			}
 			return
 		}
 		writeJSON(w, http.StatusOK, resp)
@@ -1135,12 +1335,23 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 最终 200：清空轮转中途失败留下的 errSummary（同流式出口，见上）。
 		st.errSummary = ""
 		st.toks = completionTokens(resp)
+		// 非流式同理：聚合成功（无 error 帧、非空流）才算这一跳成功，事后才记成功/
+		// 清 11102 负缓存/绑粘性（与流式 default 分支同语义，见上方延后绑定总注释）。
+		h.cfg.Pool.NoteSuccess(acct.UID)
+		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
+		if stickyKey != "" && h.cfg.Session != nil {
+			h.cfg.Session.Bind(stickyKey, acct.UID)
+		}
 		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
 		if credit, total, ok := usageCreditTotal(resp); ok {
 			h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, total)
 		}
 		// metrics 采集（非流式）：与流式同口径，从同一份 usage 带出。
 		fillStatFromUsage(st, resp)
+		// wbk_ 分发密钥段3 记账（keystore_auth.go）：非流式成功出口，tokens/credits
+		// 口径与流式一致（上游 usage 真实值，credit 缺失传 0 不计入）。
+		tokUse, creditUse := keyUsageOf(st)
+		h.recordKeyUse(r, tokUse, creditUse)
 		return
 	}
 	// 末端错误透传（error-passthrough）：上游返回的错误原样透传，不再规范化成固定文案。
@@ -1159,6 +1370,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusServiceUnavailable
 	code := "no_healthy_account"
 	msg := "all accounts are temporarily unavailable, please retry later"
+	// 上游超时：轮转已在传输层分支止损（isUpstreamTimeout 分支 break 到此），这里给
+	// 一条**能区分**的专门文案，别混进「没有可用账号」——两者的排查方向完全不同
+	// （慢上游/网关出口网络 vs 池子空了），客户端的退避策略也不该混同。
+	if errors.Is(lastErr, errUpstreamTimeout) {
+		code = "upstream_timeout"
+		msg = "upstream timed out: rotation stopped (another account would hit the same slow upstream), please retry later"
+	}
 	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定（11133/11135
 	// 在 hint 层自带形态判定，ErrClient 家族也能带上 hint）；本地调度类错误
 	// （无上游原文）固定 no_healthy_account hint。
@@ -1352,9 +1570,12 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 得到相同解析错误）。零动作，chatCompletions 已 fail-fast 透传。
 	case upstream.ErrBadParams:
 		// 请求体解析失败（400 + Unmarshal chat params failed / 11101）：发给上游的 body
-		// 有问题（网关截断已由 413 消灭，剩余为客户端畸形 JSON）。换了账号照样 400，
-		// 不罚账号（无冷却/熔断/NoteError，同 ErrContentBlocked 待遇）；但**仍然轮转**
-		// ——不同账号可能有不同的模型权限，值得换号再试一次。
+		// 有问题（网关截断已由 413 消灭，剩余为客户端畸形 JSON）。同一 body 换任何账号
+		// 都是同样的解析结果，不罚账号（无冷却/熔断/NoteError，同 ErrContentBlocked
+		// 待遇）。**不再轮转**（语义变更，吸收自 panel commit fd5c5a6b / issue #99）：
+		// 旧语义「不罚但仍轮转（不同账号可能有不同模型权限）」已被实案反驳——11101
+		// 是 body 解析层失败，与账号模型权限无关；chatCompletions 已直接 400 透传
+		// 原文终止，本分支只为文档完备，不指望走到换号路径。
 	case upstream.ErrModelBlocked:
 		// 11102「该后端无此模型」：(账号, 模型) 负缓存避让。复用 modelCooldowns 机制
 		// （与 6004 同域），写 modelCooldowns[model]，Until 为指数退避 TTL（6h 起、封顶
@@ -1464,15 +1685,42 @@ func validConversationID(s string) bool {
 	return true
 }
 
+// errUpstreamTimeout 上游超时的哨兵：末端出口据此给出与「没号可用」可区分的文案
+// （upstream_timeout）——两者的排查方向完全不同（慢上游 vs 池子空了）。
+var errUpstreamTimeout = errors.New("upstream timeout")
+
+// isUpstreamTimeout 判断这一跳的传输层失败是否属于「上游超时 / 停滞」（panel
+// commit 55d1e4d1 同口径）。超时不是账号的问题，换号注定白换（同一份请求撞同一
+// 个慢上游），必须止损：不轮转、不罚号、连败计数也不喂。三态判定：
+//   - net.Error.Timeout()：ResponseHeaderTimeout（现役 60s）/ Client.Timeout 形态；
+//   - 显式 deadline：errors.Is context.DeadlineExceeded / os.ErrDeadlineExceeded；
+//   - clientGone=false 且错误链携带 context.Canceled：请求方 ctx 仍存活却被取消，
+//     只可能是网关自己的空闲看门狗（monitorBody IdleTimeout）掐的流 = 上游停滞。
+//     客户端真断连时请求方 ctx 已结束（clientGone=true），走抖动换号分支。
+func isUpstreamTimeout(err error, clientGone bool) bool {
+	if err == nil {
+		return false
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	return !clientGone && errors.Is(err, context.Canceled)
+}
+
 // isClientDisconnect 报告一次上游传输层错误是否由**请求方**断连/取消导致（而非
 // 上游自身故障）。判据仅限两种（audit 修复口径）：
 //   - 请求方 ctx 已结束（r.Context().Err() != nil）：客户端断连/请求取消/请求级超时；
 //   - 错误链携带 context.Canceled：上游调用因父 ctx 取消而中断的典型形态。
 //
-// 上游自身的超时不误过滤：http.Client.Timeout / SSE HeaderTimeout 的错误链携带
-// context.DeadlineExceeded 而非 Canceled，且其时请求方 ctx 仍存活——两种判据均
-// 不命中，真上游故障照常计连败。背景：客户端主动断连曾被计为账号连败
-// （NoteFailures），粘性会话下远程客户端可借反复断连逐号打满阈值触发降权出池。
+// 上游自身的超时不落入本判定：http.Client.Timeout / SSE HeaderTimeout 的错误链携带
+// context.DeadlineExceeded 而非 Canceled，且其时请求方 ctx 仍存活——两种判据均不命中。
+// 上游超时另有专门的止损分支（isUpstreamTimeout：不换号、不罚号、不计连败），在
+// 本函数之前拦截；背景：客户端主动断连曾被计为账号连败（NoteFailures），粘性会话下
+// 远程客户端可借反复断连逐号打满阈值触发降权出池。
 func isClientDisconnect(reqCtx context.Context, terr error) bool {
 	return reqCtx.Err() != nil || errors.Is(terr, context.Canceled)
 }

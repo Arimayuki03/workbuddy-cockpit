@@ -78,6 +78,10 @@ export interface Account {
   breaker_until?: string;
   /** 每模型在途请求数（只含非零条目） */
   in_flight_by_model?: Record<string, number>;
+  /** 最近一次令牌续期成功时刻（RFC3339）；零值 "0001-01-01T00:00:00Z" = 从未续期 */
+  last_renewed?: string;
+  /** 最近一次续期失败原因；空 = 无错（仅 last_renewed 之后发生的失败才有值） */
+  renew_last_error?: string;
   /** mergePoolStatus 的推导标记：本次读不到池状态（仅前端展示用） */
   pool_unknown?: boolean;
 }
@@ -355,6 +359,43 @@ export interface TaskRunQueueResponse {
   message?: string;
 }
 
+/* ── 积分流水与续期巡检 ─────────────────────────────────── */
+
+/**
+ * 积分流水单条（GET /api/tasks/records?uid=）。
+ *
+ * kind 目前只有 "credit"；jump=true 表示上游绕过签到/任务直接改余额
+ * （风控回调、人工调整等），此时 delta 恒为 0，语义用「余额跳变 A → B」
+ * 表达，不渲染 +N 徽章。
+ */
+export interface CreditRecord {
+  /** 时刻（Unix 秒） */
+  ts: number;
+  uid: string;
+  kind: string;
+  /** 变动量；jump=true 时恒为 0（无 delta 语义） */
+  delta: number;
+  prev: number;
+  new: number;
+  jump: boolean;
+  /** 后端已含昵称的可读文案 */
+  message: string;
+  dedup_key: string;
+}
+
+/** GET /api/tasks/records 响应（records 已按时间倒序） */
+export interface TaskRecordsResponse {
+  ok: boolean;
+  total: number;
+  records: CreditRecord[];
+}
+
+/** POST /api/renew_all：手动触发全账号续期巡检（异步执行） */
+export interface RenewAllResponse {
+  ok: boolean;
+  started: boolean;
+}
+
 /* ── 开学季券码（panel taskcenter.go schoolVouchers）──────── */
 // 任务状态视图（SchoolAccountView/SchoolStatusResponse）已随活动结束（2026-09-24）
 // 下线；券码查询保留（历史券码仍可查）。
@@ -628,6 +669,176 @@ export interface UpdateCheck {
   changelog_url: string;
   cached: boolean;
   checked_at?: string;
+}
+
+/* ── API 密钥管理（对外网关分发密钥，后端 internal/server/keys.go）────────── */
+
+/**
+ * 一把分发密钥。
+ *
+ * 网关侧只存密钥哈希，前端永远拿不到完整密钥——`prefix`（wbk_xxxx 形态）
+ * 是列表里唯一的可辨认信息；明文仅在创建响应的 `plaintext` 出现一次。
+ * expires_at / last_used_at 为 Unix 秒（0 或缺失 = 从未/永久）。
+ */
+export interface ApiKey {
+  id: string;
+  name: string;
+  /** wbk_xxxx 形态的前缀（不含省略号，展示时前端自补） */
+  prefix: string;
+  /** 密钥域：cn / global / ''（未限定，两版都能调——仅存量密钥） */
+  realm?: 'cn' | 'global' | '';
+  enabled: boolean;
+  /** 创建时刻（Unix 秒） */
+  created_at: number;
+  /** 过期时刻（Unix 秒）；0/null = 永不过期 */
+  expires_at?: number;
+  /** IP 数上限；0 = 不限 */
+  max_ips?: number;
+  /** IP 白名单（支持 CIDR）；空 = 不限制 */
+  ip_whitelist?: string[];
+  /** 模型白名单（带 cn:/global: 前缀即调用值）；空 = 该域全部模型 */
+  model_whitelist?: string[];
+  /** Token 配额；0 = 不限 */
+  token_quota?: number;
+  /** 积分配额（按上游真实扣费累计）；0 = 不限 */
+  credit_quota?: number;
+  used_tokens: number;
+  used_credits: number;
+  /** 密钥级限流（req/min）；0 = 默认 */
+  rate_limit?: number;
+  /** 最近使用时刻（Unix 秒）；0/缺失 = 从未使用 */
+  last_used_at?: number;
+  /** 当前绑定的不同来源 IP 数（服务端统计） */
+  ip_count?: number;
+}
+
+/** GET /api/keys */
+export interface KeysListResponse {
+  keys: ApiKey[];
+}
+
+/** POST /api/keys：key 是落库后的记录，plaintext 是仅此一次的明文（wbk_...） */
+export interface KeyCreateResponse {
+  key: ApiKey;
+  plaintext: string;
+}
+
+/** PATCH /api/keys/{id}：全字段可选，仅提交要改的 */
+export interface KeyUpdateResponse {
+  key: ApiKey;
+}
+
+/** GET /api/keys/{id}/ips：该密钥绑定过的来源 IP（用于展示/清理） */
+export interface KeyIpsResponse {
+  ips: {ip: string; first_seen: number}[];
+}
+
+/* ── 管理面作用域 Token（wbt_，internal/panel/tokens.go）────────── */
+
+/**
+ * 管理面访问令牌（Bearer wbt_...）。
+ *
+ * 与网关 ApiKey 的区别：ApiKey 发给下游调模型；wbt_ 令牌给脚本/CI 免登录调
+ * 管理面接口（GET /api/overview 等）。服务端只存 SHA-256 摘要 + prefix
+ * （"wbt_" + 8 个随机字符），**明文仅在创建响应出现一次**，列表永不回传
+ * 明文与摘要。last_used_at 为 Unix 秒（0/缺失 = 从未使用）。
+ */
+export interface PanelToken {
+  id: string;
+  name: string;
+  /** wbt_xxxx 形态的展示前缀（不含省略号，前端展示时自补） */
+  prefix: string;
+  /** readonly = GET 类只读；admin = 额外放开幂等运维端点。非法值后端已降级 readonly */
+  scope: 'readonly' | 'admin';
+  /** 创建时刻（Unix 秒） */
+  created_at: number;
+  /** 最近使用时刻（Unix 秒）；0/缺失 = 从未使用 */
+  last_used_at?: number;
+  disabled: boolean;
+}
+
+/** GET /api/tokens */
+export interface TokensListResponse {
+  ok: boolean;
+  tokens: PanelToken[];
+}
+
+/** POST /api/tokens：token 是仅此一次的明文（wbt_...），关掉弹窗后无法再取 */
+export interface TokenCreateResponse {
+  ok: boolean;
+  token: string;
+  token_record: PanelToken;
+}
+
+/* ── 安全（入站 IP 管控 / 拦截日志 / 模型锁池）────────────────── */
+
+/** GET /api/security 的 rules 段 */
+export interface SecurityRules {
+  /** 黑名单 CIDR 列表 */
+  ip_blacklist: string[];
+  /** 白名单 CIDR 列表 */
+  ip_whitelist: string[];
+  /** 白名单模式开关：true = 仅放行白名单（默认拒绝） */
+  ip_whitelist_mode: boolean;
+  /** 可信代理 CIDR（反代/CDN 场景下解析真实 IP 的依据） */
+  trusted_proxy_cidrs: string[];
+  /** 可信代理跳数（X-Forwarded-For 从右往左取第几个） */
+  trusted_proxy_hops: number;
+}
+
+/** 拦截日志单条（后端环形缓冲，上限 512，重启即清） */
+export interface BlockedLogEntry {
+  ts: number;
+  ip: string;
+  path: string;
+  /** 原因短码：missing_key / invalid_key / ip_blocked / ip_not_whitelisted 等 */
+  reason: string;
+}
+
+/** GET /api/security 响应 */
+export interface SecurityStatusResponse {
+  rules: SecurityRules;
+  blocked_logs: BlockedLogEntry[];
+}
+
+/** POST /api/security/rules 请求体（errs 非空 = 整体未生效，逐条展示） */
+export interface SecurityRulesPayload {
+  ip_blacklist: string[];
+  ip_whitelist: string[];
+  ip_whitelist_mode: boolean;
+  trusted_proxy_cidrs: string[];
+  trusted_proxy_hops: number;
+}
+
+/** POST /api/security/rules 响应：errs 为校验错误清单（空数组 = 保存成功） */
+export interface SecurityRulesResponse {
+  errs: string[];
+}
+
+/** 模型锁池单行：模型级冷却的聚合视图 */
+export interface ModelLockRow {
+  model: string;
+  /** 该模型在哪个域被锁：cn / global */
+  realm: string;
+  /** locked=全锁 / starved=全饿（服务中但一直抢不到）/ partial=部分锁定 */
+  state: 'locked' | 'starved' | 'partial';
+  /** 当前可服务的账号数 */
+  servable: number;
+  /** 该模型相关的账号总数 */
+  total: number;
+  /** 处于模型级锁定的账号数 */
+  locked: number;
+  /** 最近一个锁定账号的预计解锁时刻（Unix 秒） */
+  unlock_at: number;
+  /** 全部锁定的预计解除时刻（Unix 秒） */
+  fully_unlock_at: number;
+  /** 锁定原因（上游短码，如 6004） */
+  reason?: string;
+}
+
+/** GET /api/security/model_locks 响应 */
+export interface ModelLocksResponse {
+  locks: ModelLockRow[];
 }
 
 /* ── 模型视图（前端派生）────────────────────────────────── */

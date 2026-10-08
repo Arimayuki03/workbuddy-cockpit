@@ -79,6 +79,14 @@ type Status struct {
 	// 维护的观测台账，运维据此看到"这个号现在正在跑什么模型"。模型名 → 计数，
 	// 只含非零条目（计数归零即从台账消失，omitempty 整体省略）。
 	InFlightByModel map[string]int `json:"in_flight_by_model,omitempty"`
+	// LastRenewed 最近一次 token 续期（RefreshToken 成功）时刻；零值 = 本账号
+	// 从未有过续期记录（旧 state.json 无此字段时同样为零值，语义一致）。
+	// 续期巡检（schedule.renew_enabled）开启后由巡检写入；保活/签到路径刷新成功
+	// 同样更新。持久化到 state.json。
+	LastRenewed time.Time `json:"last_renewed"`
+	// RenewLastError 最近一次续期失败原因；空 = 最近一次续期成功（或从未尝试）。
+	// 只留最近一条（历史走日志），面板据此判断「临期号为什么还没续上」。
+	RenewLastError string `json:"renew_last_error,omitempty"`
 }
 
 // RateLimitedModel 单个被限流模型的台账行（issue #36）。
@@ -198,6 +206,18 @@ type entry struct {
 	// 持久化（stateAccount.ModelCosts，P1-anti-monopoly）：重启后成本知识保留；
 	// 落盘/恢复按 modelCostTTL 惰性过滤，陈旧观测不复活（同 modelCooldowns 口径）。
 	modelCost map[string]modelCostEntry
+
+	// lastRenewed 最近一次 token 续期时刻（成功与失败都更新；零值 = 从未续期过）。
+	// 由 scheduler 的独立续期巡检（renew 巡检）与保活/签到路径的刷新成功共同维护——
+	// 凡走 RefreshToken 成功的路径都算续期。持久化（stateAccount.LastRenewed）：
+	// 「多久没续过期」是跨重启有意义的运维观测，重启归零会让面板误判为从未续期。
+	// 运维可见的运行态时间戳（同 last_success/last_err 口径）不用指针，零值
+	// 显式写出（omitempty 对非指针 time.Time 无效，见 BreakerUntil 的长注释）。
+	lastRenewed time.Time
+	// renewLastErr 最近一次续期失败原因（持久化，stateAccount.RenewLastErr）。
+	// 空 = 最近一次续期成功（或从未尝试过）。只保留最近一条：历史失败清单
+	// 是日志的职责，这里只回答「这个号上次续期为什么没成」。
+	renewLastErr string
 }
 
 // acquireModel 在途模型台账 +1（AcquireModel 的 CAS 成功后调用）。map 惰性建表。
@@ -500,6 +520,12 @@ type stateAccount struct {
 	// 陈旧价格不复活）；恢复侧剔除非法值（负 per1k/零 LastSeen 的结构破损条目）。
 	// 与运行态 modelCostEntry 字段一一对应（单一表示，内存与落盘同构不搞两套）。
 	ModelCosts map[string]stateModelCost `json:"model_costs,omitempty"`
+	// LastRenewed 最近一次 token 续期成功时刻（见 entry.lastRenewed）。零值也显式
+	// 写出（运维口径，同 err_total 注释：缺失会让人误以为"没记录"）。
+	LastRenewed time.Time `json:"last_renewed"`
+	// RenewLastError 最近一次续期失败原因（entry.renewLastErr）。成功续期时清空
+	//（写空串），仅失败时非空——omitempty 让健康账号的 state.json 不带冗余键。
+	RenewLastError string `json:"renew_last_error,omitempty"`
 }
 
 // stateModelCooldown 单个 (账号, 模型) 的 6004 独立冷却持久化记录，与运行态

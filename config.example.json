@@ -43,7 +43,12 @@
       10
     ],
     "queue_enabled": false,
-    "_note_school": "school_* 键保留仅为老配置兼容：开学季任务已随活动 2026-09-24 结束下线，school_enabled/school_hours 不再生效"
+    "renew_hours": [
+      3
+    ],
+    "renew_enabled": false,
+    "_note_school": "school_* 键保留仅为老配置兼容：开学季任务已随活动 2026-09-24 结束下线，school_enabled/school_hours 不再生效",
+    "_note_renew": "renew_*：Token 独立续期巡检（默认关）。开启后按 renew_hours 扫描全部账号，对有效期不足 pool.expiring_soon 窗口的账号主动刷新令牌（覆盖长期闲置无对话流量的号）；面板手动停用的账号跳过，仅熔断/冷却等状态位异常的照常续期。每账号最近一次续期时间与失败原因经 /api/overview 账号条目的 last_renewed / renew_last_error 字段暴露"
   },
   "global": {
     "enabled": true,
@@ -86,7 +91,30 @@
     "idle_weight_per_hour": 0.5,
     "idle_weight_max": 5.0,
     "expiring_soon": "168h",
-    "cost_explore_interval": "30m"
+    "cost_explore_interval": "30m",
+    "credit_floor": 0,
+    "_note_credit_floor": "credit_floor：积分保底线（默认 0 = 关闭）。账号缓存余额低于本值时不再参与「收费模型」的选号，防止收费请求把余额打穿、连免费模型都 402 冷却到次日签到；全池触底且无免费模型可接时选号返回 nil（宁 503 不打穿）。是否收费按本地实测台账优先、上游模型目录倍率兜底判定",
+    "_note_pick_strategy": "pick_strategy 选号策略：weighted（默认，三因子加权随机）/ credits_desc（余额严格降序），面板设置页可在线切换"
+  },
+  "security": {
+    "trusted_proxy_cidrs": [],
+    "trusted_proxy_hops": 1,
+    "ip_blacklist": [],
+    "ip_whitelist": [],
+    "ip_whitelist_mode": false,
+    "_note_trusted_proxy": "trusted_proxy_cidrs：可信代理网段（单 IP 或 CIDR）。默认空 = 完全不信任 X-Forwarded-For / X-Real-IP 转发头（这两个头是客户端可伪造的普通请求头），客户端 IP 恒取 TCP 对端地址。反代 / CDN 后部署必须配置本段（如同机 nginx 加 \"127.0.0.1\" 与 \"::1\"），否则伪造转发头即可绕过下方全部 IP 管控、IP 规则也只能看到反代地址；CDN 场景把 hops 调成 CDN + 反代总层数并加入 CDN 回源网段。非法条目启动报错（fail-fast）",
+    "_note_ip_lists": "ip_blacklist / ip_whitelist：入站 IP 黑/白名单（判定先于鉴权，被拒请求不出站）。黑名单命中即拒且优先于白名单；白名单仅在 ip_whitelist_mode=true 且白名单非空时生效（不在名单 = 拒绝；空白名单自动失效防自我锁死）。规则落盘 data/ip_rules.json，与面板热改共用持久层",
+    "_note_env": "security 段可用环境变量覆盖：WB2A_SECURITY_TRUSTED_PROXY_CIDRS / WB2A_SECURITY_TRUSTED_PROXY_HOPS / WB2A_SECURITY_IP_BLACKLIST / WB2A_SECURITY_IP_WHITELIST / WB2A_SECURITY_IP_WHITELIST_MODE（数组键逗号分隔）",
+    "_note_keystore": "多密钥分发（wbk_ 前缀密钥）无配置键：常驻启用，密钥库存 data/api_keys.json（与 state 同目录）。文件不存在=空库=只走全局 api_key，行为不变；有密钥时 wbk_ 密钥与全局 api_key 并行鉴权（面板 keys 页管理）"
+  },
+  "logging": {
+    "request_archive": false,
+    "request_retention_days": 7,
+    "request_archive_max_mb": 200,
+    "request_client_info": false,
+    "_note_request_archive": "request_archive：请求日志 JSONL 归档开关（默认 false = 与 v1.15.1 一致，仅内存环形缓冲）。true 时按日轮转归档到 data/requests/（requests-YYYYMMDD.jsonl，只写模型/状态/token/首字延迟/扣费/错误摘要等元数据，不写提示词与响应正文）；retention_days 按天保留、archive_max_mb 总容量上限，超限删最旧",
+    "_note_request_client_info": "request_client_info：采集调用来源（client_ip / user_agent）进请求日志与归档（默认 false，来源信息较敏感不默认采集）。client_ip 的解析受 security.trusted_proxy_cidrs 信任模型约束",
+    "_note_env": "logging 段可用环境变量覆盖：WB2A_LOGGING_REQUEST_ARCHIVE / WB2A_LOGGING_REQUEST_RETENTION_DAYS / WB2A_LOGGING_REQUEST_ARCHIVE_MAX_MB / WB2A_LOGGING_REQUEST_CLIENT_INFO；pool.credit_floor 对应 WB2A_POOL_CREDIT_FLOOR"
   },
   "session_sticky": {
     "enabled": true,

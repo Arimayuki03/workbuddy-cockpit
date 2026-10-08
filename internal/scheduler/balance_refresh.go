@@ -22,10 +22,24 @@ import (
 	"workbuddy2api/internal/logfmt"
 )
 
+// nickOf 从昵称快照取展示名（缺账号回落 uid；仅日志/文案用途）。
+func nickOf(nicks map[string]string, uid string) string {
+	if n := nicks[uid]; n != "" {
+		return n
+	}
+	return uid
+}
+
 // RunBalanceRefreshNow 并发对所有非禁用账号查询余额并更新池内 credits。
 // 解冻语义与签到一致（ReenableIfCredits：余额 > 0 的冷却账号自动解冻），
 // 但不做签到、不刷新 token——只让"积分"这个观测量保持新鲜。
 // 供面板手动触发（panel.balanceAll）。
+//
+// 昵称同步（panel f1496d0a 口径）：余额查询成功后逐账号调 FetchAccountProfile
+// 同步最新昵称（用户在官网改名后免重登）。仅本手动路径接线——后台余额定时器
+// **不调用**资料接口（2026-09-21 起本函数已是唯一入口且仅面板手动触发；若日后
+// 重新引入定时全量刷新，请另立函数，勿把资料接口挂上高频路径）。
+// 资料拉取失败静默跳过（DEBUG 日志即可），不影响余额结果、不计入账号惩罚。
 //
 // 并发上限 4（信号量）：面板全量刷新账号多时若不设闸，瞬时 N 路并发全打上游
 // GET /resource（对照 panel/taskcenter.go schoolVouchers 的限流写法）。
@@ -39,7 +53,10 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 	}()
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
+	// 昵称表：goroutine 外一次性快照（池 List 已含昵称），goroutine 内零池访问。
+	nicks := map[string]string{}
 	for _, st := range s.cfg.Pool.List() {
+		nicks[st.UID] = st.Nickname
 		if st.Disabled {
 			continue
 		}
@@ -61,6 +78,28 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 				s.cfg.Pool.SetCreditsDetailed(uid, remain, buckets.Expiring)
 			} else {
 				s.cfg.Pool.ReenableIfCredits(uid, remain)
+			}
+			// 积分流水：余额比对记账（credit.go）。昵称取自池状态快照（并发 goroutine
+			// 外先查好，避免 goroutine 内再读池）。
+			s.RecordBalanceChecked(uid, nickOf(nicks, uid), remain)
+
+			// 昵称同步（panel f1496d0a）：手动刷新路径逐账号拉一次 Web 控制台资料，
+			// 上游有改名则更新内存 + 落盘（沿用 RefreshToken 的锁内写字段约定，
+			// SaveAtomic 原子写回 auth 文件 account.nickname；pool 的 Status/List
+			// 直读同一 *Auth，昵称即时生效）。失败静默跳过——改名同步是"顺手"功能，
+			// 不值得为它打扰用户，也不影响本次余额结果。
+			if nick, perr := s.cfg.Upstream.FetchAccountProfile(a); perr != nil {
+				log.Printf("DEBUG: balance %s: profile skip: %v", logfmt.Label(uid, nickOf(nicks, uid)), perr)
+			} else if nick != "" && nick != nicks[uid] {
+				a.Lock()
+				a.Nickname = nick
+				a.Unlock()
+				if err := a.SaveAtomic(); err != nil {
+					// 内存已更新（本次会话即时生效），落盘失败仅记日志：重启后回落旧名。
+					log.Printf("balance %s: nickname save: %v", logfmt.Label(uid, nick), err)
+				} else {
+					log.Printf("balance %s: nickname synced %q -> %q", logfmt.Label(uid, nick), nicks[uid], nick)
+				}
 			}
 		}(a, st.UID)
 	}

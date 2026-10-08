@@ -737,10 +737,16 @@ type Client struct {
 	// 见 global_models.go。按实例持有，测试新建 Client 即隔离。
 	globalModels fetchGlobalModelsCache
 
+	// modelRates 模型积分倍率缓存表（FetchModels / global 探测成功时填充，
+	// 见 modelrate.go）：credit_floor 兜底判收费用（main 经 ModelRateOf 装配
+	// pool.SetModelRateOf）。零值可用（Update 惰性建桶），按实例持有同上。
+	modelRates ModelRateTable
+
 	// globalProbing/globalProbeDone global 模型目录探测门闩（singleflight 自实现，
 	// 不引 x/sync 依赖）：并发冷启动时只有持门闩者真正探测，其余进入者等待
 	// done 关闭后重查缓存。保护 fetchGlobalModelsOnce 的锁外探测段（probe 自身
-	// 已是 3 路并发，无门闩时 N 个 /v1/models 同时 miss = N 倍重复探测）。
+	// 已是 4 路并发：v3 三 UA + 企业端点家族，无门闩时 N 个 /v1/models 同时 miss
+	// = N 倍重复探测）。
 	globalProbing   bool
 	globalProbeDone chan struct{}
 
@@ -1389,7 +1395,13 @@ func (c *Client) modelsPath(a *auth.Auth) string {
 // 来源：harness buddy.ts:547-555。三类规则：
 //   - id 前缀 nes-/completion-/codewise-：嵌入/补全/代码专用模型，选了报 code=11102。
 //   - maxOutputTokens ≤ 256：tiny 输出非对话模型。
-//   - tags 含 text-to-image：图片生成模型，非本网关用途。
+//   - tags 含生成类标签（图片/视频）：生成模型走各自专用端点，作为对话模型选上去
+//     只会报 11102，非本网关用途。
+//
+// 生成类标签随上游扩充：早期只有 text-to-image，桌面端 UA 目录（panel commit
+// 7b24e228 实测，2026-10-02）另带入 text-to-video / image-to-video（seedance 系列）
+// 与 image-to-image（gpt-image 系列）——后者已由 text-to-image 覆盖，此处补齐视频
+// 两类。注意本函数 CN 与 global 共用，新增标签对两域同时生效。
 func nonChatModel(id string, maxOutputTokens int64, tags []string) bool {
 	id = strings.ToLower(strings.TrimSpace(id))
 	for _, p := range [...]string{"nes-", "completion-", "codewise-"} {
@@ -1401,7 +1413,8 @@ func nonChatModel(id string, maxOutputTokens int64, tags []string) bool {
 		return true
 	}
 	for _, t := range tags {
-		if t == "text-to-image" {
+		switch t {
+		case "text-to-image", "image-to-image", "text-to-video", "image-to-video":
 			return true
 		}
 	}
@@ -1461,10 +1474,15 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 		}
 	}
 	if len(cache) == 0 && len(defCache) == 0 {
+		// 积分倍率表（modelrate.go）：目录 Credits 原文解析入表，credit_floor 兜底
+		// 判收费用。无 effort 档位数据的目录也要入表（提前 return 不跳过填充）。
+		c.StoreModelRates(a.Realm(), out)
 		return out, nil
 	}
 	// 按探测账号的 realm 写入对应桶：CN 探测只进 cn 桶，global 同模型名不被污染（C-2）。
 	c.storeEfforts(a.Realm(), cache, defCache)
+	// 同上：倍率表填充（两分支同口径，realm 隔离与 efforts 桶一致）。
+	c.StoreModelRates(a.Realm(), out)
 	return out, nil
 }
 
@@ -1619,6 +1637,54 @@ func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
 	return out, nil
 }
 
+// billingRetryDelay 签到/余额等维护类计费调用瞬时错误重试的间隔基数。
+// 独立变量供测试缩短（生产固定 2s：第 1 次重试等 2s、第 2 次等 4s，吸收 panel
+// commit dd4ea34d）。
+var billingRetryDelay = 2 * time.Second
+
+// isTransientBillingErr 报告 err 是否值得对计费维护类调用做有界重试：
+// 上游 5xx（ErrServer，实测偶发 code 10000 "API request failed with status
+// code: 500"）或网络层错误（非 *Error 的传输失败：连接中断/DNS 抖动等）。
+// 业务错误不重试——重试只会原样再失败一次，白刷上游：
+//   - 已签到（code!=0 业务幂等拒绝，ErrClient）；
+//   - 4xx（402 余额不足 / 403 风控 ErrAccountFault / 400 参数错 / WAF 403 等）；
+//   - 429 限流（ErrSoftRate——冷却语义归 pool/调用方，这里重试只会火上浇油）；
+//   - 响应解析失败（doJSON 的 "parse failed" 普通 error，body 恒定再失败）。
+// 注意网络读半截 body（doJSON "read body: ..."）是传输层普通 error，按瞬时算
+// （与 panel 口径一致：连接中断/空闲掐流重打一次值得）。
+func isTransientBillingErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ue *Error
+	if errors.As(err, &ue) {
+		return ue.Kind == ErrServer
+	}
+	return true
+}
+
+// retryBillingTransient 对签到/余额这类低频维护调用做瞬时错误有界重试：
+// 最多补打 2 次（间隔 2s、4s），首次成功或非瞬时错误立即返回。覆盖上游 5xx
+// （code 10000 / http 500）与网络抖动——单次抖动不再让账号整天漏签/错过余额
+// 刷新（panel commit dd4ea34d）。chat 热路径不用本策略——它有自己的换号轮转
+// 语义，重试会放大在途请求。
+func (c *Client) retryBillingTransient(fn func() error) error {
+	err := fn()
+	if err == nil || !isTransientBillingErr(err) {
+		return err
+	}
+	for i := 1; i <= billingRetryMaxAttempts; i++ {
+		time.Sleep(time.Duration(i) * billingRetryDelay)
+		if err = fn(); err == nil || !isTransientBillingErr(err) {
+			return err
+		}
+	}
+	return err
+}
+
+// billingRetryMaxAttempts 瞬时错误重试的最大补打次数（不含首次）。
+const billingRetryMaxAttempts = 2
+
 // billingMeterJSON 按 realm 候选路径发 billing/meter 域请求，ErrNotFound 时换下一候选路径
 // （global：/billing/meter/* → /v2/billing/meter/*；cn：单路径 /v2/billing/meter/* 现状）。
 func (c *Client) billingMeterJSON(a *auth.Auth, paths []string, method string, body any) (json.RawMessage, error) {
@@ -1724,10 +1790,14 @@ type userResourceResp struct {
 	} `json:"Response"`
 }
 
-// getUserResourceBody 发 get-user-resource 请求并解析响应（两消费方共享：请求体构造
-// 与解析逻辑原本 100% 重复）。realm 感知继承 billingMeterPaths：global 账号打
-// workbuddy.ai /billing/meter/*（404 fallback /v2），CN 账号维持
-// /v2/billing/meter/get-user-resource（现状逐字，零回归）。
+// getUserResourceBody 发 get-user-resource 请求并解析响应（两消费方 UserResourceDetailed /
+// ResourceSummary 共享：请求体构造与解析逻辑原本 100% 重复）。realm 感知继承
+// billingMeterPaths：global 账号打 workbuddy.ai /billing/meter/*（404 fallback /v2），
+// CN 账号维持 /v2/billing/meter/get-user-resource（现状逐字，零回归）。
+// 瞬时错误有界重试（panel commit dd4ea34d）：签到后紧接着的 user-resource 偶发 500
+// 会让该账号错过本次解冻/到期快照更新，只能等下一个刷新周期——重试在共享层做，
+// 两条消费链路（余额刷新/面板展示）同时受益；请求体（含时间窗）在重试间共享，
+// 与既有单发实现同口径。
 func (c *Client) getUserResourceBody(a *auth.Auth) (*userResourceResp, error) {
 	now := time.Now()
 	body := map[string]any{
@@ -1738,7 +1808,12 @@ func (c *Client) getUserResourceBody(a *auth.Auth) (*userResourceResp, error) {
 		"PackageEndTimeRangeBegin": now.Format(packageEndLayout),
 		"PackageEndTimeRangeEnd":   now.Add(365 * 101 * 24 * time.Hour).Format(packageEndLayout),
 	}
-	data, err := c.billingMeterJSON(a, c.billingMeterPaths(a), http.MethodPost, body)
+	var data json.RawMessage
+	err := c.retryBillingTransient(func() error {
+		var e error
+		data, e = c.billingMeterJSON(a, c.billingMeterPaths(a), http.MethodPost, body)
+		return e
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1754,7 +1829,7 @@ func (c *Client) getUserResourceBody(a *auth.Auth) (*userResourceResp, error) {
 // 与 UserResource 的差异：UserResource 只取 remain；本方法额外聚合 used/size/packs，
 // 且 TotalDosage 作 size 下限（与 cmd/credit 历史口径一致，见其 packageRemainUsed）。
 //
-// realm 感知继承 getUserResourceBody（billingMeterPaths）。
+// realm 感知继承 getUserResourceBody（billingMeterPaths，瞬时重试同享）。
 func (c *Client) ResourceSummary(a *auth.Auth) (remain, used, size int64, packs int, err error) {
 	resp, err := c.getUserResourceBody(a)
 	if err != nil {
@@ -1831,9 +1906,13 @@ func packageRemainUsed(a respAccount) (remain, used, size int64) {
 }
 
 // DailyCheckin 执行每日签到。已签到（业务 code 非 0）也返回错误，调用方按 msg 区分。
+// 偶发上游 5xx（code 10000 / http 500）做有界重试（见 retryBillingTransient，panel
+// commit dd4ea34d）——单次抖动不再让该账号整天漏签；「已签到」等业务错误不重试。
 func (c *Client) DailyCheckin(a *auth.Auth) error {
-	_, err := c.billingMeterJSON(a, c.checkinMeterPaths(a), http.MethodPost, map[string]any{})
-	return err
+	return c.retryBillingTransient(func() error {
+		_, err := c.billingMeterJSON(a, c.checkinMeterPaths(a), http.MethodPost, map[string]any{})
+		return err
+	})
 }
 
 // IsAlreadyCheckin 报告 err 是否表示"今天已签到"（上游幂等拒绝重复签到）。

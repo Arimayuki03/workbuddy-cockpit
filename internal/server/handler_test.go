@@ -204,10 +204,12 @@ func TestChatReadBodyErrorReturns400(t *testing.T) {
 	}
 }
 
-// TestChatBadParamsRotatesWithoutPenalty 上游 400 + Unmarshal chat params failed（11101）
-// → 该类归 ErrBadParams：不罚账号（无冷却/无禁用/无熔断计数/无 errTotal），但**仍然轮转**
-// （换号重试可能命中不同权限的账号）。端到端断言 bad 失败、good 成功、账号完好。
-func TestChatBadParamsRotatesWithoutPenalty(t *testing.T) {
+// TestChatBadParamsImmediate400 上游 400 + Unmarshal chat params failed（11101）
+// → 该类归 ErrBadParams：**立即 400 透传上游原文、终止轮转**（语义变更，吸收自
+// panel commit fd5c5a6b / issue #99：旧语义「不罚但仍轮转」把确定性 body 解析失败
+// 伪装成 503 账号不可用，诱发客户端无限重试；11101 与账号模型权限无关，换号必撞）。
+// 端到端断言：不轮转到 good、不罚账号、code=bad_params、message 装上游原文。
+func TestChatBadParamsImmediate400(t *testing.T) {
 	calls := map[string]int{}
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		calls[authz]++
@@ -225,11 +227,16 @@ func TestChatBadParamsRotatesWithoutPenalty(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != 200 {
-		t.Fatalf("code=%d body=%s (want 200 after rotate to good)", rec.Code, rec.Body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d body=%s (want 400 bad_params passthrough, no rotation)", rec.Code, rec.Body)
 	}
-	if calls["Bearer at-bad"] != 1 || calls["Bearer at-good"] != 1 {
-		t.Errorf("calls=%v want bad/good 各 1 次", calls)
+	assertJSONErrorCode(t, rec.Body.String(), "bad_params")
+	if !strings.Contains(rec.Body.String(), "Unmarshal chat params failed") {
+		t.Errorf("400 message should carry upstream 11101 body verbatim: %s", rec.Body)
+	}
+	// 停止轮转：确定性失败不再放大——只有 bad 被调用一次，good 不动。
+	if calls["Bearer at-bad"] != 1 || calls["Bearer at-good"] != 0 {
+		t.Errorf("calls=%v want bad 1 次、good 0 次（11101 停止轮转）", calls)
 	}
 	// 账号完好：无冷却、无禁用、无熔断计数、无 errTotal。
 	st, _ := p.Status("bad")
@@ -238,10 +245,10 @@ func TestChatBadParamsRotatesWithoutPenalty(t *testing.T) {
 	}
 }
 
-// TestChatAllBadParams503CarriesUpstreamBody 全部账号都 11101 时 503 文案必须包含
-// 上游原始 11101 信息（不再是空洞的 no_healthy_account）。
-// 现状即透传 lastErr.Error()（含上游 body），本测试把它锁定为回归。
-func TestChatAllBadParams503CarriesUpstreamBody(t *testing.T) {
+// TestChatAllBadParamsImmediate400CarriesUpstreamBody 全部账号都 11101 时立即 400
+// 透传（不再轮转 → 不再落到 503 no_healthy_account），文案必须包含上游原始 11101
+// 信息（含 requestId，原样透传语义锁定为回归）。
+func TestChatAllBadParamsImmediate400CarriesUpstreamBody(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 400, `{"code":11101,"msg":"Unmarshal chat params failed with error: unexpected EOF","requestId":"req-xyz-777"}`, false
 	})
@@ -249,22 +256,23 @@ func TestChatAllBadParams503CarriesUpstreamBody(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != 503 {
-		t.Fatalf("code=%d body=%s (want 503)", rec.Code, rec.Body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d body=%s (want 400 bad_params)", rec.Code, rec.Body)
 	}
 	body := rec.Body.String()
 	if !strings.Contains(body, "11101") || !strings.Contains(body, "Unmarshal chat params failed") {
-		t.Errorf("503 message should carry upstream 11101 info: %s", body)
+		t.Errorf("400 message should carry upstream 11101 info: %s", body)
 	}
 	if !strings.Contains(body, "req-xyz-777") {
-		t.Errorf("503 message should carry upstream requestId: %s", body)
+		t.Errorf("400 message should carry upstream requestId: %s", body)
 	}
 }
 
 // TestChatPassesThroughUpstreamErrorWithCodeMsgRequestID 验收（error-passthrough）：
 // 构造上游错误响应（含 code/msg/requestId，非 429 状态码）经 handler 后，客户端可见的
 // error.message 必须等于上游 body 原文（code/msg/requestId 原样保留），而非网关固定文案
-// （任务书验收 2：透视可见真实上游错误）。
+// （任务书验收 2：透视可见真实上游错误）。11101 归 ErrBadParams：立即 400 透传
+// （吸收自 panel commit fd5c5a6b），不再轮转落到 503。
 func TestChatPassesThroughUpstreamErrorWithCodeMsgRequestID(t *testing.T) {
 	const raw = `{"code":11101,"msg":"Unmarshal chat params failed with error: unexpected EOF","requestId":"req-xyz-777"}`
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
@@ -276,8 +284,8 @@ func TestChatPassesThroughUpstreamErrorWithCodeMsgRequestID(t *testing.T) {
 	})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != 503 {
-		t.Fatalf("code=%d body=%s (want 503)", rec.Code, rec.Body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d body=%s (want 400 bad_params)", rec.Code, rec.Body)
 	}
 	var e struct {
 		Error struct {

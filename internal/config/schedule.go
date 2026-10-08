@@ -21,6 +21,12 @@ type Schedule struct {
 	SchoolHours    []int `json:"school_hours"`    // [12] 开学季任务（迁移自 school/cat 两条系统 crontab）
 	CatHours       []int `json:"cat_hours"`       // [1] 夜猫窗口 23-08 CST，01:00 窗口内补 1 次
 	QueueHours     []int `json:"queue_hours"`     // [10] 任务中心执行队列（成长任务 + 开学季闭环）
+	// RenewHours Token 独立续期巡检的触发小时表（renew_enabled=true 时生效，默认 [3]）。
+	// 与 keepalive_hours 的差异：保活是「到点全量刷一遍」，续期巡检是「按剩余寿命挑号刷」
+	// ——只对临期（pool.expiring_soon 口径）账号主动 refresh，覆盖长期闲置无对话流量、
+	// 保活与签到都覆盖不到的空档（wbm services/renew.py 吸收件）。默认凌晨 3 点：
+	// 避开签到/活跃/任务队列的高峰时点。
+	RenewHours []int `json:"renew_hours"`
 	// CheckinEnabled/TravelEnabled/ActivityEnabled/KeepaliveEnabled/SchoolEnabled/CatEnabled
 	// 显式禁用开关（缺省 true）。
 	//
@@ -40,6 +46,12 @@ type Schedule struct {
 	// 全账号执行真实任务动作链（含专家/技能真实对话，消耗上游配额），是"一键完成"
 	// 的自动化版，不适合无感默认开启——缺省 false，由用户显式打开。
 	QueueEnabled bool `json:"queue_enabled"` // 缺省 false；true = 按 queue_hours 到点自动跑执行队列
+	// RenewEnabled Token 独立续期巡检排程开关（schedule.renew_enabled）。与 QueueEnabled
+	// 同风格缺省 false（opt-in）：续期对临期账号主动打 refresh 写接口（上游凭据轮换），
+	// 由用户显式打开；关闭时保活/签到/选号路径的既有刷新行为完全不受影响。
+	// 开启后按 renew_hours 触发，仅刷新「有效期不足 pool.expiring_soon 窗口」的账号
+	//（面板手动停用的账号跳过；仅熔断/冷却/状态位异常的照常续）。
+	RenewEnabled bool `json:"renew_enabled"`
 	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
 	// 默认 5 条把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int `json:"activity_report_count"`
@@ -61,6 +73,7 @@ func DefaultSchedule() Schedule {
 		SchoolHours:          []int{12},
 		CatHours:             []int{1},
 		QueueHours:           []int{10},
+		RenewHours:           []int{3}, // 续期巡检默认凌晨 3 点：避开签到/活跃/队列高峰
 		CheckinEnabled:       true,
 		TravelEnabled:        true,
 		ActivityEnabled:      true,
@@ -103,6 +116,9 @@ func (s *Schedule) Normalize() error {
 	if len(s.QueueHours) == 0 {
 		s.QueueHours = []int{10}
 	}
+	if len(s.RenewHours) == 0 {
+		s.RenewHours = []int{3}
+	}
 	// 0/负数 → 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
 	if s.ActivityReportCount <= 0 {
 		s.ActivityReportCount = 1
@@ -135,6 +151,8 @@ func (s *Schedule) validateHours() error {
 		return err
 	}
 	return checkHourRange("schedule.queue_hours", "queue_enabled", s.QueueHours)
+	// renew_hours 不在校验链里：renew_enabled 缺省 false，巡检关闭时 renew_hours
+	// 是惰性配置；开启路径由 scheduler.New 的 clampHours 钳非法小时（与其余七类同口径）。
 }
 
 func checkHourRange(field, switchKey string, hours []int) error {

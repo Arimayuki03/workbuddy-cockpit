@@ -57,6 +57,12 @@ type chatStat struct {
 	// 由 handler 错误路径经 setError 填充；截断到 ~200 字节防环形缓冲被长报文撑爆。
 	errSummary string
 
+	// clientIP / userAgent 调用来源（可选，供请求日志环形缓冲与 JSONL 归档）。
+	// 由 handler 在 newChatStat 后按 logging.request_client_info 开关填充
+	// （默认 false 不采集，保持零值）；口径见 requestlog.go requestLogClientInfo。
+	clientIP  string
+	userAgent string
+
 	logged bool
 }
 

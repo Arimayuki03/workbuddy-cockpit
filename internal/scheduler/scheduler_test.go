@@ -200,6 +200,11 @@ type fakeUpstream struct {
 	checkinCalls   atomic.Int32
 	refreshCalls   atomic.Int32
 	resourceRemain int64
+	// profileNick / profileFail 模拟 /console/account（FetchAccountProfile）：
+	// profileNick 非空时返回该昵称（uid 恒 "u1"，与测试账号对齐）；profileFail
+	// 时返回 500（资料拉取失败路径）。
+	profileNick string
+	profileFail bool
 }
 
 func (f *fakeUpstream) server() *httptest.Server {
@@ -213,6 +218,13 @@ func (f *fakeUpstream) server() *httptest.Server {
 			// size——上游真实数据恒一致，R-C 实测 Cycle{17,482,500}）。
 			w.Write([]byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CycleCapacitySize":1000,"CycleCapacityRemain":` +
 				jsonI64(f.resourceRemain) + `,"CycleCapacityUsed":0}]}}}}`))
+		case strings.HasSuffix(r.URL.Path, "/console/account"):
+			if f.profileFail {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"code":500,"msg":"boom"}`))
+				return
+			}
+			w.Write([]byte(`{"code":0,"data":{"uid":"u1","nickname":"` + f.profileNick + `"}}`))
 		case strings.HasSuffix(r.URL.Path, "/token/refresh"):
 			f.refreshCalls.Add(1)
 			w.Write([]byte(`{"code":0,"data":{"accessToken":"new","expiresIn":3600}}`))

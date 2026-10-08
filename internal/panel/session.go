@@ -18,12 +18,12 @@ import (
 	"encoding/json"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"sync"
 	"time"
 
 	"workbuddy2api/internal/httpauth"
+	"workbuddy2api/internal/iputil"
 	"workbuddy2api/internal/server"
 )
 
@@ -107,14 +107,16 @@ func (l *loginLimiter) reset(ip string) {
 	delete(l.entries, ip)
 }
 
-// clientIP 提取请求来源 IP（RemoteAddr 去端口；面板在反代后时应由部署方保证
-// RemoteAddr 已是真实客户端，或另行注入 X-Forwarded-For 白名单——本项目直连形态为主）。
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
+// clientIP 提取请求来源 IP，用于登录限速计数（真实客户端识别语义）。
+// 走 iputil.RequestClientIP 的可信代理感知解析：仅当 TCP 对端落在
+// cfg.TrustedProxyCIDRs 配置的可信代理网段内，才采信 X-Real-IP /
+// X-Forwarded-For（取真实客户端）；否则完全无视转发头、恒取 RemoteAddr
+// （零配置安全默认——直接暴露时伪造 X-Real-IP 不能绕过限速）。
+// trustedCIDRs 为 nil 时行为 = 只取 RemoteAddr（与历史行为一致）。
+// 注意：loopback_only 安全闸（panel.go loopbackOnly）刻意不走本函数——
+// 安全闸从严，恒按 RemoteAddr 判定，不解析任何转发头。
+func (p *Panel) clientIP(r *http.Request) string {
+	return iputil.RequestClientIP(r, p.cfg.TrustedProxyCIDRs, p.cfg.TrustedProxyHops)
 }
 
 // handleLogin POST /api/login {username,password}。
@@ -122,7 +124,7 @@ func clientIP(r *http.Request) string {
 // password 与 api_key 经 SHA-256 摘要后常量时间比较（与 httpauth.VerifyBearer
 // 同口径，不泄露长度），成功换发签名 cookie，失败 401。
 func (p *Panel) handleLogin(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r)
+	ip := p.clientIP(r)
 	if !loginRateLimit.allow(ip) {
 		writeErr(w, http.StatusTooManyRequests, "too_many_attempts")
 		return

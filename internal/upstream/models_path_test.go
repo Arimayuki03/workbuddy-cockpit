@@ -122,9 +122,9 @@ func TestGlobalModelsProbeV2First(t *testing.T) {
 
 	got := globalModelsClient(t, srv).FetchGlobalModels(globalAcct())
 
-	// 双 UA 后 v3 主路为两路并发（IDE UA + 默认 UA）+ v2 一路 = 3 次调用。
-	if len(calls) != 3 || !containsStr(calls, "/v3/config") || !containsStr(calls, "/v2/enterprises/personal/models") {
-		t.Fatalf("probe calls=%v want [/v3/config x2 /v2/enterprises/personal/models] (v2-first, no console)", calls)
+	// desktop-ua 后 v3 主路为三路并发（桌面端 UA + IDE UA + 默认 UA）+ v2 一路 = 4 次调用。
+	if len(calls) != 4 || !containsStr(calls, "/v3/config") || !containsStr(calls, "/v2/enterprises/personal/models") {
+		t.Fatalf("probe calls=%v want [/v3/config x3 /v2/enterprises/personal/models] (v2-first, no console)", calls)
 	}
 	counts := map[string]int{}
 	for _, id := range got {
@@ -158,12 +158,12 @@ func TestGlobalModelsProbeConsoleFallback(t *testing.T) {
 
 	got := globalModelsClient(t, srv).FetchGlobalModels(globalAcct())
 
-	// 双 UA 后：v3 两路（都 500）+ v2 500 + console 200 = 4 次调用。
-	if len(calls) != 4 ||
+	// desktop-ua 后：v3 三路（都 500）+ v2 500 + console 200 = 5 次调用。
+	if len(calls) != 5 ||
 		!containsStr(calls, "/v3/config") ||
 		!containsStr(calls, "/v2/enterprises/personal/models") ||
 		!containsStr(calls, "/console/enterprises/personal/models") {
-		t.Fatalf("fallback calls=%v want [/v3/config x2 /v2/... /console/...]", calls)
+		t.Fatalf("fallback calls=%v want [/v3/config x3 /v2/... /console/...]", calls)
 	}
 	counts := map[string]int{}
 	for _, id := range got {

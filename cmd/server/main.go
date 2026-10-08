@@ -16,10 +16,12 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/keystore"
 	"workbuddy2api/internal/livecfg"
 	"workbuddy2api/internal/panel"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/redisstore"
+	"workbuddy2api/internal/reqlog"
 	"workbuddy2api/internal/scheduler"
 	"workbuddy2api/internal/server"
 	"workbuddy2api/internal/session"
@@ -164,8 +166,11 @@ func main() {
 	p.SetMaxInFlightGlobal(cfg.Pool.MaxInFlightGlobal) // global 域在途分档（WAF 403 修复 P1-1，默认 2）
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
-	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
+	p.SetCostExploreInterval(cfg.CostExploreIntervalDur)             // costTier 探索窗口（issue #136，默认 30m；0 关停）
 	p.SetPickStrategy(pool.ParsePickStrategy(cfg.Pool.PickStrategy)) // 选号策略（weighted 默认 / credits_desc 余额严格降序）
+	// 积分保底（panel 吸收件，pool.credit_floor）：0 = 关闭（缺省零回归）。
+	// 倍率查表在 up 构建后装配（见下方 SetModelRateOf）。
+	p.SetCreditFloor(cfg.Pool.CreditFloor)
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
@@ -222,6 +227,52 @@ func main() {
 		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
 	})
 
+	// 请求日志 JSONL 归档（logging.request_archive，panel 吸收件）：默认 false
+	// 与 v1.15.1 行为一致（只有内存环形缓冲，无磁盘写）。true 时按日轮转归档到
+	// data/requests/（state 同目录推导），停机时 Close 排空队列再关文件。
+	// shutdown 组：signal ctx 的 cancel 触发（与 srv.Shutdown 同路，先于进程退出）；
+	// Close 幂等，requestlog 侧在 Record 中读包级引用，SetRequestArchive(nil) 无竞争
+	//（归档 writer 自身并发安全，Close 后不再投递即可，无需置 nil）。
+	if cfg.Logging.RequestArchive {
+		reqlogRec := reqlog.New(reqlog.Config{
+			Dir:           stateSibling(cfg.StateFile, "requests"),
+			RetentionDays: cfg.Logging.RequestRetentionDays,
+			MaxBytes:      int64(cfg.Logging.RequestArchiveMaxMB) << 20,
+		})
+		server.SetRequestArchive(reqlogRec)
+		defer reqlogRec.Close()
+		log.Printf("[logging] 请求日志归档已启用: %s (保留 %d 天 / 上限 %d MB, 来源采集=%v)",
+			stateSibling(cfg.StateFile, "requests"), cfg.Logging.RequestRetentionDays,
+			cfg.Logging.RequestArchiveMaxMB, cfg.Logging.RequestClientInfo)
+	}
+
+	// 入站 IP 规则（security 段，iprules.go）：空规则恒放行（nil 安全 + 空快照
+	// 双保险，零配置零回归）。落盘 data/ip_rules.json 与面板热改共用持久层——
+	// 读盘优先于启动 spec（上次运行的规则是单一事实来源），非法条目跳过并 WARN。
+	ipRules, ipErrs := server.NewIPRules(stateSibling(cfg.StateFile, "ip_rules.json"),
+		server.IPRulesSpec{
+			Blacklist:     cfg.Security.IPBlacklist,
+			Whitelist:     cfg.Security.IPWhitelist,
+			WhitelistMode: cfg.Security.IPWhitelistMode,
+		})
+	if len(ipErrs) > 0 {
+		log.Printf("WARN: [security] ip 规则有 %d 条非法条目已跳过: %v", len(ipErrs), ipErrs)
+	}
+
+	// 多密钥分发库（wbk_ 密钥，keystore 段）：落盘 api_keys.json 与 state 同目录
+	//（stateSibling 同规则，与 ip_rules.json/usage.json 一致，Docker volume 持久化）。
+	// **不加配置键**：常驻启用——文件存在且有密钥才生效，无密钥文件=空库=只走全局
+	// api_key（零配置行为不变）。损坏（非法 JSON）或目录不可写 fail-fast 拒启：静默
+	// 清空会让首次落盘覆盖好文件，比启动失败危险得多（keystore.Open 契约）。
+	keyStore, err := keystore.Open(stateSibling(cfg.StateFile, "api_keys.json"))
+	if err != nil {
+		fatalExit("open keystore: %v", err)
+	}
+	defer keyStore.Close() // 停机收尾：停防抖 + 最后一次落盘（与 p.Close 同位）
+	if keys := keyStore.List(); len(keys) > 0 {
+		log.Printf("[keystore] 多密钥分发已启用: api_keys.json 内 %d 把密钥（wbk_ 前缀鉴权与全局 api_key 并行）", len(keys))
+	}
+
 	up := upstream.New()
 	// 短 RPC 总时长上限（refresh/checkin/balance/FetchModels），语义不变。
 	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
@@ -256,6 +307,11 @@ func main() {
 	// 普通字段的并发读写数据竞争从根上消除（audit P0）。
 	up.SyncHot()
 
+	// 积分保底的倍率查表（pool.SetModelRateOf 装配，up 已构建后注入）：
+	// realm/model 语义与 pick 的调用口径一致——按账号所属域传 "cn"/"global"，
+	// Pick 老路径（无域上下文）传空串按空域键查；目录未覆盖返回 ""（= 未知放行）。
+	p.SetModelRateOf(up.ModelRateOf)
+
 	sch := scheduler.New(scheduler.Config{
 		Pool:                p,
 		Upstream:            up,
@@ -275,6 +331,10 @@ func main() {
 		SchoolDisabled:      !cfg.Schedule.SchoolEnabled,
 		CatDisabled:         !cfg.Schedule.CatEnabled,
 		QueueEnabled:        cfg.Schedule.QueueEnabled,
+		// Token 独立续期巡检（schedule.renew_*，缺省关）：临期账号主动刷新，
+		// 覆盖长期闲置无对话流量的空档（wbm services/renew.py 吸收件）。
+		RenewEnabled: cfg.Schedule.RenewEnabled,
+		RenewHours:   cfg.Schedule.RenewHours,
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
@@ -312,10 +372,49 @@ func main() {
 	if cfg.Schedule.QueueEnabled {
 		log.Printf("任务队列排程已启用：%v 点（任务中心执行队列：全账号成长任务 + 开学季闭环，schedule.queue_enabled）", cfg.Schedule.QueueHours)
 	}
+	if cfg.Schedule.RenewEnabled {
+		log.Printf("Token 续期巡检已启用：%v 点（临期账号主动续期，阈值=expiring_soon 窗口，schedule.renew_enabled）", cfg.Schedule.RenewHours)
+	}
+
+	// 积分流水追踪器（panel 移植件，wbm credits.record_balance 吸收件）：余额快照
+	// 落盘 data/credit_snapshots.json + 流水 data/credit_records.json（state 同目录
+	// 推导，Docker volume 持久化）。usage.enabled=false 同风格由面板配置开关控制；
+	// 面板关闭时 tracker 不建（流水随面板一起下线，scheduler 侧 sink 缺省零开销）。
+	var creditTracker *panel.CreditTracker
+	if cfg.Panel.Enabled && cfg.Usage.Enabled {
+		creditTracker = panel.NewCreditTracker(
+			stateSibling(cfg.StateFile, "credit_snapshots.json"),
+			stateSibling(cfg.StateFile, "credit_records.json"),
+		)
+		defer creditTracker.Stop() // 停机收尾：最后一次落盘
+		sch.SetCreditSink(creditTracker)
+		log.Printf("[credit] 积分流水已启用: %s + %s", stateSibling(cfg.StateFile, "credit_snapshots.json"), stateSibling(cfg.StateFile, "credit_records.json"))
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
+
+	// 模型倍率预热（credit_floor 兜底判收费用）：启动后异步探测 CN/global 两域
+	// 模型目录并把倍率入 upstream 表。容错：失败仅 WARN 不退出——运行期首次
+	// /v1/models 会自然重探（WarmModelRates 契约）。挂 signal ctx（shutdown 组）：
+	// 优雅停机取消时探测自然收尾，出站超时由 Client.HTTP 兜底。credit_floor=0
+	// （保底关闭）时跳过预热，不发起任何上游调用。
+	if cfg.Pool.CreditFloor > 0 {
+		go func() {
+			cnAcct := p.PickExcludingForRealm(nil, "", "cn")
+			globalAcct := p.PickExcludingForRealm(nil, "", "global")
+			if cnAcct == nil && globalAcct == nil {
+				log.Printf("WARN: [pool] credit_floor 预热跳过：池中暂无账号（选号时倍率兜底暂不可用，探测恢复后自动生效）")
+				return
+			}
+			if err := upstream.WarmModelRates(ctx, up, cnAcct, globalAcct); err != nil {
+				log.Printf("WARN: [pool] 模型倍率预热失败（credit_floor 目录兜底暂缺，仅本地台账判定）: %v", err)
+			} else {
+				log.Printf("[pool] 模型倍率预热完成（credit_floor 收费判定目录兜底已就绪）")
+			}
+		}()
+	}
 
 	// Web 管理面板（v1.2.0，panel 移植件）：/panel/api/* 原生 + /api/* 别名
 	//（manager 壳契约）+ 登录会话。cfg.Panel.Enabled=false 时不构建（网关行为
@@ -339,7 +438,21 @@ func main() {
 			ExpiringSoonWindow: cfg.ExpiringSoonDur,
 			ProbeFile:          stateSibling(cfg.StateFile, "output_probes.json"),
 			LoopbackOnly:       cfg.Panel.LoopbackOnly,
-			ConfigPath:         absPath,
+			// 可信代理解析参数：与下方 server.NewHandler 传同一份
+			// cfg.SecurityTrustedCIDRs 解析结果（normalize 阶段统一解析，禁止
+			// 两侧各解析一份导致口径分叉）。仅用于面板登录限速按真实 IP 计数；
+			// panel 的 loopback_only 安全闸不受此影响（恒按 RemoteAddr 从严）。
+			TrustedProxyCIDRs: cfg.SecurityTrustedCIDRs,
+			TrustedProxyHops:  cfg.Security.TrustedProxyHops,
+			TokenPath:         stateSibling(cfg.StateFile, "panel_tokens.json"),
+			// 安全页的 IP 规则引擎：与 server.Handler 共用同一实例（面板热改
+			// 规则即时生效于网关鉴权链，落盘 ip_rules.json 是单一事实来源）。
+			IPRules:    ipRules,
+			Credits:    creditTracker,
+			// API 密钥页（keys_ep.go）：与网关侧 keystore_auth 共用同一实例
+			// （面板建/停/删密钥，网关 Resolve 链即时生效；空库也注入）。
+			KeyStore: keyStore,
+			ConfigPath:        absPath,
 			LoadConfig: func() (any, error) {
 				return Load(*cfgPath)
 			},
@@ -398,6 +511,18 @@ func main() {
 		// handler 恒为默认 64MB。<=0 时传 0 走 handler 兜底回落默认（handler.go
 		// maxBodyBytes 对非正值回落 64MB，口径一致）。
 		MaxBodyBytes: int64(cfg.MaxBodyMB) << 20,
+		// 入站 IP 规则 + 可信代理解析参数（security 段）：ipRules 非 nil 时 withAuth
+		// 在鉴权前判定黑白名单；TrustedProxyCIDRs 空 = 不信任转发头（零配置安全默认）。
+		IPRules:           ipRules,
+		TrustedProxyCIDRs: cfg.SecurityTrustedCIDRs,
+		TrustedProxyHops:  cfg.Security.TrustedProxyHops,
+		// 多密钥分发库（wbk_ 密钥）：withAuth 兼容全局 api_key 的同时认 wbk_ 前缀
+		// 密钥（分段校验/记账见 keystore_auth.go）。空库也非 nil 注入——Resolve 恒
+		// 未命中，行为等价只走全局 key，省去 Handler 侧 nil/空库两种形态。
+		KeyStore: keyStore,
+		// 调用来源采集（logging.request_client_info，默认 false）：开时把 client_ip/
+		// user_agent 填进请求日志环形缓冲与 JSONL 归档。
+		RequestClientInfo: cfg.Logging.RequestClientInfo,
 		// /admin 管理面（本地 tasks/credits/shutdown + 上游 accounts 运维端点共用
 		// admin.enabled 开关；缺省关闭。本地端点开启后 loopback + api_key 双重限制）。
 		// OnShutdown=stop：POST /admin/shutdown 等价一次 Ctrl+C，走既有 flush→close→
@@ -419,6 +544,12 @@ func main() {
 		// panel.enabled=false 时保持 nil——不认任何 wb_session，行为与引入前一致。
 		SessionKey: sessionKeySupplier(panelHandler != nil, live),
 	})
+	// OpenAI Responses API（/v1/responses、/responses，v1.15.1）：挂载走
+	// responses.go 的 MountResponses（不改 handler.go 的约定——anthropic 层同理）。
+	h.MountResponses()
+	// Anthropic Messages 协议（/v1/messages 与 /v1/messages/count_tokens）：同一
+	// 导出挂载模式，与 /v1/chat/completions 完全同口径鉴权（anthropic.go）。
+	h.MountAnthropic()
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,

@@ -151,6 +151,27 @@ func (p *Pool) ManualDisabledState(uid string) (disabled bool, reason string, ok
 	return e.manualDisabled, e.manualReason, true
 }
 
+// SetRenewState 记录一次 token 续期结果（成功与失败都记；scheduler 续期巡检与
+// 保活/签到路径的 RefreshToken 收尾调用）。err==nil 记成功并清失败原因；err!=nil
+// 只更新失败原因、不动 lastRenewed（失败不代表续过期，「多久没续上」按最近一次
+// 成功算——面板据此区分「很久没续」与「在续但一直失败」两种健康形态）。
+// 幂等置脏：连续记录只落最新一条。uid 不存在为空操作（巡检与池对齐窗口内的竞态无害）。
+func (p *Pool) SetRenewState(uid string, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	if err == nil {
+		e.lastRenewed = time.Now()
+		e.renewLastErr = ""
+	} else {
+		e.renewLastErr = err.Error()
+	}
+	p.dirty.Store(true)
+}
+
 // ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号非禁用时，清冷却域（余额恢复）。
 // 迁移经 transition.reviveCoolingLocked：只清冷却域（until/coolKind/softStreak/
 // modelCooldowns）并更新 credits，不动熔断器（fails/retryCount/breakerUntil）——
@@ -387,6 +408,16 @@ func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
 	if !e.healthyForModel(now, model) {
 		return nil
 	}
+	// 积分保底（粘性路径）：与 pick 的 floorBlocked 同判据——触底 + 收费即拦
+	// （判据含上游目录倍率兜底，realm 取账号所属域——粘性号已确定，无需外部传入）。
+	// 返回 nil 后 handler 侧解绑粘性走普通轮换换号，粘性号回血后下次会话重新绑定。
+	// 日志频次：天然每请求至多一条——首次返回 nil 即解绑，后续轮转不再调入本路径
+	// （无需额外节流）；粘性续期中每个新请求一条，恰好是「余额仍在线下」的持续提醒。
+	if p.floorBlockedForRealmModel(e, model, e.a.Realm(), now) {
+		log.Printf("WARN: [pool] credit floor: sticky acct=%s model=%s credits=%d < floor=%d, unbind (paid model held out)",
+			logfmt.Label(e.a.UID, e.a.Nickname), model, e.credits, p.creditFloor)
+		return nil
+	}
 	if p.inFlightFull(e) {
 		return nil
 	}
@@ -551,6 +582,10 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		// 每模型在途台账（观测）：运维据此看到"这个号正在跑什么模型"。空台账
 		// 时为 nil（omitempty 省略），对 /status 既有消费者零回归。
 		InFlightByModel: e.inFlightByModelSnapshot(),
+		// 续期观测（schedule.renew_enabled 巡检 + 保活/签到刷新路径共同维护）：
+		// last_renewed 恒透出（零值 = 从未续期），renew_last_error 仅失败时非空。
+		LastRenewed:     e.lastRenewed,
+		RenewLastError:  e.renewLastErr,
 	}
 	if st.Disabled {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。

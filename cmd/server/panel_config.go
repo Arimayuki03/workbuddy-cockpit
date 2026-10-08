@@ -75,7 +75,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		return nil, err
 	}
 
-	// 3) 落盘（原子替换：tmp + rename）。
+	// 3) 落盘（原子替换：tmp + rename；单文件 bind mount 下 rename 报 EBUSY 时
+	// 回退原地写，见 server.writeFileEBUSYFallback——panel 5e1422c9/ab9a162b 移植）。
 	out, err := json.MarshalIndent(merged, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
@@ -85,9 +86,10 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return nil, fmt.Errorf("replace config: %w", err)
+		if fbErr := server.WriteFileEBUSYFallback(err, tmp, path, out); fbErr != nil {
+			return nil, fbErr
+		}
 	}
-
 	// 4) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
 	live.Store(livecfg.Snapshot{
 		APIKey:               newCfg.APIKey,
@@ -134,6 +136,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 			enabled = newCfg.Schedule.CatEnabled
 		case "queue":
 			enabled = newCfg.Schedule.QueueEnabled
+		case "renew":
+			enabled = newCfg.Schedule.RenewEnabled
 		}
 		_ = sch.SetEnabled(kind, enabled)
 	}
@@ -145,6 +149,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	_ = sch.SetHours("school", newCfg.Schedule.SchoolHours)
 	_ = sch.SetHours("cat", newCfg.Schedule.CatHours)
 	_ = sch.SetHours("queue", newCfg.Schedule.QueueHours)
+	_ = sch.SetHours("renew", newCfg.Schedule.RenewHours)
 
 	return restartRequiredFields(newCfg), nil
 }

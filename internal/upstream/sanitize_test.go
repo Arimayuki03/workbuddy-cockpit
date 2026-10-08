@@ -565,6 +565,29 @@ func TestReasoningContentSanitized(t *testing.T) {
 	}
 }
 
+// TestSanitizeMessagesScrubsReasoningField 补洗 OpenAI 形态的裸 reasoning 字段：
+// thinking.go 的回填会把客户端送来的 reasoning_content 镜像进 reasoning（反之亦
+// 然），客户端传入的历史消息也可能原生带该字段——此前只洗 content /
+// reasoning_content / tool_calls → 镜像进 reasoning 的指纹（裸反探测错误码）原样
+// 出站，而请求体里出现该数字本身就是上游整单拦截条件。
+func TestSanitizeMessagesScrubsReasoningField(t *testing.T) {
+	ms := []any{map[string]any{
+		"role":      "assistant",
+		"content":   "hi",
+		"reasoning": "upstream said " + fpCode,
+	}}
+	if !sanitizeMessages(ms) {
+		t.Fatal("reasoning 字段里的指纹未被净化")
+	}
+	got, _ := ms[0].(map[string]any)["reasoning"].(string)
+	if strings.Contains(got, fpCode) {
+		t.Fatalf("reasoning 仍含裸指纹: %q", got)
+	}
+	if !strings.Contains(got, fpCodeRewritten) {
+		t.Fatalf("reasoning 应改写为连字符形态: %q", got)
+	}
+}
+
 // TestSanitizeLiteralByteExact 逐字节快照护栏：把 sanitizeFeatures 7 项 +
 // sanitizeRewrites 5 对 + 3 个正则的当前字节值硬编码断言。
 // 这些字面量是实验逆向出的上游内容审核黑名单（无契约可引用），上游按逐字精确

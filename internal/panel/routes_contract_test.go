@@ -33,6 +33,7 @@ func TestManagerShellContractRoutesExist(t *testing.T) {
 		"/api/config",
 		"/api/settings/model-map",
 		"/api/tasks/queue",
+		"/api/tasks/records",
 		// /api/school/status 与 /api/school/run_all 已随开学季活动结束（2026-09-24）
 		// 下线；券码查询保留。
 		"/api/school/vouchers",
@@ -52,6 +53,7 @@ func TestManagerShellContractRoutesExist(t *testing.T) {
 		"/api/activity_all",
 		"/api/keepalive_all",
 		"/api/balance_all",
+		"/api/renew_all",
 		"/api/tasks/scan_all",
 		"/api/tasks/run_queue",
 		"/api/tasks/queue/cancel",

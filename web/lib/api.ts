@@ -38,7 +38,28 @@ import type {
   UpstreamStatus,
   UsageSnapshot,
   VouchersResponse,
+  KeysListResponse,
+  KeyCreateResponse,
+  KeyUpdateResponse,
+  KeyIpsResponse,
+  SecurityStatusResponse,
+  SecurityRulesPayload,
+  SecurityRulesResponse,
+  ModelLocksResponse,
+  RenewAllResponse,
+  TaskRecordsResponse,
+  TokensListResponse,
+  TokenCreateResponse,
 } from './types';
+
+/**
+ * HTTP 状态码提取：区分「端点未启用」（501，功能开关没开，提示而非报错）
+ * 与「重入/冲突」（409，上一轮还在跑）这类有专属文案的业务状态。
+ */
+export function httpStatus(e: unknown): number | null {
+  const ax = e as AxiosError | undefined;
+  return ax?.response?.status ?? null;
+}
 
 export const http = axios.create({
   baseURL: '',
@@ -102,6 +123,12 @@ const post = async <T>(
   body?: unknown,
   cfg?: {timeout?: number; headers?: Record<string, string>},
 ): Promise<T> => (await http.post<T>(url, body, cfg)).data;
+/** PATCH（axios 没有专属 helper，body 序列化口径与 post 一致） */
+const patch = async <T>(url: string, body?: unknown): Promise<T> =>
+  (await http.patch<T>(url, body)).data;
+/** DELETE（带可选 JSON body——token 停用/恢复复用 DELETE + {disabled}） */
+const del = async <T>(url: string, body?: unknown): Promise<T> =>
+  (await http.delete<T>(url, body ? {data: body} : undefined)).data;
 /* ── 鉴权 ───────────────────────────────────────────── */
 export const authApi = {
   me: () => get<Me>('/api/me'),
@@ -166,6 +193,8 @@ export const accountApi = {
   keepaliveAll: () => post<BatchStartResponse>('/api/keepalive_all'),
   /** 全量余额刷新：同步等待全池逐号查上游，返回最新池快照（长超时） */
   balanceAll: () => post<BalanceAllResponse>('/api/balance_all', undefined, LONG_TIMEOUT),
+  /** 手动触发全账号续期巡检（异步执行）。重入回 409，未启用回 501。 */
+  renewAll: () => post<RenewAllResponse>('/api/renew_all'),
 
   /* ── 积分包构成（券码/积分来源对比视图）──────────────────── */
   packages: () => get<PackagesResponse>('/api/packages'),
@@ -212,6 +241,11 @@ export const taskApi = {
   queue: () => get<TaskQueueResponse>('/api/tasks/queue'),
   /** 手动取消执行队列：剩余待办停止调度，进行中条目自然完成后停止（幂等） */
   cancelQueue: () => post<{ok: boolean; cancelled: boolean}>('/api/tasks/queue/cancel'),
+
+  /* ── 积分流水 ─────────────────────────────────────────── */
+  /** 积分流水（签到/任务入账与余额跳变，按时间倒序）。未启用时后端回 501。 */
+  records: (uid?: string) =>
+    get<TaskRecordsResponse>('/api/tasks/records', uid ? {uid} : undefined),
 };
 
 /* ── 开学季券码（panel taskcenter.go schoolVouchers）──────── */
@@ -268,3 +302,71 @@ export const settingsApi = {
 };
 
 export type {Account};
+
+/* ── API 密钥管理（对外网关分发密钥）────────────────────────
+ * 契约（后端 internal/server/keys.go，双方按 types.ts 落地）：
+ *  - GET    /api/keys              → {keys: ApiKey[]}
+ *  - POST   /api/keys              → {key, plaintext}（明文仅此一次）
+ *  - PATCH  /api/keys/{id}         → {key}（全字段可选）
+ *  - DELETE /api/keys/{id}
+ *  - POST   /api/keys/{id}/reset_usage
+ *  - GET    /api/keys/{id}/ips     → {ips: [{ip, first_seen}]}
+ * 4xx 错误体可能带 {error: {reason: "short_code"}}，展示时经 i18n 映射
+ * （见 keys 页的 keyReasonText）。 */
+export const keyApi = {
+  list: () => get<KeysListResponse>('/api/keys'),
+  create: (body: KeyCreatePayload) => post<KeyCreateResponse>('/api/keys', body),
+  update: (id: string, body: KeyUpdatePayload) =>
+    patch<KeyUpdateResponse>(`/api/keys/${encodeURIComponent(id)}`, body),
+  remove: (id: string) => post<OkResponse>(`/api/keys/${encodeURIComponent(id)}/delete`),
+  resetUsage: (id: string) => post<OkResponse>(`/api/keys/${encodeURIComponent(id)}/reset_usage`),
+  ips: (id: string) => get<KeyIpsResponse>(`/api/keys/${encodeURIComponent(id)}/ips`),
+};
+
+/** POST /api/keys 请求体（expires_at 为 Unix 秒，0 = 永不过期） */
+export interface KeyCreatePayload {
+  name: string;
+  /** 'cn' | 'global' | ''（不限制，仅存量密钥） */
+  realm: 'cn' | 'global' | '';
+  expires_at: number;
+  max_ips: number;
+  ip_whitelist: string[];
+  model_whitelist: string[];
+  token_quota: number;
+  credit_quota: number;
+  /** 密钥级限流（req/min）；0 = 默认 */
+  rate_limit: number;
+}
+
+/** PATCH /api/keys/{id} 请求体：与创建相同但全字段可选 */
+export type KeyUpdatePayload = Partial<KeyCreatePayload> & {enabled?: boolean};
+
+/* ── 管理面作用域 Token（wbt_，internal/panel/tokens.go）──────────
+ * 契约（双方按 types.ts 的 PanelToken 落地）：
+ *  - POST   /api/tokens        body {name, scope} → {ok, token, token_record}
+ *                              （token 是仅此一次的明文）
+ *  - GET    /api/tokens        → {ok, tokens}（无明文无摘要）
+ *  - DELETE /api/tokens/{id}   → {ok:true}；带 body {disabled: true|false}
+ *                              为停用/恢复（缺省直接删除）
+ * 这组端点**仅会话 cookie 可用**（Bearer 一律 401 session_required）——
+ * http 实例 withCredentials 天然满足，切勿给它们手动加 Authorization 头。 */
+export const tokenApi = {
+  list: () => get<TokensListResponse>('/api/tokens'),
+  create: (body: {name: string; scope: 'readonly' | 'admin'}) =>
+    post<TokenCreateResponse>('/api/tokens', body),
+  /** 删除令牌；传 disabled 时改为停用/恢复（保留审计与 last_used 历史） */
+  remove: (id: string) => del<OkResponse>(`/api/tokens/${encodeURIComponent(id)}`),
+  setDisabled: (id: string, disabled: boolean) =>
+    del<OkResponse>(`/api/tokens/${encodeURIComponent(id)}`, {disabled}),
+};
+
+/* ── 安全（入站 IP 管控 / 拦截日志 / 模型锁池）────────────────
+ * 契约（后端 internal/server/security.go）：
+ *  - GET  /api/security            → {rules, blocked_logs}
+ *  - POST /api/security/rules      → {errs: string[]}（非空 = 整体未生效）
+ *  - GET  /api/security/model_locks → {locks: ModelLockRow[]} */
+export const securityApi = {
+  status: () => get<SecurityStatusResponse>('/api/security'),
+  saveRules: (body: SecurityRulesPayload) => post<SecurityRulesResponse>('/api/security/rules', body),
+  modelLocks: () => get<ModelLocksResponse>('/api/security/model_locks'),
+};

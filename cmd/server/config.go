@@ -4,12 +4,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"workbuddy2api/internal/config"
+	"workbuddy2api/internal/iputil"
 	"workbuddy2api/internal/prompt"
 )
 
@@ -153,7 +155,56 @@ type Config struct {
 		// 最高者不可用顺延次高；绕过权重/Top5/成本分层，冷却/熔断/在途/轮换保留）。
 		// 面板设置页可在线切换（热生效，免重启）。
 		PickStrategy string `json:"pick_strategy"`
+		// CreditFloor 积分保底线（workbuddy2api-panel 吸收件）：账号缓存余额低于
+		// 本值时不再参与「收费模型」的选号，防止收费请求把余额打穿、连免费模型
+		// 都 402 冷却到次日签到。0 = 关闭（缺省即现状，零回归）；负值非法归 0。
+		// 全池触底且无免费模型可接时选号返回 nil（硬语义：宁 503 不打穿）。
+		CreditFloor int64 `json:"credit_floor"`
 	} `json:"pool"`
+
+	// Security 入站访问安全段（多密钥分发的前置件）。缺省全部零值 = 无规则恒放行
+	// + 不信任任何转发头（客户端 IP 恒取 TCP 对端），行为与引入前逐位一致。
+	Security struct {
+		// TrustedProxyCIDRs 可信代理网段列表（单 IP 或 CIDR，如 "127.0.0.1"、
+		// "10.0.0.0/8"）。**默认空 = 完全不信任 X-Forwarded-For / X-Real-IP**：
+		// 这两个头是客户端可伪造的普通请求头，服务直接暴露时伪造任意来源 IP 即可
+		// 绕过下面全部 IP 管控。反代/CDN 后部署必须配置（同机 nginx 加 127.0.0.1/8
+		// 与 ::1/128），否则真实客户端 IP 解析不到、IP 规则按对端（反代）地址判定。
+		// 非法条目启动 fail-fast（iputil.ParseTrustedCIDRs）。WB2A_SECURITY_TRUSTED_PROXY_CIDRS
+		// 环境变量覆盖（逗号分隔）。
+		TrustedProxyCIDRs []string `json:"trusted_proxy_cidrs"`
+		// TrustedProxyHops 可信代理层数：X-Forwarded-For 从右往左取第 N 跳作为
+		// 客户端 IP（N = 反代 + CDN 层数）。默认 1（一层反代）；<1 按 1 处理。
+		TrustedProxyHops int `json:"trusted_proxy_hops"`
+		// IPBlacklist 入站黑名单（命中即拒，优先于白名单）。空 = 不启用。
+		// WB2A_SECURITY_IP_BLACKLIST 环境变量覆盖（逗号分隔）。
+		IPBlacklist []string `json:"ip_blacklist"`
+		// IPWhitelist 入站白名单。仅白名单模式（下方开关）且本表非空时生效：
+		// 不在名单 = 拒绝（默认拒绝）。空 = 自动失效（防自我锁死，全放行）。
+		// WB2A_SECURITY_IP_WHITELIST 环境变量覆盖（逗号分隔）。
+		IPWhitelist []string `json:"ip_whitelist"`
+		// IPWhitelistMode 白名单模式开关：true 且白名单非空时只放行名单内来源。
+		// 黑名单模式不受本开关影响（有黑名单就判，先于白名单）。
+		IPWhitelistMode bool `json:"ip_whitelist_mode"`
+	} `json:"security"`
+
+	// Logging 日志观测段（reqlog 归档 + 调用来源采集）。缺省全部零值 =
+	// 不归档、不采集来源，行为与 v1.15.1 完全一致。
+	Logging struct {
+		// RequestArchive 请求日志 JSONL 归档开关。默认 false（保守：默认行为与
+		// v1.15.1 一致，无磁盘写放大）；true 时按日轮转归档到 data/requests/
+		//（requests-YYYYMMDD.jsonl，只写元数据：模型/状态/token/首字延迟/扣费/
+		// 错误摘要，不写提示词与响应正文）。
+		RequestArchive bool `json:"request_archive"`
+		// RequestRetentionDays 归档按天保留上限，默认 7（<=0 回落默认）。
+		RequestRetentionDays int `json:"request_retention_days"`
+		// RequestArchiveMaxMB 归档总容量上限（MB），默认 200（<=0 回落默认）。
+		RequestArchiveMaxMB int `json:"request_archive_max_mb"`
+		// RequestClientInfo 采集调用来源（client_ip / user_agent）进请求日志环形
+		// 缓冲与归档。默认 false：来源信息比 token 计数敏感，不做默认采集；
+		// client_ip 的解析同样受 security.trusted_proxy_cidrs 信任模型约束。
+		RequestClientInfo bool `json:"request_client_info"`
+	} `json:"logging"`
 
 	SessionSticky struct {
 		Enabled    bool   `json:"enabled"`     // 默认 true
@@ -198,6 +249,9 @@ type Config struct {
 	ExpiringSoonDur     time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
+	// SecurityTrustedCIDRs 解析后的可信代理网段（normalize 阶段 iputil.ParseTrustedCIDRs
+	// fail-fast 产物，main 直接注入 handler）。nil = 不信任任何转发头（零配置安全默认）。
+	SecurityTrustedCIDRs []netip.Prefix `json:"-"`
 }
 
 // Default 默认配置。
@@ -359,6 +413,67 @@ func applyEnv(c *Config) {
 			c.Admin.Enabled = b
 		}
 	}
+	// security 段 env 覆盖（WB2A_SECURITY_* 风格；数组键逗号分隔，与既有布尔/整数
+	// 覆盖同风格——解析失败静默保留文件值，不因坏 env 阻塞启动）。
+	if v := os.Getenv("WB2A_SECURITY_TRUSTED_PROXY_CIDRS"); v != "" {
+		c.Security.TrustedProxyCIDRs = splitCommaList(v)
+	}
+	if v := os.Getenv("WB2A_SECURITY_TRUSTED_PROXY_HOPS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Security.TrustedProxyHops = n
+		}
+	}
+	if v := os.Getenv("WB2A_SECURITY_IP_BLACKLIST"); v != "" {
+		c.Security.IPBlacklist = splitCommaList(v)
+	}
+	if v := os.Getenv("WB2A_SECURITY_IP_WHITELIST"); v != "" {
+		c.Security.IPWhitelist = splitCommaList(v)
+	}
+	if v := os.Getenv("WB2A_SECURITY_IP_WHITELIST_MODE"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Security.IPWhitelistMode = b
+		}
+	}
+	// pool.credit_floor env 覆盖（0 = 关闭）。
+	if v := os.Getenv("WB2A_POOL_CREDIT_FLOOR"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			c.Pool.CreditFloor = n
+		}
+	}
+	// logging 段 env 覆盖。
+	if v := os.Getenv("WB2A_LOGGING_REQUEST_ARCHIVE"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Logging.RequestArchive = b
+		}
+	}
+	if v := os.Getenv("WB2A_LOGGING_REQUEST_RETENTION_DAYS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Logging.RequestRetentionDays = n
+		}
+	}
+	if v := os.Getenv("WB2A_LOGGING_REQUEST_ARCHIVE_MAX_MB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Logging.RequestArchiveMaxMB = n
+		}
+	}
+	if v := os.Getenv("WB2A_LOGGING_REQUEST_CLIENT_INFO"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Logging.RequestClientInfo = b
+		}
+	}
+}
+
+// splitCommaList 把逗号分隔的 env 值拆成列表（去两侧空白、丢空段）。
+// 供 security 段的数组键（CIDR/黑/白名单）。
+func splitCommaList(v string) []string {
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func (c *Config) normalize() error {
@@ -474,6 +589,22 @@ func (c *Config) normalize() error {
 	if c.Admin.CreditRefreshMinIntervalSec <= 0 {
 		c.Admin.CreditRefreshMinIntervalSec = 600
 	}
+	// 积分保底线：负值非法归 0（0 = 关闭），不给"配错=全池硬 503"留口子。
+	if c.Pool.CreditFloor < 0 {
+		c.Pool.CreditFloor = 0
+	}
+	// 可信代理层数：默认 1（一层反代）；<1 按 1 处理（与 iputil.ParseClientIP 同口径）。
+	if c.Security.TrustedProxyHops < 1 {
+		c.Security.TrustedProxyHops = 1
+	}
+	// 可信代理网段：非法条目启动 fail-fast（iputil.ParseTrustedCIDRs）——网段配错
+	// 等于信任模型失效（伪造头绕过全部 IP 管控），静默降级不可接受。空列表合法
+	//（= 完全不信任转发头），ParseTrustedCIDRs 对空输入返回 (nil, nil)。
+	cidrs, err := iputil.ParseTrustedCIDRs(c.Security.TrustedProxyCIDRs)
+	if err != nil {
+		return fmt.Errorf("security.trusted_proxy_cidrs: %w", err)
+	}
+	c.SecurityTrustedCIDRs = cidrs
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen
 	}

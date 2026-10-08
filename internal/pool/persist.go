@@ -288,6 +288,10 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			sessionDeadFails: s.SessionDeadFails,
 			consecutiveFails: s.ConsecutiveFails,
 			creditsExpiring:  expiring,
+			// 续期观测恢复（同 creds/disabled 一口的直通恢复，无过期语义——
+			// 「上次续期时刻/失败原因」不会因时间流逝失效）。
+			lastRenewed:  s.LastRenewed,
+			renewLastErr: s.RenewLastError,
 		}
 		// 恢复熔断器：breakerUntil 在未来才恢复（惰性过滤过期/零值，与落盘同口径）。
 		// retryCount 仅在 breakerUntil 未过期时恢复——已过期则归零（不保留无用退避指数）。
@@ -598,6 +602,11 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			BreakerUntil:     breakerUntil,
 			RetryCount:       retryCount,
 			CreditsExpiring:  e.creditsExpiring,
+			// 续期观测（schedule.renew_enabled 巡检 + 保活/签到刷新路径共同维护）：
+			// lastRenewed 零值也写（运维口径，见 stateAccount.LastRenewed 注释）；
+			// renewLastErr 成功态为空串（omitempty 省略），失败态原样落盘。
+			LastRenewed:     e.lastRenewed,
+			RenewLastError:  e.renewLastErr,
 			ModelCooldowns:   mcs,
 			ModelCosts:       mcosts,
 		}

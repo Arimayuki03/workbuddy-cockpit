@@ -663,8 +663,11 @@ func patchConfigScalar(path, section, key string, lit []byte) (bool, error) {
 		return false, fmt.Errorf("close tmp: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return false, fmt.Errorf("rename: %w", err)
+		// EBUSY（单文件 bind mount 挂载点拒绝 rename）回退 open+truncate 原地写；
+		// 写失败时保留 tmp 新内容（挂载文件已被截断，tmp 是唯一完整副本）。
+		if fbErr := WriteFileEBUSYFallback(err, tmp, path, newRaw); fbErr != nil {
+			return false, fbErr
+		}
 	}
 	return true, nil
 }

@@ -57,6 +57,13 @@ type Config struct {
 	// 命名与上面六个相反（Enabled 而非 Disabled）：队列缺省关——它对全账号执行
 	// 真实任务动作链（消耗上游配额），由用户显式打开；其余六类零值即启用是历史兼容。
 	QueueEnabled bool
+	// RenewEnabled Token 独立续期巡检排程开关（schedule.renew_enabled，缺省关 opt-in）。
+	// 开启后按 RenewHours 到点扫描全账号，对「有效期不足 ExpiringSoonWindow」的
+	// 临期账号主动 RefreshToken（语义区分见 runRenewOnce）。复用 ExpiringSoonWindow
+	// 作为临期阈值口径（config pool.expiring_soon，默认 7 天）。
+	RenewEnabled bool
+	// RenewHours 续期巡检触发小时表，默认 [3]（凌晨，避开签到/活跃/队列高峰）。
+	RenewHours []int
 }
 
 // Scheduler 调度器。
@@ -109,6 +116,13 @@ type Scheduler struct {
 	// queueMu 保护 queueRunner 的注入与读取（装配后注入一次，热改免锁也无害，
 	// 但 Go 内存模型上并发读写函数值仍需同步）。
 	queueMu sync.RWMutex
+
+	// creditSink 积分流水执行体（panel.CreditTracker，main 装配期经 SetCreditSink
+	// 注入；internal/scheduler 不能 import internal/panel——依赖方向相反，接口
+	// 注入是唯一通路）。nil 时流水记录整体关闭（RecordBalanceChecked 零开销直返）。
+	creditSink creditSnapshotter
+	// creditMu 保护 creditSink 的注入与读取（与 queueMu 同风格）。
+	creditMu sync.RWMutex
 }
 
 // SetQueueRunner 注入任务中心执行队列的执行体（panel.QueueRunner，main 装配期
@@ -119,8 +133,8 @@ func (s *Scheduler) SetQueueRunner(fn func()) {
 	s.queueMu.Unlock()
 }
 
-// kindCount 与 taskKind 枚举数量一致（checkin/travel/activity/keepalive/school/cat/queue）。
-const kindCount = 7
+// kindCount 与 taskKind 枚举数量一致（checkin/travel/activity/keepalive/school/cat/queue/renew）。
+const kindCount = 8
 
 // clampHours 归一化排程小时表：空回落默认；逐项剔除越界值（h<0 || h>23，剔一条
 // 记一条 WARN）；剔除后为空再回落默认。config 直载的越界小时（如 25）若不拦，
@@ -150,6 +164,7 @@ func New(cfg Config) *Scheduler {
 	cfg.SchoolHours = clampHours(cfg.SchoolHours, []int{12})
 	cfg.CatHours = clampHours(cfg.CatHours, []int{1})
 	cfg.QueueHours = clampHours(cfg.QueueHours, []int{10})
+	cfg.RenewHours = clampHours(cfg.RenewHours, []int{3})
 	// 0/缺省 = 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
 	if cfg.ActivityReportCount <= 0 {
 		cfg.ActivityReportCount = 1
@@ -163,6 +178,9 @@ func New(cfg Config) *Scheduler {
 	s.enabled[taskSchool].Store(!cfg.SchoolDisabled)
 	s.enabled[taskCat].Store(!cfg.CatDisabled)
 	s.enabled[taskQueue].Store(cfg.QueueEnabled)
+	// renew 与 queue 同风格（opt-in，缺省关）：对临期账号主动打 refresh 写接口，
+	// 由用户显式打开；关闭时保活/签到/选号路径的既有刷新行为完全不受影响。
+	s.enabled[taskRenew].Store(cfg.RenewEnabled)
 	for i := range s.lastOut {
 		s.lastOut[i].Store("")
 	}
@@ -221,6 +239,7 @@ const (
 	taskSchool
 	taskCat
 	taskQueue
+	taskRenew
 )
 
 // nextWake 返回 now 之后最近的唤醒时刻，以及该时刻需要执行的全部任务。
@@ -255,6 +274,9 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	}
 	if s.enabled[taskQueue].Load() {
 		slots = append(slots, slot{nextFire(now, s.hoursOf(taskQueue)), taskQueue})
+	}
+	if s.enabled[taskRenew].Load() {
+		slots = append(slots, slot{nextFire(now, s.hoursOf(taskRenew)), taskRenew})
 	}
 	var earliest time.Time
 	for _, sl := range slots {
@@ -491,6 +513,9 @@ func (s *Scheduler) runOne(ctx context.Context, k taskKind) {
 		summary = "done"
 	case taskQueue:
 		summary = s.RunQueueNow()
+	case taskRenew:
+		s.runRenewOnce()
+		summary = "done"
 	}
 	// 收尾顺序：running 先于 lastRun/lastOut 落定——观测者（/admin 轮询方）看到
 	// lastRun 更新时 running 必已复位，不存在"有结果却仍在跑"的中间态。
@@ -659,6 +684,7 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 		}
 		s.cfg.Pool.ReenableIfCredits(st.UID, remain)
 		s.cfg.Pool.SetCreditsDetailed(st.UID, remain, buckets.Expiring)
+		s.RecordBalanceChecked(st.UID, st.Nickname, remain) // 积分流水：余额比对记账（credit.go）
 		oc.Credits = &remain
 		switch oc.Status {
 		case CheckinOK:
@@ -1000,6 +1026,8 @@ func (s *Scheduler) markRewardClaimed(uid string) {
 // 12153 禁用走 Pool.NoteSessionDead 的**连续计数**语义：一次刷新失败不再立即杀号，
 // 连续 sessionDeadThreshold 次（3 次）才禁用（P0-1：13 个 disabled 号全是历史误判）。
 // 刷新成功 → ClearSessionDead 清计数（错误判定的账号有复活路径）。
+// 收尾同步回写续期观测（SetRenewState）：成功记 last_renewed + 清失败原因；
+// 失败只记 renew_last_error——续期观测不区分触发路径（保活/签到/巡检都是刷新）。
 func (s *Scheduler) RunKeepaliveNow() {
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
@@ -1017,10 +1045,12 @@ func (s *Scheduler) RunKeepaliveNow() {
 					log.Printf("WARN: keepalive %s: 连续 %d 次 12153 session dead — 禁用", logfmt.Label(st.UID, st.Nickname), pool.SessionDeadThreshold())
 				}
 			}
+			s.cfg.Pool.SetRenewState(st.UID, err) // 失败也留痕（renew_last_error）
 			continue
 		}
 		s.cfg.Pool.ClearSessionDead(st.UID) // 刷新成功清误判计数，失败不该累计
-		a.BackfillRealm()                   // 老 auth 空 realm → 落盘前补标识（幂等：已有不动）
+		s.cfg.Pool.SetRenewState(st.UID, nil)
+		a.BackfillRealm() // 老 auth 空 realm → 落盘前补标识（幂等：已有不动）
 		if err := a.SaveAtomic(); err != nil {
 			log.Printf("keepalive %s save: %v", logfmt.Label(st.UID, st.Nickname), err)
 		}
@@ -1043,10 +1073,10 @@ func (s *Scheduler) RunMinichatNow() {
 // /admin 热管理与观测（server 包的 /admin 端点依赖；对既有定时/CLI 行为零影响）
 // ============================================================================
 
-// kindNames/kindLabels 七类任务的稳定字符串标识与中文显示名（顺序与 taskKind 枚举一致）。
-var kindNames = [kindCount]string{"checkin", "travel", "activity", "keepalive", "school", "cat", "queue"}
+// kindNames/kindLabels 八类任务的稳定字符串标识与中文显示名（顺序与 taskKind 枚举一致）。
+var kindNames = [kindCount]string{"checkin", "travel", "activity", "keepalive", "school", "cat", "queue", "renew"}
 
-var kindLabels = [kindCount]string{"签到", "猫猫旅行", "活跃上报", "Token 保活", "开学季", "夜猫子", "任务队列"}
+var kindLabels = [kindCount]string{"签到", "猫猫旅行", "活跃上报", "Token 保活", "开学季", "夜猫子", "任务队列", "令牌续期"}
 
 // Kinds 返回七类任务的字符串标识（枚举顺序），供外部遍历与参数校验。
 func Kinds() []string {
@@ -1172,6 +1202,8 @@ func (s *Scheduler) cfgHours(k taskKind) []int {
 		return s.cfg.CatHours
 	case taskQueue:
 		return s.cfg.QueueHours
+	case taskRenew:
+		return s.cfg.RenewHours
 	default:
 		return s.cfg.CatHours
 	}

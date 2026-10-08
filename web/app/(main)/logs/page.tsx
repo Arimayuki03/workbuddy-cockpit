@@ -1,16 +1,18 @@
 'use client';
 
-import {useEffect, useMemo, useRef, useState} from 'react';
+import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   ArrowDown10,
   ArrowUp10,
   ListFilter,
   Radio,
+  RefreshCw,
   ScrollText,
+  ServerCrash,
   Terminal,
 } from 'lucide-react';
 import {useHeartbeat} from '@/lib/use-heartbeat';
-import {logApi} from '@/lib/api';
+import {logApi, errText} from '@/lib/api';
 import {useCachedAsync} from '@/lib/data-cache';
 import type {RequestLog, RequestLogsResponse, SystemLogsResponse} from '@/lib/types';
 import {fmtCredit, fmtDateTime, fmtLatency, fmtNumber} from '@/lib/format';
@@ -19,6 +21,7 @@ import {EmptyState} from '@/components/common/layout/EmptyState';
 import {TableSkeleton} from '@/components/common/layout/LoadSkeleton';
 import {CopyButton} from '@/components/ui/copy-button';
 import {useT} from '@/lib/i18n/provider';
+import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
 import {Input} from '@/components/ui/input';
 import {Label} from '@/components/ui/label';
@@ -80,16 +83,32 @@ export default function LogsPage() {
   /** 实时刷新开关（请求日志与系统日志共用）：默认开，5 秒一轮 */
   const [live, setLive] = useState(true);
 
+  /* ── 首载错误态（区分「加载失败」与「环形缓冲真的是空的」）───────
+   * 错误在各 fetcher 里捕获：useCachedAsync 内部的挂载刷新会先占住请求锁
+   * 并把失败静默吞掉，页面层对 refresh 的 .catch 收不到 rejection——捕获
+   * 必须挂进 fetcher。有旧缓存时静默降级继续展示旧数据；实时心跳的周期
+   * 失败不覆盖已有状态（5 秒一轮不该刷错误雨），错误条保留到手动重试成功。 */
+  const [reqError, setReqError] = useState<string | null>(null);
+  const [sysError, setSysError] = useState<string | null>(null);
+
   // 两个日志源接缓存：切页先出上次的列表再静默续新（日志是环形缓冲快照，
   // 缓存值与新值形状一致）。key 带 limit——改条数上限等于换数据集。
   const requestsCache = useCachedAsync<RequestLogsResponse>(
     `logs:requests:${limit}`,
-    () => logApi.requestLogs(Number(limit) || 200),
+    () =>
+      logApi.requestLogs(Number(limit) || 200).catch((e) => {
+        setReqError((prev) => prev ?? errText(e)); // 已有错误不覆盖
+        throw e; // 继续抛给 hook 的常规错误路径
+      }),
     {ttl: 4000},
   );
   const logs = useMemo(() => requestsCache.data?.items ?? [], [requestsCache.data]);
   const loading = requestsCache.loading;
   const loadRequests = requestsCache.refresh;
+  const retryRequests = useCallback(() => {
+    setReqError(null);
+    loadRequests().catch((e) => setReqError(errText(e)));
+  }, [loadRequests]);
 
   // 环形缓冲只有最近 N 条，筛选全部在前端做（数据量有界）；
   // 模型筛选是下拉（来自当前日志里真实出现过的模型），搜索框做全文即时过滤
@@ -127,14 +146,23 @@ export default function LogsPage() {
 
   const systemCache = useCachedAsync<SystemLogsResponse>(
     'logs:system',
-    () => logApi.system('', 500),
+    () =>
+      logApi.system('', 500).catch((e) => {
+        setSysError((prev) => prev ?? errText(e)); // 已有错误不覆盖
+        throw e; // 继续抛给 hook 的常规错误路径
+      }),
     {ttl: 4000},
   );
   const sysEntries = useMemo(() => systemCache.data?.entries ?? [], [systemCache.data]);
   const sysLoading = systemCache.loading;
   const loadSystem = systemCache.refresh;
+  const retrySystem = useCallback(() => {
+    setSysError(null);
+    loadSystem().catch((e) => setSysError(errText(e)));
+  }, [loadSystem]);
 
   useEffect(() => {
+    // 首次拉取/换 tab/换条数：错误已由 fetcher 捕获记录，这里无需再处理
     if (tab === 'requests') loadRequests();
     else loadSystem();
     // 依赖是「会改变查询范围」的项；筛选/搜索/排序在前端即时生效
@@ -148,8 +176,9 @@ export default function LogsPage() {
   // 与「网关临时无响应时不刷错误弹窗雨」的意图一致。
   useHeartbeat(
     () => {
-      if (tab === 'requests') loadRequests().catch(() => {/* 静默，等下一轮 */});
-      else loadSystem().catch(() => {/* 静默，等下一轮 */});
+      // 心跳失败静默（等下一轮自愈）；错误条保留到手动重试成功
+      if (tab === 'requests') loadRequests().catch(() => {/* 静默 */});
+      else loadSystem().catch(() => {/* 静默 */});
     },
     live ? 5000 : 0,
   );
@@ -387,6 +416,21 @@ export default function LogsPage() {
               </TableBody>
             </Table>
 
+            {/* 首载失败且无缓存可展示：错误态（与「暂无日志」空态严格区分） */}
+            {reqError && !loading && !logs.length ? (
+              <EmptyState
+                icon={ServerCrash}
+                title={t('logs.loadErrorTitle')}
+                description={reqError}
+                className="flex flex-col items-center justify-center py-16 text-center"
+              >
+                <Button className="mt-4 rounded-full" onClick={retryRequests}>
+                  <RefreshCw />
+                  {t('common.refresh')}
+                </Button>
+              </EmptyState>
+            ) : (
+              <>
             {!filteredLogs.length && !loading && (
               <EmptyState
                 icon={ScrollText}
@@ -396,6 +440,8 @@ export default function LogsPage() {
               />
             )}
             {loading && !logs.length && <TableSkeleton rows={6} />}
+              </>
+            )}
           </section>
         </TabsContent>
 
@@ -463,7 +509,20 @@ export default function LogsPage() {
           </section>
 
           <section className="overflow-hidden rounded-[20px] bg-muted">
-            {sysFiltered.length ? (
+            {/* 首载失败且无缓存可展示：错误态（与「暂无日志」空态严格区分） */}
+            {sysError && !sysLoading && !sysEntries.length ? (
+              <EmptyState
+                icon={ServerCrash}
+                title={t('logs.loadErrorTitle')}
+                description={sysError}
+                className="flex flex-col items-center justify-center py-16 text-center"
+              >
+                <Button className="mt-4 rounded-full" onClick={retrySystem}>
+                  <RefreshCw />
+                  {t('common.refresh')}
+                </Button>
+              </EmptyState>
+            ) : sysFiltered.length ? (
               <div
                 ref={logEndRef}
                 onScroll={(e) => {

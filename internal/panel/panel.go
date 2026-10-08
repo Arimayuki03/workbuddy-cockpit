@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/netip"
 	"os"
 	"sort"
 	"strconv"
@@ -25,9 +26,11 @@ import (
 	"time"
 
 	"workbuddy2api/internal/httpauth"
+	"workbuddy2api/internal/keystore"
 	"workbuddy2api/internal/livecfg"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/scheduler"
+	"workbuddy2api/internal/server"
 	"workbuddy2api/internal/upstream"
 	"workbuddy2api/internal/usage"
 )
@@ -74,9 +77,37 @@ type Config struct {
 	// （选号优先消耗）。<=0 时上游不分桶（与 scheduler 同口径）。
 	ExpiringSoonWindow time.Duration
 
+	// TokenPath 管理面 API token 落盘路径（wbt_ 前缀，data/panel_tokens.json；
+	// 空 = 纯内存形态，重启即失效）。生产装配用 stateSibling(state_file) 同目录。
+	TokenPath string
+
+	// Credits 积分流水追踪器（credit_record.go，nil = 流水整体关闭）：
+	// 余额快照比对记账（去重/跳变/基线三口径）+ /api/tasks/records 数据源。
+	// 生产装配用 data/credit_snapshots.json + data/credit_records.json。
+	Credits *CreditTracker
+
 	// LoopbackOnly 仅允许回环地址访问面板（config panel.loopback_only，默认 false）。
 	// true 时 withAuth 前置闸：RemoteAddr 非 127.0.0.1/::1 的请求一律 403。
 	LoopbackOnly bool
+
+	// TrustedProxyCIDRs / TrustedProxyHops 可信代理解析参数（与 server.Handler
+	// 的 TrustedProxyCIDRs/Hops 共用 main 装配的同一份 cfg.SecurityTrustedCIDRs
+	// 解析结果——网关与面板对「真实客户端 IP」的判定口径必须一致，否则出现
+	// 网关放行、面板限速误判的错位）。仅用于登录限速等"真实客户端识别"路径
+	// （session.go clientIP）；loopback_only 安全闸不受影响（恒按 RemoteAddr 从严）。
+	// 空 = 不信任转发头（零配置安全默认，行为与未注入一致）。
+	TrustedProxyCIDRs []netip.Prefix
+	TrustedProxyHops  int
+
+	// IPRules 入站 IP 黑白名单规则引擎（security 段，iprules.go；nil = 安全页
+	// 规则保存端点 501、GET 回显空规则）。生产装配传 server.NewIPRules 的产物
+	//（与 handler 侧同一实例：面板热改规则，网关鉴权链即时生效）。
+	IPRules *server.IPBlockRules
+
+	// KeyStore 多密钥分发库（wbk_ 网关密钥，internal/keystore；nil = 密钥页
+	// 全部端点 501）。生产装配恒非 nil（main 的 keystore.Open 产物，空库也注入），
+	// 测试可省。keys_ep.go 六端点的存储层。
+	KeyStore *keystore.Store
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)
@@ -118,6 +149,18 @@ type Panel struct {
 	// 纯手动路径零开销）。
 	abortMu sync.Mutex
 	abortCh chan struct{}
+
+	// tokenStore 管理面 API token 存储（wbt_ 前缀，见 tokens.go）。nil 时
+	// token 通道整体关闭（withAuth 不认 Bearer wbt_；/api/tokens* 返回 501）。
+	// 生产装配恒非 nil；测试可用 Config.TokenStore 注入或以 nil 简化。
+	tokenStore *TokenStore
+
+	// secMu/secTPCIDRs/secTPHops 安全页最近保存的 trusted_proxy 参数（POST
+	// /api/security/rules 成功后镜像，GET 回显优先读它——SaveConfig/LoadConfig
+	// 未注入的最小装配形态也能如实回显刚保存的值；见 security_ep.go）。
+	secMu      sync.Mutex
+	secTPCIDRs []string
+	secTPHops  int
 }
 
 // taskAbortCh 返回当前的中断信号通道（nil = 无中断源）。
@@ -212,11 +255,12 @@ func New(cfg Config) *Panel {
 		cfg.RedisMode = "noop"
 	}
 	p := &Panel{
-		cfg:     cfg,
-		mux:     http.NewServeMux(),
-		started: time.Now(),
-		logs:    NewRing(500),
-		logins:  map[string]loginSession{},
+		cfg:        cfg,
+		mux:        http.NewServeMux(),
+		started:    time.Now(),
+		logs:       NewRing(500),
+		logins:     map[string]loginSession{},
+		tokenStore: NewTokenStore(cfg.TokenPath),
 	}
 	p.routes()
 	return p
@@ -282,6 +326,12 @@ func (p *Panel) routes() {
 	p.api("POST", "/api/tasks/run_queue", "/api/tasks/run_queue", p.tasksRunQueue)
 	p.api("POST", "/api/tasks/queue/cancel", "/api/tasks/queue/cancel", p.tasksCancelQueue)
 	p.api("GET", "/api/tasks/queue", "/api/tasks/queue", p.tasksQueueStatus)
+	// 积分流水记录（credit_record.go）：任务中心记录流 kind=credit 的读取端点。
+	// uid 查询参数非空时按账号过滤；tracker 未装配（credit_track_enabled=false）
+	// 返回 501，前端按「未启用」展示而非空白。
+	p.api("GET", "/api/tasks/records", "/api/tasks/records", p.tasksRecords)
+	// 手动全量续期巡检（renew.go 语义：仅临期账号；schedule.renew_enabled 只管定时）。
+	p.api("POST", "/api/renew_all", "/api/renew_all", p.renewAll)
 	// school/status 与 school/run_all 已随开学季活动结束（2026-09-24）下线；
 	// 券码查询保留（历史券码仍可查）。
 	p.api("GET", "/api/school/vouchers", "/api/school/vouchers", p.schoolVouchers)
@@ -296,6 +346,32 @@ func (p *Panel) routes() {
 	p.api("GET", "/api/model_probes", "/api/model_probes", p.modelProbes)
 	p.api("GET", "/api/config", "/api/config", p.getConfig)
 	p.api("POST", "/api/config", "/api/config", p.saveConfig)
+	// 安全页（security_ep.go）：入站 IP 规则读写 + 拦截日志 + 模型锁池。
+	// GET 两条进 wbt_ token 分级表只读档（securityEndpointLevels），POST 保存
+	// 属写语义，分级表外恒拒（与 /api/config 同口径）。
+	p.api("GET", "/api/security", "/api/security", p.handleSecurityGet)
+	p.api("POST", "/api/security/rules", "/api/security/rules", p.handleSecuritySetRules)
+	p.api("GET", "/api/security/model_locks", "/api/security/model_locks", p.handleSecurityModelLocks)
+
+	// API 密钥页（keys_ep.go，keystore 存储）：删除走 POST …/delete（前端
+	// keyApi.remove 契约，非 DELETE 方法）。GET 两条进 wbt_ token 分级表只读档；
+	// 创建/修改/删除/重置是写语义，分级表外恒拒（与 /api/config 同口径）。
+	p.api("GET", "/api/keys", "/api/keys", p.keysHandler)
+	p.api("POST", "/api/keys", "/api/keys", p.keyCreate)
+	p.api("PATCH", "/api/keys/{id}", "/api/keys/{id}", p.keyUpdate)
+	p.api("POST", "/api/keys/{id}/delete", "/api/keys/{id}/delete", p.keyDelete)
+	p.api("POST", "/api/keys/{id}/reset_usage", "/api/keys/{id}/reset_usage", p.keyResetUsage)
+	p.api("GET", "/api/keys/{id}/ips", "/api/keys/{id}/ips", p.keyIPs)
+
+	// 管理面 API token 管理（tokens.go）：**仅会话 cookie 可用**（withAuthSession
+	// 直挂，不走双通道）——泄露的 wbt_ token 不能创建/吊销/提权另一个 token，
+	// 否则泄露即等于「自助持久化 + 提权」。明文仅 POST 响应返回一次。
+	p.mux.HandleFunc("POST /api/tokens", p.withAuthSession(p.handleTokenCreate))
+	p.mux.HandleFunc("POST /panel/api/tokens", p.withAuthSession(p.handleTokenCreate))
+	p.mux.HandleFunc("GET /api/tokens", p.withAuthSession(p.handleTokenList))
+	p.mux.HandleFunc("GET /panel/api/tokens", p.withAuthSession(p.handleTokenList))
+	p.mux.HandleFunc("DELETE /api/tokens/{id}", p.withAuthSession(p.handleTokenDelete))
+	p.mux.HandleFunc("DELETE /panel/api/tokens/{id}", p.withAuthSession(p.handleTokenDelete))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API
@@ -309,6 +385,12 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // 启用判定：RemoteAddr host 非 127.0.0.1/::1 的请求被拒。反代部署下 RemoteAddr
 // 是反代地址，本闸按"直接暴露"语义设计（与 /admin 管理面同口径），
 // 不解析 X-Forwarded-For（可伪造，不做鉴权依据）。
+//
+// 安全闸从严：本闸**刻意不换轨** iputil.RequestClientIP（cfg.TrustedProxyCIDRs
+// 只供 session.go clientIP 的登录限速/审计路径使用）。转发头永远客户端可伪造，
+// 若闸按转发头放行，攻击者加一行 X-Real-IP: 127.0.0.1 即可穿透网络边界；
+// 按对端判定至多损失"反代后误 403"的可用性（此时应关掉 loopback_only 并依赖
+// api_key 鉴权），绝不损失安全性。
 func (p *Panel) loopbackOnly(r *http.Request) bool {
 	if !p.cfg.LoopbackOnly {
 		return true
@@ -334,11 +416,127 @@ func (p *Panel) loopback(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// withAuth 面板 API 双通道鉴权：先过 loopback_only 回环闸（login/logout 走
-// loopback 中间件共用同一判定），再验会话 cookie（manager 壳登录态），回落
-// Bearer（httpauth 常量时间比较，与 /v1/* 同口径）；二者任一通过即放行。
-// api_key 为空时放行（本机/私网部署，与主服务同语义）。
+// withAuthSession 仅会话 cookie 闸（**不认 Bearer**）：管理 token 本身的端点专用。
+// 原因见 routes() 注释——wbt_ token 一旦可以管理 token，泄露即等于持久化后门。
+// api_key 为空（未启用鉴权）时与 sessionAuth 同口径放行。
+func (p *Panel) withAuthSession(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !p.loopbackOnly(r) {
+			writeErr(w, http.StatusForbidden, "panel restricted to loopback")
+			return
+		}
+		if !p.sessionAuth(r) {
+			writeErr(w, http.StatusUnauthorized, "session_required")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// tokenEndpointLevel wbt_ token 可访问的端点分级（method + path 形态）。
+//
+// 分类依据（panel.go routes() 路由表逐条归类）：
+//   - tokenLevelRead：纯读端点（GET）——readonly / admin 一律放行；
+//   - tokenLevelOps：幂等运维端点（只查上游 / 触发缓存回写，不改账号状态）——
+//     仅 admin scope 放行；
+//   - 白名单外（含全部写端点、登录/登出、token 管理族、含敏感数据的 export）：
+//     一律拒绝。
+//
+// 刻意不放行的边界（即使 admin scope）：
+//   - GET /api/accounts/export：响应含上游 token 明文（凭据导出），脚本读数
+//     用不到它，暴露面过大；
+//   - POST /api/config、/api/settings/model-map 等：配置保存是状态变更；
+//   - 全部 /api/tasks/*、/api/checkin_all 等：触发真实业务动作（写语义）；
+//   - /api/auth/start|poll：OAuth 加号流程会落盘新凭证（写语义）；
+//   - /api/logout、/api/login/*：会话族与 token 无关。
+type tokenEndpointLevel int
+
+const (
+	tokenLevelRead tokenEndpointLevel = iota // 只读：readonly ∪ admin
+	tokenLevelOps                            // 幂等运维：仅 admin
+)
+
+// tokenEndpointLevels 端点分级表。isWriteMethods 之外的 method（GET）在表内
+// 且命中即两档放行；POST 条目仅 admin。
+var tokenEndpointLevels = map[string]tokenEndpointLevel{
+	// 只读（GET）：
+	"GET /api/overview":             tokenLevelRead,
+	"GET /api/logs":                 tokenLevelRead,
+	"GET /api/models":               tokenLevelRead,
+	"GET /api/usage":                tokenLevelRead,
+	"GET /api/packages":             tokenLevelRead,
+	"GET /api/model_probes":         tokenLevelRead,
+	"GET /api/tasks/queue":          tokenLevelRead,
+	"GET /api/school/vouchers":      tokenLevelRead,
+	"GET /api/accounts/{uid}/tasks": tokenLevelRead,
+	// 安全页只读（security_ep.go）：规则/拦截日志/模型锁池均为展示数据，
+	// readonly token 可读；保存（POST /api/security/rules）不进表 = 拒绝。
+	"GET /api/security":             tokenLevelRead,
+	"GET /api/security/model_locks": tokenLevelRead,
+	// 密钥页只读（keys_ep.go）：列表与来源 IP 是脚本取数场景（readonly 档）；
+	// 创建/修改/删除/重置（POST/PATCH）是写语义，不进表 = 两档全拒。
+	"GET /api/keys":           tokenLevelRead,
+	"GET /api/keys/{id}/ips":  tokenLevelRead,
+	// 幂等运维：上游余额/积分查询（把结果写回池内缓存，无账号状态变更语义），
+	// 以及用量落盘触发。仅 admin scope。
+	"POST /api/accounts/{uid}/balance": tokenLevelOps,
+	"POST /api/accounts/{uid}/checkin": tokenLevelOps, // 签到=解冻+余额刷新（幂等查询+缓存回写，上游"今日已签到"幂等）
+	"POST /api/balance_all":            tokenLevelOps,
+	"POST /api/usage/save":             tokenLevelOps,
+}
+
+// tokenWriteMethods 判定「写方法」的方法集合（GET 之外的表内条目按 admin 档判定）。
+var tokenWriteMethods = map[string]bool{"POST": true, "PATCH": true, "PUT": true, "DELETE": true}
+
+// tokenEndpointKey 归一化当前请求为分级表键：/panel 前缀剥离 + /api/accounts/
+// {uid}/... 与 /api/keys/{id}/... 的实际 id 段通配。
+func tokenEndpointKey(r *http.Request) string {
+	path := strings.TrimPrefix(r.URL.Path, "/panel")
+	segs := strings.Split(strings.Trim(path, "/"), "/")
+	// /api/accounts/{uid}/<action> 与 /api/accounts/{uid} 两形态（export 无 uid，
+	// 保留字面量使 export 键天然不命中通配——它本就不在表内）。
+	if len(segs) >= 4 && segs[0] == "api" && segs[1] == "accounts" && segs[3] != "export" {
+		segs[2] = "{uid}"
+	} else if len(segs) == 3 && segs[0] == "api" && segs[1] == "accounts" && segs[2] != "export" {
+		segs[2] = "{uid}"
+	}
+	// /api/keys/{id}/<action>（ips）通配为 {id}；/api/keys/{id} 两段形态只在
+	// PATCH 出现——PATCH 是写方法，分级表查无条目恒拒，无需通配。
+	if len(segs) == 4 && segs[0] == "api" && segs[1] == "keys" {
+		segs[2] = "{id}"
+	}
+	return r.Method + " /" + strings.Join(segs, "/")
+}
+
+// tokenAllowed 判定 wbt_ token（scope=scopeVal）是否可访问当前请求。
+// 分级表外的一切 → 拒绝；GET 条目两档放行；POST 条目仅 admin。
+func (p *Panel) tokenAllowed(r *http.Request, scopeVal string) bool {
+	level, listed := tokenEndpointLevels[tokenEndpointKey(r)]
+	if !listed {
+		return false
+	}
+	if !tokenWriteMethods[r.Method] {
+		return true
+	}
+	return scopeVal == scopeAdmin && level == tokenLevelOps
+}
+
+// withAuth 面板 API 多通道鉴权：先过 loopback_only 回环闸（login/logout 走
+// loopback 中间件共用同一判定），再按序验三通道：
+//  1. 会话 cookie（manager 壳登录态）；
+//  2. Bearer 网关 api_key（httpauth 常量时间比较，与 /v1/* 同口径；**wbt_ 形态
+//     的值不进本分支**——api_key 是用户自选字符串，可能与 wbt_ 前缀撞形，
+//     语义上它授权的是 /v1/* 模型调用，此处按既有契约继续作为面板全权通道）；
+//  3. Bearer wbt_ 管理 token（tokens.go：prefix 定位 + 常量时间比较 + scope
+//     白名单——只读脚本通道，写端点一律 403 token_write_forbidden）。
+//
+// 任一通过即放行。api_key 为空时放行（本机/私网部署，与主服务同语义）。
 // 密钥经 livecfg 快照读取：面板里改了 api_key，下一个请求即用新值（无需重启）。
+//
+// 通道顺序说明：api_key 分支在 token 分支之前（保持既有 Bearer 语义逐字节
+// 不变——纯新增）；wbt_ 前缀值在 api_key 分支里比较必然失败（除非管理员刻意
+// 把 api_key 设成 wbt_ 开头，此时按 api_key 全权放行也是该配置的明确意图），
+// 随后落进 token 分支按最小权限放行。
 func (p *Panel) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !p.loopbackOnly(r) {
@@ -349,11 +547,22 @@ func (p *Panel) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			next(w, r)
 			return
 		}
-		if !httpauth.VerifyBearer(r, p.apiKey()) {
-			writeErr(w, http.StatusUnauthorized, "invalid_api_key")
+		// Bearer 网关 api_key 通道（既有语义，保持不变）。
+		apiKeyOK := httpauth.VerifyBearer(r, p.apiKey())
+		if apiKeyOK {
+			next(w, r)
 			return
 		}
-		next(w, r)
+		// Bearer wbt_ 管理 token 通道（新增；仅当值带 wbt_ 前缀才有意义）。
+		if tc := p.checkTokenAuth(r); tc.ok {
+			if p.tokenAllowed(r, tc.scope) {
+				next(w, r)
+				return
+			}
+			writeErr(w, http.StatusForbidden, "token_write_forbidden")
+			return
+		}
+		writeErr(w, http.StatusUnauthorized, "invalid_api_key")
 	}
 }
 
@@ -639,6 +848,9 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	// 分桶补写：快过期子集供三因子选号的 ×8 权重因子，与 scheduler.go 签到口径一致
 	// （先解冻再补分桶；SetCreditsDetailed 会把 expiring 钳到 [0, credits]）。
 	p.cfg.Pool.SetCreditsDetailed(uid, remain, buckets.Expiring)
+	// 积分流水：余额比对记账（scheduler.RecordBalanceChecked 经注入的 CreditTracker
+	// 落流水；tracker 未装配时零开销直返）。
+	p.recordBalance(uid, remain)
 	resp["credits"] = remain
 	resp["credits_total"] = buckets.Total()
 	log.Printf("panel: checkin uid=%s msg=%q credits=%d/%d", uid, checkinMsg, remain, buckets.Total())
@@ -660,7 +872,26 @@ func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.cfg.Pool.SetCreditsDetailed(uid, remain, buckets.Expiring)
+	p.recordBalance(uid, remain) // 积分流水（同 accountCheckin）
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credits": remain, "credits_total": buckets.Total()})
+}
+
+// recordBalance 面板侧余额刷新路径的积分流水记账钩子：经 Scheduler 上注入的
+// CreditTracker 落流水（与签到/全量刷新同一 sink）。Scheduler 缺失时直返
+// （测试形态/panel 无调度器的部署，流水只覆盖定时与全量路径）。
+func (p *Panel) recordBalance(uid string, remain int64) {
+	if p.cfg.Scheduler == nil {
+		return
+	}
+	p.cfg.Scheduler.RecordBalanceChecked(uid, p.nicknameOf(uid), remain)
+}
+
+// nicknameOf 池状态快照取昵称（文案展示用；缺账号回落 uid）。
+func (p *Panel) nicknameOf(uid string) string {
+	if st, ok := p.cfg.Pool.Status(uid); ok && st.Nickname != "" {
+		return st.Nickname
+	}
+	return uid
 }
 
 // accountRemove 移除账号：先出池（立即落盘 state），再删 auth 文件。

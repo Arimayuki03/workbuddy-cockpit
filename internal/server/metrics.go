@@ -22,6 +22,12 @@ import (
 // metricsCap 模型键容量上限。上游目录规模远小于此值；上限只为兜底异常模型名。
 const metricsCap = 512
 
+// minGenWindowMS 可信生成窗口的下限（毫秒）：扣除 TTFB 后剩余窗口不足该值即视为
+// 「生成时长不可测」，退回端到端耗时（见 recordChatMetric 内生成分母处注释）。
+// 真流式下首帧到末帧通常铺满剩余窗口，200ms 远低于正常生成时长，不影响真实
+// 快速输出（如缓存命中后的爆发）被如实报告。
+const minGenWindowMS = 200.0
+
 // modelMetrics 单模型的累加器（全字段原子性由 metricsMu 保证，无需 atomic）。
 type modelMetrics struct {
 	requests  int64
@@ -116,9 +122,16 @@ func recordChatMetric(s *chatStat, total time.Duration) {
 		mm.cacheMiss += int64(s.cacheMiss)
 		mm.cacheWrite += int64(s.cacheWr)
 		// 生成吞吐分母：总耗时减去 TTFB（纯生成时间）。TTFB 缺失时退回总耗时。
+		// 扣除后不足 minGenWindow 时也退回端到端：TTFB 量的是「首个 SSE 帧到达」，
+		// 当上游把整个响应攒到最后一次性下发（假流式/中间层攒批刷新——首帧与末帧
+		// 几乎同时到）时，total−ttfb 只剩几毫秒，拿它当分母会把几百 token 除成
+		// 上万 tok/s 的幻数（聚合出口 TokensPerSec=compTok/genSecSum）。这种形态下
+		// 「生成时长」不可测，诚实的分母只有端到端。
 		gen := totalMS
 		if s.ttfb > 0 {
-			gen = totalMS - float64(s.ttfb.Milliseconds())
+			if g := totalMS - float64(s.ttfb.Milliseconds()); g >= minGenWindowMS {
+				gen = g
+			}
 		}
 		if gen > 0 {
 			mm.genSecSum += gen / 1000.0

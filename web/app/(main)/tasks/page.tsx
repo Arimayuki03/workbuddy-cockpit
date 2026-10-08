@@ -1,26 +1,31 @@
 'use client';
 
-import {useCallback, useEffect, useRef, useState} from 'react';
+import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   ClipboardList,
   Coins,
   Globe,
+  History,
+  Info,
   ListChecks,
   Loader2,
   Play,
+  RefreshCw,
   ScanSearch,
   TriangleAlert,
   XCircle,
 } from 'lucide-react';
 import {notify} from '@/lib/toast';
-import {taskApi, errText} from '@/lib/api';
+import {taskApi, accountApi, errText, httpStatus} from '@/lib/api';
 import {useCachedAsync} from '@/lib/data-cache';
 import type {
   GrowthTask,
+  OverviewResponse,
   QueueItem,
   ScanAllResponse,
+  TaskRecordsResponse,
 } from '@/lib/types';
-import {fmtNumber} from '@/lib/format';
+import {fmtDateTimeMarked, fmtNumber} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {TableSkeleton} from '@/components/common/layout/LoadSkeleton';
@@ -83,6 +88,9 @@ function queueTone(s: QueueItem['status']): string {
   }
 }
 
+/** 积分流水展示条数上限（records 已按时间倒序返回，截取前 N 条即可） */
+const RECORDS_SHOWN = 50;
+
 /**
  * 队列状态文案。cancelled 的 locales 键（tasks.queue_cancelled）尚未添加
  * （本任务禁止改 locales，且 translate 不支持 defaultValue，缺键会直接回显
@@ -130,6 +138,56 @@ export default function TasksPage() {
   const [autoAllBusyUid, setAutoAllBusyUid] = useState<string | null>(null);
   const autoAllBusyRef = useRef(false);
 
+  /* ── 积分流水 ─────────────────────────────────────────────
+   * records 本体走缓存（切页先出旧数据）；501「未启用」是**部署形态**而非
+   * 错误——fetcher 里就地识别转成 unavailable 标记，页面显示常驻提示条，
+   * 不弹 toast 错误。uid 筛选变化 = 换一份快照（换 key 重新拉取）。 */
+  const [recordsUid, setRecordsUid] = useState<string>('all');
+  const [recordsUnavailable, setRecordsUnavailable] = useState(false);
+  const recordsCache = useCachedAsync<TaskRecordsResponse>(
+    `tasks:records:${recordsUid}`,
+    () =>
+      taskApi.records(recordsUid === 'all' ? undefined : recordsUid).catch((e) => {
+        if (httpStatus(e) === 501) {
+          // 未启用：置标记 + 回落空响应（不进错误提示路径）
+          setRecordsUnavailable(true);
+          return {ok: true, total: 0, records: []} as TaskRecordsResponse;
+        }
+        throw e;
+      }),
+    {ttl: 10_000},
+  );
+  const records = recordsCache.data?.records ?? null;
+  const recordsBusy = recordsCache.loading || recordsCache.refreshing;
+
+  /** 积分流水筛选下拉的账号名单：扫一份池总览（有缓存，几乎零开销）。
+   *  与待办扫描的名单不同源——流水覆盖全部账号，不只扫出待办的那些。 */
+  const overviewCache = useCachedAsync<OverviewResponse>(
+    'overview',
+    () => accountApi.overview(),
+    {ttl: 10_000},
+  );
+  // useMemo 稳定引用：把裸数组喂给 useCallback 依赖会让 lint 警告每次渲染都在变
+  const overviewAccounts = useMemo(
+    () => overviewCache.data?.accounts ?? [],
+    [overviewCache.data],
+  );
+  /** uid → 昵称（流水行渲染用；records.message 已含昵称，这里只做筛选下拉） */
+  const nicknameOf = useCallback(
+    (uid: string) => overviewAccounts.find((a) => a.uid === uid)?.nickname || uid,
+    [overviewAccounts],
+  );
+
+  const loadRecords = useCallback(async () => {
+    setRecordsUnavailable(false); // 重新评估：后端可能已启用
+    try {
+      await recordsCache.refresh();
+    } catch (e) {
+      notify.err(errText(e));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recordsCache.refresh]);
+
   const loadScan = useCallback(async () => {
     try {
       await scanCache.refresh();
@@ -152,7 +210,8 @@ export default function TasksPage() {
   useEffect(() => {
     loadScan();
     loadQueue();
-  }, [loadScan, loadQueue]);
+    loadRecords();
+  }, [loadScan, loadQueue, loadRecords]);
 
   // 队列执行中每 2 秒轮询，空闲时 30 秒一次（与心跳同频）。
   // tick 末尾**无条件**安排下一次：hidden 只跳过本轮请求——若在 return 前
@@ -614,6 +673,138 @@ export default function TasksPage() {
           )}
         </section>
       )}
+
+      {/* 积分流水（签到/任务入账与余额跳变；后端已按时间倒序，截取展示） */}
+      <section className="rounded-[20px] bg-muted p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <History className="h-4 w-4" />
+            {t('tasks.recordsTitle')}
+            {records && !recordsUnavailable && (
+              <Badge variant="secondary" className="rounded-full tabular-nums">
+                {t('tasks.recordsCount', {n: fmtNumber(Math.min(records.length, RECORDS_SHOWN))})}
+              </Badge>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Select
+              value={recordsUid}
+              onValueChange={(v) => {
+                setRecordsUid(v);
+                setRecordsUnavailable(false); // 新 key 重新评估「未启用」
+              }}
+            >
+              <SelectTrigger className="h-7 w-[180px] rounded-full text-[11px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all" className="text-xs">{t('common.all')}</SelectItem>
+                {overviewAccounts.map((a) => (
+                  <SelectItem key={a.uid} value={a.uid} className="text-xs">
+                    {a.nickname || a.uid}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 rounded-full text-[11px]"
+              disabled={recordsBusy || recordsUnavailable}
+              onClick={loadRecords}
+              title={t('tasks.recordsRefreshTitle')}
+            >
+              <RefreshCw className={recordsBusy ? 'animate-spin' : ''} />
+              {t('common.refresh')}
+            </Button>
+          </div>
+        </div>
+
+        {recordsUnavailable ? (
+          /* 未启用态：提示而非报错（积分记录整体关闭的部署形态） */
+          <div className="flex items-start gap-2.5 rounded-2xl bg-background/60 p-4 text-xs">
+            <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+            <div className="space-y-1">
+              <div className="font-medium">{t('tasks.recordsUnavailableTitle')}</div>
+              <div className="text-muted-foreground">{t('tasks.recordsUnavailableDesc')}</div>
+            </div>
+          </div>
+        ) : recordsBusy && !records ? (
+          <TableSkeleton rows={4} />
+        ) : records && records.length ? (
+          <div className="scroll-slim max-h-[360px] overflow-auto">
+            <Table>
+              <TableHeader>
+                <TableRow className="border-b border-border/60 hover:bg-transparent">
+                  <TableHead className="pl-2 text-[11px] text-muted-foreground">{t('tasks.colTime')}</TableHead>
+                  <TableHead className="text-[11px] text-muted-foreground">{t('tasks.colAccount')}</TableHead>
+                  <TableHead className="text-[11px] text-muted-foreground">{t('tasks.colChange')}</TableHead>
+                  <TableHead className="text-[11px] text-muted-foreground">{t('tasks.colBalance')}</TableHead>
+                  <TableHead className="pr-2 text-[11px] text-muted-foreground">{t('tasks.colMessage')}</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {records.slice(0, RECORDS_SHOWN).map((r) => (
+                  <TableRow
+                    key={r.dedup_key || `${r.uid}-${r.ts}-${r.prev}-${r.new}`}
+                    className={'border-b border-border/40' + (r.jump ? ' bg-amber-500/5' : '')}
+                  >
+                    <TableCell className="whitespace-nowrap pl-2 text-[11px] text-muted-foreground">
+                      {fmtDateTimeMarked(r.ts)}
+                    </TableCell>
+                    <TableCell className="max-w-[140px] truncate text-xs">{nicknameOf(r.uid)}</TableCell>
+                    <TableCell>
+                      {r.jump ? (
+                        /* 跳变记录：delta 恒 0，语义是「余额跳变 A → B」，不渲染 +N 徽章 */
+                        <Badge
+                          variant="secondary"
+                          className="rounded-full text-[10px] text-amber-600 dark:text-amber-400"
+                          title={t('tasks.recordsJumpTitle')}
+                        >
+                          {t('tasks.recordsJump', {prev: fmtNumber(r.prev), next: fmtNumber(r.new)})}
+                        </Badge>
+                      ) : (
+                        <Badge
+                          variant="secondary"
+                          className={
+                            'rounded-full text-[10px] tabular-nums ' +
+                            (r.delta > 0
+                              ? 'text-emerald-600 dark:text-emerald-400'
+                              : r.delta < 0
+                                ? 'text-red-600 dark:text-red-400'
+                                : 'text-muted-foreground')
+                          }
+                        >
+                          {r.delta > 0 ? `+${fmtNumber(r.delta)}` : fmtNumber(r.delta)}
+                        </Badge>
+                      )}
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap text-xs tabular-nums text-muted-foreground">
+                      {fmtNumber(r.prev)} <span className="text-muted-foreground/40">→</span>{' '}
+                      <span className="font-medium text-foreground">{fmtNumber(r.new)}</span>
+                    </TableCell>
+                    <TableCell className="max-w-[320px] truncate pr-2 text-[11px] text-muted-foreground" title={r.message}>
+                      {r.message || '—'}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+            {records.length > RECORDS_SHOWN && (
+              <div className="pt-2 text-center text-[10px] text-muted-foreground">
+                {t('tasks.recordsShownLimit', {shown: RECORDS_SHOWN, total: fmtNumber(records.length)})}
+              </div>
+            )}
+          </div>
+        ) : (
+          <EmptyState
+            icon={History}
+            title={t('tasks.recordsEmptyTitle')}
+            description={t('tasks.recordsEmptyDesc')}
+            className="flex flex-col items-center justify-center py-10 text-center"
+          />
+        )}
+      </section>
     </div>
   );
 }

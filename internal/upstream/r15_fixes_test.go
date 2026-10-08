@@ -111,9 +111,9 @@ func TestGlobalCompleteRegistrationServerFaultSkipsRegionFlow(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // 回归：并发冷启动（缓存全 miss）时探测只发一次——旧实现锁内查缓存、锁外探测，
-// N 个 /v1/models 同时 miss 会 N 倍打上游（probe 自身已是 3 路并发）。
+// N 个 /v1/models 同时 miss 会 N 倍打上游（probe 自身已是 4 路并发）。
 // 慢探测注入：服务器首次命中延迟 200ms，5 个 goroutine 同时进入，
-// 断言上游收到的 /v3/config 请求数 == 2（单次探测的双 UA 路数）。
+// 断言上游收到的 /v3/config 请求数 == 3（单次探测的三 UA 路数，desktop-ua 后）。
 func TestFetchGlobalModelsOnceConcurrentColdStartSingleFlight(t *testing.T) {
 	auth.SetGlobalEnabled(true)
 	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
@@ -144,8 +144,8 @@ func TestFetchGlobalModelsOnceConcurrentColdStartSingleFlight(t *testing.T) {
 	}
 	wg.Wait()
 
-	if got := v3Calls.Load(); got != 2 {
-		t.Errorf("concurrent cold start made %d /v3/config calls, want 2 (single probe, 2 UA paths)", got)
+	if got := v3Calls.Load(); got != 3 {
+		t.Errorf("concurrent cold start made %d /v3/config calls, want 3 (single probe, 3 UA paths)", got)
 	}
 	for i, r := range results {
 		if len(r) != 1 || r[0] != "gpt-5.4" {
@@ -194,8 +194,8 @@ func TestFetchGlobalModelsOnceConcurrentFailureSingleFlight(t *testing.T) {
 	}
 	wg.Wait()
 
-	if got := v3Calls.Load(); got != 2 {
-		t.Errorf("concurrent failure made %d /v3/config calls, want 2", got)
+	if got := v3Calls.Load(); got != 3 {
+		t.Errorf("concurrent failure made %d /v3/config calls, want 3", got)
 	}
 	// 负缓存生效：冷却期内再调零新请求。
 	before := v3Calls.Load()

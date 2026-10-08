@@ -47,10 +47,11 @@ func TestSnapshotAllDefaults(t *testing.T) {
 		t.Fatalf("快照 %d 项", len(snap))
 	}
 	for _, sn := range snap {
-		// queue 是 opt-in 任务（对全账号执行真实任务动作，缺省关），其余六类缺省开。
-		if sn.Kind == "queue" {
+		// queue/renew 是 opt-in 任务（renew 对临期账号主动打 refresh 写接口），
+		// 缺省关；其余六类缺省开。
+		if sn.Kind == "queue" || sn.Kind == "renew" {
 			if sn.Enabled || sn.NextFire != "" {
-				t.Fatalf("queue 缺省应禁用（opt-in）：%+v", sn)
+				t.Fatalf("%s 缺省应禁用（opt-in）：%+v", sn.Kind, sn)
 			}
 			continue
 		}

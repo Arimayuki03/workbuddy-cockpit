@@ -16,13 +16,21 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  ChevronLeft,
+  ChevronRight,
+  NotebookPen,
+  Search,
+  ServerCrash,
+  SquarePen,
+  TimerReset,
+  TriangleAlert,
 } from 'lucide-react';
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
-import {accountApi, errText} from '@/lib/api';
+import {accountApi, errText, httpStatus} from '@/lib/api';
 import {useCachedAsync} from '@/lib/data-cache';
 import type {Account, CreditPackage, OverviewResponse, PackagesResponse} from '@/lib/types';
-import {fmtNumber} from '@/lib/format';
+import {fmtAgo, fmtNumber} from '@/lib/format';
 import {
   availabilityLabelKey,
   availabilityOf,
@@ -45,6 +53,16 @@ import {realmLabel, useRealm} from '@/lib/realm-context';
 import {useT} from '@/lib/i18n/provider';
 import {Button} from '@/components/ui/button';
 import {Badge} from '@/components/ui/badge';
+import {Input} from '@/components/ui/input';
+import {Popover, PopoverContent, PopoverTrigger} from '@/components/ui/popover';
+import {Textarea} from '@/components/ui/textarea';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import {
   Table,
   TableBody,
@@ -53,6 +71,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import {useDebounce} from '@/hooks/use-debounce';
 
 export default function AccountsPage() {
   const {realm} = useRealm();
@@ -61,6 +80,32 @@ export default function AccountsPage() {
   const [addOpen, setAddOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [busyUid, setBusyUid] = useState<string | null>(null);
+
+  /* ── 本地备注（localStorage 按 uid 存）────────────────────
+   * 后端暂无备注字段，先落浏览器本地；后端支持后把 notesOf / setNote
+   * 的数据源切到 Account.notes 即可（检索逻辑可原样复用）。
+   * 与列排序同约定：首帧默认空、挂载后回填，避免 hydration mismatch。 */
+  const [notes, setNotes] = useState<Record<string, string>>({});
+  /** 首载失败信息：fetcher 里捕获，UI 显示错误态而非「空列表」 */
+  const [loadError, setLoadError] = useState<string | null>(null);
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem('accountsNotes');
+      if (raw) setNotes(JSON.parse(raw) as Record<string, string>);
+    } catch {/* 存储不可用/损坏：保持空 */}
+  }, []);
+  const setNote = useCallback((uid: string, text: string) => {
+    setNotes((prev) => {
+      const next = {...prev};
+      if (text.trim()) next[uid] = text;
+      else delete next[uid]; // 清空即删除，不让空串在存储里积累
+      try {
+        window.localStorage.setItem('accountsNotes', JSON.stringify(next));
+      } catch {/* 忽略 */}
+      return next;
+    });
+  }, []);
+  const notesOf = useCallback((uid: string) => notes[uid] ?? '', [notes]);
 
   /* ── 列排序（浏览器本地偏好持久化）─────────────────────
    * key 对应可排序列：nickname / uid / status / credits / requests。
@@ -114,14 +159,54 @@ export default function AccountsPage() {
   );
   const [checkinAllBusy, setCheckinAllBusy] = useState(false);
   const [balanceAllBusy, setBalanceAllBusy] = useState(false);
+  const [renewAllBusy, setRenewAllBusy] = useState(false);
+
+  /* ── 搜索（本地过滤，防抖 300ms）──────────────────────────
+   * 覆盖 uid / 昵称 / 备注；纯前端过滤，不改 API 调用。 */
+  const [query, setQuery] = useState('');
+  const debouncedQuery = useDebounce(query, 300);
+
+  /* ── 客户端分页（本地偏好持久化，与列排序同约定）────────────── */
+  type PageSize = 20 | 50 | 100;
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<PageSize>(20);
+  useEffect(() => {
+    try {
+      const raw = Number(window.localStorage.getItem('accountsPageSize'));
+      if (raw === 20 || raw === 50 || raw === 100) setPageSize(raw);
+    } catch {/* 存储不可用：保持默认 */}
+  }, []);
+  const changePageSize = useCallback((next: PageSize) => {
+    setPageSize(next);
+    setPage(1); // 换每页条数后旧页码可能越界，直接回第一页
+    try {
+      window.localStorage.setItem('accountsPageSize', String(next));
+    } catch {/* 忽略 */}
+  }, []);
 
   // overview 与 packages 分两个缓存条目：切页先出缓存值（积分列即刻可看），
   // 后台刷新静默替换；packages 逐号查上游慢（1-2 秒），缓存命中后不再裸等。
+  // 首载失败转成 loadError（区分「加载失败」与「真的没有账号」）。错误在
+  // fetcher 里捕获：useCachedAsync 内部的挂载刷新会先占住请求锁并把失败
+  // 静默吞掉，页面层对同一个 refresh 的 .catch 收不到 rejection——把捕获
+  // 挂进 fetcher 才是唯一可靠的位置（dashboard / logs 同此口径）。
   const overviewCache = useCachedAsync<OverviewResponse>(
     'overview',
-    () => accountApi.overview(),
+    () =>
+      accountApi.overview().catch((e) => {
+        setLoadError((prev) => prev ?? errText(e)); // 已有错误不覆盖
+        throw e; // 继续抛给 hook 的常规错误路径（静默/调用方处理）
+      }),
     {ttl: 5000},
   );
+  /** 手动重试：清错误重新拉取，失败则再次落错误态 */
+  const clearLoadError = useCallback(() => {
+    setLoadError(null);
+    overviewCache.refresh().catch((e) => {
+      setLoadError(errText(e));
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const packagesCache = useCachedAsync<PackagesResponse>(
     'packages',
     () => accountApi.packages(),
@@ -158,9 +243,10 @@ export default function AccountsPage() {
   // 池状态（冷却 / 成功计数等）会随时间变化，页面停留时定时刷新。
   // 心跳同时刷新两个缓存条目，accounts 与实时余额仍然同帧续命。
   // 周期心跳失败一律静默（与 logs 页同设计）：后台 30s 一轮的失败不该弹
-  // 错误雨，等下一轮自愈；错误提示只留给用户手动触发的操作（下方各按钮）。
+  // 错误雨，等下一轮自愈；错误条保留到手动重试成功，避免反复闪烁。
   useHeartbeat(
     () => {
+      // 心跳失败静默（等下一轮），错误态的清除只发生在手动重试成功后
       overviewCache.refresh().catch(() => {/* 静默，等下一轮心跳 */});
       packagesCache.refresh().catch(() => {/* packages 失败静默降级，不弹错 */});
     },
@@ -195,9 +281,38 @@ export default function AccountsPage() {
     }
   }, [load, t]);
 
-  /** 按当前版本过滤（Go 单实例双版本共存；存量无 realm 视为 cn），再按列排序 */
+  /** 续期巡检：手动触发全账号续期（异步执行，仅临期账号）。
+   *  409 = 上一轮还在跑（提示进行中）；501 = 巡检功能未开启（提示而非报错）。 */
+  const renewAll = useCallback(async () => {
+    setRenewAllBusy(true);
+    try {
+      await accountApi.renewAll();
+      notify.ok(t('accounts.renewAllStarted'), t('accounts.renewAllStartedDetail'));
+      await load();
+    } catch (e) {
+      const status = httpStatus(e);
+      if (status === 409) notify.info(t('accounts.renewAllBusy'), t('accounts.renewAllBusyDetail'));
+      else if (status === 501) notify.info(t('accounts.renewAllUnavailable'), t('accounts.renewAllUnavailableDetail'));
+      else notify.err(errText(e));
+    } finally {
+      setRenewAllBusy(false);
+    }
+  }, [load, t]);
+
+  /** 按当前版本过滤（Go 单实例双版本共存；存量无 realm 视为 cn），
+   *  再按关键词过滤（uid/昵称/备注），最后按列排序。
+   *  注意过滤后的列表同时供分页、表格与手机卡片使用，单一数据源避免两处分叉。 */
   const visible = useMemo(() => {
     const list = accounts.filter((a) => (a.realm ?? 'cn') === realm);
+    // 搜索：uid / 昵称 / 本地备注（小写不区分大小写）
+    const kw = debouncedQuery.trim().toLowerCase();
+    const filtered = kw
+      ? list.filter((a) => {
+          const haystack =
+            `${a.uid} ${a.nickname ?? ''} ${notes[a.uid] ?? ''}`.toLowerCase();
+          return haystack.includes(kw);
+        })
+      : list;
     // 可用性分档权重：数值越小越靠前。asc = 健康→故障；desc 反转。
     const tierWeight = (a: Account): number => {
       switch (availabilityOf(a)) {
@@ -210,7 +325,7 @@ export default function AccountsPage() {
       }
     };
     const mul = sortDir === 'asc' ? 1 : -1;
-    return [...list].sort((a, b) => {
+    return [...filtered].sort((a, b) => {
       switch (sortKey) {
         case 'nickname': {
           const na = (a.nickname || '').trim();
@@ -252,7 +367,17 @@ export default function AccountsPage() {
         }
       }
     });
-  }, [accounts, realm, sortKey, sortDir, liveCredits]);
+  }, [accounts, realm, debouncedQuery, notes, sortKey, sortDir, liveCredits]);
+
+  /* ── 分页派生：过滤+排序后的全量 → 当前页切片 ──────────────── */
+  const totalVisible = visible.length;
+  const totalPages = Math.max(1, Math.ceil(totalVisible / pageSize));
+  // 数据缩水（搜索/删号/切版本）时页码自动收回有效范围
+  const safePage = Math.min(page, totalPages);
+  const pageItems = useMemo(
+    () => visible.slice((safePage - 1) * pageSize, safePage * pageSize),
+    [visible, safePage, pageSize],
+  );
 
   /** 执行单账号操作（签到 / 余额 / 复活 / 停用 / 删除），成功后刷新列表 */
   async function run(uid: string, fn: () => Promise<unknown>, okMsg: string) {
@@ -455,6 +580,63 @@ export default function AccountsPage() {
     );
   }
 
+  /** 最近续期徽章：相对时间（「3 小时前」）或「从未续期」；
+   *  renew_last_error 非空时转红色并在 tooltip 里显示失败原因。 */
+  function renderRenewed(a: Account) {
+    // Go 零值 time.Time 序列化成 "0001-01-01T00:00:00Z" = 从未续期
+    const raw = a.last_renewed ?? '';
+    const never = !raw || raw.startsWith('0001-01-01');
+    const err = String(a.renew_last_error || '');
+    if (never && !err) {
+      return (
+        <span className="text-xs text-muted-foreground/50" title={t('accounts.lastRenewedNeverTitle')}>
+          {t('accounts.lastRenewedNever')}
+        </span>
+      );
+    }
+    const ago = never ? t('accounts.renewFailedNoTime') : fmtAgo(raw);
+    return (
+      <span
+        className={
+          'inline-flex items-center gap-1 text-xs tabular-nums ' +
+          (err
+            ? 'text-red-600 dark:text-red-400'
+            : 'text-muted-foreground')
+        }
+        title={err ? t('accounts.renewErrorTitle', {err}) : t('accounts.lastRenewedTitle', {ago})}
+      >
+        {err && <TriangleAlert className="h-3 w-3 shrink-0" />}
+        {ago}
+      </span>
+    );
+  }
+
+  /** 备注编辑入口：Popover 内 textarea，保存写 localStorage（见 setNote 注释） */
+  function renderNoteButton(a: Account) {
+    return (
+      <Popover>
+        <PopoverTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            className={
+              'h-7 w-7 rounded-md ' +
+              (notesOf(a.uid)
+                ? 'text-sky-600 hover:text-sky-600 dark:text-sky-400'
+                : 'text-muted-foreground hover:text-foreground')
+            }
+            title={t('accounts.noteTitle')}
+          >
+            <SquarePen className="h-3.5 w-3.5" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent className="w-72 rounded-2xl p-3" align="end">
+          <NoteEditor uid={a.uid} initial={notesOf(a.uid)} onSave={setNote} />
+        </PopoverContent>
+      </Popover>
+    );
+  }
+
   /** 单账号操作按钮组 */
   function renderActions(a: Account) {
     const busy = busyUid === a.uid;
@@ -578,6 +760,20 @@ export default function AccountsPage() {
                 {t('accounts.checkinAll')}
               </Button>
             )}
+            {/* 续期巡检：与批量签到同款样式；两版账号都可能有临期 token，不限 realm */}
+            {isAdmin && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="rounded-full"
+                onClick={renewAll}
+                disabled={renewAllBusy || !visible.length}
+                title={t('accounts.renewAllTitle')}
+              >
+                <TimerReset className={renewAllBusy ? 'animate-pulse' : ''} />
+                {t('accounts.renewAll')}
+              </Button>
+            )}
             {isAdmin && (
               <>
                 <ExportAccountsButton disabled={!visible.length} />
@@ -592,10 +788,83 @@ export default function AccountsPage() {
         }
       />
 
+      {/* 搜索 + 分页工具条：本地过滤/分页，纯前端行为不改 API */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="relative w-full max-w-xs">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            type="search"
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setPage(1); // 新关键词从第一页看起
+            }}
+            placeholder={t('accounts.searchPlaceholder')}
+            className="h-8 pl-9 text-xs [&::-webkit-search-cancel-button]:hidden"
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] text-muted-foreground">{t('accounts.totalCount', {n: totalVisible, count: totalVisible})}</span>
+          <Select value={String(pageSize)} onValueChange={(v) => changePageSize(Number(v) as PageSize)}>
+            <SelectTrigger size="sm" className="h-8 w-[108px] rounded-full text-[11px]" aria-label={t('accounts.pageSizeLabel')}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {([20, 50, 100] as const).map((n) => (
+                <SelectItem key={n} value={String(n)}>
+                  {t('accounts.pageSizeItem', {n})}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <div className="flex items-center gap-0.5">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 rounded-md"
+              title={t('accounts.prevPage')}
+              disabled={safePage <= 1}
+              onClick={() => setPage(safePage - 1)}
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+            </Button>
+            <span className="min-w-14 text-center text-[11px] tabular-nums text-muted-foreground">
+              {t('accounts.pageIndicator', {page: safePage, total: totalPages})}
+            </span>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 rounded-md"
+              title={t('accounts.nextPage')}
+              disabled={safePage >= totalPages}
+              onClick={() => setPage(safePage + 1)}
+            >
+              <ChevronRight className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {/* 首载失败且无缓存可展示：错误态（与「暂无账号」空态严格区分） */}
+      {loadError && !loading && !accounts.length ? (
+        <section className="overflow-hidden rounded-[20px] bg-muted">
+          <EmptyState
+            icon={ServerCrash}
+            title={t('accounts.loadErrorTitle')}
+            description={loadError}
+            className="flex flex-col items-center justify-center py-16 text-center"
+          >
+            <Button className="mt-4 rounded-full" onClick={clearLoadError}>
+              <RefreshCw />
+              {t('common.refresh')}
+            </Button>
+          </EmptyState>
+        </section>
+      ) : (
       <section className="overflow-hidden rounded-[20px] bg-muted">
         {/* 手机端：卡片列表。表格 6 列在窄屏需要横向滚动，改为纵向卡片 */}
         <div className="divide-y divide-border/40 md:hidden">
-          {visible.map((a) => (
+          {pageItems.map((a) => (
             <div key={a.uid} className="space-y-2.5 px-3.5 py-3">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-2.5">
@@ -617,17 +886,32 @@ export default function AccountsPage() {
                 </div>
               </div>
 
+              {notesOf(a.uid) && (
+                <div className="flex items-start gap-1.5 rounded-lg bg-background/60 px-2.5 py-1.5">
+                  <NotebookPen className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
+                  <span className="whitespace-pre-wrap break-all text-[11px] leading-relaxed text-muted-foreground">
+                    {notesOf(a.uid)}
+                  </span>
+                </div>
+              )}
+
               <div className="flex items-center justify-between gap-3">
                 <div className="flex shrink-0 items-center gap-1.5">
                   <Coins className="h-3.5 w-3.5 text-muted-foreground" />
                   {renderCredits(a)}
                 </div>
-                {isAdmin && renderActions(a)}
+                <div className="flex items-center gap-1">
+                  {renderRenewed(a)}
+                  {renderNoteButton(a)}
+                  {isAdmin && renderActions(a)}
+                </div>
               </div>
             </div>
           ))}
           {!visible.length && !loading && (
-            <div className="px-4 py-12 text-center text-xs text-muted-foreground">{t('accounts.tableEmpty')}</div>
+            <div className="px-4 py-12 text-center text-xs text-muted-foreground">
+              {debouncedQuery ? t('accounts.searchEmptyTitle') : t('accounts.tableEmpty')}
+            </div>
           )}
           {loading && !accounts.length && <CardRowsSkeleton rows={4} />}
         </div>
@@ -642,11 +926,13 @@ export default function AccountsPage() {
               {renderSortableHead('status', t('accounts.colStatus'))}
               {renderSortableHead('credits', t('metric.credits'))}
               {renderSortableHead('requests', t('accounts.colRequests'))}
+              <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colLastRenewed')}</TableHead>
+              <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colNote')}</TableHead>
               {isAdmin && <TableHead className="pr-4 text-[11px] text-muted-foreground">{t('accounts.colActions')}</TableHead>}
             </TableRow>
           </TableHeader>
           <TableBody>
-            {visible.map((a) => (
+            {pageItems.map((a) => (
               <TableRow key={a.uid} className="border-b border-border/40">
                 <TableCell className="pl-4">
                   <div className="flex items-center gap-2.5">
@@ -680,14 +966,24 @@ export default function AccountsPage() {
                   <span className="mx-1 text-muted-foreground/40">/</span>
                   <span className="text-red-600 dark:text-red-400">{fmtNumber(a.err_total ?? 0)}</span>
                 </TableCell>
-                {isAdmin && <TableCell className="pr-4">{renderActions(a)}</TableCell>}
+                <TableCell className="whitespace-nowrap">{renderRenewed(a)}</TableCell>
+                <TableCell className="max-w-[180px]">
+                  {notesOf(a.uid) ? (
+                    <span className="line-clamp-1 text-xs text-muted-foreground" title={notesOf(a.uid)}>
+                      {notesOf(a.uid)}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-muted-foreground/40">—</span>
+                  )}
+                </TableCell>
+                {isAdmin && <TableCell className="pr-4"><div className="flex justify-end gap-1">{renderNoteButton(a)}{renderActions(a)}</div></TableCell>}
               </TableRow>
             ))}
           </TableBody>
         </Table>
         </div>
 
-        {!visible.length && !loading && (
+        {!visible.length && !loading && !debouncedQuery && (
           <EmptyState
             icon={Users}
             title={t('accounts.emptyTitle')}
@@ -702,11 +998,79 @@ export default function AccountsPage() {
             )}
           </EmptyState>
         )}
+        {/* 搜索无命中（与「池里没有账号」区分开） */}
+        {!visible.length && !loading && debouncedQuery && (
+          <EmptyState
+            icon={Search}
+            title={t('accounts.searchEmptyTitle')}
+            description={t('accounts.searchEmptyDesc', {q: debouncedQuery})}
+            className="flex flex-col items-center justify-center py-16 text-center"
+          />
+        )}
         {loading && !accounts.length && <TableSkeleton rows={6} />}
       </section>
+      )}
 
       <AddAccountDialog open={addOpen} onOpenChange={setAddOpen} onSuccess={load} />
       <ImportAccountsDialog open={importOpen} onOpenChange={setImportOpen} onSuccess={load} />
+    </div>
+  );
+}
+
+/**
+ * 备注编辑器（Popover 内）：本地草稿 + 保存/清空。
+ * 独立组件：把草稿 state 隔离在弹层里，避免每敲一个字都重渲染整个账号页。
+ */
+function NoteEditor({
+  uid,
+  initial,
+  onSave,
+}: {
+  uid: string;
+  initial: string;
+  onSave: (uid: string, text: string) => void;
+}) {
+  const t = useT();
+  const [draft, setDraft] = useState(initial);
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="text-xs font-medium">{t('accounts.noteEditorTitle')}</div>
+      <Textarea
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        placeholder={t('accounts.notePlaceholder')}
+        rows={3}
+        className="text-xs"
+        maxLength={200}
+        autoFocus
+      />
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] text-muted-foreground">{t('accounts.noteStoredLocal')}</span>
+        <div className="flex gap-1.5">
+          {draft.trim() && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 rounded-full text-xs"
+              onClick={() => {
+                setDraft('');
+                onSave(uid, '');
+              }}
+            >
+              {t('common.clear')}
+            </Button>
+          )}
+          <Button
+            size="sm"
+            className="h-7 rounded-full text-xs"
+            disabled={draft === initial}
+            onClick={() => onSave(uid, draft)}
+          >
+            {t('common.save')}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

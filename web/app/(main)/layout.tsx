@@ -7,6 +7,7 @@ import {ManagementBar} from '@/components/common/layout/ManagementBar';
 import {LanguageToggle} from '@/components/common/layout/LanguageToggle';
 import {ThemeToggle} from '@/components/common/layout/ThemeToggle';
 import {RealmToggle} from '@/components/common/layout/RealmToggle';
+import {CommandPalette} from '@/components/common/layout/CommandPalette';
 import {RealmProvider} from '@/lib/realm-context';
 import {useAuth} from '@/lib/auth-context';
 
@@ -28,6 +29,7 @@ export default function MainLayout({
   }, [loading, me, router]);
 
   return (
+    <>
     <RealmProvider>
       <div className="min-h-screen flex flex-col">
         <MemoizedManagementBar />
@@ -79,5 +81,8 @@ export default function MainLayout({
         </div>
       </div>
     </RealmProvider>
+    {/* 命令面板（⌘K）：挂布局级，所有管理页可用；Portal 渲染不影响布局树 */}
+    <CommandPalette />
+    </>
   );
 }

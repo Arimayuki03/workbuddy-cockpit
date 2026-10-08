@@ -18,6 +18,8 @@ import {
   Link2,
   FolderGit2,
   ChevronRight,
+  KeyRound,
+  ShieldAlert,
 } from 'lucide-react';
 import {useAuth} from '@/lib/auth-context';
 import {accountApi, settingsApi} from '@/lib/api';
@@ -432,6 +434,11 @@ export function ManagementBar() {
       href: '/accounts',
     },
     {
+      title: t('nav.keys'),
+      icon: <KeyRound {...IconOptions} />,
+      href: '/keys',
+    },
+    {
       title: t('nav.tasks'),
       icon: <ClipboardList {...IconOptions} />,
       href: '/tasks',
@@ -464,6 +471,11 @@ export function ManagementBar() {
       title: t('nav.logs'),
       icon: <ScrollText {...IconOptions} />,
       href: '/logs',
+    },
+    {
+      title: t('nav.security'),
+      icon: <ShieldAlert {...IconOptions} />,
+      href: '/security',
     },
     {
       title: t('nav.settings'),

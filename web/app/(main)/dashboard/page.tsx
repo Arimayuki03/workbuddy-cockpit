@@ -1,7 +1,7 @@
 'use client';
 
 import {useCallback, useEffect, useMemo, useState} from 'react';
-import {Users, CircleCheck, TriangleAlert, Activity, Server, Coins} from 'lucide-react';
+import {Users, CircleCheck, TriangleAlert, Activity, Server, Coins, RefreshCw, ServerCrash} from 'lucide-react';
 import {
   Area,
   AreaChart,
@@ -40,6 +40,7 @@ import {StatCard} from '@/components/common/layout/StatCard';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {CardRowsSkeleton} from '@/components/common/layout/LoadSkeleton';
 import {Badge} from '@/components/ui/badge';
+import {Button} from '@/components/ui/button';
 import {useT} from '@/lib/i18n/provider';
 import {notify} from '@/lib/toast';
 
@@ -66,9 +67,15 @@ export default function DashboardPage() {
   // overview（池快照，快）与 packages（逐号查上游，慢）分两个缓存条目并行拉：
   // 快的先渲染卡片骨架外的东西，慢的（积分）拿到后再补上——切页先出缓存值，
   // 后台刷新静默替换，不再出现「整页空 1-2 秒」。
+  // 首载错误态在 overview 的 fetcher 里捕获（见下方 loadError 注释块）。
+  const [loadError, setLoadError] = useState<string | null>(null);
   const overviewCache = useCachedAsync<OverviewResponse>(
     'overview',
-    () => accountApi.overview(),
+    () =>
+      accountApi.overview().catch((e) => {
+        setLoadError((prev) => prev ?? errText(e)); // 已有错误不覆盖
+        throw e; // 继续抛给 hook 的常规错误路径
+      }),
     {ttl: 5000},
   );
   const packagesCache = useCachedAsync<PackagesResponse>(
@@ -81,6 +88,20 @@ export default function DashboardPage() {
 
   const overview = overviewCache.data;
   const packages = packagesCache.data;
+
+  /* ── 首载错误态（区分「加载失败」与「真的没有账号」）────────────
+   * 错误在 overview 的 fetcher 里捕获：useCachedAsync 内部的挂载刷新会先
+   * 占住请求锁并把失败静默吞掉，页面层对 refresh 的 .catch 收不到
+   * rejection——捕获必须挂进 fetcher。有旧缓存时静默降级继续展示旧数据；
+   * 心跳周期刷新失败不覆盖已有状态，错误条保留到手动重试成功。 */
+  const overviewLoading = overviewCache.loading;
+  const retryLoad = useCallback(() => {
+    setLoadError(null);
+    overviewCache.refresh().catch((e) => {
+      setLoadError(errText(e));
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 切换版本后要重新取积分：两个版本的账号池不同，credits 也不能混
   //
@@ -160,8 +181,10 @@ export default function DashboardPage() {
     load();
   }, [load]);
 
-  // 账号健康度与用量持续变化：心跳静默刷新全部数据源（含两个缓存条目）
+  // 账号健康度与用量持续变化：心跳静默刷新全部数据源（含两个缓存条目）。
+  // 心跳失败静默（不弹错误雨）；错误条保留到手动重试成功。
   useHeartbeat(() => {
+    overviewCache.refresh().catch(() => {/* 静默，等下一轮 */});
     void load(true);
   }, 30000);
 
@@ -311,6 +334,24 @@ export default function DashboardPage() {
         title={t('dashboard.title')}
         description={t('dashboard.description', {realm: realmName})}
       />
+
+      {/* 首载失败且无缓存可展示：错误态（与「暂无账号」空态严格区分） */}
+      {loadError && !overviewLoading && !overview ? (
+        <section className="overflow-hidden rounded-[20px] bg-muted">
+          <EmptyState
+            icon={ServerCrash}
+            title={t('dashboard.loadErrorTitle')}
+            description={loadError}
+            className="flex flex-col items-center justify-center py-16 text-center"
+          >
+            <Button className="mt-4 rounded-full" onClick={retryLoad}>
+              <RefreshCw />
+              {t('common.refresh')}
+            </Button>
+          </EmptyState>
+        </section>
+      ) : (
+      <>
 
       <section className="grid grid-cols-2 gap-3 lg:grid-cols-5 md:gap-4">
         <StatCard
@@ -609,6 +650,8 @@ export default function DashboardPage() {
           />
         )}
       </section>
+      </>
+      )}
     </div>
   );
 }

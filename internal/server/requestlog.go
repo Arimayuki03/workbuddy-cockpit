@@ -6,6 +6,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"workbuddy2api/internal/iputil"
+	"workbuddy2api/internal/logfmt"
+	"workbuddy2api/internal/reqlog"
 )
 
 // requestLogEntry 单条请求日志（面板「请求日志」tab 的行）。
@@ -29,6 +33,11 @@ type requestLogEntry struct {
 	CacheWrite  int    `json:"cache_write_tokens,omitempty"`
 	HasCacheObs bool   `json:"has_cache_obs,omitempty"`
 	Error       string `json:"error,omitempty"` // 非 200 的原因摘要
+	// ClientIP / UserAgent 调用来源（可选）：受 logging.request_client_info 开关
+	// 控制（默认 false 不采集，保持零值即不落内存快照、不进 JSONL 归档——
+	// omitempty 序列化时缺省）。采集口径见 newChatStat 的 TODO（iputil 接线）。
+	ClientIP  string `json:"client_ip,omitempty"`
+	UserAgent string `json:"user_agent,omitempty"`
 }
 
 // requestLogCap 环形缓冲容量（设计文档 §4.3.2：~1000 条，重启即清）。
@@ -49,7 +58,20 @@ type requestLogStore struct {
 
 var requestLog = &requestLogStore{buf: make([]requestLogEntry, requestLogCap)}
 
-// appendRequestLog 写入一条请求日志（覆盖最旧）。由 chatStat.done() 调用（单一埋点）。
+// globalRequestArchive 请求日志 JSONL 归档 writer（reqlog 包，panel 移植件）。
+// 包级而非 Handler 字段：chatStat 是值日志对象，不持 Handler 引用；单一埋点
+// 读一个包级引用比回传 Handler 简单且测试可注入（SetRequestArchive，对齐
+// SetUsageRecorder 的注入风格）。nil = 未配置归档（appendRequestLog 跳过，
+// 热路径零开销）。
+var globalRequestArchive *reqlog.Recorder
+
+// SetRequestArchive 注入请求日志归档 writer（main 启动期调用一次；
+// nil = 关闭归档——环形缓冲照常工作，仅无磁盘落盘）。
+func SetRequestArchive(r *reqlog.Recorder) { globalRequestArchive = r }
+
+// appendRequestLog 写入一条请求日志：环形缓冲（覆盖最旧）+ 可选 JSONL 归档
+// （archive 非 nil 时异步投递；nil 则跳过，未配置归档时零开销）。
+// 由 chatStat.done() 调用（单一埋点）。
 func appendRequestLog(e requestLogEntry) {
 	requestLog.mu.Lock()
 	defer requestLog.mu.Unlock()
@@ -62,6 +84,36 @@ func appendRequestLog(e requestLogEntry) {
 	requestLog.next = (requestLog.next + 1) % len(requestLog.buf)
 	if requestLog.seq > int64(len(requestLog.buf)) {
 		requestLog.dropped.Store(requestLog.seq - int64(len(requestLog.buf)))
+	}
+	// JSONL 归档（reqlog 包）：与环形缓冲互补——环形是热数据（重启即清），
+	// 归档是持久层（按日轮转/保留上限）。投递非阻塞，队列满由 reqlog 丢弃并计数。
+	// nil 跳过：未配置归档时这条判断是唯一的额外开销（一次指针判空）。
+	if a := globalRequestArchive; a != nil {
+		a.Record(requestLogArchiveEvent(e))
+	}
+}
+
+// requestLogArchiveEvent 环形缓冲条目 → reqlog 归档事件的字段映射。
+// Account 复用表格日志的「昵称(uid8)」标签口径（logfmt.Label），不落完整 UID
+// ——归档文件可被人工 cat/grep，最小化可识别信息。
+func requestLogArchiveEvent(e requestLogEntry) reqlog.Event {
+	return reqlog.Event{
+		Time:       e.Time,
+		Model:      e.Model,
+		Account:    logfmt.Label(e.UID, e.Nick),
+		Mode:       e.Mode,
+		Status:     e.Status,
+		OK:         e.Status >= 200 && e.Status < 400, // 3xx 视为成功（网关无重定向语义，防御性口径）
+		Tokens:     e.Tokens,
+		TTFBMS:     e.TTFBMS,
+		Credit:     e.Credit,
+		HasCredit:  e.HasCredit,
+		CacheHit:   e.CacheHit,
+		CacheMiss:  e.CacheMiss,
+		CacheWrite: e.CacheWrite,
+		Error:      e.Error,
+		ClientIP:   e.ClientIP,
+		UserAgent:  e.UserAgent,
 	}
 }
 
@@ -103,8 +155,34 @@ func (h *Handler) handleRequestLogs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// requestLogClientInfo 从入站请求提取调用来源（client_ip / user_agent）。
+// enabled=false（logging.request_client_info 缺省）返回零值——来源信息比 token
+// 计数敏感，运营可自行决定是否采集/落盘。
+//
+// TODO(iputil 接线)：client_ip 目前取 r.RemoteAddr 的 IP 部分（iputil.CleanAddress，
+// 剥端口/方括号），不解析 X-Forwarded-For。主代理接好 iputil.RequestClientIP
+// （可信代理链 + XFF hop 数配置）后，此处换 RequestClientIP(r, trustedCIDRs, hops)
+// 即可，环形缓冲/归档字段口径不变。
+func requestLogClientInfo(r *http.Request, enabled bool) (clientIP, userAgent string) {
+	if r == nil || !enabled {
+		return "", ""
+	}
+	return iputil.CleanAddress(r.RemoteAddr), r.UserAgent()
+}
+
+// noteClientInfo 把入站请求的调用来源填进 chatStat（供环形缓冲与 JSONL 归档）。
+// handler 在 newChatStat 之后调用一次（开关关闭时为 no-op，零开销）。
+// 供主代理接线的一行：st.noteClientInfo(r, cfg.Logging.RequestClientInfo)。
+func (s *chatStat) noteClientInfo(r *http.Request, enabled bool) {
+	if s == nil || !enabled {
+		return
+	}
+	s.clientIP, s.userAgent = requestLogClientInfo(r, enabled)
+}
+
 // requestLogPayloadFromStat 从 chatStat 抽取请求日志载荷（与表格日志同一观测源）。
-// 前置条件：done() 已把 uid/nick/ttfb 等字段填齐。
+// 前置条件：done() 已把 uid/nick/ttfb 等字段填齐；clientIP/userAgent 由 handler
+// 按 logging.request_client_info 开关填充（缺省零值——不采集即不落任何视图）。
 func requestLogPayloadFromStat(s *chatStat) requestLogEntry {
 	return requestLogEntry{
 		Time:        time.Now(),
@@ -122,5 +200,7 @@ func requestLogPayloadFromStat(s *chatStat) requestLogEntry {
 		CacheWrite:  s.cacheWr,
 		HasCacheObs: s.hasUsage,
 		Error:       s.errSummary,
+		ClientIP:    s.clientIP,
+		UserAgent:   s.userAgent,
 	}
 }
