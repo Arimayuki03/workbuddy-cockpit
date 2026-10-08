@@ -3,6 +3,7 @@
 package pool
 
 import (
+	"fmt"
 	"log"
 	"sort"
 	"time"
@@ -170,6 +171,26 @@ func (p *Pool) SetRenewState(uid string, err error) {
 		e.renewLastErr = err.Error()
 	}
 	p.dirty.Store(true)
+}
+
+// SetNote 写入/清空账号的运维备注（面板 accounts 页编辑保存端点的落点）。
+// note 支持空串 = 清空（与前端「清空即删除」的语义对齐，不让空串残留）。
+// 幂等：同值重复写入不置脏（避免无意义的 5s 落盘循环）；uid 不存在为空操作。
+// 参照 SetManualDisabled 的入口模式：p.mu 写锁内改 entry 字段 + dirty 置脏，
+// 落盘由后台 flusher（flushInterval）择机完成。
+func (p *Pool) SetNote(uid, note string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return fmt.Errorf("account not found: %s", uid)
+	}
+	if e.note == note {
+		return nil
+	}
+	e.note = note
+	p.dirty.Store(true)
+	return nil
 }
 
 // ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号非禁用时，清冷却域（余额恢复）。
@@ -586,6 +607,8 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		// last_renewed 恒透出（零值 = 从未续期），renew_last_error 仅失败时非空。
 		LastRenewed:     e.lastRenewed,
 		RenewLastError:  e.renewLastErr,
+		// 运维备注透出（SetNote 写入，面板 accounts 页展示/编辑；空 = 未写）。
+		Note:            e.note,
 	}
 	if st.Disabled {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。

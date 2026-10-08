@@ -87,6 +87,11 @@ type Status struct {
 	// RenewLastError 最近一次续期失败原因；空 = 最近一次续期成功（或从未尝试）。
 	// 只留最近一条（历史走日志），面板据此判断「临期号为什么还没续上」。
 	RenewLastError string `json:"renew_last_error,omitempty"`
+	// Note 运维给账号写的备注（面板 accounts 页编辑，POST /api/accounts/{uid}/note
+	// 写入）。纯人读元数据：选号/状态机完全不消费。空 = 未写或已清空（omitempty
+	// 省略，state.json 与 /api/overview 均不带冗余键）。历史版本前端把备注存
+	// localStorage（换浏览器即丢），后端化后由前端一次性迁移进池状态。
+	Note string `json:"note,omitempty"`
 }
 
 // RateLimitedModel 单个被限流模型的台账行（issue #36）。
@@ -218,6 +223,11 @@ type entry struct {
 	// 空 = 最近一次续期成功（或从未尝试过）。只保留最近一条：历史失败清单
 	// 是日志的职责，这里只回答「这个号上次续期为什么没成」。
 	renewLastErr string
+
+	// note 运维给账号写的备注（持久化，stateAccount.Note）。面板 accounts 页
+	// 编辑保存后经 Pool.SetNote 写入；纯展示元数据，选号逻辑不消费。支持清空
+	//（空串即删除备注）。旧 state.json 缺此字段 → 零值空串，语义一致。
+	note string
 }
 
 // acquireModel 在途模型台账 +1（AcquireModel 的 CAS 成功后调用）。map 惰性建表。
@@ -526,6 +536,9 @@ type stateAccount struct {
 	// RenewLastError 最近一次续期失败原因（entry.renewLastErr）。成功续期时清空
 	//（写空串），仅失败时非空——omitempty 让健康账号的 state.json 不带冗余键。
 	RenewLastError string `json:"renew_last_error,omitempty"`
+	// Note 运维备注（entry.note，见 Status.Note 注释）。仅非空时落盘（omitempty），
+	// 旧 state.json 缺此字段零值恢复，向后兼容。
+	Note string `json:"note,omitempty"`
 }
 
 // stateModelCooldown 单个 (账号, 模型) 的 6004 独立冷却持久化记录，与运行态

@@ -1,7 +1,19 @@
 'use client';
 
 import {useCallback, useEffect, useMemo, useState} from 'react';
-import {Users, CircleCheck, TriangleAlert, Activity, Server, Coins, RefreshCw, ServerCrash} from 'lucide-react';
+import {
+  Users,
+  CircleCheck,
+  TriangleAlert,
+  Activity,
+  Server,
+  Coins,
+  RefreshCw,
+  ServerCrash,
+  ChevronDown,
+  ChevronRight,
+  CircleCheck as CircleCheckOk,
+} from 'lucide-react';
 import {
   Area,
   AreaChart,
@@ -24,6 +36,7 @@ import type {
 } from '@/lib/types';
 import {
   fmtCompact,
+  fmtDate,
   fmtDateTime,
   fmtNumber,
 } from '@/lib/format';
@@ -41,7 +54,9 @@ import {EmptyState} from '@/components/common/layout/EmptyState';
 import {CardRowsSkeleton} from '@/components/common/layout/LoadSkeleton';
 import {Badge} from '@/components/ui/badge';
 import {Button} from '@/components/ui/button';
+import {Select, SelectContent, SelectItem, SelectTrigger, SelectValue} from '@/components/ui/select';
 import {useT} from '@/lib/i18n/provider';
+import {useNow} from '@/lib/use-now';
 import {notify} from '@/lib/toast';
 
 export default function DashboardPage() {
@@ -64,6 +79,24 @@ export default function DashboardPage() {
       window.localStorage.setItem('expiryDailyMerge', on ? '1' : '0');
     } catch {/* 隐私模式等存储不可用：本次会话内仍生效 */}
   }, []);
+  // 到期提醒卡片的统计窗口（7/14/30 天，本地偏好，默认 7——签到/任务发的积分包
+  // 约一个月失效，7 天窗口对应「再不消耗就来不及」的最后一段）。同样首帧 SSR
+  // 对齐默认值、水合后回填，避免 hydration mismatch。
+  const [expiryWindow, setExpiryWindow] = useState(7);
+  useEffect(() => {
+    try {
+      const raw = Number(window.localStorage.getItem('expiryWindow'));
+      if (raw === 7 || raw === 14 || raw === 30) setExpiryWindow(raw);
+    } catch {/* 存储不可用：保持默认 */}
+  }, []);
+  const changeExpiryWindow = useCallback((days: number) => {
+    setExpiryWindow(days);
+    try {
+      window.localStorage.setItem('expiryWindow', String(days));
+    } catch {/* 忽略 */}
+  }, []);
+  // 卡片展开态：收起时只显示最紧急的 1-3 个包，展开看全部到期升序列表。
+  const [expiryExpanded, setExpiryExpanded] = useState(false);
   // overview（池快照，快）与 packages（逐号查上游，慢）分两个缓存条目并行拉：
   // 快的先渲染卡片骨架外的东西，慢的（积分）拿到后再补上——切页先出缓存值，
   // 后台刷新静默替换，不再出现「整页空 1-2 秒」。
@@ -151,6 +184,54 @@ export default function DashboardPage() {
     mergedExpiries.push(...expiries);
   }
   const nextExpiry: {at: number; amount: number} | null = mergedExpiries[0] ?? null;
+
+  /* ── 积分到期提醒卡片（吸收 panel commits acb3830c/bb8fd1df）────────
+   * 逐包明细按 FEFO 口径消费：上游按可抵扣窗口结束（DeductionEndTime）升序
+   * 自动优先扣减，所以「先用哪包」= 到期最早且有余额的那包。窗口内合计给出
+   * 「再不消耗就会作废」的量级；数据年龄来自响应 fetched_at（后端实时透传
+   * 上游、无服务端缓存），超 10 分钟明确标注，避免旧快照被误当实时。 */
+  const fetchedAt = useMemo(() => {
+    if (!packages?.fetched_at) return null;
+    const at = Date.parse(packages.fetched_at);
+    return Number.isFinite(at) ? at : null;
+  }, [packages]);
+  const now = useNow(30_000); // 分钟级精度足够：数据年龄 / 剩余天数文案 30s 刷一次
+  const dataAgeMin = fetchedAt ? Math.max(0, Math.floor((now - fetchedAt) / 60_000)) : null;
+
+  /** 单包到期行：包名 + 所属账号 + 剩余积分 + 到期时刻（升序，后端已排好，前端再兜一层） */
+  const expiryPacks = useMemo(() => {
+    const rows: {at: number; amount: number; name: string; uid: string; nickname: string; realm: string}[] = [];
+    if (packages) {
+      for (const row of packages.accounts) {
+        if (row.realm && row.realm !== realm) continue; // 只看当前版本的号
+        for (const p of row.packages ?? []) {
+          const at = p.expires_at ?? (p.end_time ? Date.parse(p.end_time) : NaN);
+          if (!Number.isFinite(at) || p.remain <= 0) continue;
+          rows.push({
+            at,
+            amount: p.remain,
+            name: p.sub_product_name || p.name || '—',
+            uid: row.uid,
+            nickname: row.nickname || row.uid.slice(0, 8),
+            realm: row.realm ?? 'cn',
+          });
+        }
+      }
+    }
+    rows.sort((a, b) => a.at - b.at); // FEFO：到期最早的先用/先看
+    return rows;
+  }, [packages, realm]);
+
+  const windowPacks = useMemo(
+    () => expiryPacks.filter((p) => p.at - now <= expiryWindow * 86_400_000),
+    [expiryPacks, expiryWindow, now],
+  );
+  const windowTotal = useMemo(() => windowPacks.reduce((sum, p) => sum + p.amount, 0), [windowPacks]);
+  // 最紧急的 1-3 个包：收起态摘要；全量列表展开后看（到期升序）。
+  const urgentPacks = windowPacks.slice(0, 3);
+  const firstPack = windowPacks[0] ?? null;
+  // FEFO 提示行的剩余天数（≥0；向下取整与倒计时口径一致）。
+  const firstDaysLeft = firstPack ? Math.floor((firstPack.at - now) / 86_400_000) : 0;
 
   // 上游健康与用量时序：这两个端点都很快，不进缓存，保持原有的一次性拉取。
   // 心跳沿用原 load：同时刷上游状态、usage 与两个缓存条目，全部数据同帧续命。
@@ -479,6 +560,147 @@ export default function DashboardPage() {
           delay={0.16}
         />
       </section>
+
+      {/* 积分到期提醒（FEFO 口径）：只看当前版本的号；packages 未同步时不渲染，
+          与积分卡片的「等待上游同步」一致，避免骨架期闪出「无到期」安心空态。 */}
+      {packages && (
+        <section className="rounded-[20px] bg-muted p-4">
+          <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="flex items-center gap-2 text-sm font-medium">
+              <Coins className="h-4 w-4" />
+              {t('dashboard.expiryCardTitle')}
+            </span>
+            {/* 统计窗口切换：7/14/30 天（本地偏好）。哨兵值 'd7' 等字符串避开
+                Radix Select 对空串的占位符语义（logs 页同口径）。 */}
+            <Select value={`d${expiryWindow}`} onValueChange={(v) => changeExpiryWindow(Number(v.slice(1)))}>
+              <SelectTrigger className="h-7 w-auto gap-1 rounded-full border-none bg-background/60 px-3 text-[11px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="d7" className="text-xs">{t('dashboard.expiryWindow7')}</SelectItem>
+                <SelectItem value="d14" className="text-xs">{t('dashboard.expiryWindow14')}</SelectItem>
+                <SelectItem value="d30" className="text-xs">{t('dashboard.expiryWindow30')}</SelectItem>
+              </SelectContent>
+            </Select>
+            <span className="grow" />
+            {/* 数据年龄：后端实时透传上游、无服务端缓存，fetched_at 即采集时刻。
+                超 10 分钟明确标注，避免旧快照被误当实时（panel bb8fd1df 口径）。 */}
+            <span
+              className={
+                'text-[11px] tabular-nums ' +
+                (dataAgeMin !== null && dataAgeMin > 10 ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground')
+              }
+            >
+              {dataAgeMin === null
+                ? t('dashboard.expiryDataLive')
+                : t('dashboard.expiryDataAge', {n: dataAgeMin, count: dataAgeMin})}
+            </span>
+          </div>
+
+          {windowPacks.length ? (
+            <div className="space-y-1">
+              {/* FEFO 提示行：上游按失效时刻升序自动优先扣减——先用最早到期的包，
+                  不用抢在它前面烧长期积分（实测结论，给「先用哪包」一个明确答案）。 */}
+              {firstPack && (
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-2xl bg-background/60 px-3 py-2 text-xs">
+                  <span
+                    className={
+                      'inline-block h-2 w-2 shrink-0 rounded-full ' +
+                      (firstDaysLeft <= 3
+                        ? 'bg-red-500'
+                        : firstDaysLeft <= expiryWindow
+                          ? 'bg-amber-500'
+                          : 'bg-emerald-500')
+                    }
+                  />
+                  <span className="text-muted-foreground">{t('dashboard.expiryFefoLine')}</span>
+                  <span className="font-medium">
+                    {t('dashboard.expiryFefoPack', {name: firstPack.name, nickname: firstPack.nickname})}
+                  </span>
+                  <span className="font-medium tabular-nums">
+                    {t('dashboard.expiryFefoAmount', {amount: fmtNumber(firstPack.amount)})}
+                  </span>
+                  <span className="tabular-nums text-muted-foreground">
+                    {firstDaysLeft <= 0
+                      ? t('dashboard.expiryToday')
+                      : t('dashboard.expiryInDays', {n: firstDaysLeft, count: firstDaysLeft})}
+                  </span>
+                </div>
+              )}
+              {/* 窗口合计 + 最紧急 1-3 个包（展开后是完整到期升序列表） */}
+              {(expiryExpanded ? windowPacks : urgentPacks).map((p, i) => {
+                const days = Math.floor((p.at - now) / 86_400_000);
+                return (
+                  <div
+                    key={`${p.uid}-${p.name}-${p.at}-${i}`}
+                    className="flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 rounded-2xl bg-background/60 px-3 py-2 text-xs"
+                  >
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span
+                        className={
+                          'inline-block h-2 w-2 shrink-0 rounded-full ' +
+                          (days <= 3 ? 'bg-red-500' : days <= expiryWindow ? 'bg-amber-500' : 'bg-emerald-500')
+                        }
+                      />
+                      <span className="truncate font-medium">{p.name}</span>
+                      <span className="shrink-0 text-muted-foreground">{p.nickname}</span>
+                    </span>
+                    <span className="flex shrink-0 items-center gap-3 tabular-nums">
+                      <span className="font-medium">{fmtNumber(p.amount)}</span>
+                      <span className="text-muted-foreground">{fmtDate(p.at)}</span>
+                      <span
+                        className={
+                          days <= 3
+                            ? 'text-red-600 dark:text-red-400'
+                            : days <= expiryWindow
+                              ? 'text-amber-600 dark:text-amber-400'
+                              : 'text-muted-foreground'
+                        }
+                      >
+                        {days <= 0
+                          ? t('dashboard.expiryToday')
+                          : t('dashboard.expiryInDays', {n: days, count: days})}
+                      </span>
+                    </span>
+                  </div>
+                );
+              })}
+              {/* 批次收尾：还有没显示出来的批次时给出总数（panel acb3830c 口径） */}
+              {!expiryExpanded && windowPacks.length > urgentPacks.length && (
+                <button
+                  type="button"
+                  onClick={() => setExpiryExpanded(true)}
+                  className="w-full rounded-2xl px-3 py-1.5 text-left text-[11px] text-muted-foreground transition-colors hover:bg-background/60"
+                >
+                  {t('dashboard.expiryMoreBatches', {count: windowPacks.length - urgentPacks.length, n: windowPacks.length - urgentPacks.length})}
+                </button>
+              )}
+              <div className="flex items-center justify-between px-3 pt-1">
+                <span className="text-[11px] tabular-nums text-muted-foreground">
+                  {t('dashboard.expiryWindowTotal', {
+                    amount: fmtNumber(windowTotal),
+                    days: expiryWindow,
+                  })}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setExpiryExpanded((v) => !v)}
+                  className="flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  {expiryExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                  {expiryExpanded ? t('dashboard.expiryCollapse') : t('dashboard.expiryExpand')}
+                </button>
+              </div>
+            </div>
+          ) : (
+            /* 安心空态：窗口内没有要作废的积分——明确说没有，而不是空着 */
+            <div className="flex items-center gap-2 rounded-2xl bg-background/60 px-3 py-3 text-xs text-muted-foreground">
+              <CircleCheckOk className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+              {t('dashboard.expiryAllClear', {days: expiryWindow})}
+            </div>
+          )}
+        </section>
+      )}
 
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="rounded-[20px] bg-muted p-4 lg:col-span-2">

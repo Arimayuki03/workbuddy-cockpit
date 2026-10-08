@@ -20,6 +20,7 @@ import type {
   ModelProbesResponse,
   OkOnlyResponse,
   OkResponse,
+  ProxyRoutesResponse,
   AccountImportResponse,
   OverviewResponse,
   PackagesResponse,
@@ -165,6 +166,14 @@ export const accountApi = {
     post<AccountCheckinResponse>(`/api/accounts/${encodeURIComponent(uid)}/checkin`),
   balance: (uid: string) =>
     post<AccountBalanceResponse>(`/api/accounts/${encodeURIComponent(uid)}/balance`),
+  /** 保存账号备注（后端化，落 state.json；空串 = 清除）。旧 localStorage 数据首载迁移 */
+  setNote: (uid: string, note: string) =>
+    post<OkResponse>(`/api/accounts/${encodeURIComponent(uid)}/note`, {note}),
+  /** 出口线路表（密码脱敏 ***）+ 全池账号当前绑定视图 */
+  proxyRoutes: () => get<ProxyRoutesResponse>('/api/proxy_routes'),
+  /** 绑定/解绑账号出口线路（空 route = 解绑恢复直连；落 auth 文件 + 内存即时生效） */
+  setProxyRoute: (uid: string, route: string) =>
+    post<OkResponse>(`/api/accounts/${encodeURIComponent(uid)}/proxy_route`, {route}),
   remove: (uid: string) =>
     post<OkResponse>(`/api/accounts/${encodeURIComponent(uid)}/remove`),
 

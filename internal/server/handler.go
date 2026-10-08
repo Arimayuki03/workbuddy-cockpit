@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1370,6 +1371,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusServiceUnavailable
 	code := "no_healthy_account"
 	msg := "all accounts are temporarily unavailable, please retry later"
+	// retryAfterSec 给末端 503 附加的 Retry-After 头（秒）；0 = 不带头（既有形态
+	// 零回归）。目前仅 model_blocked 口径带（模型级冷却有确定的解锁墙钟）。
+	retryAfterSec := 0
 	// 上游超时：轮转已在传输层分支止损（isUpstreamTimeout 分支 break 到此），这里给
 	// 一条**能区分**的专门文案，别混进「没有可用账号」——两者的排查方向完全不同
 	// （慢上游/网关出口网络 vs 池子空了），客户端的退避策略也不该混同。
@@ -1381,6 +1385,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 在 hint 层自带形态判定，ErrClient 家族也能带上 hint）；本地调度类错误
 	// （无上游原文）固定 no_healthy_account hint。
 	hint := upstream.NoHealthyAccountHint()
+	ueMsg := "" // 上游原文（errors.As 命中且非空时记录，下方 model_blocked 判据用）
 	var ue *upstream.Error
 	if errors.As(lastErr, &ue) {
 		hint = h.hintOf(ue.Kind, ue.Msg, bareModel, reqHasImage, ue)
@@ -1407,7 +1412,50 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if s := strings.TrimSpace(ue.Msg); s != "" {
 			// 上游原文优先：透传 code/msg/requestId，不拼接本地前缀。
 			msg = s
+			ueMsg = s
 		}
+	}
+	// 全池模型级阻塞（吸收自 workbuddy2api-panel commit 44d6e049）：轮转耗尽且该
+	// (realm, model) 的全部参与选号账号都被**该模型自身**的冷却（6004 / 11102）挡住
+	// （ModelLockView locked 态）时，回可区分的 model_blocked 口径，不再伪装成
+	// 「没有可用账号」——两者客户端动作完全不同：前者换模型或等解锁（Retry-After
+	// 给了解锁时刻），后者稍后重试即可。改写条件（宁缺毋滥，只覆盖纯调度失败形态）：
+	//   - status 仍为 503 且 code 仍是 no_healthy_account（429 rate_limit /
+	//     400 content_blocked / upstream_timeout 等更具体口径不在本形态内）；
+	//   - 无上游原文可透传（ueMsg 为空）——原文在手说明上游真实回过话，透传原文
+	//     优先，绝不覆盖。lastErr 为 nil（冷却已在台账、选号 0 跳耗尽）正是本
+	//     形态的典型代表，故判定必须在 errors.As 块之外、对 nil lastErr 同样生效。
+	// 非 blocked（starved：账号级冷却/熔断/在途占满）与 pool 侧任何 false（含
+	// realm 为空等边界）零改动，保持 no_healthy_account。
+	if status == http.StatusServiceUnavailable && code == "no_healthy_account" && ueMsg == "" {
+		if blocked, unlockAt, reason := h.cfg.Pool.ModelBlockedNow(realm, bareModel); blocked {
+			code = "model_blocked"
+			// reason 带上游原文语义（6004 恒为 "6004 model rate limit"）：6004 拼进
+			// 文案定位限流根因，其余（11102 负缓存原文较长）只给解锁时刻，不拼原文。
+			if strings.HasPrefix(reason, "6004") {
+				msg = fmt.Sprintf("model %s is rate-limited on all accounts (%s), earliest unlock %s",
+					bareModel, reason, unlockAt.Format(time.RFC3339))
+			} else {
+				msg = fmt.Sprintf("model %s is rate-limited on all accounts, earliest unlock %s",
+					bareModel, unlockAt.Format(time.RFC3339))
+			}
+			// Retry-After：距最早解锁的秒数。下限 1（同秒解锁也算 1，避免 0/负值
+			// 让客户端立刻重试撞回 503）；上限 600 封顶（11102 负缓存 TTL 长达数
+			// 小时，客户端不该按小时级退避挂连接，封顶后按既有节奏重试即可）。
+			retryAfterSec = int(time.Until(unlockAt).Seconds()) + 1
+			if retryAfterSec > 600 {
+				retryAfterSec = 600
+			}
+			if retryAfterSec < 1 {
+				retryAfterSec = 1
+			}
+		}
+	}
+	// Retry-After 头：仅 model_blocked 口径带（模型级冷却有确定的解锁墙钟）；其余
+	// 末端 503 形态不带头（既有形态零回归）。上限 600 / 下限 1 在 model_blocked
+	// 分支内钳制。
+	if retryAfterSec > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSec))
 	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status

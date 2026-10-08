@@ -16,6 +16,7 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   NotebookPen,
@@ -24,12 +25,13 @@ import {
   SquarePen,
   TimerReset,
   TriangleAlert,
+  Waypoints,
 } from 'lucide-react';
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {notify} from '@/lib/toast';
 import {accountApi, errText, httpStatus} from '@/lib/api';
 import {useCachedAsync} from '@/lib/data-cache';
-import type {Account, CreditPackage, OverviewResponse, PackagesResponse} from '@/lib/types';
+import type {Account, CreditPackage, OverviewResponse, PackagesResponse, ProxyRoutesResponse} from '@/lib/types';
 import {fmtAgo, fmtNumber} from '@/lib/format';
 import {
   availabilityLabelKey,
@@ -81,31 +83,90 @@ export default function AccountsPage() {
   const [importOpen, setImportOpen] = useState(false);
   const [busyUid, setBusyUid] = useState<string | null>(null);
 
-  /* ── 本地备注（localStorage 按 uid 存）────────────────────
-   * 后端暂无备注字段，先落浏览器本地；后端支持后把 notesOf / setNote
-   * 的数据源切到 Account.notes 即可（检索逻辑可原样复用）。
-   * 与列排序同约定：首帧默认空、挂载后回填，避免 hydration mismatch。 */
-  const [notes, setNotes] = useState<Record<string, string>>({});
+  /* ── 账号备注（后端化）──────────────────────────────────
+   * 数据源切换：Account.note（池状态，state.json 落盘，换浏览器不丢）为主，
+   * localStorage（key accountsNotes，按 uid 的历史版本数据）为兜底——后端
+   * note 为空且本地有旧值时展示旧值。编辑保存调 POST /api/accounts/{uid}/note，
+   * 成功后本地同步。首载做一次性迁移：对「后端为空且本地有值」的账号批量推送
+   * 后端（逐个 POST，失败静默），全部推送成功（或已推过）后清掉 localStorage
+   * key，避免反复推。与列排序同约定：首帧默认空、挂载后回填，避免 hydration
+   * mismatch。 */
+  const [localNotes, setLocalNotes] = useState<Record<string, string>>({});
   /** 首载失败信息：fetcher 里捕获，UI 显示错误态而非「空列表」 */
   const [loadError, setLoadError] = useState<string | null>(null);
   useEffect(() => {
     try {
       const raw = window.localStorage.getItem('accountsNotes');
-      if (raw) setNotes(JSON.parse(raw) as Record<string, string>);
+      if (raw) setLocalNotes(JSON.parse(raw) as Record<string, string>);
     } catch {/* 存储不可用/损坏：保持空 */}
   }, []);
-  const setNote = useCallback((uid: string, text: string) => {
-    setNotes((prev) => {
+  /** 备注展示值：后端 note 优先，为空时回落 localStorage 旧值（迁移前窗口期） */
+  const notesOf = useCallback(
+    (a: Account) => a.note || localNotes[a.uid] || '',
+    [localNotes],
+  );
+  /**
+   * 保存备注：调后端（成功后同步本地兜底缓存——后端已有值，兜底不再生效；
+   * 失败时落 localStorage 保底，避免用户写的备注因网络问题直接丢失）。
+   * 后端为权威数据源：成功后由 overview 轮询带回最新值。
+   */
+  const syncLocalNote = useCallback((uid: string, text: string) => {
+    setLocalNotes((prev) => {
       const next = {...prev};
       if (text.trim()) next[uid] = text;
-      else delete next[uid]; // 清空即删除，不让空串在存储里积累
+      else delete next[uid];
       try {
         window.localStorage.setItem('accountsNotes', JSON.stringify(next));
       } catch {/* 忽略 */}
       return next;
     });
   }, []);
-  const notesOf = useCallback((uid: string) => notes[uid] ?? '', [notes]);
+  const setNote = useCallback(
+    async (uid: string, text: string) => {
+      try {
+        await accountApi.setNote(uid, text);
+        syncLocalNote(uid, text); // 后端已落，本地兜底同步（清空即删，不积累空串）
+        notify.ok(t('accounts.noteSaved'));
+      } catch {
+        // 后端失败：本地兜底保存（下次打开页面/迁移重试仍可找回）
+        syncLocalNote(uid, text);
+        notify.err(t('accounts.noteSaveFailed'));
+      }
+    },
+    [t, syncLocalNote],
+  );
+  /** 一次性迁移是否已跑过（跑过即不再推，防失败循环反复打端点）。
+   *  迁移 effect 本体在 overviewCache 声明之后（依赖其 loading/data）。 */
+
+  /* ── 出口代理线路（workbuddy-manager proxy_routes 吸收件）──────────────
+   * 线路表经 GET /api/proxy_routes 拉取（密码已脱敏，仅展示名字）；绑定写
+   * POST /api/accounts/{uid}/proxy_route（落 auth 文件 + 内存即时生效，无需重启）。
+   * 未配置任何线路时按钮隐藏（零配置零噪声）。空 selection = 直连（解绑）。 */
+  const proxyRoutesCache = useCachedAsync<ProxyRoutesResponse>(
+    'proxy_routes',
+    () => accountApi.proxyRoutes(),
+    {ttl: 30000},
+  );
+  const proxyRouteNames = useMemo(
+    () => Object.keys(proxyRoutesCache.data?.routes ?? {}).sort(),
+    [proxyRoutesCache.data],
+  );
+  const routeOf = useCallback(
+    (uid: string) => proxyRoutesCache.data?.accounts?.[uid] ?? '',
+    [proxyRoutesCache.data],
+  );
+  const setRoute = useCallback(
+    async (uid: string, route: string) => {
+      try {
+        await accountApi.setProxyRoute(uid, route);
+        notify.ok(route ? t('accounts.proxyRouteSaved', {name: route}) : t('accounts.proxyRouteCleared'));
+        await proxyRoutesCache.refresh();
+      } catch (e) {
+        notify.err(errText(e));
+      }
+    },
+    [t, proxyRoutesCache],
+  );
 
   /* ── 列排序（浏览器本地偏好持久化）─────────────────────
    * key 对应可排序列：nickname / uid / status / credits / requests。
@@ -267,6 +328,40 @@ export default function AccountsPage() {
     }
   }, [load, t]);
 
+  /* ── 签到按钮「今日已签」态（会话内）──────────────────────
+   * 上游对重复签到返回幂等拒绝（msg 含「已签到」/already），签到端点把它放进
+   * checkin_message 且 ok 恒 true。后端没有签到日期字段（刻意不加），因此该态
+   * 仅在本会话内保留：点签到遇「已签到」回复 → 按钮打勾禁用；刷新页面回到
+   * 未知态（可再点，上游幂等拒绝无害）。 */
+  const [checkedIn, setCheckedIn] = useState<Record<string, boolean>>({});
+
+  /** 单号签到：区分「成功签到」「今日已签」两种成功形态，后者置会话内已签态 */
+  const runCheckin = useCallback(
+    async (uid: string) => {
+      setBusyUid(uid);
+      try {
+        const res = await accountApi.checkin(uid);
+        // 已签判定：上游幂等拒绝的 checkin_message（「今天已签到」/"already ..."）。
+        // balance_error 不在此列（那是余额查询失败，签到本身可能成功）。
+        const msg = res.checkin_message ?? '';
+        if (msg && (msg.includes('已签到') || /already/i.test(msg))) {
+          setCheckedIn((prev) => ({...prev, [uid]: true}));
+          notify.info(t('accounts.checkinAlready'), msg);
+        } else {
+          if (msg) notify.err(msg);
+          else notify.ok(t('accounts.checkinDone'));
+          await load();
+          window.dispatchEvent(new Event('workbuddy-manager:accounts-changed'));
+        }
+      } catch (e) {
+        notify.err(errText(e));
+      } finally {
+        setBusyUid(null);
+      }
+    },
+    [load, t],
+  );
+
   /** 批量签到：异步触发（进度看日志频道） */
   const checkinAll = useCallback(async () => {
     setCheckinAllBusy(true);
@@ -299,17 +394,62 @@ export default function AccountsPage() {
     }
   }, [load, t]);
 
+  /* ── 备注一次性迁移（localStorage → 后端）────────────────
+   * 触发条件：overview 首载完成（accounts 才有 note 可比对）。对「后端 note
+   * 为空且本地有值」的账号逐个推送后端（失败静默，本地值保留下次重试）；
+   * 全部成功或无可迁数据 → 清掉 localStorage key，避免反复推。 */
+  const [noteMigrated, setNoteMigrated] = useState(false);
+  useEffect(() => {
+    if (noteMigrated) return;
+    if (loading) return; // 等 overview 首载（accounts 才有值）
+    setNoteMigrated(true); // 无论结果如何本轮只跑一次
+    const pending = Object.entries(localNotes).filter(([uid, text]) => {
+      if (!text.trim()) return false;
+      const acct = accounts.find((a) => a.uid === uid);
+      // 账号已不在池里（被删）：没有推送目标，跳过
+      return acct != null && !acct.note;
+    });
+    if (!pending.length) {
+      // 没有可迁的旧数据：直接清 key（含「全部已迁完」的后续打开）
+      try {
+        window.localStorage.removeItem('accountsNotes');
+      } catch {/* 忽略 */}
+      setLocalNotes({});
+      return;
+    }
+    // 逐个推送（失败静默——本地兜底值仍在，下次重试）
+    let okCount = 0;
+    Promise.all(
+      pending.map(([uid, text]) =>
+        accountApi
+          .setNote(uid, text)
+          .then(() => {
+            okCount += 1;
+          })
+          .catch(() => {/* 静默：本地值保留 */}),
+      ),
+    ).then(() => {
+      // 全部成功才算迁完清 key；有失败的保留旧值，下次打开再试
+      if (okCount === pending.length) {
+        try {
+          window.localStorage.removeItem('accountsNotes');
+        } catch {/* 忽略 */}
+        setLocalNotes({});
+      }
+    });
+  }, [noteMigrated, loading, localNotes, accounts]);
+
   /** 按当前版本过滤（Go 单实例双版本共存；存量无 realm 视为 cn），
    *  再按关键词过滤（uid/昵称/备注），最后按列排序。
    *  注意过滤后的列表同时供分页、表格与手机卡片使用，单一数据源避免两处分叉。 */
   const visible = useMemo(() => {
     const list = accounts.filter((a) => (a.realm ?? 'cn') === realm);
-    // 搜索：uid / 昵称 / 本地备注（小写不区分大小写）
+    // 搜索：uid / 昵称 / 备注（后端 note 为主，localStorage 旧值兜底；小写不区分大小写）
     const kw = debouncedQuery.trim().toLowerCase();
     const filtered = kw
       ? list.filter((a) => {
           const haystack =
-            `${a.uid} ${a.nickname ?? ''} ${notes[a.uid] ?? ''}`.toLowerCase();
+            `${a.uid} ${a.nickname ?? ''} ${a.note ?? ''} ${localNotes[a.uid] ?? ''}`.toLowerCase();
           return haystack.includes(kw);
         })
       : list;
@@ -367,7 +507,7 @@ export default function AccountsPage() {
         }
       }
     });
-  }, [accounts, realm, debouncedQuery, notes, sortKey, sortDir, liveCredits]);
+  }, [accounts, realm, debouncedQuery, localNotes, sortKey, sortDir, liveCredits]);
 
   /* ── 分页派生：过滤+排序后的全量 → 当前页切片 ──────────────── */
   const totalVisible = visible.length;
@@ -611,7 +751,7 @@ export default function AccountsPage() {
     );
   }
 
-  /** 备注编辑入口：Popover 内 textarea，保存写 localStorage（见 setNote 注释） */
+  /** 备注编辑入口：Popover 内 textarea，保存调后端（见 setNote 注释） */
   function renderNoteButton(a: Account) {
     return (
       <Popover>
@@ -621,7 +761,7 @@ export default function AccountsPage() {
             size="icon"
             className={
               'h-7 w-7 rounded-md ' +
-              (notesOf(a.uid)
+              (notesOf(a)
                 ? 'text-sky-600 hover:text-sky-600 dark:text-sky-400'
                 : 'text-muted-foreground hover:text-foreground')
             }
@@ -631,7 +771,36 @@ export default function AccountsPage() {
           </Button>
         </PopoverTrigger>
         <PopoverContent className="w-72 rounded-2xl p-3" align="end">
-          <NoteEditor uid={a.uid} initial={notesOf(a.uid)} onSave={setNote} />
+          <NoteEditor uid={a.uid} initial={notesOf(a)} onSave={setNote} />
+        </PopoverContent>
+      </Popover>
+    );
+  }
+
+  /** 出口线路选择入口（管理员）：Popover 内下拉，列出全部已配置线路 + 「不绑定」。
+   *  仅在配置了至少一条线路时渲染（未配置 = 隐藏，零配置零噪声）。 */
+  function renderRouteButton(a: Account) {
+    if (!isAdmin || !proxyRouteNames.length) return null;
+    const current = routeOf(a.uid);
+    return (
+      <Popover>
+        <PopoverTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            className={
+              'h-7 w-7 rounded-md ' +
+              (current
+                ? 'text-violet-600 hover:text-violet-600 dark:text-violet-400'
+                : 'text-muted-foreground hover:text-foreground')
+            }
+            title={current ? t('accounts.proxyRouteTitle', {name: current}) : t('accounts.proxyRouteNoneTitle')}
+          >
+            <Waypoints className="h-3.5 w-3.5" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent className="w-56 rounded-2xl p-3" align="end">
+          <RouteSelector uid={a.uid} current={current} routes={proxyRouteNames} onSelect={setRoute} />
         </PopoverContent>
       </Popover>
     );
@@ -646,12 +815,20 @@ export default function AccountsPage() {
     const manualOff = a.manual_disabled === true;
     return (
       <div className="flex justify-end gap-1">
-        {/* 签到：手动触发单号签到 + 余额查询解冻 */}
+        {/* 签到：手动触发单号签到 + 余额查询解冻。
+            「今日已签」态（会话内）：图标打勾 + 禁用，防当天重复点击白打上游。 */}
         {canCheckin && !off && (
-          <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('accounts.checkin')} disabled={busy}
-            onClick={() => run(a.uid, () => accountApi.checkin(a.uid), t('accounts.opDone'))}>
-            <Gift className="h-3.5 w-3.5" />
-          </Button>
+          checkedIn[a.uid] ? (
+            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md text-emerald-600 hover:text-emerald-600"
+              title={t('accounts.checkinAlreadyTitle')} disabled>
+              <CheckCircle2 className="h-3.5 w-3.5" />
+            </Button>
+          ) : (
+            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('accounts.checkin')} disabled={busy}
+              onClick={() => runCheckin(a.uid)}>
+              <Gift className="h-3.5 w-3.5" />
+            </Button>
+          )
         )}
         {/* 查余额：直接向腾讯查询并写回池内 credits */}
         <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('accounts.balance')} disabled={busy}
@@ -886,11 +1063,11 @@ export default function AccountsPage() {
                 </div>
               </div>
 
-              {notesOf(a.uid) && (
+              {notesOf(a) && (
                 <div className="flex items-start gap-1.5 rounded-lg bg-background/60 px-2.5 py-1.5">
                   <NotebookPen className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
                   <span className="whitespace-pre-wrap break-all text-[11px] leading-relaxed text-muted-foreground">
-                    {notesOf(a.uid)}
+                    {notesOf(a)}
                   </span>
                 </div>
               )}
@@ -902,6 +1079,7 @@ export default function AccountsPage() {
                 </div>
                 <div className="flex items-center gap-1">
                   {renderRenewed(a)}
+                  {renderRouteButton(a)}
                   {renderNoteButton(a)}
                   {isAdmin && renderActions(a)}
                 </div>
@@ -968,15 +1146,15 @@ export default function AccountsPage() {
                 </TableCell>
                 <TableCell className="whitespace-nowrap">{renderRenewed(a)}</TableCell>
                 <TableCell className="max-w-[180px]">
-                  {notesOf(a.uid) ? (
-                    <span className="line-clamp-1 text-xs text-muted-foreground" title={notesOf(a.uid)}>
-                      {notesOf(a.uid)}
+                  {notesOf(a) ? (
+                    <span className="line-clamp-1 text-xs text-muted-foreground" title={notesOf(a)}>
+                      {notesOf(a)}
                     </span>
                   ) : (
                     <span className="text-xs text-muted-foreground/40">—</span>
                   )}
                 </TableCell>
-                {isAdmin && <TableCell className="pr-4"><div className="flex justify-end gap-1">{renderNoteButton(a)}{renderActions(a)}</div></TableCell>}
+                {isAdmin && <TableCell className="pr-4"><div className="flex justify-end gap-1">{renderRouteButton(a)}{renderNoteButton(a)}{renderActions(a)}</div></TableCell>}
               </TableRow>
             ))}
           </TableBody>
@@ -1018,8 +1196,65 @@ export default function AccountsPage() {
 }
 
 /**
+ * 出口线路选择器（Popover 内）：单选下拉列出全部已配置线路 + 「不绑定（直连）」。
+ * 独立组件（照 NoteEditor 模式）：选择即提交（无需保存按钮——绑定端点幂等且
+ * 可反复切换），请求期间整组禁用防重复提交。
+ */
+function RouteSelector({
+  uid,
+  current,
+  routes,
+  onSelect,
+}: {
+  uid: string;
+  current: string;
+  routes: string[];
+  onSelect: (uid: string, route: string) => Promise<void>;
+}) {
+  const t = useT();
+  const [saving, setSaving] = useState(false);
+  const [pending, setPending] = useState<string | null>(null);
+  const select = async (route: string) => {
+    if (route === current || saving) return;
+    setSaving(true);
+    setPending(route);
+    try {
+      await onSelect(uid, route);
+    } finally {
+      setSaving(false);
+      setPending(null);
+    }
+  };
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="text-xs font-medium">{t('accounts.proxyRouteEditorTitle')}</div>
+      <Select value={current} onValueChange={(v) => void select(v)} disabled={saving}>
+        <SelectTrigger className="h-8 text-xs">
+          <SelectValue placeholder={t('accounts.proxyRouteNone')} />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="">
+            {t('accounts.proxyRouteNone')}
+          </SelectItem>
+          {routes.map((r) => (
+            <SelectItem key={r} value={r}>
+              {r}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <div className="text-[10px] leading-relaxed text-muted-foreground">
+        {t('accounts.proxyRouteHint')}
+      </div>
+      {saving && <div className="text-[10px] text-muted-foreground">{pending ? t('accounts.proxyRouteSaving') : ''}</div>}
+    </div>
+  );
+}
+
+/**
  * 备注编辑器（Popover 内）：本地草稿 + 保存/清空。
  * 独立组件：把草稿 state 隔离在弹层里，避免每敲一个字都重渲染整个账号页。
+ * 保存走后端（setNote 异步）：请求期间按钮禁用，防止重复提交。
  */
 function NoteEditor({
   uid,
@@ -1028,10 +1263,21 @@ function NoteEditor({
 }: {
   uid: string;
   initial: string;
-  onSave: (uid: string, text: string) => void;
+  onSave: (uid: string, text: string) => Promise<void>;
 }) {
   const t = useT();
   const [draft, setDraft] = useState(initial);
+  const [saving, setSaving] = useState(false);
+
+  /** 保存包装：异步请求期间置 saving（异常已在 setNote 内 toast，这里只吞掉） */
+  const save = async (text: string) => {
+    setSaving(true);
+    try {
+      await onSave(uid, text);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div className="flex flex-col gap-2">
@@ -1046,16 +1292,17 @@ function NoteEditor({
         autoFocus
       />
       <div className="flex items-center justify-between">
-        <span className="text-[10px] text-muted-foreground">{t('accounts.noteStoredLocal')}</span>
+        <span className="text-[10px] text-muted-foreground">{t('accounts.noteStoredServer')}</span>
         <div className="flex gap-1.5">
           {draft.trim() && (
             <Button
               variant="ghost"
               size="sm"
               className="h-7 rounded-full text-xs"
+              disabled={saving}
               onClick={() => {
                 setDraft('');
-                onSave(uid, '');
+                void save('');
               }}
             >
               {t('common.clear')}
@@ -1064,10 +1311,10 @@ function NoteEditor({
           <Button
             size="sm"
             className="h-7 rounded-full text-xs"
-            disabled={draft === initial}
-            onClick={() => onSave(uid, draft)}
+            disabled={saving || draft === initial}
+            onClick={() => void save(draft)}
           >
-            {t('common.save')}
+            {saving ? t('accounts.noteSaving') : t('common.save')}
           </Button>
         </div>
       </div>

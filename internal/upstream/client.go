@@ -13,6 +13,7 @@ import (
 	"math"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -715,6 +716,18 @@ type Client struct {
 	// 与 HTTP 共享同一个 *http.Transport 实例，连接池不重复。
 	ChatHTTP *http.Client
 
+	// proxyRoutes 每账号命名出口代理线路表（proxy_route.go，workbuddy-manager
+	// 吸收件）：线路名 → 已解析代理 URL。main 装配期经 SetProxyRoutes 注入
+	// （config.json proxy_routes 段），出站路径按账号 a.ProxyRouteValue() 查表
+	// 选 client——命中走独立 transport（连接池按线路隔离），未命中**拒绝发出**
+	// （绝不静默回退直连），空绑定沿用共享 client（零回归）。proxyMu 读多写少
+	// （写只在装配/面板热改），RWMutex 足够；per-route client 缓存由 SetProxyRoutes
+	// 整体重建（URL 变更后旧连接池作废）。
+	proxyMu      sync.RWMutex
+	proxyRoutes  map[string]proxyRouteEntry
+	proxyRaw     map[string]string
+	proxyClients *proxyClientCache
+
 	// HeaderTimeout 聊天 SSE 首字节前（响应头）超时：由 cmd/server/main.go 写入
 	// 共享 Transport.ResponseHeaderTimeout 的载体字段；<=0 的回落发生在 config
 	// normalize（cmd/server/config.go），本结构内无回落逻辑。
@@ -859,6 +872,8 @@ func New() *Client {
 	// 热改快照与字段同值初始化：运行期读侧恒走快照（headers.go），快照必须从
 	// 零值起就与字段同步，否则看不到 New 预置的默认值。
 	c.hot = HotFields{SanitizeFingerprints: true}
+	// 代理线路表：零值 = 空表（所有账号未绑定线路 → 直连，零配置零回归）。
+	c.proxyClients = newProxyClientCache()
 	return c
 }
 
@@ -1046,8 +1061,26 @@ func (c *Client) checkinMeterPaths(a *auth.Auth) []string {
 // doJSON 发请求并解信封；HTTP 非 2xx 或业务 code != 0 时返回带 body 片段的 *Error。
 // body 读失败（连接中断/空闲掐流/截断）返回普通错误（非 *Error）——半截 body 不进
 // Classify，不参与账号惩罚（传输层故障不该喂熔断误罚号）。
+//
+// 代理线路选择点（proxy_route.go）：出站前经 doEndpoint 按请求构造时绑定的账号
+// 选 client——绑定有效走线路独立 client（连接池隔离），未命中**拒绝发出**返回
+// 明确错误，未绑定走共享 HTTP（现状路径零回归）。全部 billing/growth/refresh/
+// 模型目录/资料等短 RPC 经此底座，一处收口全链路生效。
+// 账号上下文经 doJSONAuth 显式传递（见下），本函数是「未带账号」的兼容形态
+// （内部调用方已全部迁移 doJSONAuth；保留签名供外部/测试调用不破）。
 func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
-	resp, err := c.HTTP.Do(req)
+	return c.doJSONAuth(nil, req)
+}
+
+// doJSONAuth doJSON 的账号上下文形态：a 用于按其 ProxyRoute 选出站 client
+// （nil = 直连共享 client）。所有包内调用点已迁移本形态——账号绑定线路对
+// 「签到/余额/续期/growth/资料/模型目录」全链路生效的收口点。
+func (c *Client) doJSONAuth(a *auth.Auth, req *http.Request) (json.RawMessage, error) {
+	hc, err := c.doEndpoint(a)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1133,8 +1166,11 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	a.Unlock()
 	c.RefreshHeaders(req, &hdrSnapshot)
 
-	// 网络 I/O（锁外，30s 上限）。
-	data, err := c.doJSON(req)
+	// 网络 I/O（锁外，30s 上限）。续期走账号绑定线路（refresh 与对话同源
+	// 出口——风控把 token 生命周期与出口 IP 关联时，出口漂移会触发重登）：
+	// doJSONAuth 按账号选 client（绑定有效→线路独立 client；未命中→拒绝发出；
+	// 未绑定→共享 HTTP），信封解析/错误分类与原 doJSON 路径完全一致。
+	data, err := c.doJSONAuth(a, req)
 	if err != nil {
 		return err
 	}
@@ -1237,14 +1273,22 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
 		reqCtx, cancel := context.WithCancel(ctx)
 		req = req.WithContext(reqCtx)
-		resp, err := c.chatHTTP().Do(req)
+		// 代理线路选择（chat 形态）：绑定有效走线路独立 SSE client（Timeout=0
+		// 同 ChatHTTP 语义），绑定未命中拒绝发出，未绑定走共享 ChatHTTP。
+		hc, perr := c.chatEndpoint(a)
+		if perr != nil {
+			cancel()
+			return nil, 0, nil, perr
+		}
+		resp, err := hc.Do(req)
 		if err != nil {
 			cancel()
 			log.Printf("ERR: [upstream] chat_stream acct=%s: transport error: %v", logfmt.Label(a.UID, a.Nickname), err)
-			// 传输层失败 → 清空共享连接池的空闲连接（连接层加固第 5 件）：
+			// 传输层失败 → 清空本次所用 transport 的空闲连接池（连接层加固第 5 件）：
 			// 失败连接可能仍留在空闲池里，下一个请求会继续捡到它（kongjianguan
-			// 实测：仅靠 IdleConnTimeout 等过期不够，主动清池才断根）。
-			roundTripCloseIdle(c.chatHTTP().Transport)
+			// 实测：仅靠 IdleConnTimeout 等过期不够，主动清池才断根）。清的是本次
+			// 请求实际走的 client（绑定线路时为其独立 transport，不殃及共享池）。
+			roundTripCloseIdle(hc.Transport)
 			return nil, 0, nil, err
 		}
 		if resp.StatusCode >= 400 {
@@ -1525,7 +1569,11 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 	}
 	c.CommonHeaders(req, a) // 复用共享请求头（Origin/Referer/UA/Accept/Content-Type）
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	resp, err := c.HTTP.Do(req)
+	hc, perr := c.doEndpoint(a)
+	if perr != nil {
+		return nil, perr
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1605,7 +1653,11 @@ func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
 	// （Bearer + web UA → 400 code 12403，见 global-models-missing.md）。
 	c.CommonHeaders(req, a)
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	resp, err := c.HTTP.Do(req)
+	hc, perr := c.doEndpoint(a)
+	if perr != nil {
+		return nil, perr
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1650,6 +1702,7 @@ var billingRetryDelay = 2 * time.Second
 //   - 4xx（402 余额不足 / 403 风控 ErrAccountFault / 400 参数错 / WAF 403 等）；
 //   - 429 限流（ErrSoftRate——冷却语义归 pool/调用方，这里重试只会火上浇油）；
 //   - 响应解析失败（doJSON 的 "parse failed" 普通 error，body 恒定再失败）。
+//
 // 注意网络读半截 body（doJSON "read body: ..."）是传输层普通 error，按瞬时算
 // （与 panel 口径一致：连接中断/空闲掐流重打一次值得）。
 func isTransientBillingErr(err error) bool {
@@ -1770,22 +1823,42 @@ func (c *Client) UserResourceDetailed(a *auth.Auth, soon time.Duration) (remain 
 	return remain, buckets, nil
 }
 
+// userResourceAccount get-user-resource 响应里单个套餐的公共字段（分桶/聚合
+// 消费方共享；缺省字段按零值处理）。到期判据当前是 CycleEndTime——R-A/R-B 实测：
+// CN/global 两域字段全集均无 PackageEndTime，上游真实下发的到期时刻即此字段
+// （global Bonus Pack 14 天赠送积分的到期时间也走它）。
+type userResourceAccount struct {
+	PackageName         string `json:"PackageName"`
+	CycleEndTime        string `json:"CycleEndTime"` // "2006-01-02 15:04:05"，缺省/空 = 无到期
+	CapacitySize        int64  `json:"CapacitySize"`
+	CapacityRemain      int64  `json:"CapacityRemain"`
+	CapacityUsed        int64  `json:"CapacityUsed"`
+	CycleCapacitySize   int64  `json:"CycleCapacitySize"`
+	CycleCapacityRemain int64  `json:"CycleCapacityRemain"`
+	CycleCapacityUsed   int64  `json:"CycleCapacityUsed"`
+}
+
+// respAccount 投影成 packageRemainUsed 的入参（字段同构，单一事实来源不旁路）。
+func (u userResourceAccount) respAccount() respAccount {
+	return respAccount{
+		CapacityRemain:      u.CapacityRemain,
+		CapacityUsed:        u.CapacityUsed,
+		CapacitySize:        u.CapacitySize,
+		CycleCapacityRemain: u.CycleCapacityRemain,
+		CycleCapacityUsed:   u.CycleCapacityUsed,
+		CycleCapacitySize:   u.CycleCapacitySize,
+	}
+}
+
 // userResourceResp get-user-resource 响应结构（UserResourceDetailed 与 ResourceSummary
-// 共享；含分桶所需 CycleEndTime 与聚合所需 TotalDosage，缺省字段按零值处理）。
+// 共享；含分桶所需 CycleEndTime 与聚合所需 TotalDosage）。Raw 保留原始信封 data
+// 层切片，供 CreditPackages 补读明细字段（DeductionEndTime 等）二次解析。
 type userResourceResp struct {
+	Raw      json.RawMessage `json:"-"`
 	Response struct {
 		Data struct {
-			TotalDosage int64 `json:"TotalDosage"`
-			Accounts    []struct {
-				PackageName         string `json:"PackageName"`
-				CycleEndTime        string `json:"CycleEndTime"` // "2006-01-02 15:04:05"，缺省/空 = 无到期
-				CapacitySize        int64  `json:"CapacitySize"`
-				CapacityRemain      int64  `json:"CapacityRemain"`
-				CapacityUsed        int64  `json:"CapacityUsed"`
-				CycleCapacitySize   int64  `json:"CycleCapacitySize"`
-				CycleCapacityRemain int64  `json:"CycleCapacityRemain"`
-				CycleCapacityUsed   int64  `json:"CycleCapacityUsed"`
-			} `json:"Accounts"`
+			TotalDosage int64                 `json:"TotalDosage"`
+			Accounts    []userResourceAccount `json:"Accounts"`
 		} `json:"Data"`
 	} `json:"Response"`
 }
@@ -1821,6 +1894,9 @@ func (c *Client) getUserResourceBody(a *auth.Auth) (*userResourceResp, error) {
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, fmt.Errorf("resource parse: %w", err)
 	}
+	// Raw 保留 data 层原文（getUserResourceBody 已解过 apiEnvelope，data 从这里开始），
+	// 供 CreditPackages 二次解析明细字段——两次 Unmarshal 的请求成本共享一次。
+	resp.Raw = data
 	return &resp, nil
 }
 
@@ -1872,6 +1948,145 @@ type respAccount struct {
 	CycleCapacityRemain int64
 	CycleCapacityUsed   int64
 	CycleCapacitySize   int64
+}
+
+// CreditPackage 积分包逐包明细（面板「积分构成 / 到期提醒」用）。
+//
+// 两个账号即使任务完成度完全一致，余额也可能相差上千——差别藏在包的**面额与
+// 来源**里（「国内运营裂变包」「拉新权益包」按次发放，面额 6~1500 不等）。
+// 只看聚合值（ResourceSummary）看不出这件事，所以把逐包明细也暴露出来。
+type CreditPackage struct {
+	Name   string `json:"name"`
+	Remain int64  `json:"remain"`
+	Used   int64  `json:"used"`
+	Size   int64  `json:"size"`
+	// EndTime 该包的失效时刻：优先 DeductionEndTime（可抵扣窗口结束，真「用不完
+	// 就没了」），缺失依次回落 ExpiredTime / PackageEndTime / CycleEndTime（周期
+	// 边界，仅兜底）。RFC3339 或上游墙钟字符串，前端取日期部分展示。
+	EndTime string `json:"end_time,omitempty"`
+	// ExpiresAt 与 EndTime 同源的 Unix 毫秒时间戳，供前端按精确剩余天数聚合
+	// （RFC3339 字符串要再 parse 一次才能拿到毫秒，这里直接给现成的）。
+	ExpiresAt int64 `json:"expires_at,omitempty"`
+	// CreatedAt 发放时刻，RFC3339。**这是区分「首登赠送」与「活动奖励」的唯一依据**：
+	// 两类包的 PackageName 与 PackageCode 完全相同（例如都是「国内运营裂变包」+
+	// TCACA_code_007_*），只看名字无法区分，只有时间能说明它是不是账号首次授权那刻发的。
+	CreatedAt string `json:"created_at,omitempty"`
+	// PackageCode / SubProductCode / SubProductName 上游的包类型标识。同 Name 不同
+	// Code 的包可能是不同来源；同 Code 不同面额则是同来源分批发放（首登 1500 与
+	// 活动 300 即如此）。
+	PackageCode    string `json:"package_code,omitempty"`
+	SubProductCode string `json:"sub_product_code,omitempty"`
+	SubProductName string `json:"sub_product_name,omitempty"`
+	// Cycle 为 true 表示按周期发放的包（读 Cycle* 字段），否则读 Capacity*。
+	Cycle bool `json:"cycle,omitempty"`
+}
+
+// CreditPackages 返回账号当前的逐包积分构成（remain/size 为各包求和）。
+//
+// 字段选择与 UserResourceDetailed 的聚合口径一致（packageRemainUsed 单一事实
+// 来源）：CycleCapacitySize > 0 时按周期字段算，否则按 Capacity 字段算——两条
+// 路径不能混，否则同一个包会被算两次。
+//
+// 到期时间语义（panel commit acb3830c 移植，OkRoromori 分支实测结论）：请求参数
+// 叫 PackageEndTimeRange*，但响应里 ExpiredTime 恒空；真正的失效时刻是
+// DeductionEndTime（可抵扣窗口结束，epoch 毫秒）——判「这个包什么时候不能再花」
+// 以它为准，CycleEndTime（周期边界/额度重置点）只作兜底。上游实测按该时刻升序
+// 自动优先扣减（FEFO），所以面板的到期提醒与「先用快过期的包」都以本字段排序。
+// 字段缺失/为 0 的包保守回落墙钟字符串字段；都缺 = 无到期信息（EndTime/ExpiresAt
+// 留空零值，调用方按无到期处理，不伪造 1970）。
+func (c *Client) CreditPackages(a *auth.Auth) ([]CreditPackage, int64, int64, error) {
+	resp, err := c.getUserResourceBody(a)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	// 解析层补读 DeductionEndTime / CreateTime / 包类型标识：响应结构里这些字段
+	// 上游真实下发，但旧 userResourceResp 没声明——补齐在独立结构，不动共享的
+	// userResourceResp（分桶/聚合两条链路的字段面保持最小）。
+	var full struct {
+		Response struct {
+			Data struct {
+				Accounts []struct {
+					userResourceAccount
+					ExpiredTime    string `json:"ExpiredTime"`
+					PackageEndTime string `json:"PackageEndTime"`
+					// DeductionEndTime 可抵扣窗口结束（epoch 毫秒）。与 CycleEndTime 的
+					// 语义区分见 CreditPackages 注释：失效时刻 vs 周期边界。
+					DeductionEndTime int64 `json:"DeductionEndTime"`
+					// CreateTime 发放时刻（epoch 毫秒；0 = 上游没给）。
+					CreateTime     int64  `json:"CreateTime"`
+					PackageCode    string `json:"PackageCode"`
+					SubProductCode string `json:"SubProductCode"`
+					SubProductName string `json:"SubProductName"`
+				} `json:"Accounts"`
+			} `json:"Data"`
+		} `json:"Response"`
+	}
+	if err := json.Unmarshal(resp.Raw, &full); err != nil {
+		return nil, 0, 0, fmt.Errorf("packages parse: %w", err)
+	}
+	packs := full.Response.Data.Accounts
+	out := make([]CreditPackage, 0, len(packs))
+	var sumRemain, sumSize int64
+	for _, p := range packs {
+		remain, used, size := packageRemainUsed(p.respAccount())
+		if remain < 0 {
+			remain = 0
+		}
+		cp := CreditPackage{
+			Name:           p.PackageName,
+			PackageCode:    p.PackageCode,
+			SubProductCode: p.SubProductCode,
+			SubProductName: p.SubProductName,
+			Remain:         remain,
+			Used:           used,
+			Size:           size,
+			Cycle:          p.CycleCapacitySize > 0,
+		}
+		switch {
+		case p.DeductionEndTime > 0:
+			// 真失效时刻（可抵扣窗口结束），语义见 CreditPackages 注释。epoch 毫秒 →
+			// RFC3339 与墙钟字符串口径共存（前端统一取日期部分展示）；ExpiresAt 直接
+			// 用原始毫秒——RFC3339 不是 packageEndLayout 形态，走下方解析会静默失败得 0。
+			cp.EndTime = time.UnixMilli(p.DeductionEndTime).Format(time.RFC3339)
+			cp.ExpiresAt = p.DeductionEndTime
+		case p.ExpiredTime != "":
+			cp.EndTime = p.ExpiredTime
+		case p.PackageEndTime != "":
+			cp.EndTime = p.PackageEndTime
+		default:
+			cp.EndTime = p.CycleEndTime
+		}
+		// 兜底字段只给墙钟字符串，没换算出毫秒的这里统一补：缺失/格式异常保持 0
+		//（与 UserResourceDetailed 对脏数据的保守口径一致，不猜）。
+		if cp.ExpiresAt == 0 && cp.EndTime != "" {
+			if end, perr := time.ParseInLocation(packageEndLayout, cp.EndTime, softRateResetLoc); perr == nil {
+				cp.ExpiresAt = end.UnixMilli()
+			}
+		}
+		// CreateTime 是 epoch 毫秒；0 表示上游没给，留空而不是伪造 1970。
+		if p.CreateTime > 0 {
+			cp.CreatedAt = time.UnixMilli(p.CreateTime).Format(time.RFC3339)
+		}
+		sumRemain += cp.Remain
+		sumSize += cp.Size
+		out = append(out, cp)
+	}
+	// 到期升序（FEFO 口径）：快过期的包排最前，与上游实际扣减顺序一致；无到期
+	// 时间的包垫底（-1 当 +∞ 用），同到期按面额降序收尾（大包先看）。
+	sort.SliceStable(out, func(i, j int) bool {
+		ei, ej := out[i].ExpiresAt, out[j].ExpiresAt
+		if ei == 0 {
+			ei = math.MaxInt64
+		}
+		if ej == 0 {
+			ej = math.MaxInt64
+		}
+		if ei != ej {
+			return ei < ej
+		}
+		return out[i].Size > out[j].Size
+	})
+	return out, sumRemain, sumSize, nil
 }
 
 // packageRemainUsed 聚合单套餐的 remain/used/size（历史口径见 cmd/credit/billing.go，

@@ -13,6 +13,7 @@ import (
 	"workbuddy2api/internal/config"
 	"workbuddy2api/internal/iputil"
 	"workbuddy2api/internal/prompt"
+	"workbuddy2api/internal/upstream"
 )
 
 // Config 顶层配置。
@@ -236,6 +237,14 @@ type Config struct {
 	// 服务 cc-switch 等写死模型名的客户端。空/缺省 = 不做映射（零开销路径）。
 	// 面板设置页可在线编辑（saveConfig 深合并写回 + SetModelMap 热生效）。
 	ModelMap map[string]string `json:"model_map"`
+
+	// ProxyRoutes 每账号命名出口代理线路表（workbuddy-manager proxy_routes 吸收件）：
+	// 线路名 → 代理 URL（仅 http/https；socks5 未启用——避免引入 x/net 依赖，
+	// 见 internal/upstream/proxy_route.go proxySchemes 注释）。key 不能为空、value
+	// 必须是合法代理 URL（normalize 校验，非法 fail-fast 拒启）。账号侧只存线路名
+	// （auth 文件 proxy_route 键），代理凭据不进 auths/——绑定名查无此线时出站
+	// **拒绝发出**（绝不静默回退直连）。空/缺省 = 无线路（全部直连，零回归）。
+	ProxyRoutes map[string]string `json:"proxy_routes"`
 
 	// 解析后
 	SoftRateDur         time.Duration `json:"-"`
@@ -605,6 +614,13 @@ func (c *Config) normalize() error {
 		return fmt.Errorf("security.trusted_proxy_cidrs: %w", err)
 	}
 	c.SecurityTrustedCIDRs = cidrs
+	// 代理线路表校验（fail-fast）：名字非空、URL 合法（http/https、host、port）。
+	// 校验收口在 upstream.ValidateProxyRoutes（配置解析与热改同一套语义——面板
+	// 保存走同一条 normalize 链，配错在保存时就被拒绝而不只是启动时）。
+	// 空表合法（= 全部直连，零回归）。
+	if err := upstream.ValidateProxyRoutes(c.ProxyRoutes); err != nil {
+		return fmt.Errorf("proxy_routes: %w", err)
+	}
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen
 	}

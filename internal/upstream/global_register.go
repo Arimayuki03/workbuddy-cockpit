@@ -81,8 +81,13 @@ func (c *Client) globalRegisterReq(method, url, token string, body any) (*http.R
 // 「code!=0 的业务答复」，GlobalRegisterStatus 会把服务端故障误判成
 // needsRegion / 未激活。body 读失败（连接中断/截断）上抛为普通错误（半截
 // body 不进 Classify，与 doJSON 同口径，不参与账号惩罚）。
-func (c *Client) globalRegisterJSON(req *http.Request) (code int, msg string, raw json.RawMessage, err error) {
-	resp, err := c.HTTP.Do(req)
+func (c *Client) globalRegisterJSON(req *http.Request, a *auth.Auth) (code int, msg string, raw json.RawMessage, err error) {
+	// 注册链路同样走账号绑定线路（global 加号在风控侧与登录/对话同源出口）。
+	hc, perr := c.doEndpoint(a)
+	if perr != nil {
+		return 0, "", nil, perr
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return 0, "", nil, err
 	}
@@ -116,7 +121,7 @@ func (c *Client) GlobalFetchCountries(a *auth.Auth, intlOnly bool) ([]GlobalCoun
 	if err != nil {
 		return nil, err
 	}
-	code, msg, raw, err := c.globalRegisterJSON(req)
+	code, msg, raw, err := c.globalRegisterJSON(req, a)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +175,7 @@ func (c *Client) GlobalRegisterStatus(a *auth.Auth) (activated bool, needsRegion
 		return false, false, "", err
 	}
 	req.Header.Set("X-User-Id", a.UID)
-	code, m, _, err := c.globalRegisterJSON(req)
+	code, m, _, err := c.globalRegisterJSON(req, a)
 	if err != nil {
 		return false, false, "", err
 	}
@@ -205,7 +210,7 @@ func (c *Client) GlobalSubmitRegion(a *auth.Auth, country GlobalCountry) error {
 	if err != nil {
 		return err
 	}
-	code, msg, _, err := c.globalRegisterJSON(req)
+	code, msg, _, err := c.globalRegisterJSON(req, a)
 	if err != nil {
 		return err
 	}

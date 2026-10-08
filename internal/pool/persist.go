@@ -292,6 +292,8 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			// 「上次续期时刻/失败原因」不会因时间流逝失效）。
 			lastRenewed:  s.LastRenewed,
 			renewLastErr: s.RenewLastError,
+			// 备注直通恢复（纯展示元数据，无过期/失效语义——运维写什么就是什么）。
+			note: s.Note,
 		}
 		// 恢复熔断器：breakerUntil 在未来才恢复（惰性过滤过期/零值，与落盘同口径）。
 		// retryCount 仅在 breakerUntil 未过期时恢复——已过期则归零（不保留无用退避指数）。
@@ -607,6 +609,8 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			// renewLastErr 成功态为空串（omitempty 省略），失败态原样落盘。
 			LastRenewed:     e.lastRenewed,
 			RenewLastError:  e.renewLastErr,
+			// 运维备注直通落盘（空串 omitempty 省略，同 RenewLastError 口径）。
+			Note:            e.note,
 			ModelCooldowns:   mcs,
 			ModelCosts:       mcosts,
 		}

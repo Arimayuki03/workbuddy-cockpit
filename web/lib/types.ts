@@ -82,6 +82,11 @@ export interface Account {
   last_renewed?: string;
   /** 最近一次续期失败原因；空 = 无错（仅 last_renewed 之后发生的失败才有值） */
   renew_last_error?: string;
+  /** 运维备注（后端化；空 = 未写或已清空）。旧 localStorage 数据由前端一次性迁移 */
+  note?: string;
+  /** 出口代理线路名（workbuddy-manager proxy_routes 吸收件；空 = 直连）。
+   *  状态透出不带它——绑定视图走 GET /api/proxy_routes 的 accounts 字段 */
+  proxy_route?: string;
   /** mergePoolStatus 的推导标记：本次读不到池状态（仅前端展示用） */
   pool_unknown?: boolean;
 }
@@ -183,6 +188,15 @@ export interface OkResponse {
   file_error?: string;
 }
 
+/** GET /api/proxy_routes（panel proxy_route.go）：线路表（密码已脱敏 ***）+ 全池绑定视图 */
+export interface ProxyRoutesResponse {
+  ok: boolean;
+  /** 线路名 → 代理 URL（密码段替换为 ***；编辑请走设置页的 config JSON） */
+  routes: Record<string, string>;
+  /** uid → 线路名（只含已绑定的账号；未绑定不出现） */
+  accounts: Record<string, string>;
+}
+
 /** POST /api/accounts/import（panel transfer.go）：skipped 逐项带原因 */
 export interface AccountImportResponse {
   ok: boolean;
@@ -209,12 +223,21 @@ export interface CreditPackage {
   remain: number;
   used: number;
   size: number;
-  /** 该包周期结束时间（上游 ExpiredTime / PackageEndTime 取有值者） */
+  /**
+   * 该包失效时刻：优先上游 DeductionEndTime（可抵扣窗口结束——「这个包什么时候
+   * 不能再花」的真失效时刻），缺失回落 ExpiredTime / PackageEndTime / CycleEndTime
+   * （周期边界，仅兜底）。RFC3339 或上游墙钟字符串，取日期部分展示。
+   */
   end_time?: string;
+  /** 与 end_time 同源的 Unix 毫秒时间戳，供到期聚合/排序（0 = 无到期信息） */
+  expires_at?: number;
   /** 发放时刻 RFC3339——区分「首登赠送」与「活动奖励」的唯一依据 */
   created_at?: string;
   package_code?: string;
   sub_product_code?: string;
+  sub_product_name?: string;
+  /** true = 按周期发放的包（上游 Cycle* 字段），否则按 Capacity* 字段 */
+  cycle?: boolean;
 }
 
 export interface PackageRow {
@@ -225,12 +248,15 @@ export interface PackageRow {
   /** 已用积分（所有套餐已用额度合计，ResourceSummary 口径） */
   used: number;
   size: number;
+  /** 逐包明细（后端已按到期升序排列；旧缓存快照缺失时为空数组） */
   packages: CreditPackage[];
   error?: string;
 }
 
 export interface PackagesResponse {
   accounts: PackageRow[];
+  /** 本响应生成时刻 RFC3339（后端实时透传上游，无服务端缓存）——数据年龄展示用 */
+  fetched_at?: string;
 }
 
 /* ── 任务中心（panel tasks.go / taskcenter.go）───────────── */

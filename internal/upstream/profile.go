@@ -59,7 +59,7 @@ func (c *Client) FetchAccountProfile(a *auth.Auth) (string, error) {
 
 	// doJSON 已解 apiEnvelope：非 2xx / 业务 code!=0 返回 *Error，成功返回 env.Data。
 	// 敏感字段（手机号等）在 Data 里，但这里只 Unmarshal 下述两个键，其余即弃。
-	data, err := c.doJSON(req)
+	data, err := c.doJSONAuth(a, req)
 	if err != nil {
 		return "", err
 	}

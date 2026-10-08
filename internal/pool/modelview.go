@@ -82,7 +82,7 @@ func (p *Pool) ModelLockView() []ModelLockRow {
 		}
 		routable[realm]++
 		for model, mc := range e.modelCooldowns {
-			if mc.Until.IsZero() || !now.Before(mc.Until) {
+			if !modelLockActive(now, mc) {
 				continue // 零值/已过期：与 modelCooled 同口径，不算锁
 			}
 			key := realm + "\x1f" + model
@@ -167,4 +167,65 @@ func (p *Pool) ModelLockView() []ModelLockRow {
 		return out[i].Realm < out[j].Realm
 	})
 	return out
+}
+
+// modelLockActive 单条模型级冷却条目当前是否构成「真锁」：Until 非零且未到期。
+// ModelLockView 的聚合判定与 ModelBlockedNow 的单点判定共用这一个谓词，保证两处
+// 口径永远一致（此前该判定的两份内联表达式就散在 ModelLockView 里，抽取即防分叉）。
+func modelLockActive(now time.Time, mc modelCooldown) bool {
+	return !mc.Until.IsZero() && now.Before(mc.Until)
+}
+
+// ModelBlockedNow 回答「该 (域, 模型) 此刻是否被模型级冷却**整体**挡死」——即
+// ModelLockView 口径下的 locked 态：所有参与选号的账号都被该模型自身的冷却挡住
+// （6004 模型级限流 / 11102 负缓存），没有任何账号能服务它。供 handler 轮转耗尽
+// 末端区分 503 口径：blocked → model_blocked（换模型或等解锁才有用），非 blocked
+// （starved：账号级冷却/熔断/在途占满）仍报 no_healthy_account（等一下就会好，
+// 与模型无关）。
+//
+// 判定语义与 ModelLockView 的 locked 态严格一致（共享 modelLockActive 谓词，
+// 停用号不计分母、servable 按 healthyForModel+在途口径），只是把全清单聚合换成
+// 单 (realm, model) 的轻量单遍扫描——轮转耗尽热路径上不值得为一次判定构建
+// 整张全清单。
+//
+// 返回值：
+//   - blocked：true = 该 (realm, model) 全部参与选号的账号都被该模型冷却挡住；
+//     false = 不构成整体锁（无冷却 / 部分被锁仍有号可选 / 账号级原因饿死）。
+//   - earliestUnlock：最早解锁时刻（第一个被锁账号恢复的时刻，blocked 时恒非零；
+//     未 blocked 时零值，调用方不得使用）。
+//   - reason：最早解锁账号的冷却原因（上游原文；6004 恒为 "6004 model rate limit"）。
+//
+// realm 为空时恒返回 false（handler 侧 resolveModel 之外的异常形态，宁可不改写
+// 口径也不猜）；只读：持 RLock 遍历，不改任何状态。
+func (p *Pool) ModelBlockedNow(realm, model string) (blocked bool, earliestUnlock time.Time, reason string) {
+	if realm == "" || model == "" {
+		return false, time.Time{}, ""
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+
+	// 单遍扫描：跳过停用号（disabled / manualDisabled 与模型无关，与 ModelLockView
+	// 分母口径一致），对参与选号的账号分别累计「被该模型锁住」与「此刻能服务」。
+	total, locked, servable := 0, 0, 0
+	for _, e := range p.byUID {
+		if e.a.Realm() != realm || e.disabled || e.manualDisabled {
+			continue
+		}
+		total++
+		if mc, ok := e.modelCooldowns[model]; ok && modelLockActive(now, mc) {
+			locked++
+			// 最早解锁：取最小 Until，原因跟随最早解锁账号（与 ModelLockView 同口径）。
+			if earliestUnlock.IsZero() || mc.Until.Before(earliestUnlock) {
+				earliestUnlock = mc.Until
+				reason = mc.Reason
+			}
+		}
+		if e.healthyForModel(now, model) && !p.inFlightFull(e) {
+			servable++
+		}
+	}
+	// locked 态判定与 ModelLockView 完全一致：仍有号能服务 → 不算整体锁（partial）；
+	// 全部被该模型冷却挡住（locked >= total，total==0 空域自然排除）→ 整体锁。
+	return servable == 0 && locked >= total && total > 0, earliestUnlock, reason
 }

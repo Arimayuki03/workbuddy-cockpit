@@ -301,6 +301,15 @@ func main() {
 	up.ChatBaseGlobal = cfg.Global.ChatBase
 	up.BillingBaseGlobal = cfg.Global.BillingBase
 	up.GlobalEnabled = cfg.Global.Enabled
+	// 每账号命名出口代理线路表（config proxy_routes 段，workbuddy-manager 吸收件）：
+	// normalize 已做 URL fail-fast 校验；装配失败属于进程级错误（理论上不可达，
+	// 防御性兜底 fatalExit）。空表 = 全部直连（零回归）。
+	if err := up.SetProxyRoutes(cfg.ProxyRoutes); err != nil {
+		fatalExit("set proxy routes: %v", err)
+	}
+	if len(cfg.ProxyRoutes) > 0 {
+		log.Printf("[proxy_routes] 已加载 %d 条命名出口线路（账号绑定见 auths/*.json 的 proxy_route 字段）", len(cfg.ProxyRoutes))
+	}
 
 	// 装配期收尾：把上述直赋值物化进热改快照（upstream.SyncHot）。此后运行期读侧
 	// （headers.go/prepareBody）恒走 HotFields() 快照，面板热改走 SetHotFields——

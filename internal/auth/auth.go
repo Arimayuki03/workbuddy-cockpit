@@ -42,6 +42,14 @@ type Auth struct {
 	// 手写扁平形 auth 文件可直接写 "device_token": "..."；插件 OAuth 嵌套形
 	// 顶层 device_token 也会被解析（与桌面端共用状态文件的部署方式）。
 	DeviceToken string
+
+	// ProxyRoute 出站代理线路名（workbuddy-manager proxy_routes 吸收件）。
+	// **只存线路名，绝不存代理 URL/凭据**：线路表（名 → 代理 URL）存共享配置
+	// config.json 的 proxy_routes 段，账号文件只引用名字——代理凭据不在 auths/ 里
+	// 扩散，导出/分享凭证文件不会连带泄密。空串 = 直连（现状行为，零配置零回归）；
+	// 非空但线路表查无此名 → upstream 侧拒绝发出请求（绝不静默回退直连：回落
+	// = 出口隔离失效且无人发现）。落盘于嵌套形 auth 段内 + 扁平形顶层 proxy_route。
+	ProxyRoute string
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -183,6 +191,26 @@ func (a *Auth) RealmStored() string {
 // IsGlobal 报告账号是否属于 global realm（= Realm() == "global"）。
 func (a *Auth) IsGlobal() bool { return a.Realm() == "global" }
 
+// ProxyRouteValue 加锁读取 ProxyRoute（出站代理线路名，upstream 每次出站按此
+// 查线路表选 transport）。与 AccessTokenValue 同款：ProxyRoute 由面板绑定端点
+// （pool 内同一 *Auth 对象）在锁内改写，出站路径并发读取必须同锁，否则构成
+// 数据竞争（go test -race 实证模式，见 AccessTokenValue 注释）。
+func (a *Auth) ProxyRouteValue() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.ProxyRoute
+}
+
+// SetProxyRoute 加锁写入 ProxyRoute（面板绑定端点用；空串 = 解绑直连）。
+func (a *Auth) SetProxyRoute(route string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.ProxyRoute = strings.TrimSpace(route)
+}
+
 // isGlobalDomain 判定 domain 是否指向 www.workbuddy.ai 家族。
 // 同时接受裸域 workbuddy.ai 与任意子域（HasSuffix("www.workbuddy.ai") 或裸域本身）。
 func isGlobalDomain(d string) bool {
@@ -221,6 +249,8 @@ func Parse(raw []byte) (*Auth, error) {
 				ExpiresAt    int64  `json:"expiresAt"`
 				Domain       string `json:"domain"`
 				Realm        string `json:"realm"`
+				// ProxyRoute 出站代理线路名（嵌套形放 auth 段内，与 SaveAtomic 写回同形）。
+				ProxyRoute string `json:"proxy_route"`
 			} `json:"auth"`
 			Account struct {
 				UID          string `json:"uid"`
@@ -230,9 +260,16 @@ func Parse(raw []byte) (*Auth, error) {
 			// DeviceToken 顶层 device_token（嵌套形与扁平形共用）。
 			// 放在 auth 段之外，手写时无需嵌进 auth 对象，降低配置门槛。
 			DeviceToken string `json:"device_token"`
+			// ProxyRouteTop 顶层 proxy_route 兼容形态：与 auth 段内等价（面板绑定
+			// 端点写 auth 段内，手工维护的文件可直接写顶层，两形态都能读）。
+			ProxyRouteTop string `json:"proxy_route"`
 		}
 		if err := json.Unmarshal(raw, &n); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
+		}
+		proxyRoute := n.Auth.ProxyRoute
+		if strings.TrimSpace(proxyRoute) == "" {
+			proxyRoute = n.ProxyRouteTop // auth 段内缺失时回落顶层兼容键
 		}
 		a = Auth{
 			AccessToken:  n.Auth.AccessToken,
@@ -244,6 +281,7 @@ func Parse(raw []byte) (*Auth, error) {
 			EnterpriseID: n.Account.EnterpriseID,
 			Nickname:     n.Account.Nickname,
 			DeviceToken:  n.DeviceToken,
+			ProxyRoute:   strings.TrimSpace(proxyRoute),
 		}
 	} else {
 		var f struct {
@@ -256,6 +294,7 @@ func Parse(raw []byte) (*Auth, error) {
 			EnterpriseID string `json:"enterpriseId"`
 			Nickname     string `json:"nickname"`
 			DeviceToken  string `json:"device_token"`
+			ProxyRoute   string `json:"proxy_route"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -270,6 +309,7 @@ func Parse(raw []byte) (*Auth, error) {
 			EnterpriseID: f.EnterpriseID,
 			Nickname:     f.Nickname,
 			DeviceToken:  f.DeviceToken,
+			ProxyRoute:   strings.TrimSpace(f.ProxyRoute),
 		}
 	}
 	if strings.TrimSpace(a.AccessToken) == "" {
@@ -297,6 +337,9 @@ func (a *Auth) SaveAtomic() error {
 			"expiresAt":    a.ExpiresAt,
 			"domain":       a.Domain,
 			"realm":        a.realm,
+			// ProxyRoute 非空才写（omitempty 语义手工实现）：旧文件保持原形，不引入空键。
+			// 只写线路名——代理 URL/凭据只在 config.json 的 proxy_routes 段，绝不入 auth 文件。
+			"proxy_route": a.ProxyRoute,
 		},
 		"account": map[string]any{
 			"uid":          a.UID,
@@ -360,6 +403,9 @@ func (a *Auth) ExportDoc() map[string]any {
 			"expiresAt":    a.ExpiresAt,
 			"domain":       a.Domain,
 			"realm":        a.realm,
+			// ProxyRoute 与 SaveAtomic 同形：只透出线路名，不含代理凭据（导出文件
+			// 可安全流转；线路 URL 本体在 config.json proxy_routes，导入方自行配置）。
+			"proxy_route": a.ProxyRoute,
 		},
 		"account": map[string]any{
 			"uid":          a.UID,

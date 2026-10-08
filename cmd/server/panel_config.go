@@ -117,6 +117,11 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
 	p.SetPickStrategy(pool.ParsePickStrategy(newCfg.Pool.PickStrategy)) // 选号策略热生效（weighted/credits_desc）
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
+	// 代理线路表热生效（proxy_routes 整段替换语义，与 model_map 的整段替换同类；
+	// normalize 已校验 URL，SetProxyRoutes 防御性复验 + 重建 per-route 连接池缓存）。
+	if err := up.SetProxyRoutes(newCfg.ProxyRoutes); err != nil {
+		return nil, fmt.Errorf("apply proxy_routes: %w", err)
+	}
 	// 排程开关热改（主仓库排程开关经 SetEnabled）+ 触发小时热改（SetHours，
 	// 通知 Run 主循环立即重排定时器——面板保存配置与 /admin PATCH hours 共用）。
 	for _, kind := range scheduler.Kinds() {
@@ -189,10 +194,14 @@ const modelMapKey = "model_map"
 // mergeConfigMaps 把 incoming 深合并进 cur（原地），返回 cur。
 // 对嵌套对象逐键覆盖而不是整体替换：面板表单只提交它管理的键，
 // 未提交的兄弟键（含用户手写的未知键）保持原样。
-// model_map 例外：整段替换（见 modelMapKey 注释）。
+// 整段替换例外（两段，语义同类——「传入的表即最终落盘的表」，深合并会把
+// 已删条目从旧值合回来导致删除永远无法落盘）：
+//   - model_map（v1.2.0 历史例外）；
+//   - proxy_routes（出口线路表，workbuddy-manager 吸收件）：面板/用户改 URL、
+//     删线路都是整表操作，删除必须能落盘；replaceProxyRoutesKeys 集中登记。
 func mergeConfigMaps(cur, incoming map[string]any) map[string]any {
 	for k, v := range incoming {
-		if k != modelMapKey {
+		if !replaceProxyRoutesKeys[k] {
 			if inMap, ok := v.(map[string]any); ok {
 				if curMap, ok := cur[k].(map[string]any); ok {
 					cur[k] = mergeConfigMaps(curMap, inMap)
@@ -203,6 +212,13 @@ func mergeConfigMaps(cur, incoming map[string]any) map[string]any {
 		cur[k] = v
 	}
 	return cur
+}
+
+// replaceProxyRoutesKeys mergeConfigMaps 的整段替换段名集合：incoming 里出现
+// 这些键时整体覆盖（不做深合并）。model_map 是历史键，proxy_routes 同语义并入。
+var replaceProxyRoutesKeys = map[string]bool{
+	modelMapKey:    true,
+	"proxy_routes": true,
 }
 
 // mergedJSON 把合并后的 map 序列化回 JSON（供 ParseConfigInto 校验）。

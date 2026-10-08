@@ -233,7 +233,7 @@ func (c *Client) ClaimReward(a *auth.Auth, taskCode string) (credit, energy int6
 		req.Header.Set("X-Domain", d)
 	}
 
-	data, err := c.doJSON(req)
+	data, err := c.doJSONAuth(a, req)
 	if err != nil {
 		return 0, 0, err
 	}

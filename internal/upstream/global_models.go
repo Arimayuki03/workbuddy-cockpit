@@ -457,7 +457,12 @@ func (c *Client) globalModelsOnceUA(a *auth.Auth, path, ua string) ([]string, []
 		req.Header.Set("User-Agent", ua)
 	}
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	resp, err := c.HTTP.Do(req)
+	// 模型目录探测走账号绑定线路（目录与对话同源出口，避免跨出口指纹漂移）。
+	hc, perr := c.doEndpoint(a)
+	if perr != nil {
+		return nil, nil, nil, nil, perr
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}

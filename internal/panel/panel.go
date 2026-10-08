@@ -310,6 +310,13 @@ func (p *Panel) routes() {
 	p.api("POST", "/api/accounts/{uid}/clear-cooldown", "/api/accounts/{uid}/clear-cooldown", p.accountClearCooldown)
 	p.api("POST", "/api/accounts/{uid}/disable", "/api/accounts/{uid}/disable", p.accountDisable)
 	p.api("POST", "/api/accounts/{uid}/enable", "/api/accounts/{uid}/enable", p.accountEnable)
+	// 账号备注（accounts_note.go）：面板 accounts 页后端化备注的写入端点，空串=清除。
+	// 写语义，不进 wbt_ token 分级表（分级表外恒拒，与 disable/enable 同口径）。
+	p.api("POST", "/api/accounts/{uid}/note", "/api/accounts/{uid}/note", p.accountNote)
+	// 出口代理线路（proxy_route.go）：线路表回显（密码脱敏）+ 账号绑定/解绑
+	// （空 route = 解绑直连）。写语义，不进 wbt_ token 分级表（与 note 同口径）。
+	p.api("GET", "/api/proxy_routes", "/api/proxy_routes", p.proxyRoutes)
+	p.api("POST", "/api/accounts/{uid}/proxy_route", "/api/accounts/{uid}/proxy_route", p.accountProxyRoute)
 	p.api("POST", "/api/accounts/{uid}/checkin", "/api/accounts/{uid}/checkin", p.accountCheckin)
 	p.api("POST", "/api/accounts/{uid}/balance", "/api/accounts/{uid}/balance", p.accountBalance)
 	p.api("POST", "/api/accounts/{uid}/remove", "/api/accounts/{uid}/remove", p.accountRemove)
@@ -475,8 +482,8 @@ var tokenEndpointLevels = map[string]tokenEndpointLevel{
 	"GET /api/security/model_locks": tokenLevelRead,
 	// 密钥页只读（keys_ep.go）：列表与来源 IP 是脚本取数场景（readonly 档）；
 	// 创建/修改/删除/重置（POST/PATCH）是写语义，不进表 = 两档全拒。
-	"GET /api/keys":           tokenLevelRead,
-	"GET /api/keys/{id}/ips":  tokenLevelRead,
+	"GET /api/keys":          tokenLevelRead,
+	"GET /api/keys/{id}/ips": tokenLevelRead,
 	// 幂等运维：上游余额/积分查询（把结果写回池内缓存，无账号状态变更语义），
 	// 以及用量落盘触发。仅 admin scope。
 	"POST /api/accounts/{uid}/balance": tokenLevelOps,
@@ -1062,24 +1069,27 @@ func (p *Panel) usageSave(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// packages 返回全部账号的积分构成，供「积分构成」视图对比。
+// packages 返回全部账号的积分构成，供「积分构成 / 到期提醒」视图对比。
 //
 // 逐个账号向上游查（并发有上限，避免瞬时打满上游限流），失败只在对应账号上
 // 标 error，不影响其它账号——一个号 token 失效不该让整页空白。
-// 主仓库 upstream 无 panel 的 CreditPackages（panel 快照漂移件），改用
-// ResourceSummary（remain/used/size 聚合 + 包数 packages_count）：字段契约保持
-// remain/size 口径，逐包明细退化为计数（前端按空数组处理）。
+// v1.17 恢复逐包明细（upstream.CreditPackages，含 DeductionEndTime 到期语义）：
+// remain/used/size 聚合口径不变，packages 数组每包带 name/remain/used/size/
+// end_time/expires_at/created_at 等（前端按到期升序消费，FEFO 结论依赖它）。
+// fetched_at 为本次响应生成时刻（实时透传上游、无服务端缓存，即数据年龄）；
+// 前端据此展示「数据采集于 X 分钟前」，避免旧快照被误当实时。
 func (p *Panel) packages(w http.ResponseWriter, r *http.Request) {
 	accts := p.cfg.Pool.List()
 	type row struct {
-		UID           string `json:"uid"`
-		Nickname      string `json:"nickname"`
-		Realm         string `json:"realm"`
-		Remain        int64  `json:"remain"`
-		Used          int64  `json:"used"`
-		Size          int64  `json:"size"`
-		PackagesCount int    `json:"packages_count"`
-		Error         string `json:"error,omitempty"`
+		UID           string                   `json:"uid"`
+		Nickname      string                   `json:"nickname"`
+		Realm         string                   `json:"realm"`
+		Remain        int64                    `json:"remain"`
+		Used          int64                    `json:"used"`
+		Size          int64                    `json:"size"`
+		PackagesCount int                      `json:"packages_count"`
+		Packages      []upstream.CreditPackage `json:"packages"`
+		Error         string                   `json:"error,omitempty"`
 	}
 	out := make([]row, len(accts))
 
@@ -1099,13 +1109,19 @@ func (p *Panel) packages(w http.ResponseWriter, r *http.Request) {
 				out[i] = it
 				return
 			}
-			remain, used, size, packs, err := p.cfg.Upstream.ResourceSummary(a)
+			packs, remain, size, err := p.cfg.Upstream.CreditPackages(a)
 			if err != nil {
 				it.Error = err.Error()
 				out[i] = it
 				return
 			}
-			it.Remain, it.Used, it.Size, it.PackagesCount = remain, used, size, packs
+			it.Packages = packs
+			it.PackagesCount = len(packs)
+			var used int64
+			for _, pk := range packs {
+				used += pk.Used
+			}
+			it.Remain, it.Used, it.Size = remain, used, size
 			out[i] = it
 		}(i, s)
 	}
@@ -1113,7 +1129,7 @@ func (p *Panel) packages(w http.ResponseWriter, r *http.Request) {
 
 	// 余额降序：多的在前，便于和少的对比。
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Remain > out[j].Remain })
-	writeJSON(w, http.StatusOK, map[string]any{"accounts": out})
+	writeJSON(w, http.StatusOK, map[string]any{"accounts": out, "fetched_at": time.Now().Format(time.RFC3339)})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

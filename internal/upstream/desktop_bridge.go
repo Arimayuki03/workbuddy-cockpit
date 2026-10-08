@@ -83,5 +83,5 @@ func (c *Client) growthJSONMP(a *auth.Auth, method, path string, body any) (json
 	}
 	c.BillingHeaders(req, a)
 	req.Header.Set("X-Client-Platform", mpPlatform)
-	return c.doJSON(req)
+	return c.doJSONAuth(a, req)
 }

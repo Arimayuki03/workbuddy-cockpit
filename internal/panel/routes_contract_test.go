@@ -40,6 +40,7 @@ func TestManagerShellContractRoutesExist(t *testing.T) {
 		"/api/auth/regions",
 		"/api/accounts/u1/tasks",
 		"/api/accounts/export",
+		"/api/proxy_routes",
 	}
 	postPaths := []string{
 		"/api/login",
@@ -62,6 +63,8 @@ func TestManagerShellContractRoutesExist(t *testing.T) {
 		"/api/accounts/u1/revive",
 		"/api/accounts/u1/disable",
 		"/api/accounts/u1/enable",
+		"/api/accounts/u1/note",
+		"/api/accounts/u1/proxy_route",
 		"/api/accounts/u1/checkin",
 		"/api/accounts/u1/balance",
 		"/api/accounts/u1/clear-cooldown",
