@@ -139,7 +139,8 @@
     "expiresInHours": "{n} 時間後に期限切れ",
     "expiresInDays": "{n} 日後に期限切れ",
     "expiryTipTitle": "有効期限（合計 {total}）",
-    "expiryTipNote": "有効期限の早い順に表示。カウントダウンは直近の 1 件のみ。期限を過ぎた未使用分は失効します。"
+    "expiryTipNote": "有効期限の早い順に表示。カウントダウンは直近の 1 件のみ。期限を過ぎた未使用分は失効します。",
+    "exhaustedLine": "使い切ったパッケージがさらに {n} 件（残額 0、省略）"
   },
   "metric": {
     "credits": "クレジット残高",

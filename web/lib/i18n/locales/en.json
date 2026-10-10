@@ -150,7 +150,8 @@
       "other": "expires in {n} days"
     },
     "expiryTipTitle": "Credit expiry (total {total})",
-    "expiryTipNote": "Listed by expiry time; the countdown shows only the nearest one. Unused credits are forfeited at expiry."
+    "expiryTipNote": "Listed by expiry time; the countdown shows only the nearest one. Unused credits are forfeited at expiry.",
+    "exhaustedLine": "{n} exhausted pack(s) (0 left, not listed)"
   },
   "metric": {
     "credits": "Credit balance",

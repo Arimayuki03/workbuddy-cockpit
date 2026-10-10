@@ -10,7 +10,7 @@ import type {CreditPackage} from '@/lib/types';
  *
  * 数据源是 /api/packages 的积分包明细（panel upstream.CreditPackage）：
  * end_time 为该包周期结束时间（上游 ExpiredTime / PackageEndTime 二者取有值者）。
- * 只显示**最近一个**到期套餐的倒计时，全部套餐明细放在悬停提示里。
+ * 只显示**最近一个仍有余量**的到期套餐倒计时，全部套餐明细放在悬停提示里。
  *
  * 没有到期信息（套餐永不过期 / 尚未查到）时不渲染任何东西——包括不订阅时钟。
  */
@@ -20,7 +20,9 @@ export function CreditCountdown({packages}: {packages?: CreditPackage[] | null})
     .map((p) => ({at: Date.parse(p.end_time as string), amount: p.remain}))
     .filter((p) => Number.isFinite(p.at))
     .sort((a, b) => a.at - b.at);
-  const next = rows[0];
+  // 徽章只认「还有积分可花」的最近一笔：已耗尽（remain=0）的包排在最前
+  // （它们的到期时刻更近）但没有展示价值，显示成「0 · N 天后到期」纯属误导。
+  const next = rows.find((r) => r.amount > 0);
   if (!next) return null;
   return <Countdown next={next} all={rows} />;
 }
@@ -43,8 +45,16 @@ function Countdown({next, all}: {next: {at: number; amount: number}; all: {at: n
 
   // 明细：每条「额度 · 到期时刻（本地时区）」。时刻用绝对时间，
   // 用户要拿它跟腾讯官网/客服对账，倒计时只解决紧迫感。
-  const lines = all.map((e) => `${fmtNumber(e.amount)} · ${fmtDateTime(e.at)}`);
-  const total = all.reduce((sum, e) => sum + e.amount, 0);
+  // 已耗尽（remain=0）的包折叠成一行计数——几十个「0 · 时间」把真正
+  // 要看的余量行顶出悬浮窗，没有对账价值；到期日在未来的已耗尽包
+  // 对周期套餐来说额度会重置，但此刻确实无可花，一行带过即可。
+  const usable = all.filter((e) => e.amount > 0);
+  const exhausted = all.length - usable.length;
+  const lines = usable.map((e) => `${fmtNumber(e.amount)} · ${fmtDateTime(e.at)}`);
+  if (exhausted > 0) {
+    lines.push(t('credit.exhaustedLine', {count: exhausted, n: exhausted}));
+  }
+  const total = usable.reduce((sum, e) => sum + e.amount, 0);
 
   return (
     <span

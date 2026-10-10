@@ -139,7 +139,8 @@
     "expiresInHours": "{n}시간 후 만료",
     "expiresInDays": "{n}일 후 만료",
     "expiryTipTitle": "크레딧 만료 (합계 {total})",
-    "expiryTipNote": "만료가 빠른 순서로 표시됩니다. 카운트다운은 가장 가까운 항목만 보여줍니다. 만료 후 남은 크레딧은 소멸됩니다."
+    "expiryTipNote": "만료가 빠른 순서로 표시됩니다. 카운트다운은 가장 가까운 항목만 보여줍니다. 만료 후 남은 크레딧은 소멸됩니다.",
+    "exhaustedLine": "소진된 패키지 {n}개 추가 (잔액 0, 미표시)"
   },
   "metric": {
     "credits": "크레딧 잔액",

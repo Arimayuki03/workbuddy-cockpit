@@ -132,7 +132,8 @@
     "expiresInHours": "{n} 小时后到期",
     "expiresInDays": "{n} 天后到期",
     "expiryTipTitle": "积分到期时间（合计 {total}）",
-    "expiryTipNote": "按到期时间排列，倒计时只显示最近一笔；到期后未用完的积分会作废。"
+    "expiryTipNote": "按到期时间排列，倒计时只显示最近一笔；到期后未用完的积分会作废。",
+    "exhaustedLine": "另有 {n} 个已耗尽的包（额度 0，未列出）"
   },
   "metric": {
     "credits": "积分余额",

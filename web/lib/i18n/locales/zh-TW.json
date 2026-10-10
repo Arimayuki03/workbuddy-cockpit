@@ -139,7 +139,8 @@
     "expiresInHours": "{n} 小時後到期",
     "expiresInDays": "{n} 天後到期",
     "expiryTipTitle": "積分到期時間（合計 {total}）",
-    "expiryTipNote": "按到期時間排列，倒數只顯示最近一筆；到期後未用完的積分會作廢。"
+    "expiryTipNote": "按到期時間排列，倒數只顯示最近一筆；到期後未用完的積分會作廢。",
+    "exhaustedLine": "另有 {n} 個已耗盡的包（額度 0，未列出）"
   },
   "metric": {
     "credits": "積分餘額",

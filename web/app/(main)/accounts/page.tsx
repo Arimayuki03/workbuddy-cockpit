@@ -1005,7 +1005,9 @@ export default function AccountsPage() {
             >
               <ChevronLeft className="h-3.5 w-3.5" />
             </Button>
-            <span className="min-w-14 text-center text-[11px] tabular-nums text-muted-foreground">
+            {/* min-w-14 装不下中文「第 12 / 13 页」（7 字 × 11px ≈ 77px），
+                用 whitespace-nowrap 防换行 + 足量最小宽防遮挡 */}
+            <span className="min-w-20 whitespace-nowrap text-center text-[11px] tabular-nums text-muted-foreground">
               {t('accounts.pageIndicator', {page: safePage, total: totalPages})}
             </span>
             <Button

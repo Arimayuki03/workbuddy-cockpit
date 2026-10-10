@@ -16,7 +16,7 @@
  * 一次明文。token 管理端点仅会话 cookie 可用——api.ts 的 withCredentials
  * 封装天然满足，本组件不做任何额外鉴权处理。
  */
-import {useCallback, useRef, useState} from 'react';
+import {useCallback, useEffect, useRef, useState} from 'react';
 import {
   KeyRound,
   Plus,
@@ -101,6 +101,12 @@ export function TokensTab() {
       setLoading(false);
     }
   }, []);
+
+  // 挂载即拉一次列表。没有这一步组件会永远停在初始 loading 骨架——
+  // load 只在创建/删除后调用，首屏没人触发（修：空令牌页一直显示占位）。
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   const submit = useCallback(async () => {
     if (submitting.current) return;
