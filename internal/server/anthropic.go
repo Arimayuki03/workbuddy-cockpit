@@ -19,6 +19,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -646,8 +648,15 @@ type streamTranslator struct {
 
 	thinkIdx int // 当前打开的思考块 index（-1 = 未打开）
 	textIdx  int // 当前打开的文本块 index（-1 = 未打开）
-	toolIdx  int // 当前打开的工具块 index（-1 = 未打开）
-	toolID   string
+
+	// toolSlots 并行工具调用分槽：上游 tool_calls 各带 index 字段，参数分片可能
+	// 跨帧交错到达（index=0 与 index=1 的 arguments 交替）。只记单个「当前工具」
+	// 会让后到的分片写进错误的块（input_json_delta 串块，客户端拼出损坏 JSON）。
+	// key = 上游 index，value = 本翻译器分配的 Anthropic content_block index
+	// （-1 = 该槽还未开块）。
+	toolSlots map[int]int
+	toolOrder []int // 槽位开块顺序（finish 收尾按此顺序关块）
+	toolID    string
 
 	thinkBuf  string // 思考全文（用于 signature）
 	nextIndex int
@@ -662,12 +671,12 @@ type streamTranslator struct {
 
 func newStreamTranslator(model string, thinking bool) *streamTranslator {
 	return &streamTranslator{
-		model:    model,
-		thinking: thinking,
-		msgID:    "msg_" + anthNewID(),
-		thinkIdx: -1,
-		textIdx:  -1,
-		toolIdx:  -1,
+		model:     model,
+		thinking:  thinking,
+		msgID:     "msg_" + anthNewID(),
+		thinkIdx:  -1,
+		textIdx:   -1,
+		toolSlots: map[int]int{},
 	}
 }
 
@@ -696,6 +705,19 @@ func (t *streamTranslator) closeBlock(index int) []byte {
 	return sseEvent("content_block_stop", map[string]any{
 		"type": "content_block_stop", "index": index,
 	})
+}
+
+// closeToolSlots 关掉全部打开的工具块（按开块顺序），并清空槽位表。
+func (t *streamTranslator) closeToolSlots() []byte {
+	var out []byte
+	for _, upIdx := range t.toolOrder {
+		if slot, ok := t.toolSlots[upIdx]; ok && slot >= 0 {
+			out = append(out, t.closeBlock(slot)...)
+		}
+	}
+	t.toolSlots = map[int]int{}
+	t.toolOrder = nil
+	return out
 }
 
 // closeThink 关掉思考块。先把 signature 发完、再 stop——顺序不能反：
@@ -794,9 +816,8 @@ func (t *streamTranslator) feed(obj map[string]any) []byte {
 		t.sawText = true
 		// 切到正文前先把思考块关掉（含发签名）——思考与正文是两个块。
 		out = append(out, t.closeThink()...)
-		// 从工具块切回文本时，先把工具块关掉。
-		out = append(out, t.closeBlock(t.toolIdx)...)
-		t.toolIdx = -1
+		// 从工具块切回文本时，先把所有工具块关掉。
+		out = append(out, t.closeToolSlots()...)
 		if t.textIdx < 0 {
 			t.textIdx = t.nextIndex
 			t.nextIndex++
@@ -828,16 +849,28 @@ func (t *streamTranslator) feed(obj map[string]any) []byte {
 		out = append(out, t.closeBlock(t.textIdx)...)
 		t.textIdx = -1
 
+		// 上游 index 分槽（并行 tool calls 各自独立成块；缺省 index=0 与
+		// 单工具序列形态兼容——首个未带 index 的分片也落 0 号槽）。
+		upIdx := 0
+		if v := anthAsInt(call["index"]); v > 0 {
+			upIdx = v
+		}
+		slot, opened := t.toolSlots[upIdx]
 		if name, _ := fn["name"].(string); name != "" {
-			// 新工具：关掉上一个，开一个新的。
-			out = append(out, t.closeBlock(t.toolIdx)...)
+			// 新工具（该槽首个带名的分片）：关掉槽里旧的，开一个新的。
+			if opened {
+				out = append(out, t.closeBlock(slot)...)
+			} else {
+				t.toolOrder = append(t.toolOrder, upIdx)
+			}
 			t.toolID, _ = call["id"].(string)
-			t.toolIdx = t.nextIndex
+			slot = t.nextIndex
 			t.nextIndex++
+			t.toolSlots[upIdx] = slot
 			t.sawTool = true
 			out = append(out, sseEvent("content_block_start", map[string]any{
 				"type":  "content_block_start",
-				"index": t.toolIdx,
+				"index": slot,
 				"content_block": map[string]any{
 					"type":  "tool_use",
 					"id":    t.toolID,
@@ -847,10 +880,10 @@ func (t *streamTranslator) feed(obj map[string]any) []byte {
 			})...)
 		}
 		// 参数分片原样透传，拼接交给客户端（我们无从判断 JSON 何时完整）。
-		if args, _ := fn["arguments"].(string); args != "" && t.toolIdx >= 0 {
+		if args, _ := fn["arguments"].(string); args != "" && slot >= 0 {
 			out = append(out, sseEvent("content_block_delta", map[string]any{
 				"type":  "content_block_delta",
-				"index": t.toolIdx,
+				"index": slot,
 				"delta": map[string]any{"type": "input_json_delta", "partial_json": args},
 			})...)
 		}
@@ -880,8 +913,7 @@ func (t *streamTranslator) finish(finishReason string) []byte {
 	out = append(out, t.closeThink()...)
 	out = append(out, t.closeBlock(t.textIdx)...)
 	t.textIdx = -1
-	out = append(out, t.closeBlock(t.toolIdx)...)
-	t.toolIdx = -1
+	out = append(out, t.closeToolSlots()...)
 
 	out = append(out, sseEvent("message_delta", map[string]any{
 		"type": "message_delta",
@@ -966,10 +998,12 @@ func (h *Handler) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 内部克隆请求：体替换为 OpenAI 形态；透传 RemoteAddr（PassthroughIP 的客户端
-	// IP 提取读它）与入站会话头族（X-Conversation-Request-ID / X-Trace-ID，管线
-	// 校验后透传出站）。上下文沿用原请求——客户端断连/取消语义保持一致。
-	// 不携带 Authorization：鉴权在挂载层已完成，且管线出站头由账号 token 决定。
+	// 内部转发：io.Pipe 直连（对齐 responses.go 的 rspInnerWriter 模式）——管线
+	// 写一帧、这里翻译一帧下发，客户端在生成期间持续收到字节（真流式）；此前
+	// anthResponseBridge 全量缓冲整个上游响应，流式语义丢失、首字节延迟等于
+	// 全程生成时长、buf 无上限。非流式分支同样从 pipe 聚合（行为不变）。
+	pr, pw := io.Pipe()
+	iw := &anthInnerWriter{header: http.Header{}, pw: pw, sig: make(chan struct{})}
 	cloned := r.Clone(r.Context())
 	// Body 必须装实际转换后的字节：管线 session.ParseRequest 从 body 读 stream/
 	// model/会话键等全部派生字段（Body 为空则 parsed.Stream=false，流式请求会
@@ -981,29 +1015,47 @@ func (h *Handler) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 	cloned.Header.Del("Cookie")
 	cloned.Header.Set("Content-Type", "application/json")
 	cloned.Header.Set("Content-Length", fmt.Sprintf("%d", len(outBody)))
-	bridge := &anthResponseBridge{}
-	h.chatCompletions(bridge, cloned)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer pw.Close() // chatCompletions 返回后关写端 → 读端 EOF
+		h.chatCompletions(iw, cloned)
+	}()
+
+	// 状态码就绪（错误信封显式写头 / 首个数据帧隐式 200）。在此之前不向客户端
+	// 定型任何状态——错误必须以真实状态码回给 Anthropic SDK 触发重试/报错路径。
+	<-iw.sig
+
+	// 错误未开流：真实状态码回 Anthropic 错误体（不裹事件——客户端还没看到任何
+	// 200 语义）。流式/非流式同口径：排空 pipe、等管线收尾，再一次性写错误体。
+	if iw.status >= 400 {
+		errBody, _ := io.ReadAll(pr)
+		<-done
+		msg, hint := anthOpenAIErrorEnvelope(string(errBody))
+		if strings.TrimSpace(msg) == "" {
+			msg = strings.TrimSpace(string(errBody))
+		}
+		if msg == "" {
+			msg = fmt.Sprintf("upstream returned %d", iw.status)
+		}
+		writeAnthropicError(w, iw.status, "api_error", anthJoinHint(msg, hint))
+		return
+	}
 
 	// 流式：管线产出的 OpenAI SSE 在飞行中翻译为 Anthropic 事件流。
 	if stream {
-		h.anthropicStream(w, bridge, model, wantThinking)
+		h.anthropicStream(w, pr, model, wantThinking)
+		_ = pr.Close() // 关读端：chatCompletions 在途 pipe 写立刻失败（客户端已走）
+		<-done
 		return
 	}
 
-	// 非流式：错误信封转 Anthropic 错误体（沿用管线分类出的真实状态码）。
-	if bridge.status() >= 400 {
-		msg, hint := anthOpenAIErrorEnvelope(bridge.bodyString())
-		if strings.TrimSpace(msg) == "" {
-			msg = strings.TrimSpace(bridge.bodyString())
-		}
-		if msg == "" {
-			msg = fmt.Sprintf("upstream returned %d", bridge.status())
-		}
-		writeAnthropicError(w, bridge.status(), "api_error", anthJoinHint(msg, hint))
-		return
-	}
+	// 非流式：聚合完整响应体（pw 关闭后 ReadAll 返回）。
+	body2, _ := io.ReadAll(pr)
+	<-done
+
 	var data map[string]any
-	if json.Unmarshal(bridge.bodyBytes(), &data) != nil {
+	if json.Unmarshal(body2, &data) != nil {
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", "upstream response is not valid JSON")
 		return
 	}
@@ -1026,20 +1078,10 @@ func anthJoinHint(msg, hint string) string {
 // 上游开流后才写头），真实错误已在轮转内消化或以 error 帧形态在流内出现——
 // 这里按 SSE 输出；>= 400 时直接以真实状态码回 Anthropic 错误体（未开流，
 // 状态码可自由定型）。
-func (h *Handler) anthropicStream(w http.ResponseWriter, bridge *anthResponseBridge, model string, thinking bool) {
-	// 错误未开流：真实状态码回 Anthropic 错误体（不裹事件——客户端还没看到
-	// 任何 200 语义，直接给真实状态码才能触发 SDK 的重试/报错路径）。
-	if code := bridge.status(); code >= 400 {
-		msg, hint := anthOpenAIErrorEnvelope(bridge.bodyString())
-		if strings.TrimSpace(msg) == "" {
-			msg = strings.TrimSpace(bridge.bodyString())
-		}
-		if msg == "" {
-			msg = fmt.Sprintf("upstream returned %d", code)
-		}
-		writeAnthropicError(w, code, "api_error", anthJoinHint(msg, hint))
-		return
-	}
+func (h *Handler) anthropicStream(w http.ResponseWriter, body io.Reader, model string, thinking bool) {
+	// 状态码 >= 400 的分支由调用方在开流前处理（真实状态码回错误体）；进入本函数
+	// 时管线已产 200，真实错误只能以 error 事件形态出现在流内（见下方 error 帧
+	// 转换）。
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1049,9 +1091,16 @@ func (h *Handler) anthropicStream(w http.ResponseWriter, bridge *anthResponseBri
 	flusher, _ := w.(http.Flusher)
 	tr := newStreamTranslator(model, thinking)
 	var errorText string
-	for scanner := range anthSplitSSE(bridge.bodyBytes()) {
-		raw := scanner
-		if raw == "[DONE]" {
+	// 逐行流式消费（不再全量缓冲）：pipe 读一帧翻译一帧，边生成边下发。
+	sc := bufio.NewScanner(body)
+	sc.Buffer(make([]byte, 0, 64*1024), maxRspSSEBuffer)
+	for sc.Scan() {
+		raw := strings.TrimSpace(sc.Text())
+		if !strings.HasPrefix(raw, "data:") {
+			continue // 注释/空行/事件名行
+		}
+		raw = strings.TrimSpace(raw[len("data:"):])
+		if raw == "" || raw == "[DONE]" {
 			continue
 		}
 		var obj map[string]any
@@ -1059,7 +1108,8 @@ func (h *Handler) anthropicStream(w http.ResponseWriter, bridge *anthResponseBri
 			continue
 		}
 		// 上游可能中途回 error 帧（{"error":{...}}，没有 choices）：整帧丢弃会让
-		// 客户端只收到 message_start 加一个空回答——显式转成 error 事件并中止。
+		// 客户端只收到 message_start 加一个空回答——显式转成 error 事件并中止
+		// 迭代（pr 由调用方关闭，pipe 写端立刻失败，chatCompletions 尽快收尾）。
 		if e := anthUsageMap(obj["error"]); e != nil && len(anthToSlice(obj["choices"])) == 0 {
 			msg, _ := e["message"].(string)
 			if msg == "" {
@@ -1093,26 +1143,6 @@ func (h *Handler) anthropicStream(w http.ResponseWriter, bridge *anthResponseBri
 	if flusher != nil {
 		flusher.Flush()
 	}
-}
-
-// anthSplitSSE 把缓存的 SSE 字节流拆成 data 载荷序列（跳过注释/空行/非 data 行）。
-// 管线产出已在内存中（bridge 缓存），按行切分即可，无需流式缓冲。
-func anthSplitSSE(data []byte) <-chan string {
-	ch := make(chan string)
-	go func() {
-		defer close(ch)
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if !strings.HasPrefix(line, "data:") {
-				continue
-			}
-			payload := strings.TrimSpace(line[len("data:"):])
-			if payload != "" {
-				ch <- payload
-			}
-		}
-	}()
-	return ch
 }
 
 // ---------------------------------------------------------------------------
@@ -1214,40 +1244,42 @@ func (h *Handler) readJSONBody(w http.ResponseWriter, r *http.Request) ([]byte, 
 	return body, nil
 }
 
-// anthResponseBridge 捕获内部 chatCompletions 调用的响应（状态码 + 头 + 体），
-// 供 Anthropic 端点在飞行中翻译/转换。实现 http.ResponseWriter + Flusher；
-// 不实现 Hijacker——管线流式路径对非 Hijacker 响应照常逐帧写出。
-type anthResponseBridge struct {
-	header http.Header
-	buf    bytes.Buffer
-	code   int
-}
-
-func (c *anthResponseBridge) Header() http.Header {
-	if c.header == nil {
-		c.header = make(http.Header)
-	}
-	return c.header
-}
-func (c *anthResponseBridge) Write(p []byte) (int, error) {
-	if c.code == 0 {
-		c.code = http.StatusOK
-	}
-	return c.buf.Write(p)
-}
-func (c *anthResponseBridge) WriteHeader(code int) { c.code = code }
-func (c *anthResponseBridge) Flush()               {}
-func (c *anthResponseBridge) status() int {
-	if c.code == 0 {
-		return http.StatusOK
-	}
-	return c.code
-}
-func (c *anthResponseBridge) bodyBytes() []byte  { return c.buf.Bytes() }
-func (c *anthResponseBridge) bodyString() string { return c.buf.String() }
-
 // anthIDSeq 消息/请求 ID 的进程级计数（时间戳 + 计数，进程内唯一即可）。
 var anthIDSeq atomic.Uint64
+
+// anthInnerWriter 内部转发用的 ResponseWriter（对齐 responses.go 的 rspInnerWriter）：
+// 捕获 chatCompletions 写出的状态码与响应头，body 字节经 io.Pipe 同步交给主
+// goroutine——io.Pipe 无缓冲，写端阻塞到读端消费，天然背压，流式翻译零额外缓冲。
+type anthInnerWriter struct {
+	header  http.Header
+	status  int
+	pw      *io.PipeWriter
+	sig     chan struct{}
+	sigOnce sync.Once
+}
+
+func (w *anthInnerWriter) signal() { w.sigOnce.Do(func() { close(w.sig) }) }
+
+func (w *anthInnerWriter) Header() http.Header { return w.header }
+
+func (w *anthInnerWriter) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+	w.signal()
+}
+
+func (w *anthInnerWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK // 隐式 200（SSE 透传路径从不显式 WriteHeader）
+	}
+	w.signal()
+	return w.pw.Write(b)
+}
+
+// Flush 空实现：io.Pipe 写是同步的（读端消费才返回），无需 flush 传播。
+// chatCompletions 流式路径的 http.Flusher 断言落空后照常逐帧写出。
+func (w *anthInnerWriter) Flush() {}
 
 // anthNewID 生成 Anthropic 形态的消息 ID 片段（msg_ 前缀由调用方拼）。
 func anthNewID() string {

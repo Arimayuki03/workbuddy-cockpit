@@ -313,15 +313,15 @@ export const settingsApi = {
 export type {Account};
 
 /* ── API 密钥管理（对外网关分发密钥）────────────────────────
- * 契约（后端 internal/server/keys.go，双方按 types.ts 落地）：
+ * 契约（后端 internal/panel/keys_ep.go，双方按 types.ts 落地）：
  *  - GET    /api/keys              → {keys: ApiKey[]}
  *  - POST   /api/keys              → {key, plaintext}（明文仅此一次）
  *  - PATCH  /api/keys/{id}         → {key}（全字段可选）
  *  - DELETE /api/keys/{id}
  *  - POST   /api/keys/{id}/reset_usage
  *  - GET    /api/keys/{id}/ips     → {ips: [{ip, first_seen}]}
- * 4xx 错误体可能带 {error: {reason: "short_code"}}，展示时经 i18n 映射
- * （见 keys 页的 keyReasonText）。 */
+ * 4xx 错误体是 {ok: false, error: "字符串"}（panel.writeErr），展示时直接
+ * 用 errText 取 error 文案即可。 */
 export const keyApi = {
   list: () => get<KeysListResponse>('/api/keys'),
   create: (body: KeyCreatePayload) => post<KeyCreateResponse>('/api/keys', body),
@@ -370,9 +370,11 @@ export const tokenApi = {
 };
 
 /* ── 安全（入站 IP 管控 / 拦截日志 / 模型锁池）────────────────
- * 契约（后端 internal/server/security.go）：
+ * 契约（后端 internal/panel/security_ep.go）：
  *  - GET  /api/security            → {rules, blocked_logs}
- *  - POST /api/security/rules      → {errs: string[]}（非空 = 整体未生效）
+ *  - POST /api/security/rules      → {errs: string[], error?}（errs 非空 = 校验未通过
+ *                                    整体未生效；errs 空但 error 非空 = 规则已生效、
+ *                                    config 落盘失败，重启会回落旧值）
  *  - GET  /api/security/model_locks → {locks: ModelLockRow[]} */
 export const securityApi = {
   status: () => get<SecurityStatusResponse>('/api/security'),

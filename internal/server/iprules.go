@@ -159,19 +159,36 @@ const defaultBlockLogCap = 512
 // 容忍哲学）；filePath 非空时先尝试读盘恢复，再以 spec 兜底。
 func NewIPBlockRules(filePath string, spec ipRuleSpec) (*IPBlockRules, []string) {
 	b := &IPBlockRules{filePath: filePath, blockCap: defaultBlockLogCap}
+	// diskUnreadable：读到了文件但解析失败——损坏文件保留不覆盖（见下）。
+	diskUnreadable := false
 	// 读盘优先：上次运行的规则优先于本次启动 spec（落盘 = 面板热改的持久层，
-	// 启动 spec 只是首次运行的种子）。读盘失败回落 spec，不阻塞启动。
+	// 启动 spec 只是首次运行的种子）。读盘/解析失败回落 spec，不阻塞启动，
+	// 但要留信号（否则上一轮保存的规则丢了无人知晓）。
 	if filePath != "" {
-		if raw, err := os.ReadFile(filePath); err == nil {
+		raw, err := os.ReadFile(filePath)
+		switch {
+		case err == nil:
 			var disk ipRuleSpec
-			if json.Unmarshal(raw, &disk) == nil {
+			if uErr := json.Unmarshal(raw, &disk); uErr != nil {
+				// 解析失败：回落种子，但**不把种子落盘覆盖**损坏文件——保留
+				// 原文件供人工排查（覆盖即销毁证据，且用户可能只是想修个笔误）。
+				diskUnreadable = true
+				log.Printf("WARN: [server] ip rules file %s 解析失败（%v），回落启动种子，损坏文件保留不覆盖", filePath, uErr)
+			} else {
 				spec = disk
 			}
+		case os.IsNotExist(err):
+			// 首次运行：正常路径，无信号。
+		default:
+			log.Printf("WARN: [server] ip rules file %s 读取失败（%v），回落启动种子", filePath, err)
 		}
 	}
 	rules, errs := buildRules(spec)
 	b.rules.Store(rules)
-	if filePath != "" && len(errs) == 0 {
+	// diskUnreadable 时跳过种子落盘：写盘会用种子 spec 覆盖损坏文件，上一轮
+	// 保存的规则就无信号丢失了（内存已回落种子运行，等用户人工修复或面板
+	// 下次 SetRules 再正常落盘）。
+	if filePath != "" && len(errs) == 0 && !diskUnreadable {
 		// 初始规则合法时照常落盘（幂等：内容相同写一次无害，且让「落盘文件
 		// 存在」成为规则已持久化的单一事实来源）。
 		if err := b.writeLocked(rules); err != nil {
@@ -179,6 +196,13 @@ func NewIPBlockRules(filePath string, spec ipRuleSpec) (*IPBlockRules, []string)
 		}
 	} else if len(errs) > 0 {
 		log.Printf("WARN: [server] ip rules: %d invalid entries skipped: %v", len(errs), errs)
+	}
+	// M1 收窄口径：白名单模式开启但有效白名单为空（条目全非法被清空，或本就
+	// 未配置）时，Evaluate 的「空白名单自动失效防自我锁死」语义会让该组合
+	// 静默全放行——这是防锁死的有意设计不能改，但必须打 ERROR 级响亮告警，
+	// 否则管理员以为开了白名单实际门户大开。
+	if rules.WhitelistMode && len(rules.Whitelist) == 0 {
+		log.Printf("ERROR: [server] 白名单模式开启但有效白名单为空，已回落全放行，请检查 ip_whitelist 条目（空白名单自动失效是防自我锁死设计，但该组合通常意味着条目全部非法）")
 	}
 	return b, errs
 }

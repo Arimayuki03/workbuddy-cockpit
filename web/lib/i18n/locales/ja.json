@@ -1318,7 +1318,8 @@
       "loadError": "トークン一覧の読み込みに失敗しました",
       "neverUsed": "未使用",
       "lastUsed": "最終使用",
-      "createdAt": "作成日時"
+      "createdAt": "作成日時",
+      "prefix": "プレフィックス"
     }
   },
   "phrases": {

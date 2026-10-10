@@ -220,6 +220,14 @@ function dateToUnixSec(date: string): number {
   return Number.isFinite(at) ? Math.floor(at / 1000) : 0;
 }
 
+/** Date → 本地时区的 yyyy-MM-dd（编辑回填用）。不能用 toISOString()：那是
+ *  UTC，负偏移时区会把本地当天截回前一天；而提交（dateToUnixSec）按本地
+ *  时区的 T23:59:59 换算——两边口径不一致时，用户没改日期直接保存就会漂移。 */
+function dateToLocalYMD(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 export default function KeysPage() {
   const t = useT();
   const {isAdmin} = useAuth();
@@ -269,8 +277,11 @@ export default function KeysPage() {
   }, []);
 
   // 密钥状态可能被调用侧改变（配额用尽、过期），心跳刷新保持同步。
-  // useCachedAsync 的 refresh 永不 reject（错误进 fetcher 捕获），直接传即可。
-  useHeartbeat(keysCache.refresh, 60000);
+  // useCachedAsync 的 refresh 会 rethrow（fetcher 失败原样抛给调用方），
+  // 心跳 tick 不捕获会产生 unhandled rejection——这里自行 catch 静默。
+  useHeartbeat(() => {
+    keysCache.refresh().catch(() => {/* 轮询失败静默，下轮重试 */});
+  }, 60000);
 
   const retryLoad = useCallback(() => {
     setLoadError(null);
@@ -291,7 +302,7 @@ export default function KeysPage() {
     setForm({
       name: k.name,
       expiryMode: k.expires_at ? 'date' : 'never',
-      expiryDate: k.expires_at ? new Date(k.expires_at * 1000).toISOString().slice(0, 10) : '',
+      expiryDate: k.expires_at ? dateToLocalYMD(new Date(k.expires_at * 1000)) : '',
       maxIps: String(k.max_ips ?? 0),
       ipWhitelist: (k.ip_whitelist ?? []).join('\n'),
       models: (k.model_whitelist ?? []).join('\n'),
@@ -580,9 +591,13 @@ export default function KeysPage() {
                               title={t('keys.resetUsageTitle')}
                               description={t('keys.resetUsageDesc', {name: k.name})}
                               onConfirm={async () => {
-                                await keyApi.resetUsage(k.id);
-                                notify.ok(t('keys.resetDone'));
-                                keysCache.refresh();
+                                try {
+                                  await keyApi.resetUsage(k.id);
+                                  notify.ok(t('keys.resetDone'));
+                                  keysCache.refresh().catch(() => {/* 已有 toast 提示 */});
+                                } catch (e) {
+                                  notify.err(errText(e));
+                                }
                               }}
                               trigger={
                                 <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title={t('keys.resetUsage')}>
@@ -597,9 +612,13 @@ export default function KeysPage() {
                               confirmText={t('keys.delete')}
                               destructive
                               onConfirm={async () => {
-                                await keyApi.remove(k.id);
-                                notify.ok(t('keys.deleted'));
-                                keysCache.refresh();
+                                try {
+                                  await keyApi.remove(k.id);
+                                  notify.ok(t('keys.deleted'));
+                                  keysCache.refresh().catch(() => {/* 已有 toast 提示 */});
+                                } catch (e) {
+                                  notify.err(errText(e));
+                                }
                               }}
                               trigger={
                                 <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md text-red-500 hover:text-red-600" title={t('keys.delete')}>

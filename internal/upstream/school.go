@@ -85,7 +85,7 @@ func mpEventBase(a *auth.Auth) map[string]any {
 		"machineId":    deriveID(a, "machine"), // 按账号派生,避免池级设备指纹关联;与 desktop 事件口径一致
 		"timezone":     "Asia/Shanghai",
 		"userId":       a.UID,
-		"userNickname": a.Nickname,
+		"userNickname": a.NicknameValue(),
 	}
 }
 

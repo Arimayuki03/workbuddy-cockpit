@@ -235,12 +235,19 @@ func TestRejectModelWhitelist(t *testing.T) {
 	if rej := s.Validate(k, "", "kimi-k3", "cn", now); rej != nil {
 		t.Fatalf("第二条白名单被拒: %+v", rej)
 	}
-	// global: 前缀保留比较：白名单里没有 global: 形态 → 拒。
-	rej := s.Validate(k, "", "global:glm-5.2", "global", now)
+	// global: 前缀同剥归一（两侧裸名比对——server 侧调用传的就是剥完前缀的裸名，
+	// 白名单写 global: 形态与裸名等价，与 cn: 同理）。白名单外的其它模型 → 拒。
+	rej := s.Validate(k, "", "gpt-9", "global", now)
 	if rej == nil || rej.Status != 400 || rej.Reason != ReasonModelNotAllowed {
-		t.Fatalf("global: 模型=%+v want 400/model_not_allowed", rej)
+		t.Fatalf("白名单外模型(global realm)=%+v want 400/model_not_allowed", rej)
 	}
-	// 完全不在白名单。
+	// H7 回归：白名单照 /v1/models 下发 id 写 global: 前缀形态，请求剥前缀后的
+	// 裸名必须放行（此前 bareModel 保留 global: 导致恒 400）。
+	_, kg := mustCreate(t, s, CreateParams{ModelWhitelist: []string{"global:gpt-5.4"}})
+	if rej := s.Validate(kg, "", "gpt-5.4", "global", now); rej != nil {
+		t.Fatalf("global: 白名单条目对裸名请求被拒: %+v", rej)
+	}
+	// 完全不在白名单（cn realm 同口径）。
 	rej = s.Validate(k, "", "gpt-9", "cn", now)
 	if rej == nil || rej.Status != 400 || rej.Reason != ReasonModelNotAllowed {
 		t.Fatalf("白名单外模型=%+v want 400/model_not_allowed", rej)

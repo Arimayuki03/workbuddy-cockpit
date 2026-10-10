@@ -42,9 +42,15 @@ func ParseClientIP(peer string, header func(name string) string, trustedCIDRs []
 		// 关键：对端不可信时，转发头一律不看（这正是参考项目被绕过的地方）。
 		return host
 	}
-	// X-Real-IP 优先（单值，nginx/caddy 标准做法；反代以 $remote_addr 覆盖写入）。
-	if real := CleanAddress(header("X-Real-IP")); real != "" {
-		return real
+	// X-Real-IP 仅单跳可信（hops<=1）：nginx/caddy 的 proxy_set_header X-Real-IP
+	// $remote_addr 写入的是**紧邻对端**——单层反代时恰好是真实客户端；多跳
+	// （CDN+反代，hops>=2）时该头承载的是中间跳（CDN 回源 IP）而非客户端，
+	// 且它优先于 XFF 短路，会把 hops 配置架空（黑白名单按 CDN 地址判定）。
+	// 多跳场景一律走 XFF 从右往左穿透。
+	if hops <= 1 {
+		if real := CleanAddress(header("X-Real-IP")); real != "" {
+			return real
+		}
 	}
 	// X-Forwarded-For 从右往左数第 hops 跳：右侧是最近一跳反代追加的真实对端地址，
 	// 左侧才是客户端可伪造部分。hops=1 取最右一个；超出左端（parts 不够长）回落最左。

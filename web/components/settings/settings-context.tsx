@@ -30,6 +30,14 @@ import {
   pickValues,
   emptyForm,
   toWire,
+  SCHEDULE_FIELDS,
+  PROMPT_FIELDS,
+  COOLDOWN_FIELDS,
+  POOL_FIELDS,
+  FEATURES_FIELDS,
+  SESSION_FIELDS,
+  UPSTREAM_FIELDS,
+  GLOBAL_FIELDS,
   type FieldValue,
   type Section,
 } from './settings-fields';
@@ -140,14 +148,17 @@ export function SettingsProvider({children}: {children: ReactNode}) {
     setCfg(v);
     const root = (v.config ?? {}) as Record<string, Record<string, unknown>>;
     const picked: Record<Section, Record<string, FieldValue>> = {
-      schedule: pickValues(GROUPS.find((g) => g.id === 'schedule')!.fields, root.schedule),
-      prompt: pickValues(GROUPS.find((g) => g.id === 'prompt')!.fields, root.prompt),
-      cooldown: pickValues(GROUPS.find((g) => g.id === 'cooldown')!.fields, root.cooldown),
-      pool: pickValues(GROUPS.find((g) => g.id === 'pool')!.fields, root.pool),
-      features: pickValues(GROUPS.find((g) => g.id === 'features')!.fields, root.features),
-      session: pickValues(GROUPS.find((g) => g.id === 'session')!.fields, root.session_sticky),
-      upstream: pickValues(GROUPS.find((g) => g.id === 'upstream')!.fields, root.upstream),
-      global: pickValues(GROUPS.find((g) => g.id === 'global')!.fields, root.global),
+      // 直接引用 settings-fields 导出的字段常量（GROUPS 各组的 fields 就是
+      // 它们），避免 GROUPS.find(...)!.fields 的非空断言——分组 id 改名时
+      // 断言会让运行时直接炸，这里编译期就锚定到常量。
+      schedule: pickValues(SCHEDULE_FIELDS, root.schedule),
+      prompt: pickValues(PROMPT_FIELDS, root.prompt),
+      cooldown: pickValues(COOLDOWN_FIELDS, root.cooldown),
+      pool: pickValues(POOL_FIELDS, root.pool),
+      features: pickValues(FEATURES_FIELDS, root.features),
+      session: pickValues(SESSION_FIELDS, root.session_sticky),
+      upstream: pickValues(UPSTREAM_FIELDS, root.upstream),
+      global: pickValues(GLOBAL_FIELDS, root.global),
     };
     // 保存一个分组成功后 load() 会整表 applyConfig。若直接全量覆盖，
     // 其他分组里未保存的编辑会被无提示清空——这里在 setState 前先算出

@@ -128,16 +128,13 @@ export function CommandPalette() {
   }, [themeUtils]);
 
   // 主题项文案要等挂载后再信 theme（hydration 安全，与 ThemeToggle 同约定）。
-  // 图标随主题态切换：浅色显示月亮（点了去深色）、深色显示太阳、系统态显示显示器。
-  const themeLabel = !mounted
-    ? t('theme.switchToDark')
-    : theme === 'light'
-      ? t('theme.switchToDark')
-      : theme === 'dark'
-        ? t('theme.switchToLight')
-        : t('theme.system');
+  // getAction() 已含未挂载兜底（default = switchToDark），与原嵌套三元等价。
+  const themeLabel = mounted ? themeUtils.getAction() : t('theme.switchToDark');
 
-  const ThemeIcon = !mounted ? Monitor : theme === 'dark' ? Sun : Moon;
+  // 图标随主题态切换：浅色显示月亮（点了去深色）、深色显示太阳、系统态显示
+  // 显示器；未挂载时 theme 不可信，显示显示器与 system 态对齐。
+  const themeIcons: Record<string, typeof Moon> = {light: Moon, dark: Sun, system: Monitor};
+  const ThemeIcon = !mounted ? Monitor : (themeIcons[theme ?? ''] ?? Moon);
 
   const languages = useMemo(
     () => locales.map((l: Locale) => ({code: l, label: LOCALE_LABELS[l]})),

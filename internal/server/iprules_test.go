@@ -213,6 +213,57 @@ func TestIPBlockRulesPersistRoundTrip(t *testing.T) {
 	}
 }
 
+// TestIPBlockRulesCorruptFilePreserved M8：损坏的落盘文件保留现场——构造后
+// 文件字节原样不动（不得用种子 spec 覆盖，否则上一轮保存的规则无信号丢失），
+// 内存回落种子继续运行，errs 非空（JSON 解析失败计入错误清单）。
+func TestIPBlockRulesCorruptFilePreserved(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "iprules.json")
+	seed := ipRuleSpec{Blacklist: []string{"1.1.1.1"}}
+	// 先正常落一份盘，模拟「上一轮保存的规则」。
+	b0, errs := NewIPBlockRules(fp, seed)
+	if len(errs) > 0 {
+		t.Fatalf("seed init: %v", errs)
+	}
+	_ = b0
+	// 人为损坏（模拟半截写/手工编辑出错）。
+	corrupt := []byte(`{"ip_blacklist":["10.0.0.0/8"`)
+	if err := os.WriteFile(fp, corrupt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 重启：回落种子运行，但损坏文件必须原样保留（信号以 WARN 日志形式存在
+	// ——errs 返回值只含 CIDR 条目级错误，文件级解析失败不打进 errs）。
+	b, _ := NewIPBlockRules(fp, seed)
+	rawAfter, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(rawAfter) != string(corrupt) {
+		t.Fatalf("损坏文件被覆盖（种子落盘）：\nbefore=%s\nafter=%s", corrupt, rawAfter)
+	}
+	// 内存按种子运行（1.1.1.1 拦截；磁盘里那条 10/8 不生效）。
+	if allowed, _ := b.Evaluate("1.1.1.1"); allowed {
+		t.Fatal("种子黑名单应在内存生效")
+	}
+	if allowed, _ := b.Evaluate("10.0.0.1"); !allowed {
+		t.Fatal("损坏文件里的条目不得生效")
+	}
+}
+
+// TestIPBlockRulesValidSeedPersists 健康路径回归：文件不存在时合法种子照常
+// 落盘（M8 的跳过落盘只针对损坏文件，不能误伤首次运行的持久化）。
+func TestIPBlockRulesValidSeedPersists(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "iprules.json")
+	_, errs := NewIPBlockRules(fp, ipRuleSpec{Blacklist: []string{"1.1.1.1"}})
+	if len(errs) > 0 {
+		t.Fatalf("init: %v", errs)
+	}
+	if _, err := os.Stat(fp); err != nil {
+		t.Fatalf("首次运行种子应落盘: %v", err)
+	}
+}
+
 // TestIPBlockRulesBlockLogRolling 拦截日志滚动上限：只记拦截、超容量 FIFO
 // 淘汰最旧、满环 wrap 后仍保持时间序。
 func TestIPBlockRulesBlockLogRolling(t *testing.T) {

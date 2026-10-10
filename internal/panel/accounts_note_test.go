@@ -96,6 +96,16 @@ func TestAccountNoteErrors(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("too long: code=%d want 400", rec.Code)
 	}
+
+	// 200 汉字 = 恰好上限，按字符计数应通过（按字节计数会 600 字节误拒）
+	ok200 := strings.Repeat("长", 200)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/api/accounts/u1/note", strReader(`{"note":"`+ok200+`"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("200 runes (600 bytes): code=%d want 200", rec.Code)
+	}
 }
 
 // TestAccountNoteAuth 鉴权口径：无凭证 401；wbt_ token 是写语义 → 403

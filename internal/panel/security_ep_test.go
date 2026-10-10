@@ -214,6 +214,16 @@ func TestSecurityRulesInvalidRejected(t *testing.T) {
 	if len(resp.Errs) == 0 {
 		t.Fatal("非法 trusted_proxy_cidrs 必须产生非空 errs")
 	}
+	// trusted_proxy 校验失败：前置检查语义——旧 IP 规则原样保留（内存与磁盘都
+	// 不动）。修复前此处会用空规则「回滚」，把上面落的 203.0.113.9 黑名单
+	// 清空覆盖（旧黑白名单内存+磁盘双丢）。
+	view = p.cfg.IPRules.RulesView()
+	if got, _ := view["ip_blacklist"].([]string); len(got) != 1 || got[0] != "203.0.113.9" {
+		t.Errorf("trusted_proxy 校验失败不得清空旧 IP 规则: %v", view["ip_blacklist"])
+	}
+	if ok, _ := p.cfg.IPRules.Evaluate("203.0.113.9"); ok {
+		t.Error("旧黑名单在 trusted_proxy 校验失败后必须仍然生效")
+	}
 }
 
 // TestSecurityTrustedProxyEchoFromLoadConfig 注入 LoadConfig 时 trusted_proxy

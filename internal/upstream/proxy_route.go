@@ -172,9 +172,14 @@ func MaskProxyURL(rawURL string) string {
 
 // ValidateProxyRoutes 线路表纯校验（不触碰 Client 状态）：cmd/server 的 config
 // normalize 与面板保存共用（fail-fast 语义，非法 URL 在保存/启动时即被拒绝）。
-// 空表/nil 合法（= 全部直连）。
+// 空表/nil 合法（= 全部直连）。`_` 前缀键视为注释说明（_note 等）跳过不校验
+// ——proxy_routes 是 map[string]string 段（无 struct 段的 _note_* 字位），手写
+// 配置只能靠 `_` 前缀键写段内说明，不能让说明文字被当线路解析成空 scheme 报错。
 func ValidateProxyRoutes(routes map[string]string) error {
 	for name, rawURL := range routes {
+		if strings.HasPrefix(name, "_") {
+			continue // 注释键（如 _note）：不是线路
+		}
 		if strings.TrimSpace(name) == "" {
 			return fmt.Errorf("线路名不能为空")
 		}
@@ -190,10 +195,14 @@ func ValidateProxyRoutes(routes map[string]string) error {
 // 非法 → 报错且**整表不替换**（保持旧表，半新半旧比全旧更危险）。nil/空表
 // = 清空（全部绑定回落直连？不——空表使绑定名必然未命中，按拒绝语义拒绝
 // 发出，行为正确且显式）。替换成功后清空 per-route client 缓存（旧 URL 的
-// 连接池整体作废，新请求按新 URL 重建）。
+// 连接池整体作废，新请求按新 URL 重建）。`_` 前缀键视为注释说明（_note 等）
+// 跳过——与 ValidateProxyRoutes 同口径，手写配置的段内说明不得被当线路解析。
 func (c *Client) SetProxyRoutes(routes map[string]string) error {
 	clean := make(map[string]proxyRouteEntry, len(routes))
 	for name, rawURL := range routes {
+		if strings.HasPrefix(name, "_") {
+			continue // 注释键（如 _note）：不是线路
+		}
 		name = strings.TrimSpace(name)
 		if name == "" {
 			return fmt.Errorf("proxy route 名不能为空")
@@ -257,7 +266,7 @@ func (c *Client) endpoint(a *auth.Auth, chat bool) (*http.Client, error) {
 	hc, err := c.transportFor(a, chat)
 	if err != nil {
 		if a != nil {
-			log.Printf("ERR: [upstream] proxy_route acct=%s: %v", logfmt.Label(a.UID, a.Nickname), err)
+			log.Printf("ERR: [upstream] proxy_route acct=%s: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 		}
 		return nil, err
 	}

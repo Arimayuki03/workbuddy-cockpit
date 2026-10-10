@@ -104,6 +104,14 @@ func TestTokenCreateResolveRoundtrip(t *testing.T) {
 		t.Fatal("empty token must not resolve")
 	}
 
+	// 短前缀形态（"wbt_" 本体 / 前缀 + 不足 8 字符）：拒绝而非 panic——
+	// 修复前 plain[:12] 在此越界（未认证可稳定触发的请求级 panic）。
+	for _, short := range []string{"wbt_", "wbt_abc", "wbt_1234567"} {
+		if got := p.tokenStore.Resolve(short); got != nil {
+			t.Fatalf("short-prefix token %q must not resolve, got %v", short, got)
+		}
+	}
+
 	// 明文绝不入库：落盘文件与内存记录都不得包含明文。
 	raw, err := os.ReadFile(path)
 	if err != nil {

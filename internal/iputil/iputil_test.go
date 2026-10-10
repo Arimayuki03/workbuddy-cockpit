@@ -97,6 +97,17 @@ func TestParseClientIPXFFHops(t *testing.T) {
 	if got != "6.6.6.6" {
 		t.Fatalf("whitespace-tolerant xff: got %q", got)
 	}
+
+	// M6 回归：多跳（hops>=2，CDN+反代）时 X-Real-IP 不得采信——反代的
+	// proxy_set_header X-Real-IP $remote_addr 写入的是 CDN 回源 IP（中间跳），
+	// 采信它等于黑白名单按 CDN 地址判定。必须走 XFF 穿透到真实客户端。
+	got = ParseClientIP("127.0.0.1:5000", hdrs(map[string]string{
+		"X-Real-IP":       "2.2.2.2", // CDN 回源 IP（反代写的，非客户端）
+		"X-Forwarded-For": "1.1.1.1, 2.2.2.2, 3.3.3.3",
+	}), loopback, 2)
+	if got != "2.2.2.2" {
+		t.Fatalf("hops=2 must ignore X-Real-IP and walk XFF: got %q want 2.2.2.2", got)
+	}
 }
 
 // TestParseClientIPIPv6 IPv6 剥壳与 v6 可信网段匹配。

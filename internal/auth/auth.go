@@ -116,6 +116,30 @@ func (a *Auth) RefreshTokenValue() string {
 	return a.RefreshToken
 }
 
+// SetNickname 加锁写 Nickname（余额刷新的昵称同步在锁内改写它，见 balance_refresh.go）。
+func (a *Auth) SetNickname(nick string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.Nickname = nick
+	a.mu.Unlock()
+}
+
+// NicknameValue 加锁读取 Nickname（同 AccessTokenValue：昵称同步在锁内改写它）。
+//
+// 池的 Status/List（statusOf 直读 e.a.Nickname）与面板任务中心 goroutine 都在锁外
+// 读该字段，与余额刷新的写并发即数据竞争——同族字段 AccessToken/Domain/RefreshToken
+// 均有加锁访问器，Nickname 补齐同款口径。
+func (a *Auth) NicknameValue() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.Nickname
+}
+
 // globalEnabled 全局开关：global realm 是否路由（D5 双保险）。
 // 默认开启（与 config global.enabled 缺省 true 一致）：Realm() 正常按显式 realm/
 // domain 判定 global/cn。显式 SetGlobalEnabled(false)（config "enabled": false）关闭
@@ -344,6 +368,7 @@ func (a *Auth) SaveAtomic() error {
 		"account": map[string]any{
 			"uid":          a.UID,
 			"enterpriseId": a.EnterpriseID,
+			// 直读字段：本函数全程持 a.mu（防止半更新快照），NicknameValue 会自锁。
 			"nickname":     a.Nickname,
 		},
 	}
@@ -410,6 +435,7 @@ func (a *Auth) ExportDoc() map[string]any {
 		"account": map[string]any{
 			"uid":          a.UID,
 			"enterpriseId": a.EnterpriseID,
+			// 直读字段：本函数全程持 a.mu（完整 token 快照语义），NicknameValue 会自锁。
 			"nickname":     a.Nickname,
 		},
 	}
@@ -469,15 +495,15 @@ func LoadDir(dir string) ([]*Auth, error) {
 		a.FilePath = f
 		if prev, ok := seenUID[a.UID]; ok {
 			log.Printf("WARN: uid %s duplicated across %s and %s — 后者覆盖（不同 realm 同名 UID？）",
-				logfmt.Label(a.UID, a.Nickname), prev, f)
+				logfmt.Label(a.UID, a.NicknameValue()), prev, f)
 		}
 		seenUID[a.UID] = f
 		if a.RealmStored() == "" {
 			if changed, r := a.BackfillRealm(); changed {
 				if err := a.SaveAtomic(); err != nil {
-					log.Printf("WARN: auth %s realm backfill save: %v", logfmt.Label(a.UID, a.Nickname), err)
+					log.Printf("WARN: auth %s realm backfill save: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 				} else if r == "global" {
-					log.Printf("auth %s 存量迁移: 补 realm=global（domain=%s）", logfmt.Label(a.UID, a.Nickname), a.Domain)
+					log.Printf("auth %s 存量迁移: 补 realm=global（domain=%s）", logfmt.Label(a.UID, a.NicknameValue()), a.Domain)
 				}
 			}
 		}

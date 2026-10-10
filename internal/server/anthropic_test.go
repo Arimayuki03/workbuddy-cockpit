@@ -538,6 +538,67 @@ func TestStreamTranslatorEventSequence(t *testing.T) {
 			t.Error("first finish must emit")
 		}
 	})
+
+	// M10 回归：并行 tool_calls 参数分片跨帧交错（index=0 与 index=1 交替到达），
+	// 各自分槽独立成块——单 toolIdx 形态会把后到分片写进错误的块（串块）。
+	t.Run("parallel tool_use interleaved", func(t *testing.T) {
+		tr := newStreamTranslator("glm-5.2", false)
+		var buf []byte
+		// 两把工具同时开块（同一帧内两个带名分片）。
+		buf = append(buf, tr.feed(map[string]any{
+			"choices": []any{map[string]any{"delta": map[string]any{"tool_calls": []any{
+				map[string]any{"index": 0, "id": "call_a", "type": "function", "function": map[string]any{"name": "search", "arguments": ""}},
+				map[string]any{"index": 1, "id": "call_b", "type": "function", "function": map[string]any{"name": "fetch", "arguments": ""}},
+			}}}},
+		})...)
+		// 参数分片交错：0 号的片段、1 号的片段、再 0 号的片段。
+		buf = append(buf, tr.feed(map[string]any{
+			"choices": []any{map[string]any{"delta": map[string]any{"tool_calls": []any{
+				map[string]any{"index": 0, "function": map[string]any{"arguments": `{"q":`}},
+				map[string]any{"index": 1, "function": map[string]any{"arguments": `{"u`}},
+			}}}},
+		})...)
+		buf = append(buf, tr.feed(map[string]any{
+			"choices": []any{map[string]any{"delta": map[string]any{"tool_calls": []any{
+				map[string]any{"index": 1, "function": map[string]any{"arguments": `rl":"x"}`}},
+				map[string]any{"index": 0, "function": map[string]any{"arguments": `"hi"}`}},
+			}}}},
+		})...)
+		buf = append(buf, tr.finish("tool_calls")...)
+		events := parseAnthEvents(t, string(buf))
+
+		// 两个 tool_use 块（index 0 与 1），各两片 partial_json，交错片段必须
+		// 落到各自块的 index 上（0 号块收到 {"q": 与 "hi"}，1 号块收到 {"u 与 rl":"x"}）。
+		type frag struct{ block int; pj string }
+		var got []frag
+		for _, ev := range events {
+			if ev.Payload["type"] != "content_block_delta" {
+				continue
+			}
+			if d, ok := ev.Payload["delta"].(map[string]any); ok && d["type"] == "input_json_delta" {
+				got = append(got, frag{block: int(ev.Payload["index"].(float64)), pj: d["partial_json"].(string)})
+			}
+		}
+		want := []frag{{0, `{"q":`}, {1, `{"u`}, {1, `rl":"x"}`}, {0, `"hi"}`}}
+		if len(got) != len(want) {
+			t.Fatalf("partials=%v want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("partial[%d]=%+v want %+v（交错分片串块）", i, got[i], want[i])
+			}
+		}
+		// 两块都关掉（各一个 content_block_stop，index 0 与 1）。
+		stops := map[float64]bool{}
+		for _, ev := range events {
+			if ev.Payload["type"] == "content_block_stop" {
+				stops[ev.Payload["index"].(float64)] = true
+			}
+		}
+		if !stops[0] || !stops[1] {
+			t.Errorf("content_block_stop 缺块: %v", stops)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------

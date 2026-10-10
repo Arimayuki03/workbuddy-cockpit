@@ -53,10 +53,14 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 	}()
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
-	// 昵称表：goroutine 外一次性快照（池 List 已含昵称），goroutine 内零池访问。
+	// 昵称表：先单独遍历一遍池构建完整快照，再进并发循环——若边启 goroutine 边写
+	// map，先前 goroutine 的读与主循环的写并发，触发「concurrent map read and
+	// map write」直接 fatal 整个网关进程。
 	nicks := map[string]string{}
 	for _, st := range s.cfg.Pool.List() {
 		nicks[st.UID] = st.Nickname
+	}
+	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
 			continue
 		}
@@ -71,7 +75,7 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 			defer func() { <-sem }()
 			remain, buckets, err := s.cfg.Upstream.UserResourceDetailed(a, s.cfg.ExpiringSoonWindow)
 			if err != nil {
-				log.Printf("balance %s: %v", logfmt.Label(uid, a.Nickname), err)
+				log.Printf("balance %s: %v", logfmt.Label(uid, a.NicknameValue()), err)
 				return
 			}
 			if buckets.Expiring > 0 {
@@ -91,9 +95,7 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 			if nick, perr := s.cfg.Upstream.FetchAccountProfile(a); perr != nil {
 				log.Printf("DEBUG: balance %s: profile skip: %v", logfmt.Label(uid, nickOf(nicks, uid)), perr)
 			} else if nick != "" && nick != nicks[uid] {
-				a.Lock()
-				a.Nickname = nick
-				a.Unlock()
+				a.SetNickname(nick)
 				if err := a.SaveAtomic(); err != nil {
 					// 内存已更新（本次会话即时生效），落盘失败仅记日志：重启后回落旧名。
 					log.Printf("balance %s: nickname save: %v", logfmt.Label(uid, nick), err)

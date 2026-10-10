@@ -34,18 +34,20 @@ import {SystemTab} from '@/components/settings/SystemTab';
 import {AboutTab} from '@/components/settings/AboutTab';
 import {
   DEFAULT_SETTINGS_TAB,
+  SETTINGS_TABS,
   SETTINGS_TAB_LABEL_KEYS,
   settingsTabFromSearch,
   type SettingsTab,
 } from '@/components/settings/settings-tabs';
 
-const TAB_ICONS = {
+/** Tab 图标（按 SETTINGS_TABS 的 slug 索引；清单本体在 settings-tabs.ts） */
+const TAB_ICONS: Record<SettingsTab, React.ReactNode> = {
   config: <Server className="mr-1.5 h-3.5 w-3.5" />,
   models: <Shuffle className="mr-1.5 h-3.5 w-3.5" />,
   tokens: <KeyRound className="mr-1.5 h-3.5 w-3.5" />,
   system: <Sparkles className="mr-1.5 h-3.5 w-3.5" />,
   about: <Info className="mr-1.5 h-3.5 w-3.5" />,
-} as const;
+};
 
 /** 顶部「重新加载」：状态与动作在 settings-context（原 PageHeader actions）。 */
 function ReloadButton() {
@@ -103,7 +105,9 @@ function SettingsBody() {
         {/* 标签较多，手机上会撑破容器，这里允许横向滚动 */}
         <div className="-mx-1 overflow-x-auto px-1 pb-1">
           <TabsList className="w-max">
-            {(Object.keys(TAB_ICONS) as (keyof typeof TAB_ICONS)[]).map((key) => (
+            {/* Tab 清单以 SETTINGS_TABS 为唯一数据源（settings-tabs.ts），
+                图标按 key 索引 TAB_ICONS——两份清单不再各自漂移。 */}
+            {SETTINGS_TABS.map((key) => (
               <TabsTrigger key={key} value={key}>
                 {TAB_ICONS[key]}
                 {t(SETTINGS_TAB_LABEL_KEYS[key])}

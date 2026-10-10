@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,5 +136,43 @@ func TestRestartRequiredNotIncludingProxyRoutes(t *testing.T) {
 		if strings.Contains(f, "proxy") {
 			t.Fatalf("proxy_routes 可热改不应在重启清单: %v", restartRequiredFields(c))
 		}
+	}
+}
+
+// TestExampleConfigProxyRoutesLoad H1 端到端回归：config.example.json（Dockerfile
+// COPY 为镜像默认配置、CI cp 为默认 config.json）必须能原样通过 Load+normalize
+// 整链——修复前 proxy_routes 段的 _note 说明键被 map[string]string 吸收，
+// parseProxyURL 解析空 scheme 必报错，默认镜像启动即 fail-fast。
+// （example 的 api_key 是空串待用户填写，normalize 必填校验会拒——测试补一个
+// key，模拟「拿到 example 后填 key 启动」的最短路径，其余字节原样。）
+func TestExampleConfigProxyRoutesLoad(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "config.example.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("example config not valid JSON: %v", err)
+	}
+	m["api_key"] = "k1"
+	raw, err = json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(fp, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatalf("example config must load as-is (镜像/CI 默认配置): %v", err)
+	}
+	// 示例线路表原样生效（_note 已移段外，段内只剩真实线路）。
+	if len(c.ProxyRoutes) != 2 {
+		t.Fatalf("example proxy_routes = %v, want 2 routes", c.ProxyRoutes)
+	}
+	if c.ProxyRoutes["route-hk"] == "" || c.ProxyRoutes["route-jp"] == "" {
+		t.Fatalf("example proxy_routes entries = %v", c.ProxyRoutes)
 	}
 }

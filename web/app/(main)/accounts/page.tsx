@@ -401,7 +401,9 @@ export default function AccountsPage() {
   const [noteMigrated, setNoteMigrated] = useState(false);
   useEffect(() => {
     if (noteMigrated) return;
-    if (loading) return; // 等 overview 首载（accounts 才有值）
+    // 首载失败时 accounts 是空数组，误判「无旧数据」会直接清掉 localStorage，
+    // 本地备注不可逆丢失——必须等成功加载后再判（loadError 由页面 fetcher 写入）。
+    if (loading || loadError) return;
     setNoteMigrated(true); // 无论结果如何本轮只跑一次
     const pending = Object.entries(localNotes).filter(([uid, text]) => {
       if (!text.trim()) return false;
@@ -437,7 +439,7 @@ export default function AccountsPage() {
         setLocalNotes({});
       }
     });
-  }, [noteMigrated, loading, localNotes, accounts]);
+  }, [noteMigrated, loading, loadError, localNotes, accounts]);
 
   /** 按当前版本过滤（Go 单实例双版本共存；存量无 realm 视为 cn），
    *  再按关键词过滤（uid/昵称/备注），最后按列排序。

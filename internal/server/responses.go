@@ -192,7 +192,15 @@ func (b *rspToolBridge) unique(base string) string {
 	for b.taken[name] {
 		suffix := "_" + strconv.Itoa(n)
 		if len(name)+len(suffix) > 64 {
-			name = rspSanitizeToolName(base)[:64-len(suffix)] + suffix
+			// 截断下标必须上界钳制：短名（净化后 < 64-len(suffix)）配合长占用名
+			// （前一轮拼到恰好 64）时，64-len(suffix) 会超过净化名长度 → 越界 panic
+			// （三个以上同名工具、净化名 59 字符即可复现）。
+			bare := rspSanitizeToolName(base)
+			cut := 64 - len(suffix)
+			if cut > len(bare) {
+				cut = len(bare)
+			}
+			name = bare[:cut] + suffix
 		} else {
 			name = rspSanitizeToolName(base) + suffix
 		}
@@ -852,7 +860,10 @@ func chatToResponses(data map[string]any, model, respID string, bridge *rspToolB
 		if fn != nil {
 			rawName = rspString(fn["name"])
 		}
-		_, isCustom := bridge.restore(rawName)
+		// H8：还原客户端原名——rawName 是出站名（namespace 拼接 / 重名去重后缀 /
+		// 净化改写），直接回传客户端按 function_call.name 派发工具时会找不到。
+		// 流式路径（closeTools）已用 restoredName，此处对齐。
+		restoredName, isCustom := bridge.restore(rawName)
 		if (isCustom || bridge.customNames[rawName]) && finish == "length" {
 			suppressTools = true
 			break
@@ -864,10 +875,10 @@ func chatToResponses(data map[string]any, model, respID string, bridge *rspToolB
 		if isCustom {
 			// custom 包装解码失败时宁可空 input 也不伪装成合法调用。
 			rawInput, _ := rspCustomInputDecode(rspArgsString(fn))
-			callItems = append(callItems, rspCustomCallItem(callID, rspID("ctc"), rawName, rawInput))
+			callItems = append(callItems, rspCustomCallItem(callID, rspID("ctc"), restoredName, rawInput))
 			continue
 		}
-		callItems = append(callItems, rspFunctionCallItem(callID, rspID("fc"), rawName, rspArgsString(fn)))
+		callItems = append(callItems, rspFunctionCallItem(callID, rspID("fc"), restoredName, rspArgsString(fn)))
 	}
 	if !suppressTools {
 		output = append(output, callItems...)

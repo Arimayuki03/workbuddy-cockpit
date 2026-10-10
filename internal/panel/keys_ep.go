@@ -39,19 +39,33 @@ import (
 const exportModelFallback = "cn:glm-5.2"
 
 // keyPayload POST /api/keys 请求体（web/lib/types.ts KeyCreatePayload 契约）。
+// 可清零字段（ExpiresAt/MaxIPs/TokenQuota/CreditQuota/RateLimit）是**指针**：
+// JSON 缺省 = nil = 不改（PATCH 部分更新语义），显式提交（含 0）= 显式设置
+// （0 = 清回「不限」）。值类型 + `!= 0` 判空会让「清空配额」被静默吞掉——
+// 前端编辑表单恒发全量 payload，用户清空即踩中。POST 侧解引用后传 Create
+// （缺省即 0，与创建语义一致）。
 type keyPayload struct {
 	Name           string   `json:"name"`
 	Realm          string   `json:"realm"`
-	ExpiresAt      int64    `json:"expires_at"`
-	MaxIPs         int      `json:"max_ips"`
+	ExpiresAt      *int64   `json:"expires_at"`
+	MaxIPs         *int     `json:"max_ips"`
 	IPWhitelist    []string `json:"ip_whitelist"`
 	ModelWhitelist []string `json:"model_whitelist"`
-	TokenQuota     int64    `json:"token_quota"`
-	CreditQuota    float64  `json:"credit_quota"`
-	RateLimit      int      `json:"rate_limit"`
+	TokenQuota     *int64   `json:"token_quota"`
+	CreditQuota    *float64 `json:"credit_quota"`
+	RateLimit      *int     `json:"rate_limit"`
 	// Enabled 仅 PATCH 消费（KeyUpdatePayload 的附加字段）；POST 忽略——
 	// 新密钥恒启用（keystore.Create 语义），前端创建表单也不发该字段。
 	Enabled *bool `json:"enabled"`
+}
+
+// deref 辅助：指针缺省（nil）取零值（POST 创建路径：缺省 = 0 = 不限）。
+func deref[T any](p *T) T {
+	var zero T
+	if p == nil {
+		return zero
+	}
+	return *p
 }
 
 // keyView 前端 ApiKey DTO（web/lib/types.ts 同名字段契约；json tag 即响应键）。
@@ -107,13 +121,13 @@ func (p *Panel) keyCreate(w http.ResponseWriter, r *http.Request) {
 	plaintext, k, err := p.cfg.KeyStore.Create(keystore.CreateParams{
 		Name:           body.Name,
 		Realm:          body.Realm,
-		ExpiresAt:      body.ExpiresAt,
-		MaxIPs:         body.MaxIPs,
+		ExpiresAt:      deref(body.ExpiresAt),
+		MaxIPs:         deref(body.MaxIPs),
 		IPWhitelist:    body.IPWhitelist,
 		ModelWhitelist: body.ModelWhitelist,
-		TokenQuota:     body.TokenQuota,
-		CreditQuota:    body.CreditQuota,
-		RateLimit:      body.RateLimit,
+		TokenQuota:     deref(body.TokenQuota),
+		CreditQuota:    deref(body.CreditQuota),
+		RateLimit:      deref(body.RateLimit),
 	})
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -156,11 +170,11 @@ func (p *Panel) keyUpdate(w http.ResponseWriter, r *http.Request) {
 		if body.Realm != "" {
 			k.Realm = body.Realm
 		}
-		if body.ExpiresAt != 0 {
-			k.ExpiresAt = body.ExpiresAt
+		if body.ExpiresAt != nil {
+			k.ExpiresAt = *body.ExpiresAt
 		}
-		if body.MaxIPs != 0 {
-			k.MaxIPs = body.MaxIPs
+		if body.MaxIPs != nil {
+			k.MaxIPs = *body.MaxIPs
 		}
 		if body.IPWhitelist != nil {
 			k.IPWhitelist = body.IPWhitelist
@@ -168,14 +182,14 @@ func (p *Panel) keyUpdate(w http.ResponseWriter, r *http.Request) {
 		if body.ModelWhitelist != nil {
 			k.ModelWhitelist = body.ModelWhitelist
 		}
-		if body.TokenQuota != 0 {
-			k.TokenQuota = body.TokenQuota
+		if body.TokenQuota != nil {
+			k.TokenQuota = *body.TokenQuota
 		}
-		if body.CreditQuota != 0 {
-			k.CreditQuota = body.CreditQuota
+		if body.CreditQuota != nil {
+			k.CreditQuota = *body.CreditQuota
 		}
-		if body.RateLimit != 0 {
-			k.RateLimit = body.RateLimit
+		if body.RateLimit != nil {
+			k.RateLimit = *body.RateLimit
 		}
 		if body.Enabled != nil {
 			k.Enabled = *body.Enabled

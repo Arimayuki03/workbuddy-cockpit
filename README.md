@@ -48,12 +48,12 @@ WorkBuddy Cockpit 是一个自托管的一体化项目：**后端**是多账号 
 
 ### 🔀 双协议直连（Anthropic Messages + OpenAI Responses）
 
-- **Anthropic Messages API**（`/v1/messages` + `/v1/messages/count_tokens`）— Claude Code 等 Anthropic 协议客户端免转换层直连；`thinking` 的 enabled / adaptive 两态都支持；tool_result 内嵌图片正确提取为视觉输入（不再把 base64 塞进文本撑爆上下文）；count_tokens 按 CJK / 非 CJK 分类保守估算；鉴权与 chat completions 同口径（同一把 key）。
-- **OpenAI Responses API**（`/v1/responses`）— Codex 等 Responses 客户端直连；instructions / input items 完整转换、reasoning item 宽容回填（防上游 11155「推理内容缺失」死循环）、`prompt_cache_key` 透传（缓存命中后费用差约 17 倍）、namespace 工具桥接为 function call。
+- **Anthropic Messages API**（`/v1/messages` + `/v1/messages/count_tokens`）— Claude Code 等 Anthropic 协议客户端免转换层直连；`thinking` 的 enabled / adaptive 两态都支持；tool_result 内嵌图片正确提取为视觉输入（不再把 base64 塞进文本撑爆上下文）；count_tokens 按 CJK / 非 CJK 分类保守估算；鉴权与 chat completions 同口径（同一把 key）。流式经 io.Pipe 边生成边翻译下发（v1.17.1 前为全量缓冲伪流式）；并行 tool_calls 按上游 `index` 分槽成块，参数交错分片不串块（v1.17.1）。
+- **OpenAI Responses API**（`/v1/responses`）— Codex 等 Responses 客户端直连；instructions / input items 完整转换、reasoning item 宽容回填（防上游 11155「推理内容缺失」死循环）、`prompt_cache_key` 透传（缓存命中后费用差约 17 倍）、namespace 工具桥接为 function call；非流式工具调用回传客户端原名而非内部出站名（v1.17.1）。
 
 ### 🛡️ 入站 IP 安全
 
-`security` 配置段（`trusted_proxy_cidrs` / `trusted_proxy_hops` / `ip_blacklist` / `ip_whitelist` / `ip_whitelist_mode`）：**默认零配置完全不信任转发头**——直连部署下伪造 `X-Real-IP` 无法绕过任何 IP 管控；反代 / CDN 后部署按网段声明可信代理，网关才从 `X-Forwarded-For` 还原真实来源。面板「安全」页提供 IP 规则热编辑、拦截日志（只记拦截，环形 512 条）与模型锁池卡片。
+`security` 配置段（`trusted_proxy_cidrs` / `trusted_proxy_hops` / `ip_blacklist` / `ip_whitelist` / `ip_whitelist_mode`）：**默认零配置完全不信任转发头**——直连部署下伪造 `X-Real-IP` 无法绕过任何 IP 管控；反代 / CDN 后部署按网段声明可信代理，网关才从 `X-Forwarded-For` 还原真实来源（多跳场景 `X-Real-IP` 一律不采信、只走 XFF 从右往左穿透，v1.17.1）。面板「安全」页提供 IP 规则热编辑（校验失败整体不生效、绝不因"回滚"清空已存规则，v1.17.1）、拦截日志（只记拦截，环形 512 条）与模型锁池卡片；规则文件读盘 / 解析失败时明确告警并保留原文件供排查，不静默回落（v1.17.1）。
 
 ### 💰 credit_floor 积分保底
 
@@ -64,7 +64,7 @@ WorkBuddy Cockpit 是一个自托管的一体化项目：**后端**是多账号 
 浏览器打开即用，与网关同端口同鉴权，明暗主题，简中 / 繁中 / 英 / 日 / 韩五语言：
 
 - **总览** — 账号健康分布、今日请求 / token / 积分扣费一目了然；到期积分按天归并口径切换（本地偏好）
-- **账号** — 池总览（状态 / 积分进度条 / 冷却倒计时 / 成功失败计数 / 在途数）；单号禁用 / 恢复 / 复活 / 签到 / 查余额 / 移除；批量签到 / 保活 / 余额刷新；**扫码 / 授权登录添加账号**，凭证落盘后热加载进池，免重启；**凭据导出 / 导入**（跨部署迁移账号，同 UID 覆盖更新）；**强制清冷却**（冷却 / 熔断 / 连败降权 / 模型级限流一键归零，不碰禁用位）；**账号备注**（本地存储）与**搜索 + 分页**；积分变动流水（余额刷新对比快照，增加即记）
+- **账号** — 池总览（状态 / 积分进度条 / 冷却倒计时 / 成功失败计数 / 在途数）；单号禁用 / 恢复 / 复活 / 签到 / 查余额 / 移除；批量签到 / 保活 / 余额刷新；**扫码 / 授权登录添加账号**，凭证落盘后热加载进池，免重启；**凭据导出 / 导入**（跨部署迁移账号，同 UID 覆盖更新）；**强制清冷却**（冷却 / 熔断 / 连败降权 / 模型级限流一键归零，不碰禁用位）；**账号备注**（后端持久化进 state.json，换浏览器不丢）与**搜索 + 分页**；积分变动流水（余额刷新对比快照，增加即记）
 - **任务** — 成长任务一键自动化（25 个任务动作纯 API 完成：推进 → 轮询计分 → 自动领奖，执行队列账号内串行、账号间并发；含小程序 Sequential_Tasks_1..7 顺序任务链——专家对话、5/10 次对话、GLM5.2、灵感功能等，链式依赖每日解锁自动重试，**锁定环不扫入待办**，小程序对话上报按真人节奏执行——每条间隔 45s+ 随机抖动、可被队列取消中断）；历史券码二维码查询（开学季任务闭环已随活动 2026-09-24 结束下线）；六类定时任务快照与手动触发；**积分变动流水**（任务中心记录流 kind=credit）
 - **统计** — 逐请求用量分桶（时间片 × 域 × 账号 × 模型）时间轴图表 + 按模型 / 账号聚合的请求量 / token / 延迟 / 扣费 / **积分（含积分每百万 token 单价，与积分同时观测的配对 token 才计入比例）**；时间窗筛选图和表同步生效；时间窗含近 24h / 72h / 7d / 30d 数字档与「启动以来」全量档
 - **日志** — 请求日志（模型 / 账号 / 状态 / tokens / 首字延迟 / 扣费 / 错误 / **prompt 缓存命中三段观测**，环形缓冲最近约 1000 条）+ 系统日志（任务 / 对话 / 系统三频道）；请求日志可 **JSONL 归档**（`data/requests/` 按天轮转，重启不丢，`logging` 段配置保留天数与容量上限；client_ip / user_agent 脱敏开关默认不采集）
@@ -289,6 +289,7 @@ workbuddy-cockpit/
 | v1.15.1 | 2026-09-29 | **镜像构建修复**——多架构镜像的前端 / Go 构建段钉 `BUILDPLATFORM` 原生构建 + Go 按 `TARGETOS/TARGETARCH` 交叉编译，不再走 QEMU 模拟（v1.15.0 的 ghcr 镜像构建在模拟 arm64 内 `next/font` 拉 Google Fonts ETIMEDOUT 失败，release 二进制不受影响）；网关代码与 v1.15.0 完全一致 |
 | v1.16.0 | 2026-10-08 | **吸收两上游能力大版本**——**多密钥分发**（`wbk_` 前缀，realm / 有效期 / IP 白名单 / 模型白名单 / Token 与积分配额 / 限流逐把可设，明文仅创建时可见、库中只存 SHA-256，创建弹窗一次性导出 9 种客户端配置片段）；**双协议直连**（Anthropic Messages `/v1/messages` + count_tokens，Claude Code 直连；OpenAI Responses `/v1/responses`，Codex 直连，reasoning item 宽容回填防 11155 死循环、`prompt_cache_key` 透传省费约 17 倍）；**入站 IP 安全**（`security` 段：默认零配置完全不信任转发头防伪造 `X-Real-IP`，反代按网段声明可信代理；面板「安全」页规则编辑 + 拦截日志 + 模型锁池卡片）；**credit_floor 积分保底**（触底号不接收费模型，防烧费）；模型锁池可见性（`/status` 三态聚合 + 503 `model_blocked`）；请求日志 JSONL 归档（按天轮转重启不丢，client_ip/UA 脱敏默认不采集）；**作用域 Token**（`wbt_` 前缀只读 / 管理两档，写操作仅会话 cookie 可用）；账号治理增量（积分变动流水 / Token 续期巡检 `schedule.renew_*` / 账号备注与搜索分页 / 昵称同步）；出站修复一批（GPT 系 max_tokens 钳制防 11133、工具 schema `\_` 归一防 11129、背靠背 tool_calls 合并防 11148、11101 立即 400 直通、上游超时止损不罚号、流式成功判定延后到真成功）；面板 UI（⌘K 命令面板 / 全局错误兜底页 / 加载失败与空态区分 / settings 拆子路由）；运维（docker-compose PUID/PGID 参数化、单文件 bind mount EBUSY 写回回退、签到/余额瞬时错误有界重试、模型目录桌面 UA 第三路探测、tok/s 200ms 护栏、密钥导出片段） |
 | v1.17.0 | 2026-10-08 | **个人自用体验轮**——**每账号出口代理线路**（`proxy_routes` 线路表 + 账号绑定 `proxy_route`，http/https 代理，签到/余额/续期/对话全链路走绑定出口，绑定失效线路拒绝出站绝不静默回退，面板账号页「线路」下拉即选即存、URL 脱敏回显，配置热改）；**积分到期提醒**（仪表盘卡片：7/14/30 天窗口、FEFO 先用哪包提示、最紧急 1-3 包明细与完整到期升序列表、数据年龄标注；积分包解析补 `DeductionEndTime` 真失效时刻）；**账号备注后端化**（`note` 字段进 state.json 持久化 + `/api/accounts/{uid}/note` 端点，localStorage 自动迁移到服务器，换浏览器不丢）；**签到已签回显**（「今日已签到」按钮态与提示）；**503 model_blocked 补漏**（全池模型级阻塞时轮转耗尽返回 `model_blocked` + `Retry-After`，不再伪装成「无可用账号」；6004 原因入文案定位根因） |
+| v1.17.1 | 2026-10-10 | **审查修复轮**（对 v1.16.0/v1.17.0 两轮 4 提交做全量 OCR 审查 + 双模型交叉验证，73 条评论验证后落地 40 处修复）——**稳定性**：余额刷新昵称表并发写 map fatal（critical）、`a.Nickname` 无锁读写 data race（补 `NicknameValue`/`SetNickname` 访问器全仓收口）、Anthropic SSE error 帧 goroutine 泄漏、`wbt_` 短前缀切片越界 panic、Responses 工具名去重截断越界 panic；**数据安全**：密钥库 Flush 失败后 dirty 不回挂导致停机丢变更、安全页 trusted_proxy 校验失败的"回滚"实为清空旧 IP 规则、iprules 读盘损坏静默回落且覆盖落盘、账号备注迁移在 overview 首载失败时误清空 localStorage；**行为正确性**：模型白名单 `global:` 前缀口径两侧统一（此前照 `/v1/models` 抄写恒 400）、密钥 realm 脏值归一、Anthropic 流式改 io.Pipe 真流式（此前全量缓冲、客户端全程零字节）、并行 tool_calls 按上游 index 分槽（此前串块）、非流式工具调用回传客户端原名、X-Real-IP 多跳时不采信、keys 编辑零值字段可显式清零、备注长度按字符校验、五语言 `settings.tokens.prefix` 键补齐、面板多处未处理 Promise rejection/日期时区漂移/心跳无 catch 修复 |
 
 完整变更见 [Releases](https://github.com/Arimayuki03/workbuddy-cockpit/releases)。
 

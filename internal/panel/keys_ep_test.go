@@ -152,6 +152,47 @@ func TestKeysCRUDFlow(t *testing.T) {
 		t.Errorf("patch 404: code=%d", rec.Code)
 	}
 
+	// --- PATCH 显式清零（指针语义）：0 必须写进去（= 改回不限），不得被
+	// 「!= 0 判空」静默吞——前端编辑表单恒发全量 payload，用户清空配额即踩中 ---
+	rec = doKeysCookie(t, p, "PATCH", "/api/keys/"+id,
+		`{"token_quota":0,"credit_quota":0,"rate_limit":0,"max_ips":0}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch zeros: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var zeroed struct {
+		Key map[string]any `json:"key"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &zeroed); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"token_quota", "credit_quota", "rate_limit", "max_ips"} {
+		if zeroed.Key[f] != float64(0) {
+			t.Errorf("PATCH %s=0 未生效（清零被吞）: %v", f, zeroed.Key[f])
+		}
+	}
+
+	// --- PATCH 字段缺省 = 不改（部分更新语义不受指针化影响）---
+	rec = doKeysCookie(t, p, "PATCH", "/api/keys/"+id, `{"name":"renamed"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch name-only: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var kept struct {
+		Key map[string]any `json:"key"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &kept); err != nil {
+		t.Fatal(err)
+	}
+	if kept.Key["name"] != "renamed" {
+		t.Errorf("name 未改: %v", kept.Key["name"])
+	}
+	if kept.Key["rate_limit"] != float64(0) {
+		// 前一步刚清零到 0，本步未提交该字段应保持 0（同时覆盖「缺省不改」）
+		t.Errorf("未提交的 rate_limit 应保持 0: %v", kept.Key["rate_limit"])
+	}
+	if kept.Key["token_quota"] != float64(0) {
+		t.Errorf("未提交的 token_quota 应保持 0: %v", kept.Key["token_quota"])
+	}
+
 	// --- reset_usage：RecordUse 记账后归零 ---
 	k := p.cfg.KeyStore.List()[0]
 	p.cfg.KeyStore.RecordUse(&k, "10.0.0.1", 500, 1.25)

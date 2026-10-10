@@ -766,10 +766,10 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 		for i := 1; i <= count; i++ {
 			rid := fmt.Sprintf("%s-r%d", cid, i)
 			if err := s.cfg.Upstream.ReportChatActivity(a, cid, rid); err != nil {
-				log.Printf("activity %s: report %d/%d: %v", logfmt.Label(a.UID, a.Nickname), i, count, err)
+				log.Printf("activity %s: report %d/%d: %v", logfmt.Label(a.UID, a.NicknameValue()), i, count, err)
 				break // 本号上报失败：不再续发，streak 自检无意义
 			}
-			log.Printf("activity %s: report %d/%d ok", logfmt.Label(a.UID, a.Nickname), i, count)
+			log.Printf("activity %s: report %d/%d ok", logfmt.Label(a.UID, a.NicknameValue()), i, count)
 			ok++
 			if i < count {
 				// 账号内 5 条之间间隔，避免秒发风控；取消时立即放弃本号剩余条数。
@@ -802,14 +802,14 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 func (s *Scheduler) checkActivityStreak(a *auth.Auth) bool {
 	days, err := s.cfg.Upstream.GrowthStreak(a)
 	if err != nil {
-		log.Printf("WARN: activity %s: streak check failed (report OK): %v", logfmt.Label(a.UID, a.Nickname), err)
+		log.Printf("WARN: activity %s: streak check failed (report OK): %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 		return true
 	}
 	if days == 0 {
-		log.Printf("WARN: activity %s: report OK but streak.days=0 (silent drop?)", logfmt.Label(a.UID, a.Nickname))
+		log.Printf("WARN: activity %s: report OK but streak.days=0 (silent drop?)", logfmt.Label(a.UID, a.NicknameValue()))
 		return true
 	}
-	log.Printf("activity %s: streak days=%d", logfmt.Label(a.UID, a.Nickname), days)
+	log.Printf("activity %s: streak days=%d", logfmt.Label(a.UID, a.NicknameValue()), days)
 	return false
 }
 
@@ -851,7 +851,7 @@ func (s *Scheduler) claimGrowthRewards(a *auth.Auth) {
 	s.claimGrowthBonus(a)
 	state, err := s.cfg.Upstream.GrowthRewardState(a)
 	if err != nil {
-		log.Printf("WARN: activity %s: reward-state: %v", logfmt.Label(a.UID, a.Nickname), err)
+		log.Printf("WARN: activity %s: reward-state: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 		return
 	}
 	// 0.5 补签保连登（panel makeupYesterday 口径）：昨日漏签（heatmap score==0）且
@@ -872,11 +872,11 @@ func (s *Scheduler) claimGrowthRewards(a *auth.Auth) {
 	switch {
 	case err == nil:
 		log.Printf("activity %s: redeem tier=%s ok (+%d credit, +%d energy, +%d chances)",
-			logfmt.Label(a.UID, a.Nickname), tier, res.CreditGranted, res.EnergyGranted, res.ChancesGranted)
+			logfmt.Label(a.UID, a.NicknameValue()), tier, res.CreditGranted, res.EnergyGranted, res.ChancesGranted)
 	case upstream.IsRedeemAlreadyClaimed(err) || upstream.IsRedeemNotEnoughDays(err):
-		log.Printf("activity %s: redeem tier=%s skip (already claimed or days not enough)", logfmt.Label(a.UID, a.Nickname), tier)
+		log.Printf("activity %s: redeem tier=%s skip (already claimed or days not enough)", logfmt.Label(a.UID, a.NicknameValue()), tier)
 	default:
-		log.Printf("activity %s: redeem tier=%s: %v", logfmt.Label(a.UID, a.Nickname), tier, err)
+		log.Printf("activity %s: redeem tier=%s: %v", logfmt.Label(a.UID, a.NicknameValue()), tier, err)
 	}
 	// 标记当日已处理（无论 redeem 是否成功都记一次：领取类各状态当日不再重试，
 	// 避免对上游重复写；成功→无需再领，失败→当日不轰炸，次日自然日重置/上游幂等兜底）。
@@ -892,7 +892,7 @@ func (s *Scheduler) claimGrowthRewards(a *auth.Auth) {
 func (s *Scheduler) streakClaimTiers(a *auth.Auth) {
 	state, err := s.cfg.Upstream.GrowthRewardState(a)
 	if err != nil {
-		log.Printf("WARN: streak-bonus %s: reward-state: %v", logfmt.Label(a.UID, a.Nickname), err)
+		log.Printf("WARN: streak-bonus %s: reward-state: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 		return
 	}
 	days := state.Days()
@@ -907,11 +907,11 @@ func (s *Scheduler) streakClaimTiers(a *auth.Auth) {
 		case err == nil:
 			redeemed++
 			log.Printf("streak-bonus %s: redeem tier=%s ok (+%d credit, +%d energy, +%d chances)",
-				logfmt.Label(a.UID, a.Nickname), tier, res.CreditGranted, res.EnergyGranted, res.ChancesGranted)
+				logfmt.Label(a.UID, a.NicknameValue()), tier, res.CreditGranted, res.EnergyGranted, res.ChancesGranted)
 		case upstream.IsRedeemAlreadyClaimed(err) || upstream.IsRedeemNotEnoughDays(err):
 			// 正常态：已领/服务端判定不足，静默跳过（跨档竞态兜底）。
 		default:
-			log.Printf("streak-bonus %s: redeem tier=%s: %v", logfmt.Label(a.UID, a.Nickname), tier, err)
+			log.Printf("streak-bonus %s: redeem tier=%s: %v", logfmt.Label(a.UID, a.NicknameValue()), tier, err)
 		}
 	}
 	if redeemed == 0 {
@@ -944,10 +944,10 @@ func growthEligibleTier(days int, rs *upstream.GrowthRedemptionStatus) string {
 // 业务错误是常态（绝大多数号早已领过），无法与真错误可靠区分，不刷 WARN。
 func (s *Scheduler) claimGrowthBonus(a *auth.Auth) {
 	if credit, err := s.cfg.Upstream.ClaimGift(a); err == nil && credit > 0 {
-		log.Printf("activity %s: gift ok (+%d credit)", logfmt.Label(a.UID, a.Nickname), credit)
+		log.Printf("activity %s: gift ok (+%d credit)", logfmt.Label(a.UID, a.NicknameValue()), credit)
 	}
 	if credit, err := s.cfg.Upstream.ClaimCompensation(a); err == nil && credit > 0 {
-		log.Printf("activity %s: compensation ok (+%d credit)", logfmt.Label(a.UID, a.Nickname), credit)
+		log.Printf("activity %s: compensation ok (+%d credit)", logfmt.Label(a.UID, a.NicknameValue()), credit)
 	}
 }
 
@@ -973,10 +973,10 @@ func (s *Scheduler) makeupYesterday(a *auth.Auth) bool {
 		return false // 无卡或查询失败：静默（次日再判）
 	}
 	if err := s.cfg.Upstream.UseMakeupCard(a, yesterday); err != nil {
-		log.Printf("activity %s: makeup %s: %v", logfmt.Label(a.UID, a.Nickname), yesterday, err)
+		log.Printf("activity %s: makeup %s: %v", logfmt.Label(a.UID, a.NicknameValue()), yesterday, err)
 		return false
 	}
-	log.Printf("activity %s: makeup ok %s (+streak kept)", logfmt.Label(a.UID, a.Nickname), yesterday)
+	log.Printf("activity %s: makeup ok %s (+streak kept)", logfmt.Label(a.UID, a.NicknameValue()), yesterday)
 	return true
 }
 
@@ -987,24 +987,24 @@ func (s *Scheduler) makeupYesterday(a *auth.Auth) bool {
 func (s *Scheduler) claimGrowthLottery(a *auth.Auth) {
 	chances, err := s.cfg.Upstream.GrowthLotteryChances(a)
 	if err != nil {
-		log.Printf("WARN: activity %s: lottery-chances: %v", logfmt.Label(a.UID, a.Nickname), err)
+		log.Printf("WARN: activity %s: lottery-chances: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 		return
 	}
 	for i := 0; i < chances; i++ {
 		res, err := s.cfg.Upstream.GrowthLotteryDraw(a, "") // 每次自动新 client_token
 		switch {
 		case err == nil:
-			log.Printf("activity %s: lottery %d/%d drawn prize=%s (%s)", logfmt.Label(a.UID, a.Nickname), i+1, chances, res.PrizeName, res.PrizeType)
+			log.Printf("activity %s: lottery %d/%d drawn prize=%s (%s)", logfmt.Label(a.UID, a.NicknameValue()), i+1, chances, res.PrizeName, res.PrizeType)
 		case upstream.IsLotteryNoChance(err) || upstream.IsLotteryDisabled(err):
-			log.Printf("activity %s: lottery skip (no chances or disabled)", logfmt.Label(a.UID, a.Nickname))
+			log.Printf("activity %s: lottery skip (no chances or disabled)", logfmt.Label(a.UID, a.NicknameValue()))
 			return
 		default:
-			log.Printf("activity %s: lottery draw: %v", logfmt.Label(a.UID, a.Nickname), err)
+			log.Printf("activity %s: lottery draw: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 			return
 		}
 	}
 	if chances > 0 {
-		log.Printf("activity %s: lottery done %d draw(s)", logfmt.Label(a.UID, a.Nickname), chances)
+		log.Printf("activity %s: lottery done %d draw(s)", logfmt.Label(a.UID, a.NicknameValue()), chances)
 	}
 }
 

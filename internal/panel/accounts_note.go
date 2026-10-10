@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"unicode/utf8"
 )
 
 // noteBody 请求体：{"note": "..."}。空串 = 清除备注（与前端「清空即删除」语义对齐）。
@@ -20,7 +21,9 @@ type noteBody struct {
 	Note string `json:"note"`
 }
 
-// noteMaxLength 备注长度上限，与 web 前端 NoteEditor 的 maxLength=200 同口径。
+// noteMaxLength 备注长度上限，与 web 前端 NoteEditor 的 maxLength=200 同口径
+// （按字符/rune 计数，非字节——前端 maxLength 按 UTF-16 码元、汉字占 1 码元，
+// 服务端按字节会 1 汉字顶 3 长度，67 个汉字就误拒，两端口径必须一致）。
 const noteMaxLength = 200
 
 // accountNote 保存单账号备注。空 note = 清除。
@@ -39,7 +42,7 @@ func (p *Panel) accountNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	note := body.Note
-	if len(note) > noteMaxLength {
+	if utf8.RuneCountInString(note) > noteMaxLength {
 		writeErr(w, http.StatusBadRequest, "note_too_long")
 		return
 	}
@@ -50,7 +53,7 @@ func (p *Panel) accountNote(w http.ResponseWriter, r *http.Request) {
 	if note == "" {
 		log.Printf("panel: note uid=%s（备注已清除）", uid)
 	} else {
-		log.Printf("panel: note uid=%s（备注已保存，%d 字符）", uid, len(note))
+		log.Printf("panel: note uid=%s（备注已保存，%d 字符）", uid, utf8.RuneCountInString(note))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

@@ -1120,7 +1120,8 @@
       "loadError": "Failed to load tokens",
       "neverUsed": "Never used",
       "lastUsed": "Last used",
-      "createdAt": "Created"
+      "createdAt": "Created",
+      "prefix": "Prefix"
     }
   },
   "phrases": {

@@ -1318,7 +1318,8 @@
       "loadError": "토큰 목록을 불러오지 못했습니다",
       "neverUsed": "사용된 적 없음",
       "lastUsed": "마지막 사용",
-      "createdAt": "생성일"
+      "createdAt": "생성일",
+      "prefix": "접두사"
     }
   },
   "phrases": {

@@ -1318,7 +1318,8 @@
       "loadError": "權杖清單載入失敗",
       "neverUsed": "從未使用",
       "lastUsed": "最近使用",
-      "createdAt": "建立時間"
+      "createdAt": "建立時間",
+      "prefix": "前綴"
     }
   },
   "phrases": {

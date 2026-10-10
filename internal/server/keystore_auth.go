@@ -51,12 +51,21 @@ func keyStateFrom(r *http.Request) *keyStoreState {
 	return v
 }
 
-// keyBareModel 模型白名单比对用的归一：剥 `cn:` 前缀，**保留 `global:`**。与
-// keystore 包内 bareModel 同口径（界面上显示裸名、用户照着填，存量白名单可能写
-// 带前缀的形态，归一后两种写法等价）。keystore 不导出该函数，这里保持同一规则
-// 的两份实现——规则漂移由 keystore 侧 Validate 白名单单测与 server 侧对齐测试共同锁定。
+// keyBareModel 模型白名单比对用的归一：剥 `cn:` 与 `global:` 前缀，两侧同剥后
+// 精确比对。与 keystore 包内 bareModel 同口径（界面上显示裸名、用户照着填，存量
+// 白名单可能写带前缀的形态，归一后两种写法等价）。keystore 不导出该函数，这里保持
+// 同一规则的两份实现——规则漂移由 keystore 侧 Validate 白名单单测与 server 侧
+// 对齐测试共同锁定。global: 也剥的理由同 keystore.bareModel 注释：列表裁剪
+// （本函数）与调用校验（keystore.Validate，server 传裸名）必须同口径，否则
+// 「列表里能看到、调用必被拒」。
 func keyBareModel(model string) string {
-	return strings.TrimPrefix(model, "cn:")
+	if strings.HasPrefix(model, "cn:") {
+		return model[3:]
+	}
+	if strings.HasPrefix(model, "global:") {
+		return model[7:]
+	}
+	return model
 }
 
 // ---------------------------------------------------------------------------
@@ -186,8 +195,8 @@ func (h *Handler) validateKeyForRequest(r *http.Request, model, realm string, no
 //   - realm：key.Realm 非空（归一后）时只保留该域条目，条目归属按下发 id 前缀判
 //     （global: 前缀 = global，cn: 前缀与裸名 = cn，与 resolveModel 前缀协议同口径）；
 //   - 白名单：key.ModelWhitelist 非空时只保留命中条目，下发 id 与白名单条目两侧过
-//     keyBareModel 后精确比对（cn: 前缀写法等价，global: 保留——决定路由域，
-//     两个版本同名模型不是一回事）。id 用 /v1/models 现有下发口径原样匹配。
+//     keyBareModel 后精确比对（cn:/global: 前缀写法等价——与调用侧 keystore.Validate
+//     同口径，保证「列表里有的就能调用」）。id 用 /v1/models 现有下发口径原样匹配。
 //
 // 无密钥上下文 / keystore 未接线 / 两个约束都空 → 原样返回（零裁剪零回归）。
 func (h *Handler) filterModelsForKey(r *http.Request, list []map[string]any) []map[string]any {

@@ -836,9 +836,11 @@ export interface SecurityRulesPayload {
   trusted_proxy_hops: number;
 }
 
-/** POST /api/security/rules 响应：errs 为校验错误清单（空数组 = 保存成功） */
+/** POST /api/security/rules 响应：errs 为校验错误清单（空数组 = 校验通过） */
 export interface SecurityRulesResponse {
   errs: string[];
+  /** config 落盘失败时的错误文案，空 = 完全成功（IP 规则已生效且配置已持久化） */
+  error?: string;
 }
 
 /** 模型锁池单行：模型级冷却的聚合视图 */

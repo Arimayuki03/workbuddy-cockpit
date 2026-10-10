@@ -1095,7 +1095,8 @@
       "loadError": "令牌列表加载失败",
       "neverUsed": "从未使用",
       "lastUsed": "最近使用",
-      "createdAt": "创建时间"
+      "createdAt": "创建时间",
+      "prefix": "前缀"
     }
   },
   "activity": {

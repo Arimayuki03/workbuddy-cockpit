@@ -176,7 +176,7 @@ func (s *Scheduler) runCat(ctx context.Context) {
 		}
 		need, err := s.cfg.Upstream.BlackcatNeed(a)
 		if err != nil {
-			log.Printf("cat %s: %v", logfmt.Label(a.UID, a.Nickname), err)
+			log.Printf("cat %s: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 			continue
 		}
 		if need <= 0 {
@@ -184,9 +184,9 @@ func (s *Scheduler) runCat(ctx context.Context) {
 		}
 		ok, err := s.cfg.Upstream.RunNightChats(a, int(need))
 		if err != nil {
-			log.Printf("cat %s: %d/%d 完成，中断: %v", logfmt.Label(a.UID, a.Nickname), ok, need, err)
+			log.Printf("cat %s: %d/%d 完成，中断: %v", logfmt.Label(a.UID, a.NicknameValue()), ok, need, err)
 		} else {
-			log.Printf("cat %s: 完成 %d 次夜间对话", logfmt.Label(a.UID, a.Nickname), ok)
+			log.Printf("cat %s: 完成 %d 次夜间对话", logfmt.Label(a.UID, a.NicknameValue()), ok)
 		}
 		if !sleepCtx(ctx, activityAccountDelay) {
 			return // 优雅停机：不等限速睡满，剩余账号下轮再补

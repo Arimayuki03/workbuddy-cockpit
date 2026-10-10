@@ -128,8 +128,8 @@
     "enabled": true,
     "loopback_only": false
   },
+  "proxy_routes_note": "每账号命名出口代理线路（吸收自 workbuddy-manager proxy_routes 设计）。key=线路名（auths/*.json 里 proxy_route 字段引用它），value=代理 URL，仅支持 http:// 与 https://（socks5 未启用：避免引入 golang.org/x/net 依赖）。账号文件只存线路名、不存代理凭据——导出/分享凭证不会泄密。账号绑定的线路名不存在于本表时，该账号的所有上游请求（对话/签到/余额/续期/加号）一律拒绝发出（绝不静默回退直连——回落=出口隔离失效且无人发现）；auth 文件不写 proxy_route 或写空串 = 直连（默认行为，零回归）。面板「账号管理」页每行有「线路」下拉可绑定/解绑；本段可热改（设置页保存后立即生效，无需重启）。下段 route-hk/route-jp 为示例（按需改名/删行）",
   "proxy_routes": {
-    "_note": "每账号命名出口代理线路（吸收自 workbuddy-manager proxy_routes 设计）。key=线路名（auths/*.json 里 proxy_route 字段引用它），value=代理 URL，仅支持 http:// 与 https://（socks5 未启用：避免引入 golang.org/x/net 依赖）。账号文件只存线路名、不存代理凭据——导出/分享凭证不会泄密。账号绑定的线路名不存在于本表时，该账号的所有上游请求（对话/签到/余额/续期/加号）一律拒绝发出（绝不静默回退直连——回落=出口隔离失效且无人发现）；auth 文件不写 proxy_route 或写空串 = 直连（默认行为，零回归）。面板「账号管理」页每行有「线路」下拉可绑定/解绑；本段可热改（设置页保存后立即生效，无需重启）。示例（按需改名/删行）：",
     "route-hk": "http://user:pass@hk-1.example.com:8080",
     "route-jp": "http://user:pass@jp-1.example.com:3128"
   }

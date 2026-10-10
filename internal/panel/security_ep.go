@@ -63,8 +63,9 @@ func (p *Panel) handleSecurityGet(w http.ResponseWriter, r *http.Request) {
 // 不清草稿）；errs 空 = 保存成功。响应恒 200（校验失败是业务结果不是传输错误，
 // 与 errs 契约一体）。
 //
-// 保存顺序：先校验 trusted_proxy 参数（config 层），再落 IP 规则（iprules 层
-// 整体拒绝语义），最后写 config——任一步失败立即返回，避免半套用。
+// 保存顺序：先校验 trusted_proxy 参数（config 层，**不触碰任何状态**），再落
+// IP 规则（iprules 层整体拒绝语义），最后写 config——任一步失败立即返回，
+// 且失败点之前的步骤不产生副作用（半套用从根上不可能）。
 func (p *Panel) handleSecuritySetRules(w http.ResponseWriter, r *http.Request) {
 	var body securityRulesPayload
 	if err := json.NewDecoder(io.LimitReader(r.Body, loginBodyLimit)).Decode(&body); err != nil && r.ContentLength != 0 {
@@ -81,19 +82,15 @@ func (p *Panel) handleSecuritySetRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 1) trusted_proxy 参数先过 config 校验（ParseTrustedCIDRs fail-fast 语义，
-	// 错误清单与 IP 规则同形——「条目: 原因」）。
-	tpErrs := validateTrustedProxy(body.TrustedCIDRs)
-	// 2) IP 规则整体校验 + 换快照 + 落盘（非法条目整体拒绝，errs 逐条）。
-	errs, err := p.cfg.IPRules.SetRules(server.NewIPRuleSpec(body.IPBlacklist, body.IPWhitelist, body.IPWhitelistMode))
-	if len(tpErrs) > 0 {
-		// trusted_proxy 校验失败：回滚已生效的 IP 规则（整体拒绝语义不被
-		// 两段校验拆散——用户看到的 errs 是全量原因，但磁盘/内存不半新半旧）。
-		if _, rErr := p.cfg.IPRules.SetRules(server.NewIPRuleSpec(nil, nil, false)); rErr != nil {
-			log.Printf("WARN: [panel] security rules rollback after trusted_proxy error: %v", rErr)
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"errs": append(tpErrs, errs...)})
+	// 错误清单与 IP 规则同形——「条目: 原因」）。**前置到任何 SetRules 之前**：
+	// 校验失败直接返回，不触碰 IP 规则（内存与磁盘都不动）——此前先落新规则
+	// 再以空规则「回滚」会把旧黑白名单清空覆盖写盘（内存+磁盘双丢）。
+	if tpErrs := validateTrustedProxy(body.TrustedCIDRs); len(tpErrs) > 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"errs": tpErrs})
 		return
 	}
+	// 2) IP 规则整体校验 + 换快照 + 落盘（非法条目整体拒绝，errs 逐条）。
+	errs, err := p.cfg.IPRules.SetRules(server.NewIPRuleSpec(body.IPBlacklist, body.IPWhitelist, body.IPWhitelistMode))
 	if len(errs) > 0 || err != nil {
 		// IP 规则非法：内存未换、磁盘未写（SetRules 整体拒绝），trusted_proxy
 		// 也未落盘——直接把错误清单回显。

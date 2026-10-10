@@ -1160,6 +1160,7 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 		Domain:       a.Domain,
 		UID:          a.UID,
 		EnterpriseID: a.EnterpriseID,
+		// 直读字段：本段已持 a.mu（快照语义），NicknameValue 会自锁。
 		Nickname:     a.Nickname,
 		DeviceToken:  a.DeviceToken,
 	}
@@ -1283,7 +1284,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		resp, err := hc.Do(req)
 		if err != nil {
 			cancel()
-			log.Printf("ERR: [upstream] chat_stream acct=%s: transport error: %v", logfmt.Label(a.UID, a.Nickname), err)
+			log.Printf("ERR: [upstream] chat_stream acct=%s: transport error: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 			// 传输层失败 → 清空本次所用 transport 的空闲连接池（连接层加固第 5 件）：
 			// 失败连接可能仍留在空闲池里，下一个请求会继续捡到它（kongjianguan
 			// 实测：仅靠 IdleConnTimeout 等过期不够，主动清池才断根）。清的是本次
@@ -1298,12 +1299,12 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			// body 读失败（掐流/截断）→ 传输层错误：半截 raw 不交回调用方进 Classify，
 			// 否则 handler 侧 applyErrorPolicy 会按误判分类罚号。
 			if rerr != nil {
-				log.Printf("ERR: [upstream] chat_stream acct=%s: read body: %v", logfmt.Label(a.UID, a.Nickname), rerr)
+				log.Printf("ERR: [upstream] chat_stream acct=%s: read body: %v", logfmt.Label(a.UID, a.NicknameValue()), rerr)
 				return nil, 0, nil, fmt.Errorf("read body: %w", rerr)
 			}
 			kind := Classify(resp.StatusCode, string(raw))
 			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
-				logfmt.Label(a.UID, a.Nickname), resp.StatusCode, kind, truncate(string(raw), 200))
+				logfmt.Label(a.UID, a.NicknameValue()), resp.StatusCode, kind, truncate(string(raw), 200))
 			// ≥400 直接返回（#119 后 global 单路径 /v2，chat 层无 fallback 链；billing 层的
 			// 404 fallback 独立存在，语义不受影响）。
 			// 分类一次、随 Kind 信封返回（含 Retry-After 头解析，P1-2）：

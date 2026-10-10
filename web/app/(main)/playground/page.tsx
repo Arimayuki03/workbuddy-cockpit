@@ -159,17 +159,18 @@ export default function PlaygroundPage() {
    * 正是测试台的核心用途。
    */
   const switchProtocol = useCallback((next: Protocol) => {
-    setProtocol((cur) => {
-      if (cur !== next) {
-        abortRef.current?.abort();
-        setMsgs((prev) => prev.map((m) => (m.thinking ? {...m, thinking: {...m.thinking, collapsed: true}} : m)));
-        // 新协议的 usage 形态不同（无 credit）：重置徽章可见性，避免
-        // 沿用上一协议的累计值继续显示造成口径混淆。
-        setSessionHasCredit(false);
-      }
-      return next;
-    });
-  }, []);
+    // 副作用（abort/折叠思考/重置徽章）不能写进 setProtocol 的 updater——
+    // updater 必须是纯函数，StrictMode 双调用会把副作用双触发。这里在
+    // updater 外读当前值做判断，切换本身才交给 setState。
+    if (protocol !== next) {
+      abortRef.current?.abort();
+      setMsgs((prev) => prev.map((m) => (m.thinking ? {...m, thinking: {...m.thinking, collapsed: true}} : m)));
+      // 新协议的 usage 形态不同（无 credit）：重置徽章可见性，避免
+      // 沿用上一协议的累计值继续显示造成口径混淆。
+      setSessionHasCredit(false);
+    }
+    setProtocol(next);
+  }, [protocol]);
 
   const loadModels = useCallback(async () => {
     try {

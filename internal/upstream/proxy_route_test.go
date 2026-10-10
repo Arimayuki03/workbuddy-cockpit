@@ -183,6 +183,8 @@ func TestValidateProxyRoutes(t *testing.T) {
 	}{
 		{"nil ok", nil, false, ""},
 		{"empty ok", map[string]string{}, false, ""},
+		{"underscore note key skipped", map[string]string{"_note": "段内说明文字，不是线路"}, false, ""},
+		{"underscore keys skipped with real routes", map[string]string{"_note": "说明", "_x": "", "a": "http://h:8080"}, false, ""},
 		{"http ok", map[string]string{"a": "http://u:p@h:8080"}, false, ""},
 		{"https ok", map[string]string{"a": "https://h:443"}, false, ""},
 		{"socks5 refused", map[string]string{"a": "socks5://h:1080"}, true, "socks5"},
@@ -200,6 +202,25 @@ func TestValidateProxyRoutes(t *testing.T) {
 		if err != nil && tc.wantSub != "" && !strings.Contains(err.Error(), tc.wantSub) {
 			t.Errorf("%s: err %q 应含 %q", tc.name, err.Error(), tc.wantSub)
 		}
+	}
+}
+
+// TestSetProxyRoutesSkipsNoteKeys `_` 前缀键（_note 等手写段内说明）不进线路
+// 表：SetProxyRoutes 跳过而非报错，且不产生同名线路（绑定 _note 必然未命中）。
+func TestSetProxyRoutesSkipsNoteKeys(t *testing.T) {
+	c := New()
+	if err := c.SetProxyRoutes(map[string]string{
+		"_note": "段内说明：route-a 是香港线路",
+		"route-a": "http://h:8080",
+	}); err != nil {
+		t.Fatalf("SetProxyRoutes 应跳过 _note 键: %v", err)
+	}
+	// 真线路可用，_note 不可绑。
+	if _, err := c.transportFor(&auth.Auth{UID: "u", ProxyRoute: "route-a"}, false); err != nil {
+		t.Fatalf("route-a 应可用: %v", err)
+	}
+	if _, err := c.transportFor(&auth.Auth{UID: "u", ProxyRoute: "_note"}, false); err == nil {
+		t.Fatal("_note 不应成为可绑定线路")
 	}
 }
 

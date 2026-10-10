@@ -126,7 +126,9 @@ export default function SecurityPage() {
     () => locksCache.data?.locks ?? [],
     [locksCache.data],
   );
-  useHeartbeat(locksCache.refresh, 30000);
+  useHeartbeat(() => {
+    locksCache.refresh().catch(() => {/* 轮询失败静默，下轮重试 */});
+  }, 30000);
 
   const retryLoad = useCallback(() => {
     setLoadError(null);
@@ -151,6 +153,12 @@ export default function SecurityPage() {
       if (res.errs?.length) {
         setRuleErrs(res.errs);
         notify.err(t('security.rulesRejected'));
+        return;
+      }
+      // IP 规则已生效但 config 落盘失败（200 + error 文案）：规则只在内存中，
+      // 重启即回落旧值——必须按失败提示，不能弹「保存成功」吞掉
+      if (res.error) {
+        notify.err(res.error);
         return;
       }
       notify.ok(t('security.configSaved'));
@@ -413,7 +421,10 @@ function ModelLockCard({lock}: {lock: ModelLockRow}) {
   const t = useT();
   // 倒计时文案随刷新（30s 轮询 + 心跳）自然更新；这里不做秒级 ticker——
   // 锁的粒度是分钟级，秒级重渲染纯浪费。
-  const remain = lock.fully_unlock_at ? Math.max(0, lock.fully_unlock_at - Date.now() / 1000) : 0;
+  // 口径与并排展示的 fmtDateTime(lock.unlock_at) 统一：都取「最近一个锁定
+  // 账号的解锁时刻」。多账号锁定时若用 fully_unlock_at（全部解除时刻），
+  // 绝对时间显示最早解锁、相对时长却是全部解锁，自相矛盾。
+  const remain = lock.unlock_at ? Math.max(0, lock.unlock_at - Date.now() / 1000) : 0;
   const badgeCls =
     lock.state === 'locked'
       ? 'bg-red-500/10 text-red-600 dark:text-red-400'

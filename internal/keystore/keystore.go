@@ -177,12 +177,21 @@ type keyFile struct {
 // 模型名归一化（口径对齐 internal/server/resolve_model.go，见包注释）
 // ---------------------------------------------------------------------------
 
-// bareModel 白名单比对用的模型名归一：剥 `cn:` 前缀，**保留 `global:`**。
-// 大小写敏感（与 resolveModel 的「前缀必须是精确的小写枚举」同口径——参考实现
-// _bare_model 是小写不敏感，此处从 server 口径，理由见包注释）。
+// bareModel 白名单比对用的模型名归一：剥 `cn:` 与 `global:` 前缀，两侧同剥后
+// 精确比对。大小写敏感（与 resolveModel 的「前缀必须是精确的小写枚举」同口径——
+// 参考实现 _bare_model 是小写不敏感，此处从 server 口径，理由见包注释）。
+//
+// 为什么 global: 也要剥：server 侧 handler 调用 Validate 时传的是 resolveModel
+// 剥完前缀的**裸名**（global:gpt-x → gpt-x）。若此处保留 global:，白名单照
+// /v1/models 下发的 id 抄写 global:gpt-x 时，比对变成 "global:gpt-x" vs "gpt-x"
+// 永不相等，密钥对全部 global 模型恒 400 model_not_allowed。版本归属的判定职责
+// 在 Realm 检查（realmOf），白名单只管「模型本身」，剥掉全部路由前缀。
 func bareModel(model string) string {
 	if strings.HasPrefix(model, "cn:") {
 		return model[3:]
+	}
+	if strings.HasPrefix(model, "global:") {
+		return model[7:]
 	}
 	return model
 }
@@ -604,8 +613,11 @@ func (s *Store) Validate(k *Key, ip, model, realm string, now time.Time) *Reject
 		}
 	}
 	// --- 版本归属 → 400。判**映射之后**的名字；realm 参数（ResolveModel 结果）
-	// 优先，缺省按 model 前缀推断（裸名=cn，与 resolveModel 同口径）。---
-	if want := k.Realm; want != "" {
+	// 优先，缺省按 model 前缀推断（裸名=cn，与 resolveModel 同口径）。want 过
+	// normRealm 归一：loadRaw 载入的存量密钥可能带手工编辑的非规范 realm（如
+	// "CN"），脏值视作不限制（normRealm 口径），而非恒拒——否则脏值密钥对所有
+	// 请求 400 realm_mismatch，与「管理端脏值不报错」的语义相反。
+	if want := normRealm(k.Realm); want != "" {
 		got := normRealm(realm)
 		if got == "" {
 			got = realmOf(model)
@@ -617,7 +629,8 @@ func (s *Store) Validate(k *Key, ip, model, realm string, now time.Time) *Reject
 	// --- 模型白名单 → 400。**不能因 model 缺失就跳过检查**（参考实现的实测坑：
 	// `if models and model and ...` 让限定单模型的密钥可用「不带 model」走上游
 	// 默认模型，白名单形同虚设）。比对两侧都过 bareModel：请求名与白名单条目的
-	// `cn:` 前缀写法等价；`global:` 保留（决定路由域，两个版本同名模型不是一回事）。
+	// `cn:`/`global:` 前缀写法等价（版本归属由上方 Realm 检查单独判定，白名单
+	// 只管模型本身）。
 	if len(k.ModelWhitelist) > 0 {
 		m := strings.TrimSpace(model)
 		if m == "" {
@@ -839,12 +852,16 @@ func (s *Store) Flush() error {
 	raw, err := json.MarshalIndent(entries, "", "  ")
 	s.mu.Unlock()
 	if err != nil {
+		// 失败即存在未持久化的变更，无条件回挂 dirty（markDirty 注释口径）：
+		// 否则下次 Flush 命中 !s.dirty 伪成功，变更被静默丢弃且无定时器再触发。
+		s.markDirty()
 		return fmt.Errorf("keystore: 序列化失败: %w", err)
 	}
 	s.flushMu.Lock()
 	err = writeFile(s.path, raw)
 	s.flushMu.Unlock()
 	if err != nil {
+		s.markDirty()
 		return fmt.Errorf("keystore: 落盘 %s 失败: %w", s.path, err)
 	}
 	return nil

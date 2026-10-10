@@ -262,6 +262,11 @@ func (s *TokenStore) Resolve(plain string) *Token {
 	if !strings.HasPrefix(plain, tokenPrefix) {
 		return nil
 	}
+	// 长度防御：恰好 4 字节前缀（如 "wbt_"）连 12 字节展示前缀都凑不齐，
+	// 下方 plain[:tokenPrefixLen] 会越界 panic（未认证可稳定触发）。
+	if len(plain) < tokenPrefixLen {
+		return nil
+	}
 	digest := hashToken(plain)
 	prefix := plain[:tokenPrefixLen]
 	s.mu.Lock()
