@@ -1036,6 +1036,8 @@
     "recordsEmptyDesc": "残高変動の記録はまだありません。チェックインやタスクの獲得がここに表示されます",
     "recordsJump": "跳変 {prev} → {next}",
     "recordsJumpTitle": "残高の急変：チェックインやタスクを経由せずに上游が残高を直接変更しました（リスク管理コールバック・手動調整など）。変動量の意味はありません",
+    "recordsCheckin": "チェックイン",
+    "recordsCheckinTitle": "毎日チェックインの付与：チェックイン前後の残高差で正確に記録（同時期の消費の影響を受けません）",
     "recordsShownLimit": "最新 {shown} 件のみ表示（全 {total} 件）",
     "colTime": "時刻",
     "colChange": "変動",

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,9 +18,10 @@ import (
 	"workbuddy2api/internal/upstream"
 )
 
-// recordingSink 流水记录的测试桩：捕获 RecordBalance 的入参序列。
+// recordingSink 流水记录的测试桩：捕获 RecordBalance / RecordCheckin 的入参序列。
 type recordingSink struct {
 	balances []balanceCall
+	checkins []checkinCall
 }
 
 type balanceCall struct {
@@ -27,8 +29,18 @@ type balanceCall struct {
 	credits       int64
 }
 
+type checkinCall struct {
+	uid, nickname string
+	before, after int64
+}
+
 func (r *recordingSink) RecordBalance(uid, nickname string, credits int64, at time.Time) int {
 	r.balances = append(r.balances, balanceCall{uid, nickname, credits})
+	return 0
+}
+
+func (r *recordingSink) RecordCheckin(uid, nickname string, before, after int64, at time.Time) int {
+	r.checkins = append(r.checkins, checkinCall{uid, nickname, before, after})
 	return 0
 }
 
@@ -56,7 +68,9 @@ func TestRecordBalanceCheckedSinkNotified(t *testing.T) {
 }
 
 // TestCheckinAllRecordsBalance 签到路径的记账接线：CheckinAll 查余额成功后必然
-// 调 RecordBalanceChecked（漏接该钩子 = 该渠道到账失明，回归锁）。
+// 以「签到前 → 签到后」差值调 RecordCheckinChecked（漏接该钩子 = 签到到账失明，
+// 回归锁）。签到前基线查询 + 签到后查询共用同一桩（resourceRemain 恒定 → 差值
+// 0，RecordCheckin 内部差值 <=0 不落流水，但钩子接线本身必须发生）。
 func TestCheckinAllRecordsBalance(t *testing.T) {
 	f := &fakeUpstream{resourceRemain: 500}
 	srv := f.server()
@@ -72,8 +86,51 @@ func TestCheckinAllRecordsBalance(t *testing.T) {
 	if _, err := s.CheckinAll(); err != nil {
 		t.Fatalf("CheckinAll: %v", err)
 	}
-	if len(sink.balances) != 1 || sink.balances[0].credits != 500 {
-		t.Fatalf("签到路径流水记账缺失或参数错误：%+v", sink.balances)
+	if len(sink.checkins) != 1 || sink.checkins[0].before != 500 || sink.checkins[0].after != 500 {
+		t.Fatalf("签到路径签到记账缺失或参数错误：%+v", sink.checkins)
+	}
+}
+
+// TestCheckinAllRecordsCheckinReward 签到到账被消耗抵消时仍落流水（本修复的
+// 核心回归锁）：签到前余额 100，签到 +20 后消耗 30 → 签到后净 90（低于签到前）。
+// 快照比对口径下净减不记——签到奖励凭空消失；签到口径按 before=100/after=120
+// 记「签到到账 +20」。桩把 resourceRemain 做成动态：第 1 次查询（签到前）100，
+// 之后（签到后）90，同时记录 DailyCheckin 被调用时刻以模拟奖励先到账。
+func TestCheckinAllRecordsCheckinReward(t *testing.T) {
+	var resourceCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/daily-checkin"):
+			w.Write([]byte(`{"code":0,"msg":"ok","data":{}}`))
+		case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
+			n := resourceCalls.Add(1)
+			remain := int64(90)
+			if n == 1 {
+				remain = 100 // 签到前基线
+			}
+			w.Write([]byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CycleCapacitySize":1000,"CycleCapacityRemain":` +
+				jsonI64(remain) + `,"CycleCapacityUsed":0}]}}}}`))
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+
+	sink := &recordingSink{}
+	s.SetCreditSink(sink)
+	if _, err := s.CheckinAll(); err != nil {
+		t.Fatalf("CheckinAll: %v", err)
+	}
+	if len(sink.checkins) != 1 {
+		t.Fatalf("签到记账缺失：%+v", sink.checkins)
+	}
+	if c := sink.checkins[0]; c.before != 100 || c.after != 90 {
+		t.Fatalf("签到基线参数错误：%+v", c)
 	}
 }
 

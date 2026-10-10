@@ -925,6 +925,8 @@
     "recordsEmptyDesc": "No balance changes recorded yet — check-in and task earnings will appear here",
     "recordsJump": "Jumped {prev} → {next}",
     "recordsJumpTitle": "Balance jump: the upstream adjusted the balance directly, bypassing check-in/tasks (risk-control callback, manual adjustment, etc.); no delta semantics",
+    "recordsCheckin": "Check-in",
+    "recordsCheckinTitle": "Daily check-in reward: recorded as the exact balance difference before/after check-in (unaffected by concurrent spending)",
     "recordsShownLimit": "Showing the latest {shown} of {total} entries",
     "colTime": "Time",
     "colChange": "Change",

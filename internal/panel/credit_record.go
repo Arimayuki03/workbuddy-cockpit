@@ -207,6 +207,52 @@ func (t *CreditTracker) hasDedupLocked(key string) bool {
 	return false
 }
 
+// RecordCheckin 签到到账专用记账（scheduler.creditSnapshotter 实现）。
+// 与 RecordBalance 的关键差别在**基线锚点**：快照比对用的是「上次任意刷新」
+// 的余额，而签到与上次刷新之间隔着一整天的 API 消耗（逐请求扣减只进估算、
+// 不落快照），签到奖励 +20 常被消耗抵消成净减——快照比对口径下签到永远
+// 不落流水。签到是主动增益事件，基线必须锚定「签到前那一刻」：调用方在
+// DailyCheckin 之前先查一次余额（before），签到后再查（after），这里按
+// after-before 记「签到到账 +N」（source=checkin），同时把 after 落快照
+// （不产常规流水：该差值已由本条覆盖，重复记会双计）。
+func (t *CreditTracker) RecordCheckin(uid, nickname string, before, after int64, at time.Time) int {
+	if uid == "" {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.snap[uid] = after // 签到后余额成为新基线（本次差值已记，不再产常规流水）
+	t.dirty = true
+	delta := after - before
+	if delta <= 0 {
+		return 0 // 签到未到账（失败/已签无奖励）：只刷基线，不记
+	}
+	if t.hasDedupLocked(creditDedupKey(uid, after)) {
+		return 0
+	}
+	jump := delta > scheduler.CreditMaxDelta
+	rec := scheduler.CreditRecord{
+		Ts: at.Unix(), UID: uid, Kind: "credit",
+		Prev: before, New: after, Jump: jump, Source: "checkin",
+		Message:  creditCheckinMessage(uid, nickname, delta, before, after),
+		DedupKey: creditDedupKey(uid, after),
+	}
+	if !jump {
+		rec.Delta = delta
+	}
+	t.records = append(t.records, rec)
+	sort.Slice(t.records, func(i, j int) bool {
+		if t.records[i].Ts != t.records[j].Ts {
+			return t.records[i].Ts > t.records[j].Ts
+		}
+		return t.records[i].DedupKey > t.records[j].DedupKey
+	})
+	if len(t.records) > creditRecordMax {
+		t.records = t.records[:creditRecordMax]
+	}
+	return 1
+}
+
 // creditDedupKey 去重键：credit|uid|变动后余额。同一余额只会留下一条流水。
 func creditDedupKey(uid string, value int64) string {
 	return "credit|" + uid + "|" + itoa64(value)
@@ -223,6 +269,19 @@ func creditMessage(uid, nickname string, delta, prev, now int64, jump bool) stri
 		return "余额跳变 " + itoa64(prev) + " → " + itoa64(now) + "（增量异常，未计入收益） · " + label
 	}
 	return "余额 +" + itoa64(delta) + "（" + itoa64(prev) + " → " + itoa64(now) + "） · " + label
+}
+
+// creditCheckinMessage 签到到账文案：「签到到账 +20（980 → 1000） · 昵称」。
+// 跳变沿用手 Party 跳变口径（签到单渠道到账远低于上限，实际到不了）。
+func creditCheckinMessage(uid, nickname string, delta, before, after int64) string {
+	label := nickname
+	if label == "" {
+		label = uid
+	}
+	if delta > scheduler.CreditMaxDelta {
+		return "签到后余额跳变 " + itoa64(before) + " → " + itoa64(after) + "（增量异常，未计入收益） · " + label
+	}
+	return "签到到账 +" + itoa64(delta) + "（" + itoa64(before) + " → " + itoa64(after) + "） · " + label
 }
 
 // itoa64 极简 int64 → string（strconv.FormatInt 直通，统一文案拼接口径）。

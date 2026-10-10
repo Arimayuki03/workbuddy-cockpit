@@ -1036,6 +1036,8 @@
     "recordsEmptyDesc": "잔액 변동 기록이 아직 없습니다. 출석이나 작업 수익이 여기에 표시됩니다",
     "recordsJump": "급변 {prev} → {next}",
     "recordsJumpTitle": "잔액 급변: 출석/작업을 거치지 않고 업스트림이 잔액을 직접 조정했습니다(리스크 관리 콜백, 수동 조정 등). 변동량 의미 없음",
+    "recordsCheckin": "출석",
+    "recordsCheckinTitle": "매일 출석 보상: 출석 전후 잔액 차이로 정확히 기록(동시기 소비의 영향 없음)",
     "recordsShownLimit": "최근 {shown}건만 표시(총 {total}건)",
     "colTime": "시각",
     "colChange": "변동",

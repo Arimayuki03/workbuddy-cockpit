@@ -56,6 +56,9 @@ type CreditRecord struct {
 	Message string `json:"message"`
 	// DedupKey 去重键：credit|uid|变动后余额。同一余额重复刷新不重复记。
 	DedupKey string `json:"dedup_key"`
+	// Source 记录来源："checkin"=签到到账（签到前后差值精确记账）；空=快照
+	// 比对差额。前端据此渲染「签到」徽章，旧记录无此字段（前端不渲染徽章）。
+	Source string `json:"source,omitempty"`
 }
 
 // CreditMaxDelta 单条流水增量的上限：超过只记 jump（异常跳变），不带加号语义。
@@ -73,6 +76,11 @@ const creditSnapshotFile = "credit_snapshots.json"
 type creditSnapshotter interface {
 	// RecordBalance 比对快照并按需产出流水：新增条数返回（0 = 无流水）。
 	RecordBalance(uid, nickname string, credits int64, at time.Time) int
+	// RecordCheckin 签到到账专用记账：基线是调用方传入的「签到前余额」而非
+	// 快照——签到与上次刷新之间隔着 API 消耗（逐请求扣减不落快照），奖励常
+	// 被抵消成净减，快照口径下签到永远不落流水。before/after 由签到流程在
+	// DailyCheckin 前后各查一次余额得出。
+	RecordCheckin(uid, nickname string, before, after int64, at time.Time) int
 }
 
 // SetCreditSink 注入积分流水的产出与落盘执行体（main 装配期调用一次）。nil 清空。
@@ -101,6 +109,19 @@ func (s *Scheduler) RecordBalanceChecked(uid, nickname string, credits int64) {
 	}
 	if n := sink.RecordBalance(uid, nickname, credits, time.Now()); n > 0 {
 		log.Printf("credit %s: 余额变动流水 +%d 条", logfmt.Label(uid, nickname), n)
+	}
+}
+
+// RecordCheckinChecked 签到路径的记账钩子：签到前后各查一次余额，差值即签到
+// 到账（来源标注 source=checkin）。失败/跳过（任一次余额查询失败）不调用。
+// sink 未注入时零开销直返。
+func (s *Scheduler) RecordCheckinChecked(uid, nickname string, before, after int64) {
+	sink := s.creditSinkOf()
+	if sink == nil {
+		return
+	}
+	if n := sink.RecordCheckin(uid, nickname, before, after, time.Now()); n > 0 {
+		log.Printf("credit %s: 签到到账流水 +%d 条", logfmt.Label(uid, nickname), n)
 	}
 }
 

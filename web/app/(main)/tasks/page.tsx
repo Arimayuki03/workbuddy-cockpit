@@ -764,19 +764,31 @@ export default function TasksPage() {
                           {t('tasks.recordsJump', {prev: fmtNumber(r.prev), next: fmtNumber(r.new)})}
                         </Badge>
                       ) : (
-                        <Badge
-                          variant="secondary"
-                          className={
-                            'rounded-full text-[10px] tabular-nums ' +
-                            (r.delta > 0
-                              ? 'text-emerald-600 dark:text-emerald-400'
-                              : r.delta < 0
-                                ? 'text-red-600 dark:text-red-400'
-                                : 'text-muted-foreground')
-                          }
-                        >
-                          {r.delta > 0 ? `+${fmtNumber(r.delta)}` : fmtNumber(r.delta)}
-                        </Badge>
+                        <span className="inline-flex items-center gap-1">
+                          {/* 签到到账（签到前后精确差值）带来源徽章；普通差额记录无徽章 */}
+                          {r.source === 'checkin' && (
+                            <Badge
+                              variant="secondary"
+                              className="rounded-full px-1.5 text-[10px] text-orange-600 dark:text-orange-400"
+                              title={t('tasks.recordsCheckinTitle')}
+                            >
+                              {t('tasks.recordsCheckin')}
+                            </Badge>
+                          )}
+                          <Badge
+                            variant="secondary"
+                            className={
+                              'rounded-full text-[10px] tabular-nums ' +
+                              (r.delta > 0
+                                ? 'text-emerald-600 dark:text-emerald-400'
+                                : r.delta < 0
+                                  ? 'text-red-600 dark:text-red-400'
+                                  : 'text-muted-foreground')
+                            }
+                          >
+                            {r.delta > 0 ? `+${fmtNumber(r.delta)}` : fmtNumber(r.delta)}
+                          </Badge>
+                        </span>
                       )}
                     </TableCell>
                     <TableCell className="whitespace-nowrap text-xs tabular-nums text-muted-foreground">

@@ -900,6 +900,8 @@
     "recordsEmptyDesc": "还没有任何余额变动记录——签到或任务入账后会出现在这里",
     "recordsJump": "跳变 {prev} → {next}",
     "recordsJumpTitle": "余额跳变：上游绕过签到/任务直接调整了余额（风控回调、人工调整等），无变动量语义",
+    "recordsCheckin": "签到",
+    "recordsCheckinTitle": "每日签到到账：按签到前后余额精确差值记账（不受同期消耗影响）",
     "recordsShownLimit": "仅显示最近 {shown} 条（共 {total} 条）",
     "colTime": "时间",
     "colChange": "变动",

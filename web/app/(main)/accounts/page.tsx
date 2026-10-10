@@ -985,7 +985,10 @@ export default function AccountsPage() {
         <div className="flex items-center gap-2">
           <span className="text-[11px] text-muted-foreground">{t('accounts.totalCount', {n: totalVisible, count: totalVisible})}</span>
           <Select value={String(pageSize)} onValueChange={(v) => changePageSize(Number(v) as PageSize)}>
-            <SelectTrigger size="sm" className="h-8 w-[108px] rounded-full text-[11px]" aria-label={t('accounts.pageSizeLabel')}>
+            {/* 宽度自适应（w-fit 来自组件缺省）：固定 w-[108px] 在中文/日文文案
+                （「每页 100 条」≈124px）下溢出，选中值被 line-clamp-1 裁字。
+                whitespace-nowrap 由组件缺省保证单行，max-w 防超长文案顶破工具条。 */}
+            <SelectTrigger size="sm" className="h-8 max-w-[160px] rounded-full text-[11px]" aria-label={t('accounts.pageSizeLabel')}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>

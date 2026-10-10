@@ -838,6 +838,13 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	checkinMsg := ""
+	// 签到前基线查询：签到到账流水以「签到前余额」为基线（scheduler 侧 CheckinAll
+	// 同口径）——签到与上次快照刷新之间隔着 API 消耗，快照比对会把奖励抵成净减
+	// 而漏记。查询失败只降级（本次不记签到流水），不阻塞签到。
+	creditBefore, creditBeforeOK := int64(0), false
+	if v, _, berr := p.cfg.Upstream.UserResourceDetailed(a, 0); berr == nil {
+		creditBefore, creditBeforeOK = v, true
+	}
 	if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
 		checkinMsg = err.Error() // "今天已签到"等业务错误照常查余额
 	}
@@ -855,9 +862,11 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	// 分桶补写：快过期子集供三因子选号的 ×8 权重因子，与 scheduler.go 签到口径一致
 	// （先解冻再补分桶；SetCreditsDetailed 会把 expiring 钳到 [0, credits]）。
 	p.cfg.Pool.SetCreditsDetailed(uid, remain, buckets.Expiring)
-	// 积分流水：余额比对记账（scheduler.RecordBalanceChecked 经注入的 CreditTracker
-	// 落流水；tracker 未装配时零开销直返）。
-	p.recordBalance(uid, remain)
+	// 签到到账流水：以签到前基线记精确差值；基线查询失败时不记（0 基线会把全部
+	// 余额误报成「刚获得」）。tracker 未装配时零开销直返。
+	if creditBeforeOK {
+		p.recordCheckin(uid, creditBefore, remain)
+	}
 	resp["credits"] = remain
 	resp["credits_total"] = buckets.Total()
 	log.Printf("panel: checkin uid=%s msg=%q credits=%d/%d", uid, checkinMsg, remain, buckets.Total())
@@ -891,6 +900,16 @@ func (p *Panel) recordBalance(uid string, remain int64) {
 		return
 	}
 	p.cfg.Scheduler.RecordBalanceChecked(uid, p.nicknameOf(uid), remain)
+}
+
+// recordCheckin 面板单号签到的签到到账记账钩子（before/after 差值口径，
+// scheduler.CheckinAll 同款）：经同一 CreditTracker 落 source=checkin 流水。
+// Scheduler 缺失时直返（同 recordBalance 口径）。
+func (p *Panel) recordCheckin(uid string, before, after int64) {
+	if p.cfg.Scheduler == nil {
+		return
+	}
+	p.cfg.Scheduler.RecordCheckinChecked(uid, p.nicknameOf(uid), before, after)
 }
 
 // nicknameOf 池状态快照取昵称（文案展示用；缺账号回落 uid）。

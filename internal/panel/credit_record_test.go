@@ -157,6 +157,65 @@ func TestCreditTrackerSnapshotFileFormat(t *testing.T) {
 	}
 }
 
+// TestCreditTrackerCheckinRecord 签到到账口径：before/after 差值 >0 记
+// source=checkin 流水（文案「签到到账 +N」）；差值 <=0（已签无奖励/奖励被
+// 同期消耗吃掉）只刷基线不记；签到后基线落快照，后续常规刷新不再重复报。
+func TestCreditTrackerCheckinRecord(t *testing.T) {
+	tr := newMemoryTracker()
+	now := time.Now()
+	// 签到前 100 → 签到后 120：记一条 +20。
+	if n := tr.RecordCheckin("u1", "猫猫", 100, 120, now); n != 1 {
+		t.Fatalf("签到到账应记 1 条，实得 %d", n)
+	}
+	recs := tr.Records("")
+	if len(recs) != 1 || recs[0].Delta != 20 || recs[0].Prev != 100 || recs[0].New != 120 {
+		t.Fatalf("签到流水内容错误：%+v", recs)
+	}
+	if recs[0].Source != "checkin" || recs[0].Kind != "credit" {
+		t.Fatalf("source/kind 错误：%+v", recs[0])
+	}
+	if recs[0].DedupKey != "credit|u1|120" {
+		t.Fatalf("dedup_key 错误：%+v", recs[0])
+	}
+	if !strings.Contains(recs[0].Message, "签到到账 +20（100 → 120）") {
+		t.Fatalf("文案错误：%q", recs[0].Message)
+	}
+	// 同余额重复签到（幂等已签）：去重，不重复记。
+	if n := tr.RecordCheckin("u1", "猫猫", 120, 120, now.Add(time.Minute)); n != 0 {
+		t.Fatalf("同余额重复签到应去重：%d", n)
+	}
+	// 奖励被消耗抵消（before 120 → after 110）：只刷基线，不记负数流水。
+	if n := tr.RecordCheckin("u1", "猫猫", 120, 110, now.Add(2*time.Minute)); n != 0 {
+		t.Fatalf("净减不应记：%d", n)
+	}
+	// 签到后基线已落快照：常规刷新同余额不重复报。
+	if n := tr.RecordBalance("u1", "猫猫", 110, now.Add(3*time.Minute)); n != 0 {
+		t.Fatalf("常规刷新同余额应去重：%d", n)
+	}
+	if len(tr.Records("")) != 1 {
+		t.Fatalf("记录总数应仍为 1：%+v", tr.Records(""))
+	}
+}
+
+// TestCreditTrackerCheckinBaselineRefresh 签到把快照基线推进到 after：后续
+// 消耗回落再回升到同一 after 值（常规 RecordBalance）不重复报「刚获得」。
+func TestCreditTrackerCheckinBaselineRefresh(t *testing.T) {
+	tr := newMemoryTracker()
+	now := time.Now()
+	tr.RecordCheckin("u1", "猫猫", 100, 120, now) // 签到 +20，基线 → 120
+	// 消耗到 90（不记），随后旅行领奖回升到 120（常规路径）——120 的 dedup key
+	// 已被签到记录占用，不重复记；这正是「基线推进」想要的防双计语义。
+	if n := tr.RecordBalance("u1", "猫猫", 90, now.Add(time.Minute)); n != 0 {
+		t.Fatalf("消耗不应记：%d", n)
+	}
+	if n := tr.RecordBalance("u1", "猫猫", 120, now.Add(2*time.Minute)); n != 0 {
+		t.Fatalf("回升到已记账余额不应重复记：%d", n)
+	}
+	if len(tr.Records("")) != 1 {
+		t.Fatalf("记录总数应仍为 1：%+v", tr.Records(""))
+	}
+}
+
 // TestTasksRecordsEndpoint /api/tasks/records：有 tracker 返回 200 + records；
 // 无 tracker 返回 501（前端按「未启用」展示）。uid 参数过滤生效。
 func TestTasksRecordsEndpoint(t *testing.T) {

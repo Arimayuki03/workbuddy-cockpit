@@ -1,0 +1,4 @@
+# Windows 批处理必须以 CRLF 行尾检出：cmd.exe 对纯 LF 批处理解析错乱（goto/括号块/echo 中文
+# 全部错位，双击启动表现为"闪退"）。2026-10-11 启动服务.bat 即因此闪退过一次。
+*.bat text eol=crlf
+*.cmd text eol=crlf

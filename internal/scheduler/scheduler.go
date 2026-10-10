@@ -89,7 +89,7 @@ type Scheduler struct {
 	// hoursMu 保护 hoursTab：SetHours 热改（/admin PATCH 与面板保存配置）写、
 	// nextWake/hoursOf/SnapshotAll 读。hours 缺席时回落 cfg（启动期装配的快照），
 	// 因此不热改路径的行为与引入前逐位一致。
-	hoursMu sync.RWMutex
+	hoursMu  sync.RWMutex
 	hoursTab [kindCount][]int
 	// enabled 七类任务的可热改排程开关：New 时从 Config.*Disabled 取反初始化，
 	// 之后 SetEnabled 原子改写并经 wake 唤醒 Run 重排定时器（热生效免重启）。
@@ -657,6 +657,15 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 				}
 			}
 		}
+		// 签到前基线查询：签到到账流水（RecordCheckinChecked）以「签到前余额」
+		// 为基线——签到与上次快照刷新之间隔着 API 消耗，快照口径会把奖励抵成
+		// 净减而漏记。查询失败只降级：本次不记签到流水（creditBeforeOK=false），
+		// 不阻塞签到；常规件余额快照比对仍在（签到后若净增会走差值记录）。
+		// global 账号已在上方跳过，不会走到这里。
+		creditBefore, creditBeforeOK := int64(0), false
+		if v, _, berr := s.cfg.Upstream.UserResourceDetailed(a, 0); berr == nil {
+			creditBefore, creditBeforeOK = v, true
+		}
 		// 签到返回错误（含"今天已签到"）也继续查余额：余额恢复即可解冻账号。
 		if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
 			if upstream.IsAlreadyCheckin(err) {
@@ -684,7 +693,11 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 		}
 		s.cfg.Pool.ReenableIfCredits(st.UID, remain)
 		s.cfg.Pool.SetCreditsDetailed(st.UID, remain, buckets.Expiring)
-		s.RecordBalanceChecked(st.UID, st.Nickname, remain) // 积分流水：余额比对记账（credit.go）
+		// 签到到账流水：以签到前基线记精确差值（credit.go）。基线查询失败时
+		// 跳过签到口径（0 基线会把全部余额误报成「刚获得」），保持不记。
+		if creditBeforeOK {
+			s.RecordCheckinChecked(st.UID, st.Nickname, creditBefore, remain)
+		}
 		oc.Credits = &remain
 		switch oc.Status {
 		case CheckinOK:

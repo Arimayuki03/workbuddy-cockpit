@@ -1036,6 +1036,8 @@
     "recordsEmptyDesc": "還沒有任何餘額變動記錄——簽到或任務入帳後會出現在這裡",
     "recordsJump": "跳變 {prev} → {next}",
     "recordsJumpTitle": "餘額跳變：上游繞過簽到／任務直接調整了餘額（風控回呼、人工調整等），無變動量語義",
+    "recordsCheckin": "簽到",
+    "recordsCheckinTitle": "每日簽到到帳：按簽到前後餘額精確差值記帳（不受同期消耗影響）",
     "recordsShownLimit": "僅顯示最近 {shown} 筆（共 {total} 筆）",
     "colTime": "時間",
     "colChange": "變動",

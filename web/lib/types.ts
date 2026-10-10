@@ -407,6 +407,9 @@ export interface CreditRecord {
   /** 后端已含昵称的可读文案 */
   message: string;
   dedup_key: string;
+  /** 记录来源："checkin"=签到到账（签到前后精确差值）；空=快照比对差额。
+   *  旧记录无此字段（不渲染来源徽章）。 */
+  source?: string;
 }
 
 /** GET /api/tasks/records 响应（records 已按时间倒序） */
