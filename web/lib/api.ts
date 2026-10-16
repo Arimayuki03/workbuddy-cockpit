@@ -11,6 +11,7 @@ import type {
   AuthStartResponse,
   BalanceAllResponse,
   BatchStartResponse,
+  CompensationRunResponse,
   ConfigGetResponse,
   ConfigSaveResponse,
   Me,
@@ -273,9 +274,20 @@ export const modelApi = {
 };
 
 /* ── 用量统计 ───────────────────────────────────────── */
+/** 自定义时间区间（unix 秒，两端同时给出时后端优先于 hours） */
+export interface UsageRangeQuery {
+  from: number;
+  to: number;
+}
+
 export const statsApi = {
-  /** 用量分桶快照；hours 控制时间窗（默认 72，上限 1440=60 天；'all'=自记录以来全量） */
-  usage: (hours: number | 'all' = 72) => get<UsageSnapshot>('/api/usage', {hours}),
+  /** 用量分桶快照；hours 控制时间窗（默认 72，上限 1440=60 天；'all'=自记录以来全量）；
+   *  传 {from,to}（unix 秒）= 自定义区间，优先于 hours */
+  usage: (params: number | 'all' | UsageRangeQuery = 72) => {
+    const query =
+      typeof params === 'object' ? {from: params.from, to: params.to} : {hours: params};
+    return get<UsageSnapshot>('/api/usage', query);
+  },
   /** 立即把内存中的用量桶落盘（正常由后台 30s 防抖负责） */
   saveUsage: () => post<OkOnlyResponse>('/api/usage/save'),
   /** 原生 /v1/stats：按模型聚合的请求统计（主仓库 metrics.go 形状） */
@@ -283,6 +295,14 @@ export const statsApi = {
 };
 
 /* ── 日志 ───────────────────────────────────────────── */
+/** 请求日志的服务端筛选条件（from/to 为 unix 秒；ip/ua 为子串匹配） */
+export interface RequestLogFilters {
+  from?: number;
+  to?: number;
+  ip?: string;
+  ua?: string;
+}
+
 export const logApi = {
   /** 系统日志（panel ring 三频道：task | chat | sys，最近 500 行） */
   system: (channel: 'task' | 'chat' | 'sys' | '' = '', limit = 200) =>
@@ -290,8 +310,24 @@ export const logApi = {
       ...(channel ? {channel} : {}),
       limit,
     }),
-  /** 请求日志（internal/server/requestlog.go 环形缓冲；items 最新在前） */
-  requestLogs: (limit = 200) => get<RequestLogsResponse>('/api/request_logs', {limit}),
+  /** 请求日志（internal/server/requestlog.go 环形缓冲；items 最新在前）。
+   *  时间范围与 IP / UA 由后端过滤，未给的条件不参与查询。 */
+  requestLogs: (limit = 200, filters: RequestLogFilters = {}) =>
+    get<RequestLogsResponse>('/api/request_logs', {
+      limit,
+      ...(filters.from !== undefined ? {from: filters.from} : {}),
+      ...(filters.to !== undefined ? {to: filters.to} : {}),
+      ...(filters.ip ? {ip: filters.ip} : {}),
+      ...(filters.ua ? {ua: filters.ua} : {}),
+    }),
+};
+
+/* ── 活动补偿（每日领补偿）───────────────────────────────
+ * POST /api/compensation/run：当场给全部账号领一次活动补偿，
+ * 同步返回「尝试几个号 / 领到几个号 / 共多少积分」。有则领、没有就跳过，
+ * 幂等——重复执行不会多领。国际版账号由后端自动跳过。 */
+export const compensationApi = {
+  run: () => post<CompensationRunResponse>('/api/compensation/run', undefined, LONG_TIMEOUT),
 };
 
 /* ── 设置 ───────────────────────────────────────────── */

@@ -55,6 +55,9 @@ func TestManagerShellContractRoutesExist(t *testing.T) {
 		"/api/keepalive_all",
 		"/api/balance_all",
 		"/api/renew_all",
+		// 活动补偿一键领取（v1.19.1，web/components/common/tasks/CompensationCard.tsx
+		// 的「立即执行」按钮走这里）：同步返回 accounts/claimed/credits/message。
+		"/api/compensation/run",
 		"/api/tasks/scan_all",
 		"/api/tasks/run_queue",
 		"/api/tasks/queue/cancel",

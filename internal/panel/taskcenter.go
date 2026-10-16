@@ -38,13 +38,17 @@ type scanAccountItem struct {
 	GrowthErr string          `json:"growth_error,omitempty"`
 }
 
-// growthPending 任务是否"未完成且可自动化"。
+// growthPending 任务是否"需要动作且可自动化"（未完成，或已达标但奖励未领）。
 func growthPending(t upstream.Task) bool {
 	if t.Claimed || t.Locked {
 		return false // Locked：Sequential 族每日零点解锁一环，锁定环 accept 不落账（吸收 panel 修复）
 	}
 	if t.Target > 0 && t.Current >= t.Target {
-		return false // 达标未领：也入队（队列执行后会自动领）
+		// 达标未领 = 要补领：进度已满、奖励没到账，队列执行 runGrowthQueued 会回读
+		// claimable 并自动领奖；此处返回 false 会让这类任务永远不进待办、奖励永不
+		// 自动补领（吸收 panel 5f6c7caf）。仍以 autoActionFor 为闸门——无自动化动作
+		// 的任务入队只会在执行时得到"任务 X 无自动动作"错误。
+		return autoActionFor(t.TaskCode) != nil
 	}
 	return autoActionFor(t.TaskCode) != nil
 }

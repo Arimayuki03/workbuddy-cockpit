@@ -100,7 +100,9 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	}
 	// credits_desc 策略（pool.pick_strategy=credits_desc）：余额严格降序——
 	// 完全绕过三因子权重 / Top5 短名单 / 成本分层探索（快过期补偿与闲置补偿
-	// 都不再参与决策），候选按缓存 credits 降序取最高，highest 刚被用过
+	// 都不再参与决策；v1.20.0 的 prefer_expiring 虚拟实例倍率同样不适用——它写在
+	// weightOf 里，本分支在权重计算之前就已返回，严格余额序语义逐字不变），
+	// 候选按缓存 credits 降序取最高，highest 刚被用过
 	// （< minPickGap）时沿序顺延次高；全序刚被用过时回退取序首（严格序冠军，
 	// 非 LRU——该策略下没有饿死问题，字面语义优先）。平局按闲置时长降序
 	// 再按 uid 升序兜底稳定；零余额排最后不排除（与 weighted 不查 credits
@@ -475,14 +477,33 @@ type weighted struct {
 // 又不至于压过总量项让"总量大但快过期少"的号被完全饿死。
 const expiringWeight = 8.0
 
+// expiringVirtualSlots 「快过期积分优先消耗」的虚拟实例份数（v1.20.0）。
+// 取 3：等价于该号在 weighted 抽签里被放三份（权重 ×3），realm 可用 UID 列表里
+// 也拿到同样份数的虚拟槽位——两个路径共用一个倍数，语义可对齐可解释。
+//
+// 为什么是"倍率"而不是上游（workbuddy2api-panel 671f5d16/4b944440）的"到期升序硬排序"：
+//   - 硬排序会与本地 pool.pick_strategy=credits_desc 的严格余额序语义直接打架
+//     （两个排序键冲突时必有一个失效），且会硬化掉既有的 expiringWeight 占比因子；
+//   - 倍率式加成是**可组合**的：与 credits 占比（×10）、占比因子（×8）、闲置补偿
+//     自然叠加；与成本分层正交（tier 硬过滤先发生，加成只在同层内改变抽签概率）；
+//     与积分保底正交（保底是过滤器，加成绕不过它）；与粘性正交（粘性只改绑定不改
+//     权重）；credits_desc 路径逐字不动（该分支在权重计算之前就返回，见 pick 注释）。
+//
+// 取 3 而非更高：3 份已让快过期号在抽签里占压倒性份额（三候选均等时 3/(3+1+1)=60%），
+// 但不会像硬排序那样把其他号饿死（它们仍保底 1 份 + 各自因子）。
+const expiringVirtualSlots = 3.0
+
 // pickWeighted 三因子加权随机（claude-api selectWeightedRandom 参考口径）：
 //
-//		weight = credits 比例 × 10 + 快过期积分占比 × expiringWeight + idleWeight
+//		weight = (credits 比例 × 10 + 快过期积分占比 × expiringWeight + idleWeight)
+//		         × (快过期虚拟实例？expiringVirtualSlots : 1)
 //
 //	  - credits 比例 = 该号 credits / 全集最大 credits（避免量纲爆炸；全集口径：
 //	    tier 过滤前的全部 healthy 候选，与截断排序共享基准——见 weighted 预计算注释）
 //	  - 快过期积分占比 = creditsExpiring/credits（×8，issue:积分过期）
 //	  - idleWeight = min(距 lastUsed 小时数 × idleWeightPerHour, idleWeightMax)；从未使用给满分
+//	  - 虚拟实例倍率（v1.20.0，prefer_expiring 默认开）：满足 entry.expiringNow 时整体
+//	    ×expiringVirtualSlots（等价放三份）；关闭/无快过期快照时该倍率恒为 1
 //
 // credits 全 0 时仍按 idle+expiring 加权（不退化均匀随机）。
 // 权重为浮点，用 int64 定点（×1e6）抽签可保持确定性随机源注入（randInt64N 语义不变）。
@@ -559,6 +580,20 @@ func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
 			idleW = 0 // lastUsed 在未来（时钟回拨）时钳 0
 		}
 		w += idleW
+	}
+	// 3. 快过期虚拟实例倍率（v1.20.0，pool.prefer_expiring，默认开）：该号存在
+	// "最早到期的那笔仍有余量的积分"且失效时刻在未来时，整体权重 ×expiringVirtualSlots
+	// （等价于把它在抽签池里放三份）。
+	// **必须是最后一步、作用在完整权重上**：放在中间（如闲置补偿之前）只会放大
+	// 已累加的部分，idle 项仍在倍率之外——那就不是"放三份"，而是"放大一部分"，
+	// 与 realm 侧"恰好多三份槽位"的语义也对不上。
+	// 与 1b 正交：1b 看"快过期积分占总量比例"，本项看"最先失效的那一笔是否存在且紧迫"。
+	// 开关关闭 / 无快过期快照（旧 state.json、上游未下发到期信息）/ 包已失效 →
+	// 倍率恒为 1，权重与旧行为逐字相同。
+	// 数据来自余额刷新/签到的 SetCreditEarliest：刚打开开关时可能尚无快照，
+	// 要到下一个刷新周期才有数据可加成（注释见 Pool.preferExpiring）。
+	if p.preferExpiring && e.expiringNow(now) {
+		w *= expiringVirtualSlots
 	}
 	// （原第 3 因子「成功率 EMA ×3」已删，success-ema-review §4：双饱和计数器对
 	// 真实成功率不敏感、成熟池退化为与默认值重合的常数 1.5、失败侧与熔断器

@@ -71,7 +71,8 @@ func prepareBodyPass(src []byte, sanitize bool, efforts map[string][]string, def
 	translateMaxCompletionTokens(obj)
 	// GPT 系 max_tokens 下限钳制（见 clampGPTMinMaxTokens）：必须紧跟别名翻译——
 	// Claude Code 切模型的探针别名（max_completion_tokens=1）先被翻译成 max_tokens，
-	// 再在此抬到下限，两步在同一 pass 内串成完整修复链。
+	// 再在此抬到下限，两步在同一 pass 内串成完整修复链。上限端由管线最后的
+	// clampMaxTokensCeiling 收口（顺序不能换：下限/上限分处两端，别名形态必须先翻译）。
 	clampGPTMinMaxTokens(obj)
 	// stream_options 仅当 body 未显式带时补 {include_usage: true}（D7）：
 	// 官方 CLI 流式必发该字段，上游据此在末帧返回 usage 用量；显式带则不覆盖。
@@ -148,6 +149,14 @@ func prepareBodyPass(src []byte, sanitize bool, efforts map[string][]string, def
 			}
 		}
 	}
+	// max_tokens 上限钳制（见 clampMaxTokensCeiling）：管线最后一步。顺序不能换——
+	// 越界值恰恰是上游别名翻译的产物（客户端只发 max_completion_tokens 时，
+	// 9.9e9 先被 translateMaxCompletionTokens 搬进 max_tokens，再在
+	// clampGPTMinMaxTokens 里走过下限端），早于这两步就会漏钳别名形态；而此后
+	// （stream_options 补齐 → 工具归一 → 配对清理 → thinking/effort → sanitize →
+	// prompt_cache_key → 兜底 system）没有任何步骤再改写 max_tokens，放在最后钳制
+	// 的值就是真正的出站值。
+	clampMaxTokensCeiling(obj)
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return src
@@ -210,7 +219,15 @@ func clampGPTMinMaxTokens(obj map[string]any) {
 	var v int64
 	switch n := obj["max_tokens"].(type) {
 	case float64:
-		v = int64(n)
+		// float64 单独按浮点判，不走 int64(n)：越界值（|n| > MaxInt64，例如客户端按
+		// 剩余额度算出的 1e19）的浮点→整数转换结果实现相关（amd64 得 MinInt64），会被
+		// 误判成"低于下限"而抬到 16——把"要长输出"的请求压成 16 输出上限，与"只抬极小
+		// 探针值"的本意相反（上限钳制在管线里更晚，救不回被压小的值）。
+		if n < gptMinMaxTokens {
+			obj["max_tokens"] = int64(gptMinMaxTokens)
+			log.Printf("WARN: [upstream] max_tokens clamped model=%s %v -> %d", model, n, gptMinMaxTokens)
+		}
+		return
 	case int64:
 		v = n
 	case int:
@@ -221,6 +238,63 @@ func clampGPTMinMaxTokens(obj map[string]any) {
 	if v < gptMinMaxTokens {
 		obj["max_tokens"] = int64(gptMinMaxTokens)
 		log.Printf("WARN: [upstream] max_tokens clamped model=%s %d -> %d", model, v, gptMinMaxTokens)
+	}
+}
+
+// maxTokensCeiling 出站 max_tokens 上限。
+// 1_000_000 远高于任何真实模型输出上限（上游默认档实测 32000，见
+// translateMaxCompletionTokens 注释），又稳稳落在上游接受的整数范围内——它只用来拦
+// 「客户端减法算出的越界值」，不表达任何真实输出能力，因此不随模型分档。
+const maxTokensCeiling = 1_000_000
+
+// clampMaxTokensCeiling 把越界过大的 max_tokens 压回上限（吸收 workbuddy-manager
+// 1.0.90 的修复）。
+//
+// 背景：客户端按「剩余额度」做减法会算出 99 亿这类值（额度耗尽时 remaining-used
+// 直接下探），上游把越界整数包成 no_healthy_account + 503 返回；客户端把它误读成
+// 「服务不可用」而反复重试/换号，但 body 不变则每一次重试都注定无用（账号与 body
+// 其余部分无关），只能在发送前修。压回上限只收紧输出上限、不改语义。
+//
+// 对所有模型生效：上限与模型无关（不同于只针对 GPT 系的下限），任何模型携带越界值
+// 都会被上游同样拒收。未携带字段 / 非数值 / 未越界一律不动；0 与负数的既有边缘语义
+// 不受影响（0 = 走上游默认，负数交给上游报错，下限钳制另行处理）。
+//
+// 数值形态与 clampGPTMinMaxTokens 同口径（float64/int64/int）；字符串等畸形值不解析
+// ——沿用「畸形值透传、由上游报 11101 参数错」的既有策略，不在此把垃圾搬进 max_tokens。
+//
+// float64 分支按浮点比较、不先 int64(n)：json 解码出的越界值可超出 int64 可表示范围
+//（|n| > ~9.22e18，例如客户端按剩余额度算出 1e19），Go 规范里越界 float64→int64 转换
+// 结果实现相关（amd64 得 MinInt64 负数），先转换再比较会让 v > maxTokensCeiling 为假、
+// 钳制静默失效，越界值原样出站照样撞上游 503 no_healthy_account——正是本修复要消灭的
+// 形态。浮点比较本身无溢出，判定越界后再写回 int64 上限即绕开该转换。
+//
+// 挂载位置：管线最后一步，必须在 translateMaxCompletionTokens 别名翻译与
+// clampGPTMinMaxTokens 下限钳制之后（见 prepareBodyPass 调用点注释）——下限/上限
+// 分处两端互不覆盖，别名形态则先翻译、后钳制，串成完整修复链。
+func clampMaxTokensCeiling(obj map[string]any) {
+	model, _ := obj["model"].(string)
+	// float64 单独先比：见上方注释（越界转换溢出会让比较恒假）。
+	if n, ok := obj["max_tokens"].(float64); ok {
+		if n > maxTokensCeiling {
+			obj["max_tokens"] = int64(maxTokensCeiling)
+			// 原值用 %v：1e19 / MaxFloat64 这类值本身超出 int64，%d 会打印溢出后的错误数字。
+			log.Printf("WARN: [upstream] max_tokens clamped model=%s %v -> %d", model, n, maxTokensCeiling)
+		}
+		return
+	}
+	// int64/int 是手构造 map 的形态，值域天然落在 int64 内，不存在转换溢出，保持原口径。
+	var v int64
+	switch n := obj["max_tokens"].(type) {
+	case int64:
+		v = n
+	case int:
+		v = int64(n)
+	default:
+		return
+	}
+	if v > maxTokensCeiling {
+		obj["max_tokens"] = int64(maxTokensCeiling)
+		log.Printf("WARN: [upstream] max_tokens clamped model=%s %d -> %d", model, v, maxTokensCeiling)
 	}
 }
 

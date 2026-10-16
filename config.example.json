@@ -6,7 +6,8 @@
   "max_body_mb": 64,
   "cooldown": {
     "soft_rate": "600s",
-    "soft_rate_max": "2h"
+    "soft_rate_max": "2h",
+    "credit_exhausted": ""
   },
   "admin": {
     "enabled": false,
@@ -92,6 +93,8 @@
     "idle_weight_max": 5.0,
     "expiring_soon": "168h",
     "cost_explore_interval": "30m",
+    "prefer_expiring": true,
+    "_note_prefer_expiring": "prefer_expiring：快过期积分优先消耗（默认 true）。对「最早到期且仍有余量的积分包」所属账号，加权选号给 ×3 权重、会话粘性可用列表里放 3 份，让快过期积分先被用掉；false = 旧行为（仅三因子中的快过期占比因子）。快照随余额刷新更新，改开关下一个刷新周期生效",
     "credit_floor": 0,
     "_note_credit_floor": "credit_floor：积分保底线（默认 0 = 关闭）。账号缓存余额低于本值时不再参与「收费模型」的选号，防止收费请求把余额打穿、连免费模型都 402 冷却到次日签到；全池触底且无免费模型可接时选号返回 nil（宁 503 不打穿）。是否收费按本地实测台账优先、上游模型目录倍率兜底判定",
     "_note_pick_strategy": "pick_strategy 选号策略：weighted（默认，三因子加权随机）/ credits_desc（余额严格降序），面板设置页可在线切换"

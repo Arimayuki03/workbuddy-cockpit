@@ -28,6 +28,13 @@ export interface NumField {
   /** 步进，缺省 1；小数参数用 0.1 */
   step?: number;
   def: number;
+  /**
+   * 成对区间校验：本值不得大于同组该键的值（本字段是「下限」，如账号间隔下限）。
+   * 单字段的 min/max 看不到同伴的值，跨字段规则见 pairError()。
+   */
+  notAboveKey?: string;
+  /** 成对区间校验：本值不得小于同组该键的值（本字段是「上限」）。 */
+  notBelowKey?: string;
 }
 
 export interface HoursField {
@@ -37,6 +44,13 @@ export interface HoursField {
   label: string;
   desc: string;
   def: number[];
+  /**
+   * 留空合法（保存为 []）。语义是「该项不自动跑、只手动触发」，
+   * 因此默认空列表的开关类字段必须打开它，否则空值会被当成格式错误。
+   */
+  allowEmpty?: boolean;
+  /** 输入框占位提示（中文源文，经短语表翻译）；缺省 9, 21 */
+  placeholder?: string;
 }
 
 export interface DurationField {
@@ -48,6 +62,12 @@ export interface DurationField {
   def: string;
   /** 允许 `0` / 空串（语义：**关闭该特性**，不是格式错误）。 */
   offWhenZero?: boolean;
+  /** 留空合法（语义：**保持原行为 / 回落默认**，不是格式错误）；与 offWhenZero 二选一。 */
+  allowEmpty?: boolean;
+  /** 零时长（`0` / `0m` / `0s`）非法：此时 0 不是「关闭」而是错误配置，单独给提示。 */
+  noZero?: boolean;
+  /** 输入框占位提示（字面量，不参与翻译）；缺省 600s */
+  placeholder?: string;
 }
 
 export interface SelectField {
@@ -84,15 +104,27 @@ export type Field =
 /** 时长格式校验：数字 + 单位（s/m/h/d） */
 const DURATION_RE = /^\d+\s*(s|m|h|d)$/i;
 
+/** 零时长（0 / 0s / 0m / 0h / 0d）：数值部分为 0（裸 0 也算，便于给出「不能填 0」的专属提示） */
+const ZERO_DURATION_RE = /^0+\s*(s|m|h|d)?$/i;
+
+/** 是否为零时长写法，用于 noZero 字段的专属提示。 */
+function isZeroDuration(raw: unknown): boolean {
+  return ZERO_DURATION_RE.test(String(raw ?? '').trim());
+}
+
 /** 一个时长字段的取值是否合法。 */
 export function durationOk(f: DurationField, raw: unknown): boolean {
   const text = String(raw ?? '').trim();
   if (f.offWhenZero && (text === '' || text === '0')) return true;
-  return DURATION_RE.test(text);
+  // allowEmpty 字段：留空 = 保持原行为（合法）；其余字段留空仍算格式错误
+  if (text === '') return !!f.allowEmpty;
+  if (!DURATION_RE.test(text)) return false;
+  // noZero 字段：0m / 0s 这类零时长不接受（0 会被当作「立刻重试」，不是「关闭」）
+  return !(f.noZero && isZeroDuration(text));
 }
 
 /** 把时刻数组格式化为可读文本，如 [9,21] -> "9, 21" */
-function hoursToText(v: unknown): string {
+export function hoursToText(v: unknown): string {
   if (Array.isArray(v)) {
     return v
       .filter((x): x is number => typeof x === 'number')
@@ -103,9 +135,12 @@ function hoursToText(v: unknown): string {
 }
 
 /** 解析用户输入的时刻列表：返回 {ok, hours?, error?} */
-function parseHours(text: string): {ok: boolean; hours: number[]; error?: string} {
+function parseHours(text: string, allowEmpty = false): {ok: boolean; hours: number[]; error?: string} {
   const parts = text.split(/[,，\s]+/).filter(Boolean);
-  if (!parts.length) return {ok: false, hours: [], error: tGlobal('settings.errNeedOneHour')};
+  if (!parts.length) {
+    // allowEmpty 字段：空 = 不自动跑（合法）；其余字段空值仍是格式错误
+    return allowEmpty ? {ok: true, hours: []} : {ok: false, hours: [], error: tGlobal('settings.errNeedOneHour')};
+  }
   const out: number[] = [];
   for (const p of parts) {
     const n = Number(p);
@@ -115,6 +150,17 @@ function parseHours(text: string): {ok: boolean; hours: number[]; error?: string
     if (!out.includes(n)) out.push(n);
   }
   return {ok: true, hours: out.sort((a, b) => a - b)};
+}
+
+/**
+ * 时刻列表输入的校验与解析（设置页与任务页共用同一套规则与文案）。
+ * allowEmpty=true 时空串合法（保存为 []）。
+ */
+export function parseHoursInput(
+  text: string,
+  allowEmpty = false,
+): {ok: boolean; hours: number[]; error?: string} {
+  return parseHours(text, allowEmpty);
 }
 
 export const SCHEDULE_FIELDS: Field[] = [
@@ -214,6 +260,58 @@ export const SCHEDULE_FIELDS: Field[] = [
       + '建议避开签到/上报时刻，错峰执行',
     def: [10],
   },
+  {
+    key: 'random_delay_minutes',
+    kind: 'num',
+    label: '整点随机延后',
+    desc: '整点自动任务随机延后 0-60 分钟：每个任务每天取一个固定偏移（重启后仍不变），'
+      + '避免所有任务挤在同一秒打上游。0 = 关闭',
+    unit: '分钟',
+    min: 0,
+    max: 60,
+    def: 0,
+  },
+  {
+    key: 'account_delay_min_seconds',
+    kind: 'num',
+    label: '账号间隔下限',
+    // 与「账号间隔上限」成对：下限 > 上限时 pairError 会拦住保存
+    desc: '同一批任务里账号之间随机等待的秒数区间下限（模拟真人节奏，降低批量特征）。0 = 关闭',
+    unit: '秒',
+    min: 0,
+    max: 600,
+    def: 0,
+    notAboveKey: 'account_delay_max_seconds',
+  },
+  {
+    key: 'account_delay_max_seconds',
+    kind: 'num',
+    label: '账号间隔上限',
+    desc: '上面那个随机等待区间的上限；必须不小于下限，填反了会被拒绝保存。0 = 关闭',
+    unit: '秒',
+    min: 0,
+    max: 600,
+    def: 0,
+    notBelowKey: 'account_delay_min_seconds',
+  },
+  {
+    key: 'compensation_enabled',
+    kind: 'bool',
+    label: '每日领补偿',
+    desc: '每天自动领取平台发给账号的活动补偿（如故障补偿）。默认关闭——'
+      + '补偿公告常带截止日期，手动去任务页点「立即执行」更稳妥',
+    def: false,
+  },
+  {
+    key: 'compensation_hours',
+    kind: 'hours',
+    label: '补偿领取时刻',
+    desc: '在哪些整点自动领补偿（0-23，可多个）。留空 = 只手动执行，不自动跑；'
+      + '补偿有则领、没有就跳过，重复执行不会多领',
+    allowEmpty: true,
+    placeholder: '留空 = 不自动跑',
+    def: [],
+  },
 ];
 
 export const COOLDOWN_FIELDS: Field[] = [
@@ -230,6 +328,18 @@ export const COOLDOWN_FIELDS: Field[] = [
     label: '冷却退避上限',
     desc: '连续触发限流会逐次延长冷却，这是延长后的封顶值（格式如 2h）',
     def: '2h',
+  },
+  {
+    key: 'credit_exhausted',
+    kind: 'duration',
+    label: '积分耗尽冷却',
+    desc: '账号积分耗尽被移出账号池后冷却多久。留空 = 保持原行为（冷却到次日 04:00 等签到恢复）；'
+      + '填 **10m / 1h** 则只退出这一小段时间，到期自动回池——中途充值或额度刷新就能马上再用。'
+      + '**不能填 0**（零时长会被拒绝）',
+    allowEmpty: true,
+    noZero: true,
+    placeholder: '10m',
+    def: '',
   },
 ];
 
@@ -495,7 +605,9 @@ export const GROUPS: GroupDef[] = [
     id: 'schedule',
     section: 'schedule',
     title: '定时任务',
-    desc: '六类任务各自独立排程：签到 / 猫猫旅行 / 活跃上报 / 保活 / 夜猫 / 任务队列。可分别开关并设置执行时刻。签到、旅行、活跃上报、夜猫、任务队列**只对国内版账号生效**——国际版没有这些体系，只有保活照常执行',
+    desc: '七类任务各自独立排程：签到 / 猫猫旅行 / 活跃上报 / 保活 / 夜猫 / 任务队列 / 每日领补偿。'
+      + '可分别开关并设置执行时刻，还支持整点随机延后与账号之间的人工节奏。'
+      + '签到、旅行、活跃上报、夜猫、任务队列、领补偿**只对国内版账号生效**——国际版没有这些体系，只有保活照常执行',
     fields: SCHEDULE_FIELDS,
   },
   {
@@ -576,7 +688,9 @@ export function pickValues(fields: Field[], source: Record<string, unknown> | un
         out[f.key] = Array.isArray(raw) ? hoursToText(raw) : hoursToText(f.def);
         break;
       case 'duration':
-        out[f.key] = durationOk(f, raw) ? String(raw).trim() : f.def;
+        // 缺失/非法回退默认；allowEmpty 字段允许留空（String(undefined) 会变成
+        // 'undefined'，所以先兜成空串再 trim）
+        out[f.key] = durationOk(f, raw) ? String(raw ?? '').trim() : f.def;
         break;
       case 'select':
         // 只接受枚举内的取值；配置里是别的值（改过枚举）时回退默认
@@ -593,7 +707,8 @@ export function pickValues(fields: Field[], source: Record<string, unknown> | un
 /** 文本类字段的即时校验（用于输入框下方提示，不阻塞输入） */
 export function fieldError(f: Field, raw: FieldValue): string | undefined {
   if (f.kind === 'num') {
-    // 输入框的 min/max 只是浏览器属性，不参与提交校验，这里显式检查
+    // 输入框的 min/max 只是浏览器属性，不参与提交校验，这里显式检查。
+    // 取值口径（含空串按 0）见 numValue()，跨字段区间比较与之共用。
     const n = Number(raw);
     if (!Number.isFinite(n)) return tGlobal('settings.errNumber');
     if (n < f.min || n > f.max) {
@@ -606,15 +721,58 @@ export function fieldError(f: Field, raw: FieldValue): string | undefined {
     return undefined;
   }
   if (f.kind === 'hours') {
-    const r = parseHours(String(raw));
+    const r = parseHours(String(raw), !!f.allowEmpty);
     return r.ok ? undefined : r.error;
   }
   if (f.kind === 'duration') {
-    return durationOk(f, raw) ? undefined : tGlobal('settings.errDuration');
+    if (durationOk(f, raw)) return undefined;
+    // 零时长单独提示「不能填 0」：通用格式提示会让人以为补个单位就好
+    return f.noZero && isZeroDuration(raw)
+      ? tGlobal('settings.errDurationZero')
+      : tGlobal('settings.errDuration');
   }
   if (f.kind === 'text' && /[\r\n\u0000-\u001f]/.test(String(raw))) {
     return tGlobal('settings.errNoNewline');
   }
+  return undefined;
+}
+
+/**
+ * 数字字段的统一取值口径：**空串按 0**（= 关闭 / 未设置，与后端同义），
+ * 非数字（"-"、"1e" 这类输入中间态）返回 undefined。
+ *
+ * 必须与 fieldError / toWire 的 `Number(raw)` 同口径：它们把空串当 0，
+ * 这里若把空串当「还没填」跳过比较，就会出现「两个输入框都不亮错、保存却提交
+ * 坏区间」的双标——清空「账号间隔上限」（下限仍为 100）时提交 min=100 > max=0，
+ * 只能等后端 validateDelays 拒绝。
+ */
+function numValue(raw: FieldValue | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * 成对区间字段的跨字段校验：「账号间隔下限 ≤ 上限」这类规则。
+ *
+ * fieldError 只拿到单个字段的值，看不到同伴——渲染层（即时提示）与保存层
+ * （拒绝提交）都要带上整组表单调用本函数。两侧字段都标注了配对键，所以
+ * 无论用户改哪一个，两个输入框都会一起亮出同一条错误。
+ *
+ * 取值口径见 numValue()：空串按 0 参与比较，所以「下限有值、上限被清空」
+ * 会就地报区间错，不再依赖后端拒绝；只有非数字中间态才跳过（那种情况由
+ * fieldError 报「请填写数字」）。
+ */
+export function pairError(f: Field, group: Record<string, FieldValue>): string | undefined {
+  if (f.kind !== 'num') return undefined;
+  const otherKey = f.notAboveKey ?? f.notBelowKey;
+  if (!otherKey) return undefined;
+  const self = numValue(group[f.key]);
+  const other = numValue(group[otherKey]);
+  // 非数字中间态交给 fieldError 的「请填写数字」，这里不重复报区间错
+  if (self === undefined || other === undefined) return undefined;
+  if (f.notAboveKey && self > other) return tGlobal('settings.errRangeOrder', {min: self, max: other});
+  if (f.notBelowKey && self < other) return tGlobal('settings.errRangeOrder', {min: other, max: self});
   return undefined;
 }
 
@@ -624,16 +782,21 @@ export function toWire(
   raw: FieldValue,
 ): {ok: true; value: boolean | number | number[] | string} | {ok: false; error: string} {
   if (f.kind === 'hours') {
-    const r = parseHours(String(raw));
+    const r = parseHours(String(raw), !!f.allowEmpty);
     return r.ok ? {ok: true, value: r.hours} : {ok: false, error: r.error ?? tGlobal('settings.errHourFormat')};
   }
   if (f.kind === 'duration') {
     const t = String(raw).trim();
-    return durationOk(f, t)
-      ? {ok: true, value: t}
-      : {ok: false, error: tGlobal('settings.errDuration')};
+    if (durationOk(f, t)) return {ok: true, value: t};
+    return {
+      ok: false,
+      error: f.noZero && isZeroDuration(t)
+        ? tGlobal('settings.errDurationZero')
+        : tGlobal('settings.errDuration'),
+    };
   }
   if (f.kind === 'num') {
+    // 口径与 fieldError / pairError(numValue) 一致：空串按 0 提交
     const n = Number(raw);
     if (!Number.isFinite(n)) return {ok: false, error: tGlobal('settings.errNumber')};
     if (n < f.min || n > f.max) {
@@ -679,18 +842,44 @@ export function emptyForm(): Record<Section, Record<string, FieldValue>> {
   };
 }
 
-/** 装配期字段：后端保存后会带回「需重启才生效」的字段名集合 */
-const RESTART_SECTIONS = new Set(['prompt', 'upstream', 'global']);
+/** 装配期**段**：整段字段都在装配期被读取，改了就要重启（键是 config.json 段名）。
+ *  session_sticky 同属此类（ttl / gc_interval 被 session.Router 在装配期捕获），
+ *  审查补漏：此前不在集合里，与后端 restartRequiredFields 的清单对不上。 */
+const RESTART_SECTIONS = new Set(['prompt', 'upstream', 'global', 'session_sticky']);
 
 /**
- * 保存响应的 restart_required 是否命中本页的装配期段。
+ * 装配期**字段**：所在段大多可热改，只有个别字段绑定在装配期对象上。
+ *
+ * 为什么不能把这些段整段并进 RESTART_SECTIONS——schedule 段就是反例：
+ * 各任务的小时（scheduler.SetHours）与开关（SetEnabled）都是热改的，
+ * 整段并入会让每次改「签到时刻」都误报「需重启」。
+ *
+ * schedule.random_delay_minutes / schedule.account_delay_min_seconds /
+ * schedule.account_delay_max_seconds 三项在 scheduler 装配期就被读进 Config
+ * （与 activity_report_count 同口径），只能重启生效；后端 restartRequiredFields
+ * 也把它们列入清单。
+ */
+const RESTART_FIELDS = [
+  'schedule.random_delay_minutes',
+  'schedule.account_delay_min_seconds',
+  'schedule.account_delay_max_seconds',
+];
+
+/** 后端字段名是否落在某个登记项下：整串相等，或其后跟 `.` 前缀。 */
+function hitsRestartEntry(name: string, entry: string): boolean {
+  return name === entry || name.startsWith(entry + '.');
+}
+
+/**
+ * 保存响应的 restart_required 是否命中本页的装配期段 / 字段。
  * 后端（panel_config.go restartRequiredFields）返回的是**字段级**名字：
  * 'prompt.mode' / 'upstream.timeout_seconds' / 'global.enabled'…——整串
  * 匹配段名 Set 恒为 false，会漏报「需重启」。这里按「段名本身或段名.
- * 前缀」匹配。
+ * 前缀」匹配，再补一遍字段级清单（见 RESTART_FIELDS）。
  */
 export function needsRestartBySection(saved: string[] | undefined): boolean {
-  return (saved ?? []).some((s) =>
-    [...RESTART_SECTIONS].some((p) => s === p || s.startsWith(p + '.')),
+  return (saved ?? []).some(
+    (s) => [...RESTART_SECTIONS].some((p) => hitsRestartEntry(s, p))
+      || RESTART_FIELDS.some((f) => hitsRestartEntry(s, f)),
   );
 }

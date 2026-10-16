@@ -32,12 +32,20 @@ type Config struct {
 
 	Cooldown struct {
 		// hard_credit / err_threshold / err_cooldown 三个历史键已退役：
-		// 硬冷却固定为次日 04:00（CooldownUntilTomorrow4AM），连续错误语义并入熔断器。
+		// 硬冷却默认固定为次日 04:00（CooldownUntilTomorrow4AM），连续错误语义并入熔断器。
 		// 旧 config 中的这些键因 JSON 未知字段而自然忽略，不报错。
+		// 注意与下方 credit_exhausted 区分：那是新键，语义是「可选的固定时长软冷却」，
+		// 空值仍走 04:00 旧行为——不是退役 hard_credit 的复活。
 		SoftRate string `json:"soft_rate"` // "600s"，软限流冷却基数
 		// SoftRateMax 软冷却指数退避的封顶，默认 "2h"。
 		// 空值回落默认，非法值报错（处理风格同 soft_rate）。
 		SoftRateMax string `json:"soft_rate_max"` // "2h"
+		// CreditExhausted 积分耗尽（402 / 429+14018 硬余额不足）后的冷却时长，如 "10m"。
+		// 空 = 旧行为：硬冷却到次日 04:00（CooldownUntilTomorrow4AM，等签到恢复）；
+		// 配了则改为**固定时长的软冷却**：只退出这一小段、到期自动回池（期间用户可能
+		// 充值、上游也可能刷新额度，挂一整天是浪费）。非空必须是正时长，非法值在
+		// normalize 阶段报错（处理风格同 soft_rate）；不做指数堆加（固定值即最终时长）。
+		CreditExhausted string `json:"credit_exhausted"`
 	} `json:"cooldown"`
 
 	Schedule config.Schedule `json:"schedule"`
@@ -161,6 +169,16 @@ type Config struct {
 		// 都 402 冷却到次日签到。0 = 关闭（缺省即现状，零回归）；负值非法归 0。
 		// 全池触底且无免费模型可接时选号返回 nil（硬语义：宁 503 不打穿）。
 		CreditFloor int64 `json:"credit_floor"`
+		// PreferExpiring 快过期积分优先消耗开关（v1.20.0，默认 true）：账号存在
+		// 「最早到期且仍有余量」的积分包（失效时刻在未来）时，加权选号把它的权重
+		// ×3（虚拟实例 = 等价放三份），会话粘性的可用 UID 列表同样拿到 3 份虚拟
+		// 槽位——快过期积分（官方活动奖励）先在它作废前被消耗掉。
+		// 显式 false = 完全恢复旧行为（只保留 expiring_soon 的"快过期占比"因子）。
+		// 判据数据由余额刷新/签到路径写入池（pool.SetCreditEarliest）：改开关后
+		// 开关本身立即生效，但要等**下一个刷新周期**才有新的到期快照可加成。
+		// 注意：不影响 pool.pick_strategy=credits_desc 的严格余额序（那条路径
+		// 逐字不消费本开关）。
+		PreferExpiring bool `json:"prefer_expiring"`
 	} `json:"pool"`
 
 	// Security 入站访问安全段（多密钥分发的前置件）。缺省全部零值 = 无规则恒放行
@@ -249,6 +267,7 @@ type Config struct {
 	// 解析后
 	SoftRateDur         time.Duration `json:"-"`
 	SoftRateMaxDur      time.Duration `json:"-"`
+	CreditExhaustedDur  time.Duration `json:"-"` // cooldown.credit_exhausted 解析结果；0 = 旧行为（硬冷却到次日 04:00）
 	BreakerCooldownDur  time.Duration `json:"-"`
 	BreakerCooldownMaxD time.Duration `json:"-"`
 	DegradeCooldownDur  time.Duration `json:"-"`
@@ -274,6 +293,9 @@ func Default() *Config {
 	}
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
+	// CreditExhausted 故意不给默认：零值 "" = 保持「硬冷却到次日 04:00」旧行为，
+	// 升级后行为逐字不变（吸收件默认关闭原则；要启用就显式配正时长）。
+
 	// 排程段默认值由 internal/config 集中维护（cmd/server 与 cmd/activity 共用，
 	// 消除 issue #49 的默认值漂移）。
 	c.Schedule = config.DefaultSchedule()
@@ -309,6 +331,10 @@ func Default() *Config {
 	c.Pool.CostExploreInterval = "30m"
 	// 选号策略默认 weighted（三因子加权随机，历史行为）。
 	c.Pool.PickStrategy = "weighted"
+	// 快过期积分优先消耗默认开启（v1.20.0）：显式 false 恢复旧行为。默认开的理由——
+	// 该加成只在"有快过期包且尚未失效"时生效（无数据的账号与旧行为逐字相同），
+	// 而忘了打开它会让奖励积分白白作废（不可逆的积分损失 > 抽签略偏好的代价）。
+	c.Pool.PreferExpiring = true
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
@@ -364,6 +390,10 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_SOFT_RATE_MAX"); v != "" {
 		c.Cooldown.SoftRateMax = v
+	}
+	// 积分耗尽冷却时长覆盖（空/缺省 = 保持硬冷却到次日 04:00 的旧行为）。
+	if v := os.Getenv("WB2A_CREDIT_EXHAUSTED"); v != "" {
+		c.Cooldown.CreditExhausted = v
 	}
 	if v := os.Getenv("WB2A_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -449,6 +479,13 @@ func applyEnv(c *Config) {
 			c.Pool.CreditFloor = n
 		}
 	}
+	// pool.prefer_expiring env 覆盖（"false" 关掉即恢复旧行为，"true" 显式开）。
+	// 非法值静默保留文件/默认值（与既有布尔覆盖同风格：不因坏 env 阻塞启动）。
+	if v := os.Getenv("WB2A_POOL_PREFER_EXPIRING"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Pool.PreferExpiring = b
+		}
+	}
 	// logging 段 env 覆盖。
 	if v := os.Getenv("WB2A_LOGGING_REQUEST_ARCHIVE"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
@@ -496,6 +533,22 @@ func (c *Config) normalize() error {
 	}
 	if c.SoftRateMaxDur, err = time.ParseDuration(c.Cooldown.SoftRateMax); err != nil {
 		return fmt.Errorf("cooldown.soft_rate_max: %w", err)
+	}
+	// 积分耗尽后的冷却时长（吸收 workbuddy-manager 补丁 0004）：空 = 保持「硬冷却到
+	// 次日 04:00」的旧行为（通知 pool 传 0）；填了必须是**正**时长——负值/0 会让冷却
+	// 立即到期（等于没冷却），静默放行等于配置写错却毫无效果，故 fail-fast 报错并
+	// 点出键名（解析/校验风格同 soft_rate / soft_rate_max）。
+	if v := strings.TrimSpace(c.Cooldown.CreditExhausted); v == "" {
+		c.CreditExhaustedDur = 0
+	} else {
+		d, perr := time.ParseDuration(v)
+		if perr != nil {
+			return fmt.Errorf("cooldown.credit_exhausted: %w", perr)
+		}
+		if d <= 0 {
+			return fmt.Errorf("cooldown.credit_exhausted: 必须是正时长，got %q", v)
+		}
+		c.CreditExhaustedDur = d
 	}
 	// 空值回落默认（与 soft_rate_max / degrade_cooldown 同风格：显式 "" 不应直接启动失败）。
 	if c.Pool.BreakerCooldown == "" {

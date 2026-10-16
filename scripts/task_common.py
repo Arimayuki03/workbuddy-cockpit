@@ -12,7 +12,7 @@
      chat 域 400 时降级 web 域 www.workbuddy.cn 同路径 + x-client-platform: web）
   - 领养   : POST /activity/growth/buddy/agreement + /buddy/first（幂等，+300c+8e）
 """
-import json, os, time, glob, urllib.request, urllib.error
+import json, os, time, glob, random, urllib.request, urllib.error
 
 
 def _resolve_auths_dir() -> str:
@@ -294,3 +294,48 @@ def chat_completion(auth, model_id="glm-5.2", prompt="hi", max_tokens=32,
         return e.code, t[:200]
     except Exception as e:
         return -1, repr(e)[:200]
+
+
+class AccountSpacing:
+    """账号错峰：处理下一个账号前随机等待 [minimum, maximum] 秒。
+
+    首个账号立即处理（不等待），之后每个账号前等一次；缺省 0/0 = 关闭，wait() 是
+    空操作——不传新参数的旧调用方行为逐字不变。区间非法直接 ValueError，调用方经
+    argparse 的 parser.error 转成命令行报错（与 Go 侧 Schedule.Normalize 同口径）。
+
+    随机源用 SystemRandom（系统熵，不用全局 random 状态）：错峰是运行期「摊开流量」
+    的一次性抖动，不该被调用方/测试的 random.seed() 影响。
+    """
+
+    def __init__(self, minimum=0, maximum=0):
+        if not 0 <= minimum <= maximum <= 600:
+            raise ValueError("account delays require 0 <= min <= max <= 600 seconds")
+        self.minimum, self.maximum = minimum, maximum
+        self.started = False
+
+    def wait(self):
+        if self.started and self.maximum > 0:
+            delay = random.SystemRandom().uniform(self.minimum, self.maximum)
+            print(f"account spacing: waiting {delay:.1f}s", flush=True)
+            time.sleep(delay)
+        self.started = True
+
+
+def add_account_spacing_arguments(parser):
+    """给任务的 argparse 加账号错峰参数（默认 0 = 关闭 = 旧行为）。
+
+    由各任务脚本 main() 显式调用（脚本各自的解析器形态不同，显式接线比在公共位置
+    隐式注入更可控）。
+    """
+    parser.add_argument("--account-delay-min", type=int, default=0,
+                        help="账号间最小等待秒数（默认 0；与 --account-delay-max 配合）")
+    parser.add_argument("--account-delay-max", type=int, default=0,
+                        help="账号间随机等待上限秒数（0 = 关闭账号错峰）")
+
+
+def account_spacing_from_args(args, parser):
+    """把 --account-delay-* 转成 AccountSpacing；区间非法交由 argparse 报错退出。"""
+    try:
+        return AccountSpacing(args.account_delay_min, args.account_delay_max)
+    except ValueError as exc:
+        parser.error(str(exc))

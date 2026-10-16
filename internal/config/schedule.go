@@ -10,9 +10,11 @@ import "fmt"
 
 // Schedule 排程配置段（对应 config.json 的 "schedule" 对象）。
 //
-// 六类独立排程：签到 / 活跃上报 / 猫猫旅行 / token keepalive / 开学季 / 夜猫子。
-// cmd/server 与 cmd/activity 共用本结构，默认值由 DefaultSchedule 填充、
-// 缺省归一由 Normalize 完成——两命令走同一份语义，不再各自复制。
+// 多类独立排程：签到 / 活跃上报 / 猫猫旅行 / token keepalive / 开学季 / 夜猫子 /
+// 任务中心执行队列 / 令牌续期 / 活动补偿（最后一类缺省关、小时表默认空且不回落，
+// 见 CompensationHours 注释）。cmd/server 与 cmd/activity 共用本结构，默认值由
+// DefaultSchedule 填充、缺省归一由 Normalize 完成——两命令走同一份语义，
+// 不再各自复制。
 type Schedule struct {
 	CheckinHours   []int `json:"checkin_hours"`   // [9,21]
 	TravelHours    []int `json:"travel_hours"`    // [9,21]
@@ -52,9 +54,37 @@ type Schedule struct {
 	// 开启后按 renew_hours 触发，仅刷新「有效期不足 pool.expiring_soon 窗口」的账号
 	//（面板手动停用的账号跳过；仅熔断/冷却/状态位异常的照常续）。
 	RenewEnabled bool `json:"renew_enabled"`
+	// CompensationEnabled 活动补偿自动领取开关（schedule.compensation_enabled，
+	// 缺省 **false**，opt-in）。补偿是「有则领、没有就跳过」的幂等写（平台发给账号的
+	// 故障/活动补偿，官方网页「用量管理」也要用户手点一次），但公告常带截止日期——
+	// 面板「立即执行」当场领最稳，故不无感默认开启（与 queue/renew 同风格）。
+	CompensationEnabled bool `json:"compensation_enabled"`
+	// CompensationHours 活动补偿自动领取的整点表（schedule.compensation_hours）。
+	//
+	// **默认空数组，且是全表唯一的「空数组不回落默认」例外**：空 = 只手动执行、不自动跑
+	//（前端设置页与任务页卡片的「留空 = 只手动执行」文案即此语义）。其余七类小时表沿用
+	//「空数组/null = 未配置 → 回落默认」的老语义（见 Normalize），这里若照做，用户留空
+	// 会变成「静默每天自动领」——与用户写下的意图相反，且界面上看不出任何提示。
+	//
+	// enabled=true 但本表为空 → 不排程（等价「只手动」），由 scheduler.New 记一行 WARN
+	// 说明；不报错也不回落（用户可能是先开开关、还没填时刻）。
+	CompensationHours []int `json:"compensation_hours"`
 	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
 	// 默认 5 条把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int `json:"activity_report_count"`
+	// RandomDelayMinutes 每日随机延后窗口（分钟，0-60，缺省 0 = 关）。
+	//
+	// 开启后每个排程槽位不再卡在整点，而是在「原定整点 + 0..N 分钟」内的一个固定偏移
+	// 触发（偏移由部署私有种子确定性派生，见 scheduler.scheduledSlot）：同一部署重启后
+	// 偏移不变、不同部署互不相同，用于把固定整点的批量流量摊开（吸收 workbuddy-manager
+	// 补丁 0003 / CHANGELOG 1.0.91）。0（缺省/旧配置）行为逐字不变。
+	RandomDelayMinutes int `json:"random_delay_minutes"`
+	// AccountDelayMinSeconds/AccountDelayMaxSeconds 同一批任务的账号错峰等待区间
+	//（秒，0-600，缺省 0/0 = 关）：处理完一个账号后随机等 [min,max] 秒再处理下一个账号，
+	// 避免整批账号在同一秒打上游。只作用于定时排程——手动「立即执行」不受影响。
+	// 两者必须成对满足 0 <= min <= max（min>max 报错，而不是静默对调语义）。
+	AccountDelayMinSeconds int `json:"account_delay_min_seconds"`
+	AccountDelayMaxSeconds int `json:"account_delay_max_seconds"`
 	// 猫猫旅行已退役 travel_interval_minutes：旅行现为独立排程（travel_hours）。
 	// 旧 config 里的该键因 JSON 未知字段而自然忽略，不报错。
 }
@@ -81,8 +111,14 @@ func DefaultSchedule() Schedule {
 		SchoolEnabled:        true,
 		CatEnabled:           true,
 		ActivityReportCount:  5, // 领猫前置需 5 次对话，5 连发刷满 chat_5
+		// RandomDelayMinutes/AccountDelayMinSeconds/AccountDelayMaxSeconds 缺省保持
+		// 零值 0（关）＝旧行为逐字不变：随机延后与账号错峰都是 opt-in 的「摊开流量」
+		// 开关，与六个 *_enabled 的「缺省 true」不同，不需要在此显式置 0。
 		// QueueEnabled 缺省 false（零值即关）：队列是全账号真实任务动作的批量执行，
 		// opt-in 才安全——与六个 *_enabled 的"缺省 true"相反，是有意的不对称。
+		// CompensationEnabled / CompensationHours 同样刻意保持零值（false / 空表）：
+		// 「默认不自动跑」是本功能的用户口径（补偿公告带截止日期，手动「立即执行」最稳），
+		// 而空小时表另有一层含义——「只手动执行」（见 Normalize 的不回落例外）。
 	}
 }
 
@@ -95,6 +131,11 @@ func DefaultSchedule() Schedule {
 // 注意这是「显式配 0 = 旧行为」的兼容语义，与 scheduler.New 的 <=0 → 1 归一一致；
 // 「缺省 = 5」由 DefaultSchedule 在 Unmarshal 前置入，是另一条路径，两者不合并。
 func (s *Schedule) Normalize() error {
+	// 随机延后/账号错峰先校验：这两个值是「时长」不是「时点」，越界没有安全的回落值
+	// 可猜（配了 90 分钟想要什么？），快速失败比静默改语义诚实（口径同 validateHours）。
+	if err := s.validateDelays(); err != nil {
+		return err
+	}
 	if len(s.CheckinHours) == 0 {
 		s.CheckinHours = []int{9, 21}
 	}
@@ -119,11 +160,35 @@ func (s *Schedule) Normalize() error {
 	if len(s.RenewHours) == 0 {
 		s.RenewHours = []int{3}
 	}
+	// CompensationHours **刻意不在这里补默认**：空数组 = 「只手动执行」（前端
+	// 「留空 = 不自动跑」的语义）。其余七类的空数组是「未配置 → 回落默认」，若这里
+	// 照做，用户在前端留空会静默变成「每天自动领补偿」——界面看不出任何变化。
+	// enabled=true 且为空是合法配置（先开开关、暂不排程），不报错，只由 scheduler.New
+	// 记一行 WARN 说明；非法整点仍在 validateHours 里照常报错。
 	// 0/负数 → 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
 	if s.ActivityReportCount <= 0 {
 		s.ActivityReportCount = 1
 	}
 	return s.validateHours()
+}
+
+// validateDelays 校验随机延后窗口与账号错峰区间。
+//
+// 为什么不像非法小时那样「钳掉就算」：钳值会静默改变用户写下的语义（把 90 分钟悄悄
+// 变成 60 分钟、把 min>max 悄悄对调），而这两个键正是用来标记部署间差异的——错配的
+// 部署会让人误判「随机没生效」。故一律报错，且错误信息带键名，用户能直接定位
+// config.json 的哪一行（与 checkHourRange 同口径）。
+func (s *Schedule) validateDelays() error {
+	if s.RandomDelayMinutes < 0 || s.RandomDelayMinutes > 60 {
+		return fmt.Errorf("schedule.random_delay_minutes: %d 不是合法分钟数（0-60）；0 = 关闭随机延后",
+			s.RandomDelayMinutes)
+	}
+	lo, hi := s.AccountDelayMinSeconds, s.AccountDelayMaxSeconds
+	if lo < 0 || hi < 0 || hi > 600 || lo > hi {
+		return fmt.Errorf("schedule.account_delay_min_seconds/account_delay_max_seconds: %d/%d 不是合法区间"+
+			"（需 0 <= min <= max <= 600 秒）；0 = 关闭账号错峰", lo, hi)
+	}
+	return nil
 }
 
 // validateHours 校验排程小时落在 0-23。
@@ -150,7 +215,13 @@ func (s *Schedule) validateHours() error {
 	if err := checkHourRange("schedule.cat_hours", "cat_enabled", s.CatHours); err != nil {
 		return err
 	}
-	return checkHourRange("schedule.queue_hours", "queue_enabled", s.QueueHours)
+	if err := checkHourRange("schedule.queue_hours", "queue_enabled", s.QueueHours); err != nil {
+		return err
+	}
+	// compensation_hours 的「空」是合法语义（= 只手动，见 Normalize 的不回落例外），
+	// 但一旦给了值就必须是合法整点——越界小时会被 nextFire 归一化成意外时点
+	//（25 点静默漂移为次日 1 点），故与其余七类同一口径快速失败。
+	return checkHourRange("schedule.compensation_hours", "compensation_enabled", s.CompensationHours)
 	// renew_hours 不在校验链里：renew_enabled 缺省 false，巡检关闭时 renew_hours
 	// 是惰性配置；开启路径由 scheduler.New 的 clampHours 钳非法小时（与其余七类同口径）。
 }

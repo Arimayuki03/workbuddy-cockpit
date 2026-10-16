@@ -165,12 +165,17 @@ func main() {
 	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(cfg.Pool.MaxInFlightGlobal) // global 域在途分档（WAF 403 修复 P1-1，默认 2）
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
+	p.SetCreditExhausted(cfg.CreditExhaustedDur)       // 积分耗尽后的冷却时长（credit_exhausted，0 = 旧行为：硬冷却到次日 04:00）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur)             // costTier 探索窗口（issue #136，默认 30m；0 关停）
 	p.SetPickStrategy(pool.ParsePickStrategy(cfg.Pool.PickStrategy)) // 选号策略（weighted 默认 / credits_desc 余额严格降序）
 	// 积分保底（panel 吸收件，pool.credit_floor）：0 = 关闭（缺省零回归）。
 	// 倍率查表在 up 构建后装配（见下方 SetModelRateOf）。
 	p.SetCreditFloor(cfg.Pool.CreditFloor)
+	// 快过期积分优先消耗（pool.prefer_expiring，v1.20.0，默认 true）：对「最早到期且仍有
+	// 余量」的候选给 ×3 虚拟实例权重（加权策略）并在粘性可用列表里放 3 份；关掉即旧行为。
+	// 快照由各余额刷新路径的 SetCreditEarliest 供给，缺快照时该开关惰性。
+	p.SetPreferExpiring(cfg.Pool.PreferExpiring)
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
@@ -245,6 +250,11 @@ func main() {
 			stateSibling(cfg.StateFile, "requests"), cfg.Logging.RequestRetentionDays,
 			cfg.Logging.RequestArchiveMaxMB, cfg.Logging.RequestClientInfo)
 	}
+
+	// 日志来源采集口径（v1.19.1，requestlog.go）：面板「日志」页 IP/UA 列与
+	// ip/ua/from/to 过滤共用的可信代理解析——与入站安全同口径，只有声明了可信代理
+	// 才认转发头，零配置仍取 RemoteAddr（不放宽默认安全口径）。
+	server.SetClientInfoTrust(cfg.SecurityTrustedCIDRs, cfg.Security.TrustedProxyHops)
 
 	// 入站 IP 规则（security 段，iprules.go）：空规则恒放行（nil 安全 + 空快照
 	// 双保险，零配置零回归）。落盘 data/ip_rules.json 与面板热改共用持久层——
@@ -321,30 +331,56 @@ func main() {
 	// Pick 老路径（无域上下文）传空串按空域键查；目录未覆盖返回 ""（= 未知放行）。
 	p.SetModelRateOf(up.ModelRateOf)
 
+	// 随机延后/账号错峰的确定性种子：取部署私有值（api_key 优先，为空退 auth_dir），
+	// 让「同一天同一任务的延迟偏移」在重启后不变、不同部署互不相同。种子只作为哈希
+	// 输入，绝不写进日志/错误信息（见 scheduler.scheduledSlot）；随机延后关闭（缺省 0）
+	// 时该值无任何作用。
+	scheduleSeed := cfg.APIKey
+	if scheduleSeed == "" {
+		scheduleSeed = cfg.AuthDir
+	}
 	sch := scheduler.New(scheduler.Config{
-		Pool:                p,
-		Upstream:            up,
-		CheckinHours:        cfg.Schedule.CheckinHours,
-		TravelHours:         cfg.Schedule.TravelHours,
-		ActivityHours:       cfg.Schedule.ActivityHours,
-		KeepaliveHours:      cfg.Schedule.KeepaliveHours,
-		SchoolHours:         cfg.Schedule.SchoolHours,
-		CatHours:            cfg.Schedule.CatHours,
-		QueueHours:          cfg.Schedule.QueueHours,
-		ActivityReportCount: cfg.Schedule.ActivityReportCount,
-		ExpiringSoonWindow:  cfg.ExpiringSoonDur, // 快过期积分优先消耗（issue:积分过期）
-		CheckinDisabled:     !cfg.Schedule.CheckinEnabled,
-		TravelDisabled:      !cfg.Schedule.TravelEnabled,
-		ActivityDisabled:    !cfg.Schedule.ActivityEnabled,
-		KeepaliveDisabled:   !cfg.Schedule.KeepaliveEnabled,
-		SchoolDisabled:      !cfg.Schedule.SchoolEnabled,
-		CatDisabled:         !cfg.Schedule.CatEnabled,
-		QueueEnabled:        cfg.Schedule.QueueEnabled,
+		AccountDelayMinSeconds: cfg.Schedule.AccountDelayMinSeconds,
+		AccountDelayMaxSeconds: cfg.Schedule.AccountDelayMaxSeconds,
+		RandomDelayMinutes:     cfg.Schedule.RandomDelayMinutes,
+		RandomDelaySeed:        scheduleSeed,
+		Pool:                   p,
+		Upstream:               up,
+		CheckinHours:           cfg.Schedule.CheckinHours,
+		TravelHours:            cfg.Schedule.TravelHours,
+		ActivityHours:          cfg.Schedule.ActivityHours,
+		KeepaliveHours:         cfg.Schedule.KeepaliveHours,
+		SchoolHours:            cfg.Schedule.SchoolHours,
+		CatHours:               cfg.Schedule.CatHours,
+		QueueHours:             cfg.Schedule.QueueHours,
+		ActivityReportCount:    cfg.Schedule.ActivityReportCount,
+		ExpiringSoonWindow:     cfg.ExpiringSoonDur, // 快过期积分优先消耗（issue:积分过期）
+		CheckinDisabled:        !cfg.Schedule.CheckinEnabled,
+		TravelDisabled:         !cfg.Schedule.TravelEnabled,
+		ActivityDisabled:       !cfg.Schedule.ActivityEnabled,
+		KeepaliveDisabled:      !cfg.Schedule.KeepaliveEnabled,
+		SchoolDisabled:         !cfg.Schedule.SchoolEnabled,
+		CatDisabled:            !cfg.Schedule.CatEnabled,
+		QueueEnabled:           cfg.Schedule.QueueEnabled,
 		// Token 独立续期巡检（schedule.renew_*，缺省关）：临期账号主动刷新，
 		// 覆盖长期闲置无对话流量的空档（wbm services/renew.py 吸收件）。
 		RenewEnabled: cfg.Schedule.RenewEnabled,
 		RenewHours:   cfg.Schedule.RenewHours,
+		// 活动补偿自动领取（schedule.compensation_*，缺省关 opt-in）：有则领、没有就跳过，
+		// 重复执行不会多领，国际版账号自动跳过。默认不自动跑（手动「立即执行」最稳）；
+		// compensation_hours 留空 = 不排程（等价「只手动」，Normalize 不回落默认整点）。
+		CompensationEnabled: cfg.Schedule.CompensationEnabled,
+		CompensationHours:   cfg.Schedule.CompensationHours,
 	})
+	// 随机延后/账号错峰的生效说明（缺省全关时不打日志，与旧版输出一致；种子不出现）。
+	if cfg.Schedule.RandomDelayMinutes > 0 {
+		log.Printf("每日随机延后已开启：整点槽位在本小时内偏移 0-%d 分钟（同一天同一任务偏移固定，重启不变）",
+			cfg.Schedule.RandomDelayMinutes)
+	}
+	if cfg.Schedule.AccountDelayMaxSeconds > 0 {
+		log.Printf("账号错峰已开启：定时任务每处理完一个账号随机等待 %d-%d 秒（手动立即执行不受影响）",
+			cfg.Schedule.AccountDelayMinSeconds, cfg.Schedule.AccountDelayMaxSeconds)
+	}
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
 		log.Printf("签到已禁用（schedule.checkin_enabled=false）")
@@ -383,6 +419,11 @@ func main() {
 	}
 	if cfg.Schedule.RenewEnabled {
 		log.Printf("Token 续期巡检已启用：%v 点（临期账号主动续期，阈值=expiring_soon 窗口，schedule.renew_enabled）", cfg.Schedule.RenewHours)
+	}
+	// 活动补偿自动领取（缺省关）：只开开关不配整点 = 不排程（只手动），故这里只在两者
+	// 都齐时才报「已启用」——留空时 scheduler.New 会记一行 WARN 说明（不重复刷日志）。
+	if cfg.Schedule.CompensationEnabled && len(cfg.Schedule.CompensationHours) > 0 {
+		log.Printf("活动补偿自动领取已启用：%v 点（有则领、没有就跳过；国际版账号自动跳过，schedule.compensation_enabled）", cfg.Schedule.CompensationHours)
 	}
 
 	// 积分流水追踪器（panel 移植件，wbm credits.record_balance 吸收件）：余额快照

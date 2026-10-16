@@ -83,6 +83,9 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 			} else {
 				s.cfg.Pool.ReenableIfCredits(uid, remain)
 			}
+			// 最早到期积分快照（v1.20.0 prefer_expiring）：紧跟余额写入（钳制基准是刚写
+			// 入的 credits），供选号 ×3 权重与粘性虚拟实例；无到期信息时零值惰性。
+			s.cfg.Pool.SetCreditEarliest(uid, buckets.EarliestExpiry, buckets.EarliestRemaining)
 			// 积分流水：余额比对记账（credit.go）。昵称取自池状态快照（并发 goroutine
 			// 外先查好，避免 goroutine 内再读池）。
 			s.RecordBalanceChecked(uid, nickOf(nicks, uid), remain)

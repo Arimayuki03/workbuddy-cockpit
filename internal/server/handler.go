@@ -462,6 +462,38 @@ func fmtCreditsPrefix(raw string) string {
 	return "[" + s + " credit]"
 }
 
+// addListingCompat 补上第三方模型目录客户端要读的能力字段（issue #156：Magpie）。
+//
+// 它们不看我们自己的 supports_images / reasoning_supported_efforts，只看
+// `modalities.input` 里有没有 "image"、以及 `supported_reasoning_levels` 里每项的
+// `effort`。我们的字段是既有约定（面板与别的客户端在用），所以这里**只增不改**：
+// 两边同时输出，谁都能读。模型 ID 上的 cn:/global: 前缀保持不变 —— 它区分版本，
+// 不能为了目录兜底而抹掉。
+func addListingCompat(entry map[string]any) map[string]any {
+	if entry["supports_images"] == true {
+		entry["modalities"] = map[string]any{"input": []string{"text", "image"}}
+	}
+	var efforts []string
+	switch raw := entry["reasoning_supported_efforts"].(type) {
+	case []string:
+		efforts = raw
+	case []any:
+		for _, v := range raw {
+			if s, ok := v.(string); ok {
+				efforts = append(efforts, s)
+			}
+		}
+	}
+	if len(efforts) > 0 {
+		levels := make([]map[string]any, 0, len(efforts))
+		for _, e := range efforts {
+			levels = append(levels, map[string]any{"effort": e})
+		}
+		entry["supported_reasoning_levels"] = levels
+	}
+	return entry
+}
+
 // applyModelInfoFields 把上游模型对象全字段（ModelInfo）按「空值省略」写出规则
 // 合入 /v1/models 条目：name/description/credits/tags/vendor/能力旗标/
 // max_allowed_size/reasoning_effort/reasoning_summary。CN 动态分支与 global
@@ -550,6 +582,9 @@ func (h *Handler) modelList() []map[string]any {
 				entry["reasoning_default_effort"] = def
 			}
 		}
+		// 兼容字段补全（addListingCompat）必须覆盖**所有** entry 构建路径：CN 动态
+		// 分支与下方 global 分支都过一遍，第三方目录客户端才不会因分支差异丢字段。
+		entry = addListingCompat(entry)
 		out = append(out, entry)
 	}
 	// global 模型名单：仅 GlobalEnabled=true 时列出（逃生门）。
@@ -593,6 +628,7 @@ func (h *Handler) modelList() []map[string]any {
 					entry["reasoning_default_effort"] = def
 				}
 			}
+			entry = addListingCompat(entry)
 			out = append(out, entry)
 		}
 	}
@@ -909,9 +945,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// conversationId 透传前校验（audit：客户端可控值无校验进出站头）：非法值（控制
 	// 字符/非白名单字符/超长）写传输头时会被 stdlib 拒绝（invalid header field），
 	// 单请求最多污染 MaxRotate 个账号的出站尝试——就地丢弃改用服务端生成的 32 hex
-	// ID（session.NewMessageID，与既有生成 ID 同形态）；客户端未提供（空串）保持
-	// 「不伪造、不发」语义不变（ResolveConversationID 契约）。
+	// ID（session.NewMessageID，与既有生成 ID 同形态）；客户端未提供（空串）回退
+	// 会话键 sessKey（见下），两者都空才保持「不伪造、不发」语义（ResolveConversationID
+	// 契约）。
+	//
+	// 空值回退会话键（任务书 prompt-cache-key §B）：sessKey 是「会话标识」的完整口径
+	// （ExtractKey：metadata/顶层 conversation 四键 + prompt_cache_key 兜底），而
+	// parsed.ConversationID 只认前四键。只发 prompt_cache_key 的客户端（dsh 等 pi-ai
+	// 系）因此此前 convID 恒空：下游所有按「会话段」派生的事物都失去会话维度——
+	// prepareBody 的 prompt_cache_key 注入拿不到会话段，buildCacheKey 退化为
+	// sha256(uid+"|") 常量键（同账号所有请求同一个键，会话级前缀缓存不再成立，
+	// 跨轮/跨会话命中互相顶掉）；上游会话头族的后台聚合也随之碎片化。
+	// 回退不算伪造：值取自客户端自己的 body（prompt_cache_key 本就是这类客户端的会话
+	// ID），与下方 conversationRequestID 为空时用 sessKey 做会话级兜底同一口径
+	// （sessKey/stickyKey 的分层见上方「会话粘性」注释）。
 	convID := parsed.ConversationID
+	if convID == "" {
+		convID = sessKey
+	}
 	if convID != "" && !validConversationID(convID) {
 		log.Printf("DEBUG: [server] chat: invalid client conversationId %q (len=%d), using generated id", convID, len(convID))
 		convID = session.NewMessageID()
@@ -1161,6 +1212,34 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadRequest
 				return
 			}
+			// 11148 工具调用/结果历史错配：立即透传上游原文回 400，**不罚号不轮转**。
+			//
+			// 为什么必须在这里终止（任务书 tool-call-mismatch 最高优先）：11148 是上游对
+			// 这份出站 messages 的 tool_call↔结果配对/顺序的确定性判定——同一个 body 换
+			// 任何账号，messages 一个字节都没变，必然还是 11148。旧路径（落通用 4xx 兜底
+			// ErrClient）有两重实害：
+			//   ① applyErrorPolicy 的 ErrClient 分支轮转全池 + NoteFailures 连败计数，
+			//      用一个请求自己的历史错误把健康号一个个打出池（连败达阈即降权出池）；
+			//   ② 轮转耗尽后末端落到 503 no_healthy_account，把**确定性失败**伪装成
+			//      「账号不可用稍后再试」，客户端据此无限重试必然失败的请求。
+			// tool_pairing.go 已在出站前预防 11148（修复能修的形态），这里兜住「修不好
+			// 的污染历史」：不再浪费健康号配额，直接把上游原文（code/msg/requestId +
+			// extError 原样）交回客户端自行重建历史。
+			// 不罚号：applyErrorPolicy ErrToolCallMismatch 分支零动作（不冷却/不熔断/
+			// 不 NoteError/不喂连败），fail 只释放租约与解粘性。
+			if kind == upstream.ErrToolCallMismatch {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					// 空 body 兜底：无上游原文可透传，保留可读分类文案（不编造原文）。
+					msg = "tool calls and tool results do not match"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "tool_call_mismatch", msg,
+					h.hintOf(upstream.ErrToolCallMismatch, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				return
+			}
 			// 请求体解析失败（11101）：立即透传上游原文回 400，**不轮转**。
 			//
 			// 语义变更（吸收自 workbuddy2api-panel commit fd5c5a6b / issue #99 实案）：
@@ -1400,6 +1479,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 确定的审核结果而非误导性的 503 no_healthy_account。
 			status = http.StatusBadRequest
 			code = "content_blocked"
+		case upstream.ErrToolCallMismatch:
+			// 11148 工具调用/结果历史错配落到末端：当前控制流下循环内已有同 kind 分支
+			// 提前 return（命中即 400 透传，不走 lastErr），这里是**口径完备**的防御位
+			// ——与 content_blocked 的末端映射同理，保证「请求级确定性错误」在末端永不
+			// 退化成 503 no_healthy_account（后者会被客户端读成「账号不可用、稍后再试」，
+			// 对必然失败的请求无限重试）。上游原文由下方 ue.Msg 覆盖 message。
+			status = http.StatusBadRequest
+			code = "tool_call_mismatch"
 		case upstream.ErrWafBlock:
 			if h.wafIP.active() {
 				// IP 级拦截措辞（fail-fast 终止路径）：空 body 时给出明确可读文案——
@@ -1517,6 +1604,11 @@ func rotateBackoff(i int, ctx context.Context) bool {
 //   - ErrImageInvalid → 图片格式/数据无效：请求的问题不是账号的问题（同一 body
 //     换任何号都会得到相同的解析错误）。零动作（不冷却/不熔断/不 NoteError、
 //     不喂连败），chatCompletions 已直接透传原文返回不轮转。
+//   - ErrToolCallMismatch → 11148 工具调用/结果历史错配：同样请求级（同一 body 换任何
+//     号都是同一份 messages → 同一判定）。零动作（不冷却/不熔断/不 NoteError、不喂连败，
+//     与 ErrPromptTooLong/ErrImageInvalid 同待遇），chatCompletions 已立即 400 透传原文
+//     终止——本分支只为文档完备，不指望走到换号路径；**绝不能落 ErrClient 兜底**
+//     （那条分支会 NoteFailures 连败计数，把健康号打出池）。
 //   - ErrServer → NoteError：喂单一连续失败计数器 fails + 累计错误 errTotal，
 //     达到 breakerThreshold 触发熔断（指数退避）。
 //   - ErrModelBlocked → BlockModelBackoff：(账号, 模型) 11102 负缓存避让（复用 modelCooldowns
@@ -1616,6 +1708,14 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 	case upstream.ErrImageInvalid:
 		// 图片格式/数据无效：请求的问题不是账号的问题（同一 body 换任何号都会
 		// 得到相同解析错误）。零动作，chatCompletions 已 fail-fast 透传。
+	case upstream.ErrToolCallMismatch:
+		// 11148 工具调用/结果历史错配：请求的问题不是账号的问题（同一 body 换任何号
+		// 都是同一份 messages，判定必然相同）。零动作（不冷却/不熔断/不 NoteError、
+		// 不喂连败，同 ErrPromptTooLong/ErrImageInvalid 待遇），chatCompletions 已立即
+		// 400 透传原文终止轮转——该分支只为文档完备。
+		// 显式列出（而非依赖 default）的理由：default 分支的 ErrClient 判据是「未知 4xx
+		// 喂连败计数」，本 kind 曾被归类到那里（11148 → ErrClient）→ 轮转全池 + 连败
+		// 把健康号打出池；显式零动作让这条纪律在代码里可见、不被未来重构合并回 default。
 	case upstream.ErrBadParams:
 		// 请求体解析失败（400 + Unmarshal chat params failed / 11101）：发给上游的 body
 		// 有问题（网关截断已由 413 消灭，剩余为客户端畸形 JSON）。同一 body 换任何账号

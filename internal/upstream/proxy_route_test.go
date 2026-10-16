@@ -172,6 +172,139 @@ func TestProxyRouteTransportProxyURL(t *testing.T) {
 	}
 }
 
+// routeProxyFn 取线路 transport 的 Proxy 选择函数：生产路径的判定入口——
+// http.Transport 在每个请求上调用它决定这一跳走不走代理（返回 nil = 直连）。
+func routeProxyFn(t *testing.T, c *Client, route string) func(*http.Request) (*url.URL, error) {
+	t.Helper()
+	hc, err := c.transportFor(&auth.Auth{UID: "u-bypass", ProxyRoute: route}, false)
+	if err != nil {
+		t.Fatalf("transportFor(%s): %v", route, err)
+	}
+	tr, ok := hc.Transport.(*http.Transport)
+	if !ok || tr.Proxy == nil {
+		t.Fatalf("线路 %s 的 client 应带 Proxy 选择函数", route)
+	}
+	return tr.Proxy
+}
+
+// TestProxyRouteDirectOnlyTargetsBypass 私网/本机目标不经出口代理（直连），
+// 公网目标维持现状走绑定线路（workbuddy-manager d79f13cc 吸收件）。
+//
+// 双重断言：directOnlyHost（判定函数本身）+ 线路 transport 的 Proxy 函数
+// （真实生效入口，返回 nil 即标准库语义「本次请求直连」）。
+func TestProxyRouteDirectOnlyTargetsBypass(t *testing.T) {
+	const routeProxy = "http://127.0.0.1:1" // 必然连不通的代理：只用于断言「不该走它」
+	c := New()
+	if err := c.SetProxyRoutes(map[string]string{"route-a": routeProxy}); err != nil {
+		t.Fatalf("SetProxyRoutes: %v", err)
+	}
+	proxyFn := routeProxyFn(t, c, "route-a")
+	wantProxy := mustParse(t, routeProxy)
+
+	cases := []struct {
+		name   string
+		target string
+		direct bool
+	}{
+		// —— 任务书枚举的形态：全部直连 ——
+		{"ipv4 loopback", "http://127.0.0.1:8080/v2/x", true},
+		{"ipv6 loopback", "http://[::1]:8080/v2/x", true},
+		{"rfc1918 10/8", "http://10.0.0.5/v2/x", true},
+		{"rfc1918 192.168/16", "http://192.168.1.9:9000/v2/x", true},
+		{"rfc1918 172.16/12", "https://172.16.3.4/v2/x", true},
+		{"link-local v4", "http://169.254.1.1/v2/x", true},
+		{"ula v6 fc00::/7", "http://[fc00::1]/v2/x", true},
+		{"localhost", "http://localhost:8080/v2/x", true},
+		{"localhost 大写", "http://LOCALHOST/v2/x", true},
+		{"docker 宿主别名", "http://host.docker.internal:11434/v2/x", true},
+		// —— 同族边界/形态加固：防漏判 ——
+		{"ula fd00::/8", "http://[fd00::5]:8080/v2/x", true},
+		{"v6 link-local", "http://[fe80::1]:80/v2/x", true},
+		{"大写 v6 字面量", "http://[FC00::1]/v2/x", true},
+		{".local 后缀域名", "http://printer.local:631/v2/x", true},
+		{"FQDN 绝对形尾点", "http://localhost.:8080/v2/x", true},
+		{"IP 字面量尾点", "http://192.168.1.9.:8080/v2/x", true},
+		{"4-in-6 归一", "http://[::ffff:192.168.1.9]:8080/v2/x", true},
+		// —— 公网目标：维持现状（走绑定线路）——
+		{"公网 IP", "http://8.8.8.8/v2/x", false},
+		{"公网域名", "https://www.codebuddy.cn/v2/x", false},
+		{"公网域名 2", "http://example.com/v2/x", false},
+		{"10/8 段外", "http://11.0.0.1/v2/x", false},
+		{"172.16/12 段外", "http://172.32.1.1/v2/x", false},
+		{"4-in-6 公网", "http://[::ffff:8.8.8.8]/v2/x", false},
+		// —— 反陷阱：形近但不该直连（判定只看字面，不做 DNS）——
+		{"IP 形态域名", "http://127.0.0.1.evil.com/v2/x", false},
+		{"别名后缀域名", "http://host.docker.internal.evil.com/v2/x", false},
+		{"mylocal 无点前缀", "http://mylocal/v2/x", false},
+		{"非 .local 结尾", "http://mylocal.evil.com/v2/x", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u := mustParse(t, tc.target)
+			if got := directOnlyHost(u.Hostname()); got != tc.direct {
+				t.Fatalf("directOnlyHost(%q)=%v want %v", u.Hostname(), got, tc.direct)
+			}
+			got, err := proxyFn(&http.Request{URL: u})
+			if err != nil {
+				t.Fatalf("Proxy: %v", err)
+			}
+			if tc.direct {
+				if got != nil {
+					t.Fatalf("私网/本机目标应直连（Proxy 返回 nil），实际 %v", got)
+				}
+				return
+			}
+			if got == nil || got.String() != wantProxy.String() {
+				t.Fatalf("公网目标应走绑定线路 %v，实际 %v", wantProxy, got)
+			}
+		})
+	}
+}
+
+// TestProxyRoutePrivateTargetGoesDirectLive 端到端：绑定线路的账号访问本机目标
+// （httptest 起的 127.0.0.1 站）真的不经代理。线路代理故意指向必然连不通的端口
+// ——直连判定失效时请求会交给该端口并失败，成功即证明走了直连。
+// 注意：直连 ≠ 改用共享 client——仍是线路自己的 transport，只是这一跳不设代理
+// （连接池隔离与线路参数继续生效），故共享 transport 计数保持 0。
+func TestProxyRoutePrivateTargetGoesDirectLive(t *testing.T) {
+	hits := 0
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"code":0,"data":{"direct":true}}`))
+	}))
+	defer target.Close()
+	c := New()
+	if err := c.SetProxyRoutes(map[string]string{"r1": "http://127.0.0.1:1"}); err != nil {
+		t.Fatalf("SetProxyRoutes: %v", err)
+	}
+	a := &auth.Auth{UID: "u1", ProxyRoute: "r1"}
+	req, _ := http.NewRequest(http.MethodGet, target.URL+"/v2/balance", nil)
+	if _, err := c.doJSONAuth(a, req); err != nil {
+		t.Fatalf("本机目标应直连成功（不应交给出口代理）: %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("本机目标站应被直连命中 1 次，实际 %d", hits)
+	}
+}
+
+// TestDirectOnlyHostZeroAlloc 热路径零分配守卫：判定在每个出站请求的 Proxy 钩子
+// 里执行，域名（常态目标）与 IP 字面量都不得产生堆分配（netip.ParseAddr 的失败
+// 路径会构造错误对象，故实现里先做 looksLikeIPLiteral 预筛）。
+func TestDirectOnlyHostZeroAlloc(t *testing.T) {
+	hosts := []string{
+		"192.168.1.9", "10.0.0.5", "169.254.1.1", "127.0.0.1", "::1", "fc00::1",
+		"localhost", "LOCALHOST", "host.docker.internal", "printer.local",
+		"api.example.com", "www.codebuddy.cn", "8.8.8.8", "127.0.0.1.evil.com",
+	}
+	for _, host := range hosts {
+		host := host
+		if n := testing.AllocsPerRun(200, func() { _ = directOnlyHost(host) }); n != 0 {
+			t.Errorf("directOnlyHost(%q) 应零分配，实际 %v 次/调用", host, n)
+		}
+	}
+}
+
 // TestValidateProxyRoutes 配置校验：合法通过；非法 fail-fast（bad scheme / 缺 host /
 // 缺端口 / 空名字 / socks5 明确拒绝）。
 func TestValidateProxyRoutes(t *testing.T) {
@@ -188,6 +321,9 @@ func TestValidateProxyRoutes(t *testing.T) {
 		{"http ok", map[string]string{"a": "http://u:p@h:8080"}, false, ""},
 		{"https ok", map[string]string{"a": "https://h:443"}, false, ""},
 		{"socks5 refused", map[string]string{"a": "socks5://h:1080"}, true, "socks5"},
+		// 私网目标直连的判定**不放宽代理 scheme**：代理地址本身是私网/本机也一样
+		// 只允许 http/https（安全口径：出站只走 http/https）。
+		{"socks5 refused for loopback proxy", map[string]string{"a": "socks5://127.0.0.1:1080"}, true, "socks5"},
 		{"bad scheme", map[string]string{"a": "ftp://h:21"}, true, "scheme"},
 		{"no host", map[string]string{"a": "http://:8080"}, true, "host"},
 		{"no port", map[string]string{"a": "http://h"}, true, "端口"},

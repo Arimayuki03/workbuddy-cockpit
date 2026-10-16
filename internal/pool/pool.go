@@ -25,6 +25,11 @@ type Pool struct {
 	breakerCooldownMax time.Duration
 	// softRateMax 软冷却指数退避的封顶（SetSoftRateMax 注入；默认 defaultSoftRateMax）。
 	softRateMax time.Duration
+	// creditExhausted 积分耗尽后的冷却时长（config 键 cooldown.credit_exhausted，
+	// SetCreditExhausted 注入；0 = 旧行为「硬冷却到次日 04:00，等签到恢复」）。
+	// 配了就只退出这一小段、到期回到候选池——期间用户可能充值、上游也可能刷新额度，
+	// 挂一整天是浪费（吸收 workbuddy-manager 补丁 0004）。
+	creditExhausted time.Duration
 	// costExploreInterval costTier 条件探索窗口（issue #136 方案 a′，SetCostExploreInterval
 	// 注入；默认 defaultCostExploreInterval 30m）。tier 0 垄断 + tier 1 存在且距上次
 	// 探索 ≥ 窗口时，本次 pick 生效层切 tier 1-only（探索=搭车改道，零新增上游请求）。
@@ -55,6 +60,20 @@ type Pool struct {
 	// （避免循环依赖与分层破坏），nil 时倍率兜底不生效（退化为仅本地台账判定）。
 	// 仅在持 p.mu 时由 floorBlockedForRealmModel 调用；回调不得反向调用 Pool 方法。
 	modelRateOf func(realm, model string) string
+	// preferExpiring「快过期积分优先消耗」开关（v1.20.0，SetPreferExpiring 注入；
+	// 默认 true，与 config 键 pool.prefer_expiring 的缺省一致）。开启且候选满足
+	// entry.expiringNow（有正余量的最早到期包、失效时刻在未来）时：
+	//   - weighted 策略：权重 ×expiringVirtualSlots（虚拟实例，等价放三份）；
+	//   - realm 域可用 UID 列表：该 UID 追加 expiringVirtualSlots 份虚拟槽位。
+	// 关闭 = 完全恢复旧行为（只剩既有的 creditsExpiring 占比因子 ×8，零残留）。
+	// **不采用"到期升序硬排序"**（上游方案）：硬排序会与本地 pick_strategy=
+	// credits_desc 的严格余额序语义互相覆盖，且会硬化掉占比因子；倍率式加成可
+	// 与成本分层/保底/粘性/credits_desc 全部正交共存（见 pick.expiringVirtualSlots）。
+	// 热改语义：开关本身下一次选号/分配立即生效；但 earliestExpiry/earliestRemaining
+	// 这份观测由余额刷新/签到路径（SetCreditEarliest）写入，刚打开开关时要等
+	// **下一个刷新周期**才有数据可加成（此前无快过期快照 = 无加成，安全方向：
+	// 只会少加成，不会错加成）。关掉时无需清理历史快照——数据留着不参与决策。
+	preferExpiring bool
 	// 三因子加权调优（SetWeights 注入；默认值见 defaultIdle*）。
 	idleWeightPerHour float64
 	idleWeightMax     float64
@@ -106,6 +125,11 @@ func New(stateFp string) *Pool {
 		// config 显式 "0" 关停（SetCostExploreInterval(0)）。
 		costExploreInterval: defaultCostExploreInterval,
 		exploreLast:         map[string]time.Time{},
+		// 快过期积分优先消耗缺省开启（v1.20.0，与 config 默认值一致；显式
+		// SetPreferExpiring(false) / pool.prefer_expiring=false 恢复旧行为）。
+		// 注意：开启只是"允许加成"，实际是否加成还取决于是否有 earliestExpiry/
+		// earliestRemaining 快照（余额刷新/签到路径写入）——无快照 = 与旧行为逐字相同。
+		preferExpiring: true,
 	}
 	if stateFp != "" {
 		p.load()
@@ -137,6 +161,21 @@ func (p *Pool) SetSoftRateMax(d time.Duration) {
 	if d > 0 {
 		p.softRateMax = d
 	}
+}
+
+// SetCreditExhausted 注入「积分耗尽后的冷却时长」（config 键 cooldown.credit_exhausted，
+// main 从 config 解析后调用；面板保存同键经 saveConfig 热应用）。
+// 0 = 不启用（保持「硬冷却到次日 04:00」的旧行为，零回归）；正值 = 固定时长软冷却。
+// 注意：0 在这里是**合法值**（旧行为开关），不能沿用 SetSoftRateMax「非正值即忽略」
+// 的写法；仅负值非法保留现值（normalize 已拦非法值，这里防御性复验，风格同
+// SetCostExploreInterval）。
+func (p *Pool) SetCreditExhausted(d time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if d < 0 {
+		return
+	}
+	p.creditExhausted = d
 }
 
 // SetCostExploreInterval 注入 costTier 条件探索窗口（main 从 config 解析后调用，
@@ -211,6 +250,71 @@ func (p *Pool) SetCreditFloor(n int64) {
 	if n >= 0 {
 		p.creditFloor = n
 	}
+}
+
+// PreferExpiring 透出「快过期积分优先消耗」开关的生效值（读侧原语：测试/运维自查/
+// 后续 /status 透出均可复用；默认 true）。读取走 RLock，热改（SetPreferExpiring）
+// 期间不会读到半新半旧状态。
+func (p *Pool) PreferExpiring() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.preferExpiring
+}
+
+// SetPreferExpiring 注入「快过期积分优先消耗」开关（main 从 config 解析后调用，
+// 键 pool.prefer_expiring；面板保存同键热应用）。
+//
+// true（默认）= 快过期号在 weighted 抽签里被放 expiringVirtualSlots 份、在 realm
+// 可用 UID 列表里拿到同样份数的虚拟槽位；false = 完全恢复旧行为（只保留既有的
+// creditsExpiring 占比因子 ×8）。
+// 热改语义：只翻转开关本身，不清也不重建 earliestExpiry/earliestRemaining 快照
+// （数据由余额刷新/签到路径维护）——因此「刚打开」时要等下一个刷新周期才有数据
+// 可加成；「刚关闭」立即停止加成（快照留着无害，见 Pool.preferExpiring 注释）。
+// bool 无非法值，无需像 SetCreditFloor 那样做范围校验。
+func (p *Pool) SetPreferExpiring(on bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.preferExpiring = on
+}
+
+// SetCreditEarliest 更新「最早到期的那笔仍有余量的积分」快照（v1.20.0，
+// 与 cooldown.go 的 SetCreditsDetailed 在同一条余额刷新/签到路径上成对调用：
+// 那个写总量与窗口内快过期子集，这个写最先失效的那一笔）。
+//
+// **调用顺序要求**：先 SetCreditsDetailed（或 ReenableIfCredits）后本方法——余额是
+// 钳制基准，顺序反了会拿旧余额钳新快照（多扣少扣都只是权重口径偏移，不致命，
+// 但没必要留这种不确定性）。上游未回报分桶的账号（expiring==0）走 ReenableIfCredits
+// 分支时同样要在其后调用本方法，快过期加成不看 expiring 桶。
+//
+// expiry 零值或 remaining<=0 = 无快过期信息 → 清空快照（回到无加成状态，不报错；
+// 上游未下发到期字段、包已用尽、旧缓存清空都走这条路径）。
+// remaining 钳到 [0, credits]：与 SetCreditsDetailed 对 expiring 的钳制同口径
+// （上游分桶异常/单包余量超总余额不得让虚拟实例加成凭空生效）。
+//
+// 幂等：同值重复写入不置脏（余额刷新周期很短，避免每次刷新都触发无意义的 5s 落盘）。
+// 与 SetCreditsDetailed 同风格自取写锁，调用方无需持锁。
+func (p *Pool) SetCreditEarliest(uid string, expiry time.Time, remaining int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	if remaining < 0 {
+		remaining = 0
+	}
+	if remaining > e.credits {
+		remaining = e.credits
+	}
+	if expiry.IsZero() || remaining <= 0 {
+		expiry, remaining = time.Time{}, 0 // 无信息：显式清空（不留下半个快照）
+	}
+	if e.earliestExpiry.Equal(expiry) && e.earliestRemaining == remaining {
+		return
+	}
+	e.earliestExpiry = expiry
+	e.earliestRemaining = remaining
+	p.dirty.Store(true)
 }
 
 // SetModelRateOf 注入上游目录积分倍率查表（main 装配：upstream 模型目录的

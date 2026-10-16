@@ -1,6 +1,6 @@
 'use client';
 
-import {useCallback, useMemo, useState} from 'react';
+import {useCallback, useEffect, useMemo, useState} from 'react';
 import {Activity, TrendingUp, Cpu, Users, Coins} from 'lucide-react';
 import {
   Bar,
@@ -16,12 +16,13 @@ import {useHeartbeat} from '@/lib/use-heartbeat';
 import {statsApi, errText} from '@/lib/api';
 import {useCachedAsync} from '@/lib/data-cache';
 import type {MetricsSnapshot, UsageKeyedAgg, UsageSnapshot} from '@/lib/types';
-import {fmtCompact, fmtNumber, fmtCredit} from '@/lib/format';
+import {fmtCompact, fmtNumber, fmtCredit, localInputToSec} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {StatCard} from '@/components/common/layout/StatCard';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {TableSkeleton} from '@/components/common/layout/LoadSkeleton';
 import {Button} from '@/components/ui/button';
+import {Input} from '@/components/ui/input';
 import {
   Select,
   SelectContent,
@@ -49,6 +50,20 @@ const CHART_COLORS = [
   'var(--chart-5)',
 ];
 
+/** Date → datetime-local 的取值（本地时间，不带时区，精确到分钟） */
+function toLocalInput(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** 自定义区间的预填值：最近 24 小时（整分钟）——一选中就有合法区间，图表不会先空一拍 */
+function defaultCustomRange(): {from: string; to: string} {
+  const to = new Date();
+  to.setSeconds(0, 0);
+  const from = new Date(to.getTime() - 24 * 3600 * 1000);
+  return {from: toLocalInput(from), to: toLocalInput(to)};
+}
+
 export default function StatsPage() {
   // 统计是全局记录（Go 网关单实例双版本），但分桶/时序自带 realm 维度：
   // 卡片、趋势图、账号表、模型表全部按当前版本过滤后展示（无 realm 标注的历史存量按 cn 归属）；
@@ -56,13 +71,40 @@ export default function StatsPage() {
   const {realm, label: realmName} = useRealm();
   const t = useT();
   // 'all' = 自记录以来全量：按模型/按账号恢复全量排行，时序按日归并（后端契约 hours<=0）。
+  // 'custom' = 自定义区间：起/止以 unix 秒传给 /api/usage（两端同时给出时后端优先于 hours）。
   const [hours, setHours] = useState<string>('72');
+  const [fromInput, setFromInput] = useState('');
+  const [toInput, setToInput] = useState('');
+  /** 自定义区间里「已生效」的范围：只在输入构成合法区间时更新 */
+  const [appliedRange, setAppliedRange] = useState<{from: number; to: number} | null>(null);
   const [saveBusy, setSaveBusy] = useState(false);
+
+  // 自定义区间解析：缺一端或起 ≥ 止都算「还没定好」——此时图表继续停在
+  // 上一次生效的区间（输入框下方给即时提示），不让半成品区间把图和表清空。
+  const customRange = useMemo(() => {
+    if (hours !== 'custom') return null;
+    const from = localInputToSec(fromInput);
+    const to = localInputToSec(toInput);
+    if (from === undefined || to === undefined || from >= to) return null;
+    return {from, to};
+  }, [hours, fromInput, toInput]);
+
+  useEffect(() => {
+    if (customRange) setAppliedRange(customRange);
+  }, [customRange]);
+
+  const rangeInvalid = hours === 'custom' && !customRange;
+  const effRange = hours === 'custom' ? customRange ?? appliedRange : null;
+
   // usage/native 都进缓存：切页先出上次的图表与卡片，后台静默刷新。
-  // key 带 hours：切时间窗 = 换一份快照，各自缓存互不覆盖。
+  // key 带时间窗（既有档位 hours 或自定义区间的两端）：切档 = 换一份快照，
+  // 各自缓存互不覆盖——图与下面的表都挂在这份快照上，切换必然一起变。
   const usageCache = useCachedAsync<UsageSnapshot>(
-    `stats:usage:${hours}`,
-    () => statsApi.usage(hours === 'all' ? 'all' : Number(hours) || 72),
+    effRange ? `stats:usage:${effRange.from}-${effRange.to}` : `stats:usage:${hours}`,
+    () =>
+      effRange
+        ? statsApi.usage({from: effRange.from, to: effRange.to})
+        : statsApi.usage(hours === 'all' ? 'all' : Number(hours) || 72),
     {ttl: 5000},
   );
   const nativeCache = useCachedAsync<MetricsSnapshot>(
@@ -70,16 +112,35 @@ export default function StatsPage() {
     () => statsApi.native(),
     {ttl: 5000},
   );
+  // 「今日请求」卡专用快照：窗口恒为「本地日历日零点 → 现在」，与上面那份随选档
+  // 变化的窗口快照完全独立。不能拿窗口快照聚合今天——用户查历史区间时窗口里根本
+  // 没有今天的点，卡片会显示 0（看着像「今天没流量」），而同屏其它卡与表都在讲
+  // 那个历史区间。key 不带时间戳：本地零点在会话内是常量，若把秒级 now 拼进 key，
+  // key 每帧都变会触发无休止重取；to 在 fetcher 里现算，每轮心跳刷新都拿到最新「现在」。
+  const todayCache = useCachedAsync<UsageSnapshot>(
+    'stats:usage:today',
+    () => {
+      const now = new Date();
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+      return statsApi.usage({
+        from: Math.floor(todayStart.getTime() / 1000),
+        to: Math.floor(now.getTime() / 1000),
+      });
+    },
+    {ttl: 5000},
+  );
   const usage = usageCache.data;
   const native = nativeCache.data;
 
-  // 心跳同时刷两个缓存条目（用量持续累计，保持接近实时）。
+  // 心跳同时刷三个缓存条目（用量持续累计，保持接近实时）。今日快照也要跟心跳：
+  // 它不进图表/表格，靠这一轮轮刷新把「今日」窗口的右端一路推到当下。
   // 周期心跳失败静默（与 logs 页同设计）：60s 一轮的后台刷新弹错误雨毫无
   // 价值，等下一轮自愈；错误提示只留给用户手动操作（下方「立即落盘」）。
   useHeartbeat(
     () => {
       usageCache.refresh().catch(() => {/* 静默，等下一轮心跳 */});
       nativeCache.refresh().catch(() => {/* 静默，等下一轮心跳 */});
+      todayCache.refresh().catch(() => {/* 静默，等下一轮心跳 */});
     },
     60000,
   );
@@ -96,6 +157,19 @@ export default function StatsPage() {
       setSaveBusy(false);
     }
   }, [t]);
+
+  /** 切时间档；仅当起止输入都还空着（真正「首次切到」自定义区间）才预填最近 24 小时，
+   *  保证一选中就有合法区间。已有输入一律保留——旧判据 `!customRange` 在进入本分支时
+   *  恒为真（此时 hours 还不是 'custom'，customRange 必为 null），导致每次切回自定义
+   *  都用默认区间覆盖用户上次填的起止，与「首次」的意图相反。 */
+  function pickWindow(v: string) {
+    if (v === 'custom' && !fromInput && !toInput) {
+      const d = defaultCustomRange();
+      setFromInput(d.from);
+      setToInput(d.to);
+    }
+    setHours(v);
+  }
 
   // 时序：小时点与日点混排（日点在前、小时点在后）；scope=hour 的 t 形如 2026-09-21T14。
   // label 留完整时间供 tooltip 用，axis 只在 XAxis 按 interval 抽样显示，窄屏不再挤成一团。
@@ -210,12 +284,16 @@ export default function StatsPage() {
 
   const hasErrors = useMemo(() => chartData.some((p) => p.errors > 0), [chartData]);
 
-  /** 今日用量：先按当前版本过滤，再聚合今天的全部小时点；无小时点时回退今天的日点 */
+  /** 今日用量：先按当前版本过滤，再聚合今天的全部小时点；无小时点时回退今天的日点。
+   *  数据源是上面那份「今日」专用快照（todayCache），不是当前窗口快照：卡片口径恒定是
+   *  真实今日，用户选历史区间时不会因为窗口里没有今天的点而误报 0。聚合与派生口径
+   *  逐字沿用（小时点优先、无小时点回退日点），只换数据源。 */
   const todayUsage = useMemo(() => {
-    if (!usage) return {requests: 0, tokens: 0, errors: 0};
+    const snap = todayCache.data;
+    if (!snap) return {requests: 0, tokens: 0, errors: 0};
     const now = new Date();
     const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-    const realmSeries = (usage.series ?? []).filter((p) => (p.realm ?? 'cn') === realm);
+    const realmSeries = (snap.series ?? []).filter((p) => (p.realm ?? 'cn') === realm);
     const hourPoints = realmSeries.filter((p) => p.scope === 'hour' && p.t.startsWith(todayKey));
     if (hourPoints.length) {
       return hourPoints.reduce(
@@ -231,7 +309,7 @@ export default function StatsPage() {
     return todayDay
       ? {requests: todayDay.requests, tokens: todayDay.total_tokens, errors: todayDay.errors}
       : {requests: 0, tokens: 0, errors: 0};
-  }, [usage, realm]);
+  }, [todayCache.data, realm]);
 
   // 域内汇总：totals 是全局口径无法按域拆，改取 by_realm 当前域那一行
   //（key 恒为 'cn'|'global'；realm 字段为空串的历史行用 key 兜底匹配）。
@@ -254,7 +332,7 @@ export default function StatsPage() {
         description={t('stats.description', {realm: realmName})}
         actions={
           <>
-            <Select value={hours} onValueChange={setHours}>
+            <Select value={hours} onValueChange={pickWindow}>
               <SelectTrigger className="h-8 w-[150px] rounded-full"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="24">{t('stats.hours24')}</SelectItem>
@@ -262,8 +340,30 @@ export default function StatsPage() {
                 <SelectItem value="168">{t('stats.days7')}</SelectItem>
                 <SelectItem value="720">{t('stats.days30')}</SelectItem>
                 <SelectItem value="all">{t('stats.sinceStart')}</SelectItem>
+                <SelectItem value="custom">{t('stats.customRange')}</SelectItem>
               </SelectContent>
             </Select>
+            {/* 自定义区间：起/止（本地时间），换算成 unix 秒传给后端；
+                切换行为与既有档位一致——图与下面的表一起变 */}
+            {hours === 'custom' && (
+              <div className="flex items-center gap-1.5">
+                <Input
+                  type="datetime-local"
+                  value={fromInput}
+                  aria-label={t('stats.rangeFrom')}
+                  onChange={(e) => setFromInput(e.target.value)}
+                  className="h-8 w-[11.5rem] rounded-full bg-muted text-xs"
+                />
+                <span className="text-xs text-muted-foreground">→</span>
+                <Input
+                  type="datetime-local"
+                  value={toInput}
+                  aria-label={t('stats.rangeTo')}
+                  onChange={(e) => setToInput(e.target.value)}
+                  className="h-8 w-[11.5rem] rounded-full bg-muted text-xs"
+                />
+              </div>
+            )}
             <Button
               variant="outline"
               size="sm"
@@ -339,6 +439,12 @@ export default function StatsPage() {
             })}
           </div>
         </div>
+        {/* 区间还没填好：图表停在上一段有效区间，这里说明「为什么没变」 */}
+        {rangeInvalid && (
+          <div className="mb-2 rounded-xl bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+            {t('stats.customInvalid')}
+          </div>
+        )}
         {chart}
         {!chart && (
           // 占位高度与图表等高（280px）：数据到达后不再有 160px 的高度跳变。

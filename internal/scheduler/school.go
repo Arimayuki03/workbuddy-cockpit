@@ -6,6 +6,9 @@
 // v1.2.0：cat 由 python 脚本（task_runner.py black_cat）改为 panel 移植的纯 API
 // 实现（差额探测 + 真实 glm-5.2 对话 + 事件上报），夜猫窗口判定与补足次数对齐
 // panel blackcat.go 口径（见 scheduler.RunCatNow）。
+// 手动停用（pool ManualDisabled：「让位防风控」）的跳过是**夜猫专有**口径
+// （吸收 workbuddy-panel b1a2284d）：夜猫整任务都是真实模型对话，与让位冲突；
+// 旅行/活跃/签到/续期等纯 RPC 路径照常执行手动停用号，只跳 Disabled。
 package scheduler
 
 import (
@@ -141,10 +144,17 @@ func scriptTimedOut(c scriptRunner) bool {
 	return ok && sc.timedOut
 }
 
+// nightWindow 夜猫子计数窗口判定（生产恒为 upstream.InNightWindow：23:00–08:00 CST）。
+// 包级变量是为测试留的注入点：真实窗口随墙钟漂移，runCat 的「窗口内遍历」分支按
+// 真实时钟写用例只有 23:00–08:00 可跑、跨时段随机 skip；注入后跳过/执行两侧都能
+// 确定性断言。风格同 travelAccountDelay（仅测试改写，生产不写）。
+var nightWindow = upstream.InNightWindow
+
 // RunCatNow 立即执行夜猫子任务（panel 纯 API 口径并入，不再走 python 脚本）：
 // 23:00–08:00 窗口内对池内账号补足 glm-5.2 对话并上报事件链（BlackcatNeed 差额
 // 探测 + RunNightChats 真实对话）。窗口外触发直接跳过（black_cat 窗口外不计分，
 // 打 skip 正常态）。单号失败只该号 WARN；账号间限速 activityAccountDelay。
+// 账号过滤口径见 runCat（仅夜猫跳手动停用号，吸收 panel b1a2284d）。
 func (s *Scheduler) RunCatNow() {
 	// panel 裸 goroutine 入口：任务体 panic 不应击穿整个网关进程（与 RunCheckinNow
 	// 同理，runBatch/RunKindNow 的 recover 不覆盖本入口）。
@@ -159,12 +169,19 @@ func (s *Scheduler) RunCatNow() {
 // runCat 夜猫子任务遍历，随 ctx 取消立即退出（无 ctx 的外部入口 RunCatNow 取
 // 背景 ctx，语义与引入前 time.Sleep 版一致；账号间限速等待中取消不等睡满）。
 func (s *Scheduler) runCat(ctx context.Context) {
-	if !upstream.InNightWindow(time.Now()) {
+	if !nightWindow(time.Now()) {
 		log.Printf("cat: 当前不在 23:00–08:00 计数窗口，跳过")
 		return
 	}
 	for _, st := range s.cfg.Pool.List() {
-		if st.Disabled {
+		// 夜猫口径（吸收 workbuddy-panel b1a2284d）：手动停用（ManualDisabled，
+		// 语义「让位防风控」）的账号跳过。夜猫子是唯一「整任务都是真实模型对话」的
+		// 批量任务——RunNightChats 逐条 ChatStream 发 glm-5.2 短对话，把已让位的号
+		// 半夜又拉出来发消息，与让位语义正面冲突。其余批量路径（旅行/活跃上报/
+		// 签到/续期）是纯 RPC 或上报，**维持只跳 Disabled**，不要把 ManualDisabled
+		// 顺手加过去：panel b1a2284d 正是撤回了这种「一揽子跳过」的反向修正。
+		// Disabled 与 ManualDisabled 是并列独立位，叠加态同样跳过。
+		if st.Disabled || st.ManualDisabled {
 			continue
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
@@ -188,7 +205,7 @@ func (s *Scheduler) runCat(ctx context.Context) {
 		} else {
 			log.Printf("cat %s: 完成 %d 次夜间对话", logfmt.Label(a.UID, a.NicknameValue()), ok)
 		}
-		if !sleepCtx(ctx, activityAccountDelay) {
+		if !sleepCtx(ctx, s.accountGap(ctx, activityAccountDelay)) {
 			return // 优雅停机：不等限速睡满，剩余账号下轮再补
 		}
 	}

@@ -30,6 +30,7 @@ import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {TableSkeleton} from '@/components/common/layout/LoadSkeleton';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
+import {CompensationCard} from '@/components/common/tasks/CompensationCard';
 import {useAuth} from '@/lib/auth-context';
 import {useRealm} from '@/lib/realm-context';
 import {useI18n, useT, type TFn} from '@/lib/i18n/provider';
@@ -591,6 +592,9 @@ export default function TasksPage() {
           />
         )}
       </section>
+
+      {/* 每日领补偿：开关 + 整点 + 立即执行（配置与设置页「定时任务」同一份） */}
+      <CompensationCard />
 
       {/* 单号任务明细（选中账号时显示） */}
       {selectedUid !== 'all' && selectedUid && (

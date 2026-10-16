@@ -348,7 +348,26 @@ func (p *Pool) recordBreakerFailureLocked(e *entry) {
 
 // CooldownUntilTomorrow4AM 冷却到下一个 04:00（本地时区）。
 // 用于 ErrHardCredit 场景：积分耗尽账号等签到任务（09:00/21:00）恢复。
+//
+// 配了 cooldown.credit_exhausted（正值，SetCreditExhausted 注入）时不走 04:00：
+// 改用**固定时长的软冷却**只退出这一小段，到期即回到候选池（吸收件：不要用完积分
+// 就冷却一整天——期间用户可能充值、上游也可能刷新额度）。时长恒为配置值、不做指数
+// 堆加（Cooldown 只写固定时长、不碰 softStreak）：连续触发只会把截止刷到「此刻 +
+// 配置值」，不会成倍膨胀，更不会漂到次日 04:00。
+// 配置 0 时逐字保持旧行为：CoolHard 到次日 04:00（保留硬语义——全冷却兜底排除
+// CoolHard 号，见 pickEarliestExpiryLocked）。
+// 注：本入口只负责「下一次 402 怎么写」；已经生效中的更长冷却（例如配置热改前
+// 已挂到次日 04:00 的号）仍由 Cooldown 的「不截短」规则保留到原截止，不会因
+// 改配置被提前放回池——零余额号提前回池只会再吃一次 402。
 func (p *Pool) CooldownUntilTomorrow4AM(uid string, reason string) {
+	// 读配置需持锁（SetCreditExhausted/面板热改写同一字段，裸读构成数据竞争）。
+	p.mu.RLock()
+	short := p.creditExhausted
+	p.mu.RUnlock()
+	if short > 0 {
+		p.Cooldown(uid, CoolSoft, short, reason)
+		return
+	}
 	now := time.Now()
 	p.Cooldown(uid, CoolHard, nextDay4AM(now).Sub(now), reason)
 }

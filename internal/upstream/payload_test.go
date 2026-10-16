@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -283,6 +284,9 @@ func TestClampGPTMinMaxTokens(t *testing.T) {
 		{"gpt at floor", `{"model":"gpt-6-luna","max_tokens":16,"messages":[]}`, float64(16)},
 		{"gpt above floor", `{"model":"gpt-6-sol","max_tokens":32000,"messages":[]}`, float64(32000)},
 		{"gpt alias translated then clamped", `{"model":"gpt-6-sol","max_completion_tokens":1,"messages":[]}`, float64(16)},
+		// 越界 float64（客户端按剩余额度算出的量级）：下限钳制不得把它误判成"低于下限"
+		// 压成 16（int64(n) 溢出为 MinInt64 的旧行为），最终由管线末的上限钳制收到 1e6。
+		{"gpt huge float: floor no-op, ceiling clamps", `{"model":"gpt-6-sol","max_tokens":1e19,"messages":[]}`, float64(1000000)},
 		{"gpt absent untouched", `{"model":"gpt-6-sol","messages":[]}`, nil},
 		{"non-gpt untouched", `{"model":"hy4-preview-f","max_tokens":1,"messages":[]}`, float64(1)},
 	}
@@ -303,6 +307,229 @@ func TestClampGPTMinMaxTokens(t *testing.T) {
 				t.Fatalf("max_tokens = %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// TestClampGPTMinMaxTokensFloatOverflow 钉住下限钳制自身的 float64 分支（不经管线）：
+// 越界值不能走 int64(n)（amd64 溢出得 MinInt64 → 被误判成"低于下限"而压成 16，
+// 与"只抬极小探针值"的本意相反）；负数越界仍按"低于下限"正常抬到 16。
+func TestClampGPTMinMaxTokensFloatOverflow(t *testing.T) {
+	obj := map[string]any{"model": "gpt-6-sol", "max_tokens": 1e19}
+	clampGPTMinMaxTokens(obj)
+	if got := obj["max_tokens"]; got != 1e19 {
+		t.Fatalf("max_tokens = %v (%T), want untouched 1e19", got, got)
+	}
+	obj = map[string]any{"model": "gpt-6-sol", "max_tokens": -1e19}
+	clampGPTMinMaxTokens(obj)
+	if got := obj["max_tokens"]; got != int64(gptMinMaxTokens) {
+		t.Fatalf("negative overflow: max_tokens = %v, want %d", got, gptMinMaxTokens)
+	}
+}
+
+// TestClampMaxTokensCeiling max_tokens 上限钳制（吸收 workbuddy-manager 1.0.90）：
+// 客户端按「剩余额度」做减法会算出 9.9e9 这类越界值，上游把越界整数包成
+// no_healthy_account + 503，客户端误判服务不可用而反复重试/换号（body 不变则每次
+// 重试都无用）。上限对**所有**模型生效；未越界/非数值不动，0 与负数仍走既有下限与
+// 边缘逻辑（上限不改变下限语义）。别名形态必须先被翻译成 max_tokens 再钳制。
+func TestClampMaxTokensCeiling(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want any // nil 表示字段不存在
+	}{
+		{"9.9e9 float64 clamped",
+			`{"model":"hy4-preview-f","max_tokens":9.9e9,"messages":[]}`, float64(1000000)},
+		{"exactly at ceiling untouched",
+			`{"model":"hy4-preview-f","max_tokens":1000000,"messages":[]}`, float64(1000000)},
+		{"one above ceiling clamped",
+			`{"model":"hy4-preview-f","max_tokens":1000001,"messages":[]}`, float64(1000000)},
+		{"real-world large value below ceiling untouched",
+			`{"model":"hy4-preview-f","max_tokens":128000,"messages":[]}`, float64(128000)},
+		{"alias 9.9e9 translated then clamped",
+			`{"model":"deepseek-v4.1-flash","max_completion_tokens":9.9e9,"messages":[]}`, float64(1000000)},
+		{"alias below ceiling translated, not clamped",
+			`{"model":"deepseek-v4.1-flash","max_completion_tokens":128000,"messages":[]}`, float64(128000)},
+		{"explicit max_tokens wins then clamps",
+			`{"model":"deepseek-v4.1-flash","max_tokens":9900000000,"max_completion_tokens":123,"messages":[]}`, float64(1000000)},
+		{"gpt alias big: floor no-op, ceiling clamps",
+			`{"model":"gpt-6-sol","max_completion_tokens":9.9e9,"messages":[]}`, float64(1000000)},
+		{"gpt below floor still raised (ceiling unrelated)",
+			`{"model":"gpt-6-sol","max_tokens":1,"messages":[]}`, float64(16)},
+		{"zero untouched (upstream default)",
+			`{"model":"deepseek-v4.1-flash","max_tokens":0,"messages":[]}`, float64(0)},
+		{"negative untouched (upstream rejects)",
+			`{"model":"deepseek-v4.1-flash","max_tokens":-5,"messages":[]}`, float64(-5)},
+		{"gpt negative still floored (existing edge logic intact)",
+			`{"model":"gpt-6-sol","max_tokens":-5,"messages":[]}`, float64(16)},
+		{"absent untouched",
+			`{"model":"deepseek-v4.1-flash","messages":[]}`, nil},
+		{"model absent still clamped (ceiling is model-independent)",
+			`{"max_tokens":9.9e9,"messages":[]}`, float64(1000000)},
+		{"string mangled passes through",
+			`{"model":"deepseek-v4.1-flash","max_tokens":"9900000000","messages":[]}`, "9900000000"},
+		// 越出 int64 可表示范围（|n| > ~9.22e18）：回归——原实现先 int64(n) 再比较，
+		// Go 规范里越界转换结果实现相关（amd64 得 MinInt64 负数），比较恒假、钳制
+		// 静默失效，越界值原样出站仍撞上游 503 no_healthy_account。
+		{"1e19 float64 beyond int64 clamped (regression)",
+			`{"model":"hy4-preview-f","max_tokens":1e19,"messages":[]}`, float64(1000000)},
+		{"MaxFloat64 clamped (regression)",
+			`{"model":"hy4-preview-f","max_tokens":1.7976931348623157e308,"messages":[]}`, float64(1000000)},
+		// 别名形态：9e18 仍可翻译（≤ MaxInt64）→ 搬进 max_tokens 后走上限钳制；
+		// 1e19 的翻译守卫（v == float64(int64(v))）在越界转换下为假，别名只删不译，
+		// 出站无 max_tokens（越界值同样不外泄，回落上游默认档）。
+		{"alias 9e18 translated then clamped",
+			`{"model":"deepseek-v4.1-flash","max_completion_tokens":9e18,"messages":[]}`, float64(1000000)},
+		{"alias 1e19 dropped by translate guard, no overflow outbound",
+			`{"model":"deepseek-v4.1-flash","max_completion_tokens":1e19,"messages":[]}`, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			obj, err := decodeBody(PrepareBodyOptWithEffertsPreserve(t, c.body))
+			if err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			got, has := obj["max_tokens"]
+			if c.want == nil {
+				if has {
+					t.Fatalf("max_tokens = %v, want absent", got)
+				}
+			} else if got != c.want {
+				t.Fatalf("max_tokens = %v (%T), want %v", got, got, c.want)
+			}
+			// 别名无论翻译与否都被删除（既有语义，本次改动不改）。
+			if _, has := obj["max_completion_tokens"]; has {
+				t.Fatal("alias max_completion_tokens must be deleted")
+			}
+		})
+	}
+}
+
+// TestClampMaxTokensCeilingIntForms 手构造 map 的 int/int64 形态（非 JSON 解码路径）
+// 防御性兼容，取值口径与 clampGPTMinMaxTokens 一致：越界一律写回 int64 上限；
+// 未越界不改写（原类型原样保留）；非数值形态原样不动（沿用既有「畸形值透传、
+// 上游报 11101」策略）。
+func TestClampMaxTokensCeilingIntForms(t *testing.T) {
+	cases := []struct {
+		name string
+		in   any
+		want any
+	}{
+		{"int64 over ceiling", int64(9_900_000_000), int64(maxTokensCeiling)},
+		{"int over ceiling", int(1_000_001), int64(maxTokensCeiling)},
+		{"float64 over ceiling", 9.9e9, int64(maxTokensCeiling)},
+		{"int64 at ceiling untouched", int64(1_000_000), int64(1_000_000)},
+		{"int below ceiling untouched", int(42), int(42)},
+		{"float64 below ceiling untouched", 128000.0, float64(128000)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			obj := map[string]any{"model": "m", "max_tokens": c.in}
+			clampMaxTokensCeiling(obj)
+			if got := obj["max_tokens"]; got != c.want {
+				t.Fatalf("max_tokens = %v (%T), want %v (%T)", got, got, c.want, c.want)
+			}
+		})
+	}
+
+	for _, in := range []any{nil, "9900000000", true} {
+		obj := map[string]any{"model": "m", "max_tokens": in}
+		clampMaxTokensCeiling(obj)
+		if obj["max_tokens"] != in {
+			t.Errorf("non-numeric max_tokens %v mutated to %v", in, obj["max_tokens"])
+		}
+	}
+}
+
+// TestClampMaxTokensCeilingFloatBeyondInt64 越出 int64 可表示范围的 float64 形态
+// （OCR 审查发现：原实现先 int64(n) 再比较，Go 规范里越界 float64→int64 转换结果
+// 实现相关——amd64 得 MinInt64 负数，v > maxTokensCeiling 恒假，1e19 这类值静默
+// 通过、仍撞上游 503 no_healthy_account）。修后先按浮点比较，越界一律钳回上限且
+// 不 panic；int64/int 越界形态（值域天然在 int64 内）行为不变。
+func TestClampMaxTokensCeilingFloatBeyondInt64(t *testing.T) {
+	cases := []struct {
+		name string
+		in   any
+		want any
+	}{
+		{"float64 1e19 beyond int64 clamped", 1e19, int64(maxTokensCeiling)},
+		{"float64 MaxFloat64 clamped", math.MaxFloat64, int64(maxTokensCeiling)},
+		{"float64 1e300 clamped", 1e300, int64(maxTokensCeiling)},
+		{"float64 -MaxFloat64 untouched (negative edge unchanged)", -math.MaxFloat64, -math.MaxFloat64},
+		{"float64 boundary at ceiling untouched", 1_000_000.0, 1_000_000.0},
+		{"float64 boundary one above clamped", 1_000_001.0, int64(maxTokensCeiling)},
+		{"int64 MaxInt64 clamped", int64(math.MaxInt64), int64(maxTokensCeiling)},
+		{"int int32-representable large clamped", int(1_500_000_000), int64(maxTokensCeiling)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			obj := map[string]any{"model": "m", "max_tokens": c.in}
+			clampMaxTokensCeiling(obj) // 不得 panic（越界转换曾是实现相关 UB）
+			if got := obj["max_tokens"]; got != c.want {
+				t.Fatalf("max_tokens = %v (%T), want %v (%T)", got, got, c.want, c.want)
+			}
+		})
+	}
+
+	// NaN/±Inf 不可能出现在 JSON 里，但手构造 map 的调用方可能给出：不得 panic；
+	// +Inf 判为越界并钳回上限，-Inf 不越界（与负数边缘语义一致，原样透传）。
+	for _, c := range []struct {
+		name string
+		in   float64
+		want any
+	}{
+		{"+Inf clamped", math.Inf(1), int64(maxTokensCeiling)},
+		{"-Inf untouched", math.Inf(-1), math.Inf(-1)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			obj := map[string]any{"model": "m", "max_tokens": c.in}
+			clampMaxTokensCeiling(obj)
+			if got := obj["max_tokens"]; got != c.want {
+				t.Fatalf("max_tokens = %v (%T), want %v (%T)", got, got, c.want, c.want)
+			}
+		})
+	}
+	t.Run("NaN untouched", func(t *testing.T) {
+		obj := map[string]any{"model": "m", "max_tokens": math.NaN()}
+		clampMaxTokensCeiling(obj) // 不得 panic
+		if got, ok := obj["max_tokens"].(float64); !ok || !math.IsNaN(got) {
+			t.Fatalf("max_tokens = %v, want NaN untouched", obj["max_tokens"])
+		}
+	})
+
+	// 不变式（端到端）：任何越界输入形态都不得让越界 max_tokens 出站——要么被钳到
+	// 上限，要么字段缺失（别名守卫拒绝翻译）。这正是要消灭的 503 形态。
+	hostile := []string{
+		`{"model":"hy4-preview-f","max_tokens":1e19,"messages":[]}`,
+		`{"model":"hy4-preview-f","max_tokens":1.7976931348623157e308,"messages":[]}`,
+		`{"model":"gpt-6-sol","max_tokens":1e19,"messages":[]}`,
+		`{"model":"deepseek-v4.1-flash","max_completion_tokens":1e19,"messages":[]}`,
+		`{"model":"deepseek-v4.1-flash","max_completion_tokens":9e18,"messages":[]}`,
+		`{"model":"deepseek-v4.1-flash","max_completion_tokens":1e19,"max_tokens":9.9e9,"messages":[]}`,
+		`{"max_tokens":1e19,"messages":[]}`,
+	}
+	for _, body := range hostile {
+		obj, err := decodeBody(PrepareBodyOptWithEffertsPreserve(t, body))
+		if err != nil {
+			t.Fatalf("unmarshal: %v (in=%s)", err, body)
+		}
+		switch v := obj["max_tokens"].(type) {
+		case nil:
+			// 字段缺失：无越界值可出站（别名守卫拒绝翻译），合规。
+		case float64:
+			if v > maxTokensCeiling {
+				t.Errorf("in=%s: outbound max_tokens=%v exceeds ceiling", body, v)
+			}
+		case int64:
+			if v > maxTokensCeiling {
+				t.Errorf("in=%s: outbound max_tokens=%d exceeds ceiling", body, v)
+			}
+		case int:
+			if v > maxTokensCeiling {
+				t.Errorf("in=%s: outbound max_tokens=%d exceeds ceiling", body, v)
+			}
+		default:
+			t.Errorf("in=%s: unexpected outbound max_tokens type %T", body, v)
+		}
 	}
 }
 

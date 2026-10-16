@@ -286,10 +286,23 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 		}
 		e.credits -= d
 		if e.creditsExpiring > 0 {
-			if d > e.creditsExpiring {
-				d = e.creditsExpiring
+			// 各自按自身余量独立钳减（不共用被钳过的变量）：expiring 与
+			// earliestRemaining 是并列的两个子集观测，谁先减都不该改变另一个的钳值。
+			ce := d
+			if ce > e.creditsExpiring {
+				ce = e.creditsExpiring
 			}
-			e.creditsExpiring -= d
+			e.creditsExpiring -= ce
+		}
+		// 最早到期包（v1.20.0）同口径内插：它也是 credits 的子集，实扣同样先出这笔
+		// （上游 FEFO 按失效时刻升序扣减）。不扣的话虚拟实例加成会在该包已花掉大半后
+		// 仍按旧余量生效——直到下一个刷新周期才对账。
+		if e.earliestRemaining > 0 {
+			er := d
+			if er > e.earliestRemaining {
+				er = e.earliestRemaining
+			}
+			e.earliestRemaining -= er
 		}
 	}
 	if e.modelCost == nil {
@@ -372,8 +385,11 @@ func (p *Pool) AuthByUID(uid string) *auth.Auth {
 
 // AvailableUIDs 返回当前 healthy 且未占满在途名额的账号 UID 列表（按 UID 排序，稳定输出）。
 // 供会话粘性路由（internal/session）做快路径命中校验 + 双段分配；无可用返回空切片。
+// 不叠加快过期虚拟槽位（boost=false）：本变体无 realm/模型维度，列表长度还被
+// watch.go 的「可用账号数」日志消费，虚拟槽位（重复 UID）不应污染那个计数。
+// 需要虚拟槽位的生产路径是 realm.go 的两个域变体。
 func (p *Pool) AvailableUIDs() []string {
-	return p.availableUIDsFrom("", func(e *entry, now time.Time) bool { return e.healthy(now) })
+	return p.availableUIDsFrom("", func(e *entry, now time.Time) bool { return e.healthy(now) }, false)
 }
 
 // AvailableUIDsForModel 同 AvailableUIDs，但把健康口径换成 healthyForModel：
@@ -383,20 +399,28 @@ func (p *Pool) AvailableUIDs() []string {
 // AvailableUIDsForModelRealm（带 realm 维度）。保留作 ForModelRealm 的
 // realm=="" 退化语义锚点测试。
 // 供会话粘性按模型分配与命中校验；model 为空时等价于 AvailableUIDs。
+// boost=false（同 AvailableUIDs：无域变体不加虚拟槽位；带槽位的是 realm.go 变体）。
 func (p *Pool) AvailableUIDsForModel(model string) []string {
 	return p.availableUIDsFrom("",
-		func(e *entry, now time.Time) bool { return e.healthyForModel(now, model) })
+		func(e *entry, now time.Time) bool { return e.healthyForModel(now, model) }, false)
 }
 
 // availableUIDsFrom 是 AvailableUIDs 四变体（AvailableUIDs/ForModel/ForRealm/
 // ForModelRealm）共用的遍历实现：realm 过滤（""=全池）+ 可替换健康口径（healthy /
 // healthyForModel）+ 在途占满过滤，输出按 UID 排序（稳定）。调用方必须不持锁
 // （本方法自取 RLock，无 Locked 后缀）。
-func (p *Pool) availableUIDsFrom(realm string, health func(e *entry, now time.Time) bool) []string {
+//
+// boost=true（仅 realm.go 的域变体传 true，v1.20.0）且开关开启时，满足
+// entry.expiringNow 的 UID 不再留在原位，而是与其虚拟实例一起垫在列表尾部
+// （见 expiringVirtualUIDs）——「快过期积分优先消耗」在哈希打散分配上的等价物：
+// 槽位多 = 被分到的概率高，与 weighted 路径的权重 ×3 同一语义。
+// 开关关闭或无人合格时**逐字返回旧列表**（零回归）。
+func (p *Pool) availableUIDsFrom(realm string, health func(e *entry, now time.Time) bool, boost bool) []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
 	uids := make([]string, 0, len(p.byUID))
+	var exp []string // 合格（快过期）UID 收集侧：仅在 boost 且开关开启时填充
 	for uid, e := range p.byUID {
 		if realm != "" && e.a.Realm() != realm {
 			continue
@@ -408,9 +432,16 @@ func (p *Pool) availableUIDsFrom(realm string, health func(e *entry, now time.Ti
 			continue
 		}
 		uids = append(uids, uid)
+		if boost && p.preferExpiring && e.expiringNow(now) {
+			exp = append(exp, uid)
+		}
 	}
-	sort.Strings(uids)
-	return uids
+	sort.Strings(uids) // 先排基础列表：虚拟实例的插入位置完全由它决定（无 map 迭代序）
+	if len(exp) == 0 {
+		return uids // 开关关闭 / 无合格号：逐字返回旧列表
+	}
+	sort.Strings(exp)
+	return expiringVirtualUIDs(uids, exp)
 }
 
 // PickByUIDForModel 若 uid 当前 healthy（含模型级 6004 豁免口径）且未占满在途名额，

@@ -1,4 +1,5 @@
-// Package scheduler 定时任务：签到 / 活跃上报 / 猫猫旅行 / token keepalive / 开学季 / 夜猫子 / 任务中心执行队列 七类独立排程。
+// Package scheduler 定时任务：签到 / 活跃上报 / 猫猫旅行 / token keepalive / 开学季 / 夜猫子 /
+// 任务中心执行队列 / 令牌续期 / 活动补偿 九类独立排程。
 // 签到成功后重新查余额，余额 > 0 的冷却账号自动解冻。
 package scheduler
 
@@ -7,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,6 +36,20 @@ type Config struct {
 	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
 	// 默认 5 条同一 conversationId 内多轮上报把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int
+
+	// AccountDelayMinSeconds/AccountDelayMaxSeconds 定时排程的账号错峰等待区间（秒，0-600）。
+	// max<=0（含旧配置缺键）= 关闭：账号间保持原有最小间隔（activityAccountDelay 等）
+	// 逐字不变；区间开启后只作用于定时派发，手动入口（RunCheckinNow/RunKindNow）不受影响
+	// （见 random_schedule.go accountGap / scheduledAccountKey）。
+	AccountDelayMinSeconds int
+	AccountDelayMaxSeconds int
+	// RandomDelayMinutes 每日随机延后窗口（分钟，0-60）：把每个整点槽位在本小时内前移到
+	// 0..N 分钟的确定性偏移（random_schedule.go scheduledSlot）。0/缺省 = 整点原样触发，
+	// 行为与引入前逐字一致。
+	RandomDelayMinutes int
+	// RandomDelaySeed 部署私有种子（api_key 优先，为空退 auth_dir，见 cmd/server/main.go）：
+	// 让随机偏移在重启后稳定、不同部署互不相同。绝不写进日志/错误信息。
+	RandomDelaySeed string
 
 	// ExpiringSoonWindow 快过期积分窗口：签到查余额时，把到期时间 <= now+window 的
 	// 套餐余额标记为"快过期"（pool 据此优先消耗，见 entry.creditsExpiring）。
@@ -64,6 +80,18 @@ type Config struct {
 	RenewEnabled bool
 	// RenewHours 续期巡检触发小时表，默认 [3]（凌晨，避开签到/活跃/队列高峰）。
 	RenewHours []int
+	// CompensationEnabled 活动补偿自动领取排程开关（schedule.compensation_enabled，
+	// 缺省关 opt-in）。与 QueueEnabled/RenewEnabled 同风格：补偿「有则领、没有就跳过」
+	// 是幂等写，但公告常带截止日期——默认交给面板「立即执行」手动领最稳。
+	CompensationEnabled bool
+	// CompensationHours 补偿自动领取触发小时表（schedule.compensation_hours）。
+	//
+	// **空表 = 只手动执行、不自动跑**（与其余各族的「空 = 回落默认」相反，
+	// 见 config.Schedule 的不回落例外）：New 因此用 clampHours(hours, nil) 归一——
+	// 越界值照旧剔除并记 WARN，但空表保持空（不回落任何默认整点）。
+	// 开关开着而表为空时不排程，只记一行 WARN 说明（runOne 的 taskCompensation 分支
+	// 仍可被手动触发：面板「立即执行」与 /admin/tasks/run 都不看排程开关）。
+	CompensationHours []int
 }
 
 // Scheduler 调度器。
@@ -133,8 +161,8 @@ func (s *Scheduler) SetQueueRunner(fn func()) {
 	s.queueMu.Unlock()
 }
 
-// kindCount 与 taskKind 枚举数量一致（checkin/travel/activity/keepalive/school/cat/queue/renew）。
-const kindCount = 8
+// kindCount 与 taskKind 枚举数量一致（checkin/travel/activity/keepalive/school/cat/queue/renew/compensation）。
+const kindCount = 9
 
 // clampHours 归一化排程小时表：空回落默认；逐项剔除越界值（h<0 || h>23，剔一条
 // 记一条 WARN）；剔除后为空再回落默认。config 直载的越界小时（如 25）若不拦，
@@ -165,10 +193,18 @@ func New(cfg Config) *Scheduler {
 	cfg.CatHours = clampHours(cfg.CatHours, []int{1})
 	cfg.QueueHours = clampHours(cfg.QueueHours, []int{10})
 	cfg.RenewHours = clampHours(cfg.RenewHours, []int{3})
+	// 补偿小时表用**空默认值**归一：空表 = 只手动执行（不回落默认整点——回落会把
+	// 前端「留空 = 不自动跑」变成静默每天自动领，见 config.Schedule 的不回落例外）。
+	// 越界值仍照 clampHours 口径剔除并记 WARN（配了非法整点不该静默漂移到别的时点）。
+	cfg.CompensationHours = clampHours(cfg.CompensationHours, nil)
 	// 0/缺省 = 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
 	if cfg.ActivityReportCount <= 0 {
 		cfg.ActivityReportCount = 1
 	}
+	// 随机延后/账号错峰归一（config.Schedule.Normalize 已在配置层带键名快速失败，
+	// 这里兜零值 Config 与绕过 Normalize 的调用方；口径同上面的 clampHours）。
+	cfg.RandomDelayMinutes = clampRandomDelayMinutes(cfg.RandomDelayMinutes)
+	cfg.AccountDelayMinSeconds, cfg.AccountDelayMaxSeconds = clampAccountDelay(cfg.AccountDelayMinSeconds, cfg.AccountDelayMaxSeconds)
 	s := &Scheduler{cfg: cfg, adoptTried: make(map[string]string), rewardClaimed: make(map[string]string), wake: make(chan struct{}, 1)}
 	// 排程开关初始化自 Config 的 Disabled 标志：零值 Config = 全部启用，与引入前逐字一致。
 	s.enabled[taskCheckin].Store(!cfg.CheckinDisabled)
@@ -181,6 +217,14 @@ func New(cfg Config) *Scheduler {
 	// renew 与 queue 同风格（opt-in，缺省关）：对临期账号主动打 refresh 写接口，
 	// 由用户显式打开；关闭时保活/签到/选号路径的既有刷新行为完全不受影响。
 	s.enabled[taskRenew].Store(cfg.RenewEnabled)
+	// compensation 同样 opt-in（缺省关，手动「立即执行」最稳）。
+	s.enabled[taskCompensation].Store(cfg.CompensationEnabled)
+	// 开关开着但小时表为空 = 合法配置：不排程（nextFire 对空表返回零时点，Run 主循环
+	// 会跳过该族），等价「只手动执行」。只在这里记一行 WARN 说明——**不报错、不回落默认
+	// 整点**（回落会让用户在前端留空的意图变成静默自动领补偿）。
+	if cfg.CompensationEnabled && len(cfg.CompensationHours) == 0 {
+		log.Printf("scheduler: 活动补偿自动领取已开启但未配整点（schedule.compensation_hours 为空）——不排程，仅手动「立即执行」可用")
+	}
 	for i := range s.lastOut {
 		s.lastOut[i].Store("")
 	}
@@ -240,6 +284,10 @@ const (
 	taskCat
 	taskQueue
 	taskRenew
+	// taskCompensation 活动补偿自动领取（schedule.compensation_enabled + _hours）。
+	// 追加在枚举**末尾**：kindNames/kindLabels 与各数组按索引对齐，中间插入会让
+	// /admin 的 kind 名与既有观测位错位（旧进程内观测数据也就对不上号了）。
+	taskCompensation
 )
 
 // nextWake 返回 now 之后最近的唤醒时刻，以及该时刻需要执行的全部任务。
@@ -248,6 +296,10 @@ const (
 //
 // 禁用判定读 enabled 原子标志（New 时初始化自 Config.*Disabled，之后可由
 // SetEnabled 热改）——热改经 wake 唤醒 Run 重算，无需重启。
+//
+// 随机延后开启时每个候选走 nextScheduledFire（整点 + 确定性偏移）：同一整点上的两类
+// 任务可能落在本小时的不同时刻，因此不再必然合并成一批，各自到点各跑一次
+// （延后关闭时逐字回到「整点合并」语义）。
 func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	type slot struct {
 		at   time.Time
@@ -255,28 +307,33 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	}
 	var slots []slot
 	if s.enabled[taskCheckin].Load() {
-		slots = append(slots, slot{nextFire(now, s.hoursOf(taskCheckin)), taskCheckin})
+		slots = append(slots, slot{s.nextScheduledFire(now, s.hoursOf(taskCheckin), taskCheckin), taskCheckin})
 	}
 	if s.enabled[taskTravel].Load() {
-		slots = append(slots, slot{nextFire(now, s.hoursOf(taskTravel)), taskTravel})
+		slots = append(slots, slot{s.nextScheduledFire(now, s.hoursOf(taskTravel), taskTravel), taskTravel})
 	}
 	if s.enabled[taskActivity].Load() {
-		slots = append(slots, slot{nextFire(now, s.hoursOf(taskActivity)), taskActivity})
+		slots = append(slots, slot{s.nextScheduledFire(now, s.hoursOf(taskActivity), taskActivity), taskActivity})
 	}
 	if s.enabled[taskKeepalive].Load() {
-		slots = append(slots, slot{nextFire(now, s.hoursOf(taskKeepalive)), taskKeepalive})
+		slots = append(slots, slot{s.nextScheduledFire(now, s.hoursOf(taskKeepalive), taskKeepalive), taskKeepalive})
 	}
 	if s.enabled[taskSchool].Load() {
-		slots = append(slots, slot{nextFire(now, s.hoursOf(taskSchool)), taskSchool})
+		slots = append(slots, slot{s.nextScheduledFire(now, s.hoursOf(taskSchool), taskSchool), taskSchool})
 	}
 	if s.enabled[taskCat].Load() {
-		slots = append(slots, slot{nextFire(now, s.hoursOf(taskCat)), taskCat})
+		slots = append(slots, slot{s.nextScheduledFire(now, s.hoursOf(taskCat), taskCat), taskCat})
 	}
 	if s.enabled[taskQueue].Load() {
-		slots = append(slots, slot{nextFire(now, s.hoursOf(taskQueue)), taskQueue})
+		slots = append(slots, slot{s.nextScheduledFire(now, s.hoursOf(taskQueue), taskQueue), taskQueue})
 	}
 	if s.enabled[taskRenew].Load() {
-		slots = append(slots, slot{nextFire(now, s.hoursOf(taskRenew)), taskRenew})
+		slots = append(slots, slot{s.nextScheduledFire(now, s.hoursOf(taskRenew), taskRenew), taskRenew})
+	}
+	// 补偿族空小时表时 nextScheduledFire 返回零时点（nextFire 无候选），下方统一跳过
+	// ——「开关开着但留空」自然不排程，无需额外分支。
+	if s.enabled[taskCompensation].Load() {
+		slots = append(slots, slot{s.nextScheduledFire(now, s.hoursOf(taskCompensation), taskCompensation), taskCompensation})
 	}
 	var earliest time.Time
 	for _, sl := range slots {
@@ -345,45 +402,75 @@ type dueBatch struct {
 // 槽位也能在下一轮补上。
 //
 // 口径：
-//   - 槽位恒为整点（nextFire 用 time.Date 构造），按本地整点对齐后逐小时步进。
-//     不用 Truncate：其按绝对时间对齐，在非整点时区（如 +5:30）会错位到 :30；
-//   - cursor 非零时从 cursor+1h 起枚举（cursor 槽位本身已派发，不重跑）；
-//     零值（进程首轮）从 timer 的计划槽位起——只补首个 timer 睡过的缺口，
-//     不重放启动前的历史槽位（"服务重启"不是"睡眠唤醒"，重放只会启动风暴）；
-//   - 同刻多类任务合并成一批（与 nextWake 的合并口径一致），批内并行（runBatch）；
+//   - 槽位 = scheduledSlot(日, 整点, 任务族)：随机延后关闭时即整点本身，开启时是
+//     整点 + 确定性偏移（恒落在本小时内）。枚举单位因此是「槽位」而不是「整点小时」：
+//     同一小时内可能有多个不同时刻的槽位（如 09:12 旅行 + 09:37 签到），按小时步进
+//     会把后一个整段漏掉；
+//   - 游标语义：零值（进程首轮）从 timer 的计划槽位起——只补首个 timer 睡过的缺口，
+//     不重放启动前的历史槽位（"服务重启"不是"睡眠唤醒"，重放只会启动风暴）；非零
+//     从严格晚于 cursor 的槽位起（cursor 槽位本身已派发，不重跑）。随机延后开启后
+//     「同一小时内先后两个槽位」是常态，故判据是 slot>cursor（而非 cursor+1h），
+//     否则后一个槽位会被跳过一个整点；
+//   - 同刻（同一实际时刻）多类任务合并成一批（与 nextWake 的合并口径一致），批内并行
+//     （runBatch）；随机延后开启时同整点的两类任务偏移通常不同，各成一批、按时刻先后跑；
 //   - 禁用的任务不入批（enabled 原子读，与 nextWake 同口径）。
 //
 // 已知取舍：逐小时步进在 DST 跳变日可能漏/重一个本地小时（中国无 DST）；
 // 批次执行期间又睡过去的极端场景由下一轮 cursor 补跑兜底。
 func (s *Scheduler) dueBatches(now, cursor, planned time.Time) []dueBatch {
-	start := planned
-	if !cursor.IsZero() {
-		start = cursor.Add(time.Hour)
+	first := cursor.IsZero()
+	start := cursor
+	if first {
+		start = planned
 	}
 	// 补跑窗口下限：早于 now-24h 的槽位不再重放。
 	if window := now.Add(-catchUpWindow); start.Before(window) {
 		start = window
 	}
-	// 对齐本地整点（窗口下限可能落在半点）。
-	start = time.Date(start.Year(), start.Month(), start.Day(), start.Hour(), 0, 0, 0, start.Location())
+	// 扫描起点对齐本地整点：候选槽位恒 >= 本小时整点，边界整点要纳入
+	//（不用 Truncate：其按绝对时间对齐，在非整点时区（如 +5:30）会错位到 :30）。
+	startHour := time.Date(start.Year(), start.Month(), start.Day(), start.Hour(), 0, 0, 0, start.Location())
+	if first {
+		// 首轮与旧实现同口径：计划槽位/窗口下限向下对齐到整点后作为**下界本身**
+		//（边界整点槽位纳入，见 catchUpWindow 注释）。
+		start = startHour
+	}
+	lastHour := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, now.Location())
 
-	var batches []dueBatch
-	for t := start; !t.After(now); t = t.Add(time.Hour) {
-		var kinds []taskKind
+	// 候选槽位（升序合并前）：≤ now、且晚于起点（首轮含起点边界；后续轮严格晚于 cursor）。
+	type cand struct {
+		at   time.Time
+		kind taskKind
+	}
+	var cands []cand
+	for t := startHour; !t.After(lastHour); t = t.Add(time.Hour) {
 		for k := taskKind(0); k < kindCount; k++ {
-			if !s.enabled[k].Load() {
+			if !s.enabled[k].Load() || !hasHour(s.hoursOf(k), t.Hour()) {
 				continue
 			}
-			for _, h := range s.hoursOf(k) {
-				if h == t.Hour() {
-					kinds = append(kinds, k)
-					break
-				}
+			slot := s.scheduledSlot(t, t.Hour(), k)
+			if slot.After(now) {
+				continue // 本小时里的延后槽位还没到点：留给它到点的那一轮
 			}
+			if first {
+				if slot.Before(start) {
+					continue
+				}
+			} else if !slot.After(cursor) {
+				continue // 已派发（cursor 及更早），不重放
+			}
+			cands = append(cands, cand{at: slot, kind: k})
 		}
-		if len(kinds) > 0 {
-			batches = append(batches, dueBatch{at: t, kinds: kinds})
+	}
+	// 按实际时刻排序后合并同刻（稳定排序：同刻仍保持 kind 枚举顺序，与旧实现一致）。
+	sort.SliceStable(cands, func(i, j int) bool { return cands[i].at.Before(cands[j].at) })
+	var batches []dueBatch
+	for _, c := range cands {
+		if n := len(batches); n > 0 && batches[n-1].at.Equal(c.at) {
+			batches[n-1].kinds = append(batches[n-1].kinds, c.kind)
+			continue
 		}
+		batches = append(batches, dueBatch{at: c.at, kinds: []taskKind{c.kind}})
 	}
 	return batches
 }
@@ -405,7 +492,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 	for {
 		next, _ := s.nextWake(time.Now())
 		if next.IsZero() {
-			// 七类任务全部禁用：不空转，等退出信号或热改启用通知。
+			// 所有任务族全部禁用：不空转，等退出信号或热改启用通知。
 			// 禁用期间的槽位不进 cursor（补跑窗口天然截断，重启用后从"现在"起算）。
 			select {
 			case <-ctx.Done():
@@ -442,34 +529,56 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 }
 
-// runBatch 并行派发一批任务（同一唤醒时刻的多类任务），等全部完成返回。
+// runBatch 派发一批任务（同一唤醒时刻的多类任务），等全部完成返回。
 // 供 Run 主循环与测试使用；ctx 取消时由各任务内部的 sleepCtx 快速收尾。
+//
+// 账号错峰开启时改为**串行**派发：账号错峰只保证「同一遍历内账号先后」，若同批多类
+// 任务并行，两条遍历会同时打上游、错峰等于没做（上游补丁 0003 同口径）。关闭时
+// （旧配置 / 缺省）保持既有并行语义逐字不变。
 func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
+	if s.cfg.AccountDelayMaxSeconds > 0 {
+		for _, k := range kinds {
+			if ctx.Err() != nil {
+				return
+			}
+			s.dispatchSafe(ctx, k)
+		}
+		return
+	}
 	var wg sync.WaitGroup
 	for _, k := range kinds {
 		wg.Add(1)
 		go func(k taskKind) {
 			defer wg.Done()
-			// 任务体横跨上游 JSON 解析 / panel 注入回调 / 脚本执行，任何一处 panic 都不该
-			// 击穿整个网关进程。recover 后按任务失败口径记录，让其余任务与主循环继续。
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("scheduler: task %d panic: %v", k, r)
-				}
-			}()
-			s.dispatch(ctx, k)
+			s.dispatchSafe(ctx, k)
 		}(k)
 	}
 	wg.Wait()
 }
 
+// dispatchSafe 带 panic 兜底的派发：任务体横跨上游 JSON 解析 / panel 注入回调 /
+// 脚本执行，任何一处 panic 都不该击穿整个网关进程。recover 后按任务失败口径记录，
+// 让其余任务与主循环继续。
+func (s *Scheduler) dispatchSafe(ctx context.Context, k taskKind) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("scheduler: task %d panic: %v", k, r)
+		}
+	}()
+	s.dispatch(ctx, k)
+}
+
 // dispatch 按任务类型分发到对应执行函数。脚本类（school/cat）失败只记 WARN、
 // 不影响其余任务继续执行（与现有各任务"单账号失败不阻断遍历"同口径）。
 // ctx 传导给带账号间限速的遍历（取消时立即放弃剩余账号），纯脚本类任务不感知。
+//
+// 入口注入 scheduledAccountKey 标记：本函数是「定时派发」的唯一入口，账号错峰
+// （accountGap）只认这个标记——手动入口（RunKindNow/RunXxxNow/panel 立即执行）走
+// 背景 ctx，天然不带标记，保持立即执行。
 func (s *Scheduler) dispatch(ctx context.Context, k taskKind) {
 	s.runMu[k].Lock()
 	defer s.runMu[k].Unlock()
-	s.runOne(ctx, k)
+	s.runOne(context.WithValue(ctx, scheduledAccountKey{}, true), k)
 }
 
 // runOne 单类任务真正执行体 + 观测记录（running/lastRun/lastOut）。
@@ -482,7 +591,9 @@ func (s *Scheduler) runOne(ctx context.Context, k taskKind) {
 	var summary string
 	switch k {
 	case taskCheckin:
-		out, err := s.CheckinAll()
+		// 定时路径走 ctx 版签到：账号错峰（accountGap）只在带 scheduledAccountKey
+		// 标记的 ctx 上生效（手动 RunCheckinNow 仍走 CheckinAll 背景 ctx，立即执行）。
+		out, err := s.checkinAll(ctx)
 		if err != nil {
 			log.Printf("scheduled checkin skipped: %v", err)
 			summary = "skipped: " + err.Error()
@@ -499,7 +610,7 @@ func (s *Scheduler) runOne(ctx context.Context, k taskKind) {
 		s.runActivity(ctx)
 		summary = "done"
 	case taskKeepalive:
-		s.RunKeepaliveNow()
+		s.runKeepalive(ctx)
 		summary = "done"
 	case taskSchool:
 		// 开学季活动（2026-09-13~09-24）已结束，任务下线（吸收 panel 729247b）：
@@ -516,6 +627,10 @@ func (s *Scheduler) runOne(ctx context.Context, k taskKind) {
 	case taskRenew:
 		s.runRenewOnce()
 		summary = "done"
+	case taskCompensation:
+		// 手动「立即执行」（面板 /api/compensation/run）与定时到点共用同一实现；
+		// 汇总文案同源（CompensationOutcome.Summary）。
+		summary = s.RunCompensation(ctx).Summary()
 	}
 	// 收尾顺序：running 先于 lastRun/lastOut 落定——观测者（/admin 轮询方）看到
 	// lastRun 更新时 running 必已复位，不存在"有结果却仍在跑"的中间态。
@@ -586,7 +701,11 @@ func (s *Scheduler) runStreakBonusTail(ctx context.Context) {
 		s.makeupYesterday(a) // 补签保连登（幂等写：无漏签/无卡静默）
 		// 全档兑换 + 抽完抽奖次数。复用活跃上报侧的挑档/抽取实现（streakClaimTiers）。
 		s.streakClaimTiers(a)
-		if !sleepCtx(ctx, activityAccountDelay) {
+		// 账号间限速：定时路径叠加账号错峰（accountGap 对手动 ctx 无标记 → 逐字返回 base）。
+		// 注意本行是遍历的**收尾**等待（原实现口径，最后一个账号之后也睡一档）：保持原样
+		// 才能让旧配置（错峰关）的节奏逐字不变；错峰开启时它同样可被 ctx 取消，取消即返回，
+		// 排程循环靠 dueBatches 补跑兜住这段额外等待（不会丢槽）。
+		if !sleepCtx(ctx, s.accountGap(ctx, activityAccountDelay)) {
 			return // 优雅停机：不等限速睡满，剩余账号下轮再领
 		}
 	}
@@ -598,7 +717,14 @@ func (s *Scheduler) runStreakBonusTail(ctx context.Context) {
 //
 // session dead 走 Pool.NoteSessionDead 的**连续计数**语义（与 keepalive 一致）：
 // 一次刷新失败不再立即杀号，连续 sessionDeadThreshold 次才禁用，刷新成功清计数。
+//
+// 本入口是「手动立即执行」语义（panel 立即执行 / cmd/task / 测试）：背景 ctx 无错峰标记，
+// 逐账号不留额外等待。定时路径走 checkinAll(ctx)（dispatch 注入标记后才错峰）。
 func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
+	return s.checkinAll(context.Background())
+}
+
+func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 	if !s.checkinMu.TryLock() {
 		return nil, ErrBusy
 	}
@@ -607,6 +733,7 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 	statuses := s.cfg.Pool.List()
 	out := make([]CheckinOutcome, 0, len(statuses))
 	var okN, alreadyN, failN, skipN int
+	first := true // 首个「真正要处理」的账号立即开始，之后的账号之间才错峰
 	for _, st := range statuses {
 		oc := CheckinOutcome{UID: st.UID, Nickname: st.Nickname}
 		if st.Disabled {
@@ -631,6 +758,17 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			out = append(out, oc)
 			continue
 		}
+		// 账号错峰（仅定时路径生效，见 accountGap）：等不满 = ctx 取消，放弃剩余账号，
+		// 已完成的回执照常返回（与 runActivity 的取消口径一致）。
+		if !first {
+			if !sleepCtx(ctx, s.accountGap(ctx, 0)) {
+				return out, ctx.Err()
+			}
+			if ctx.Err() != nil {
+				return out, ctx.Err()
+			}
+		}
+		first = false
 		// 停机跨过 token 有效期（关机过夜/容器长期停跑）时先补一次刷新，否则签到必然 401 白跑。
 		if a.NeedsRefresh(checkinRefreshSkew) {
 			if err := s.cfg.Upstream.RefreshToken(a); err != nil {
@@ -693,6 +831,8 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 		}
 		s.cfg.Pool.ReenableIfCredits(st.UID, remain)
 		s.cfg.Pool.SetCreditsDetailed(st.UID, remain, buckets.Expiring)
+		// 最早到期积分快照（v1.20.0 prefer_expiring）：与余额写入同批，供选号加权。
+		s.cfg.Pool.SetCreditEarliest(st.UID, buckets.EarliestExpiry, buckets.EarliestRemaining)
 		// 签到到账流水：以签到前基线记精确差值（credit.go）。基线查询失败时
 		// 跳过签到口径（0 基线会把全部余额误报成「刚获得」），保持不记。
 		if creditBeforeOK {
@@ -741,6 +881,7 @@ func joinDetail(existing, add string) string {
 // RunActivityNow 立即对池内所有可用账号执行对话活跃上报（无 ctx 的外部入口：
 // cmd/activity 一次性触发、cmd/task、panel 裸 goroutine、测试）。内部走
 // runActivity，取背景 ctx（不可取消，语义与引入前 time.Sleep 版一致）。
+// 背景 ctx 无错峰标记：手动路径不叠加账号错峰（定时路径由 dispatch 注入标记后才错峰）。
 func (s *Scheduler) RunActivityNow() {
 	// panel 裸 goroutine 入口：任务体 panic 不应击穿整个网关进程（与 RunCheckinNow
 	// 同理，runBatch/RunKindNow 的 recover 不覆盖本入口）。
@@ -768,7 +909,8 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 		// 点亮连登）；realmBase 路由/头由 upstream.billingJSON/BillingHeaders 按 realm 切。
 		// 单账号失败只记 WARN 不影响遍历（下方 report err → break 该号 → continue 下号）。
 		if !first {
-			if !sleepCtx(ctx, activityAccountDelay) {
+			// 账号间限速：定时路径叠加账号错峰（accountGap 手动 ctx 无标记 → 逐字返回 base）。
+			if !sleepCtx(ctx, s.accountGap(ctx, activityAccountDelay)) {
 				return // 优雅停机：不等限速睡满，剩余账号下轮再报
 			}
 		}
@@ -1041,7 +1183,17 @@ func (s *Scheduler) markRewardClaimed(uid string) {
 // 刷新成功 → ClearSessionDead 清计数（错误判定的账号有复活路径）。
 // 收尾同步回写续期观测（SetRenewState）：成功记 last_renewed + 清失败原因；
 // 失败只记 renew_last_error——续期观测不区分触发路径（保活/签到/巡检都是刷新）。
+//
+// 本入口是「手动立即执行」语义：背景 ctx 无错峰标记，逐账号不留额外等待（定时路径
+// 走 runKeepalive(ctx)，dispatch 注入标记后才错峰）。
 func (s *Scheduler) RunKeepaliveNow() {
+	s.runKeepalive(context.Background())
+}
+
+// runKeepalive 保活遍历，随 ctx 取消立即退出（定时路径：取消时放弃剩余账号，
+// 下一轮排程自然补上——刷新按需幂等，无副作用）。
+func (s *Scheduler) runKeepalive(ctx context.Context) {
+	first := true
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
 			continue
@@ -1050,6 +1202,16 @@ func (s *Scheduler) RunKeepaliveNow() {
 		if a == nil || a.RefreshTokenValue() == "" {
 			continue
 		}
+		// 账号错峰（仅定时路径生效，见 accountGap）：等不满 = ctx 取消，放弃剩余账号。
+		if !first {
+			if !sleepCtx(ctx, s.accountGap(ctx, 0)) {
+				return
+			}
+			if ctx.Err() != nil {
+				return
+			}
+		}
+		first = false
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
 			log.Printf("keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			var ue *upstream.Error
@@ -1086,12 +1248,12 @@ func (s *Scheduler) RunMinichatNow() {
 // /admin 热管理与观测（server 包的 /admin 端点依赖；对既有定时/CLI 行为零影响）
 // ============================================================================
 
-// kindNames/kindLabels 八类任务的稳定字符串标识与中文显示名（顺序与 taskKind 枚举一致）。
-var kindNames = [kindCount]string{"checkin", "travel", "activity", "keepalive", "school", "cat", "queue", "renew"}
+// kindNames/kindLabels 九类任务的稳定字符串标识与中文显示名（顺序与 taskKind 枚举一致）。
+var kindNames = [kindCount]string{"checkin", "travel", "activity", "keepalive", "school", "cat", "queue", "renew", "compensation"}
 
-var kindLabels = [kindCount]string{"签到", "猫猫旅行", "活跃上报", "Token 保活", "开学季", "夜猫子", "任务队列", "令牌续期"}
+var kindLabels = [kindCount]string{"签到", "猫猫旅行", "活跃上报", "Token 保活", "开学季", "夜猫子", "任务队列", "令牌续期", "每日领补偿"}
 
-// Kinds 返回七类任务的字符串标识（枚举顺序），供外部遍历与参数校验。
+// Kinds 返回九类任务的字符串标识（枚举顺序），供外部遍历与参数校验。
 func Kinds() []string {
 	out := make([]string, 0, kindCount)
 	out = append(out, kindNames[:]...)
@@ -1137,7 +1299,7 @@ type KindSnapshot struct {
 	LastResult  string `json:"last_result"`   // 上次执行摘要；""= 未执行过
 }
 
-// SnapshotAll 六类任务的观测快照（枚举顺序）。hours 为 cfg 不可变快照的拷贝。
+// SnapshotAll 九类任务的观测快照（枚举顺序）。hours 为 cfg 不可变快照的拷贝。
 func (s *Scheduler) SnapshotAll() []KindSnapshot {
 	out := make([]KindSnapshot, 0, kindCount)
 	for i := range kindCount {
@@ -1154,7 +1316,14 @@ func (s *Scheduler) SnapshotAll() []KindSnapshot {
 			sn.LastResult = v
 		}
 		if sn.Enabled {
-			sn.NextFire = nextFire(time.Now(), s.hoursOf(k)).Format(time.RFC3339)
+			// 用 nextScheduledFire（含随机延后偏移）：/admin 展示的 next_fire 必须是
+			// 真实下一个触发时刻，而不是整点名义值——延后关闭时两者逐字相同。
+			// 仅非零时点才赋值：本字段契约是 ""= 无排程时点，而零时点 Format 会输出
+			// "0001-01-01T00:00:00Z"（启用但小时表为空——补偿「开关开 + 留空 = 只手动」
+			// 这一合法态的显示值）。
+			if at := s.nextScheduledFire(time.Now(), s.hoursOf(k), k); !at.IsZero() {
+				sn.NextFire = at.Format(time.RFC3339)
+			}
 		}
 		out = append(out, sn)
 	}
@@ -1217,6 +1386,9 @@ func (s *Scheduler) cfgHours(k taskKind) []int {
 		return s.cfg.QueueHours
 	case taskRenew:
 		return s.cfg.RenewHours
+	case taskCompensation:
+		// 空表是合法值（= 只手动，不回落默认；见 Config.CompensationHours）。
+		return s.cfg.CompensationHours
 	default:
 		return s.cfg.CatHours
 	}
@@ -1239,6 +1411,38 @@ func (s *Scheduler) SetHours(name string, hours []int) bool {
 	cp := append([]int(nil), hours...)
 	s.hoursMu.Lock()
 	s.hoursTab[k] = cp
+	s.hoursMu.Unlock()
+	select {
+	case s.wake <- struct{}{}:
+	default: // 已有未消费通知：重排幂等，无需排队
+	}
+	return true
+}
+
+// ClearHours 显式清空某任务族的小时表（写入**非 nil** 空切片 + 唤醒 Run 重排）。
+//
+// 为什么需要独立入口（不能复用 SetHours 的空数组）：SetHours 拒绝空表的通用语义是
+// 「空 = 禁用，请走 SetEnabled」，是给八类「小时表为空即非法/误用」的任务族的；
+// 而补偿族恰好相反——空表是合法语义「只手动执行」（config.Schedule 的不回落例外，
+// 见 CompensationHours）。清空必须显式落进运行态，否则用户在前端留空保存后，运行态
+// 仍按旧 hoursTab（或启动快照）的整点自动领，直到进程重启才生效。
+//
+// 必须写非 nil 空切片：hoursOf 的判据是 hoursTab[k] != nil 优先、否则回落启动期
+// cfg 快照——写 nil 会被当成「该族从未热改」而回落 snapshot，等于没清。
+// 写完照 SetHours 的写法投递一次 wake，让阻塞在旧 timer 上的 Run 立即重算：
+// 空表在 nextWake/dueBatches 里天然不排程（零时点被统一跳过），无立即唤醒循环
+// 或重复派发。
+//
+// 唯一使用者是补偿族的「留空 = 只手动执行」（cmd/server/panel_config.go 保存路径）。
+// 其他族清空得到的是「永不运行」——那些族的小时表没有「空 = 合法」的语义，
+// 不要用本函数（要停排程走 SetEnabled=false）。
+func (s *Scheduler) ClearHours(name string) bool {
+	k, exist := KindFromName(name)
+	if !exist {
+		return false
+	}
+	s.hoursMu.Lock()
+	s.hoursTab[k] = []int{} // 非 nil：nil 会回落启动快照，等于没清
 	s.hoursMu.Unlock()
 	select {
 	case s.wake <- struct{}{}:

@@ -140,6 +140,19 @@ export function fmtAgo(ts: number | string | null | undefined): string {
   return t('format.daysAgo', {count: ds, n: ds});
 }
 
+/**
+ * `datetime-local` 输入值（本地时间、无时区）→ unix 秒；空串 / 非法值返回 undefined。
+ *
+ * 抽到本文件的原因（OCR 审查）：日志页与统计页各写了一份逐字相同的实现，
+ * 而这段逻辑的语义（按**本地时区**解析、空值不参与筛选）一旦调整（时区 / 精度），
+ * 两份极易漂移出不一致行为——筛选口径必须同源。
+ */
+export function localInputToSec(v: string): number | undefined {
+  if (!v) return undefined;
+  const ms = Date.parse(v);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : undefined;
+}
+
 export async function copyText(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,15 @@ const (
 	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
 	ErrClient                        // 其他 4xx / 业务错误
+	// ErrToolCallMismatch 11148「tool calls and tool results do not match」/
+	// tool_call_sequence_broken → 请求级错误：不罚号、不轮转，末端透传原文。
+	//
+	// 为什么必须与 ErrClient 分开：11148 对本请求 body 是**确定性**答复——上游校验的是
+	// 出站 messages 里 tool_call↔tool 结果的配对/顺序，同一份 body 换任何账号都是同一份
+	// messages，换号不可能修好（tool_pairing.go 已在出站前预防，此处兜住修不好的污染
+	// 历史）。若落到通用 4xx 兜底，applyErrorPolicy 的 ErrClient 分支会轮转全池 + 喂
+	// 连败计数（NoteFailures），把健康号打出池——用一个请求自己的历史错误罚光整个账号池。
+	ErrToolCallMismatch
 )
 
 func (k ErrKind) String() string {
@@ -68,6 +78,8 @@ func (k ErrKind) String() string {
 		return "prompt_too_long"
 	case ErrImageInvalid:
 		return "image_invalid"
+	case ErrToolCallMismatch:
+		return "tool_call_mismatch"
 	case ErrClient:
 		return "client"
 	default:
@@ -298,6 +310,24 @@ var promptTooLongRule = errorRule{kind: ErrPromptTooLong, mode: matchFold, patte
 func isPromptTooLongStatus(status int) bool {
 	return status == http.StatusBadRequest || status == http.StatusNotFound ||
 		status == http.StatusRequestEntityTooLarge
+}
+
+// isToolCallMismatch 11148 工具调用/结果历史错配判定（只吃小写 body）。
+//
+// 三种 marker 覆盖实测与文档形态：
+//   - "tool calls and tool results do not match"：上游 msg / extError.message 文案；
+//   - "tool_call_sequence_broken"：同族的 extError.code（deepseek 系模型实测形状）；
+//   - codeMarker(lower, "11148")：业务信封 code 字段（数字/字符串/带空格三形态由
+//     codeMarker 内部统一容差，与 11133/11135 同口径）。
+//
+// 不复用 errorRule：词表匹配器只认字面量或大小写，而 code 判定必须容忍 JSON 空白
+// （`"code": 11148`），与 invalidImageRule 注释同因。也**不做裸 "11148" 数字子串**匹配
+// ——requestId/时间戳撞上该数字串会把无关 4xx 误判成请求级错配（与 IsSessionDead
+// 拒绝裸 12153 同一条纪律），故必须锚定 code 字段。
+func isToolCallMismatch(lower string) bool {
+	return strings.Contains(lower, "tool calls and tool results do not match") ||
+		strings.Contains(lower, "tool_call_sequence_broken") ||
+		codeMarker(lower, "11148")
 }
 
 // softRateResetLoc 上游 429 6004 文案中的重置时间固定按 UTC+8 解释（上游文案如此，
@@ -598,7 +628,10 @@ func ParseRateReset(body string) (time.Time, bool) {
 //     ErrClient → applyErrorPolicy 只换号不罚 → 连环 403（报告 §4.1 的根因）。
 //     带业务信封的 403 已被上方各层捕获（11140 request illegal →
 //     ErrAccountFault 禁用语义不变），走不到本层。
-//  11. 内容策略/参数错误/其他 4xx —— 通用兜底。
+//  11. 11148 —— 工具调用/结果历史错配：请求级确定性错误（同一 body 换号结果不变），
+//     判在通用 4xx 兜底**之前**（落 ErrClient 会轮转全池 + 喂连败计数，把健康号
+//     打出池）。只认 400，5xx/429/403 等状态码语义优先。
+//  12. 内容策略/参数错误/其他 4xx —— 通用兜底。
 func Classify(status int, body string) ErrKind {
 	// 11102「该后端无此模型」须最先判：它是「模型在后端不存在」的确定性答复，语义比
 	// 计费/限流都更具体——若不先判，msg 里的 "service info not found" 虽不含余额词、
@@ -669,6 +702,15 @@ func Classify(status int, body string) ErrKind {
 	// 口径与 hint.go 的 isInvalidImageData（同样用 codeMarker）一致。
 	if status == http.StatusBadRequest && (invalidImageRule.hit(body, lower) || codeMarker(lower, "11135")) {
 		return ErrImageInvalid
+	}
+	// 11148 工具调用/结果错配（任务书 tool-call-mismatch §1）：判在通用 4xx 兜底之前
+	// ——落 ErrClient 的代价是轮转全池 + NoteFailures 连败计数，把健康号打出池；
+	// 而 11148 对同一 body 是确定性的（上游校验的是这份 messages 的 tool_call↔结果
+	// 配对，换账号不换 messages），轮转纯属惩罚健康号。
+	// 只认 400：5xx 是服务端故障语义优先（ErrServer），429/403 同理走各自状态码层
+	// （与 invalidImageRule 的 400 绑定同口径）。
+	if status == http.StatusBadRequest && isToolCallMismatch(lower) {
+		return ErrToolCallMismatch
 	}
 	// 内容策略拦截（HTTP 400 + 审核文案）：判在通用 ErrClient 之前。
 	// 这是误报信号，不罚账号，由网关降级重试处理（见 handler.applyErrorPolicy）。
@@ -1773,6 +1815,15 @@ type CreditBuckets struct {
 	Expiring int64
 	// Stable 其余有效积分（到期时间更远或无到期时间）。
 	Stable int64
+	// EarliestExpiry 最早到期且仍有余量的包的失效时刻（无有效到期信息时零值）。
+	// v1.20.0「快过期积分优先消耗」的数据源：与 Expiring 桶正交——桶回答"这个号
+	// 有多少要作废"（按窗口内总量加权），本字段回答"最先失效的那一笔何时失效"
+	// （驱动 pool 的虚拟实例加成）。只取 end>now 的包：已过期的包不可能再被优先
+	// 消耗，纳入只会遮住真正可用的最近到期包。判据与分桶同源（CycleEndTime，
+	// 上游真实下发的到期时刻；DeductionEndTime 的精确口径见 CreditPackages）。
+	EarliestExpiry time.Time
+	// EarliestRemaining EarliestExpiry 对应包的剩余量（>0 才有意义；0 = 无信息）。
+	EarliestRemaining int64
 }
 
 // Total 返回两桶合计可用积分（= UserResource 的 remain 口径）。
@@ -1790,6 +1841,10 @@ const packageEndLayout = "2006-01-02 15:04:05"
 // 单套餐取数统一调 packageRemainUsed（与 ResourceSummary/cmd/credit 同一事实来源，
 // 含 remain 钳 [0,size] 与 used 修正；A/B 口径在 remain 维度实测一致，此改动消除
 // 双份逻辑漂移——旧中间 switch 只钳负值，上游脏数据 CycleRemain>Size 时会高估）。
+//
+// v1.20.0 起同一趟遍历额外产出 CreditBuckets.EarliestExpiry/EarliestRemaining
+// （最早到期且仍有余量的包），供 pool 的「快过期积分优先消耗」使用——不新增请求、
+// 不改本函数签名（既有调用方零改动，只是多拿到两个只读字段）。
 func (c *Client) UserResourceDetailed(a *auth.Auth, soon time.Duration) (remain int64, buckets CreditBuckets, err error) {
 	now := time.Now()
 	resp, err := c.getUserResourceBody(a)
@@ -1809,15 +1864,29 @@ func (c *Client) UserResourceDetailed(a *auth.Auth, soon time.Duration) (remain 
 			r = 0
 		}
 		remain += r
-		// 分桶：仅 soon>0 且能解析出有效到期时间、且确实在窗口内 → Expiring。
-		if soon > 0 && r > 0 && acct.CycleEndTime != "" {
+		// 到期时间解析一次、分桶与「最早到期快照」共用（同一字段不 parse 两遍）。
+		// parsed 显式区分"解析成功"与"解析出零值"：只有 0001-01-01 这种病态输入
+		// 会落到后者，此时按解析失败处理（保守归 Stable，与既有口径一致）。
+		var end time.Time
+		parsed := false
+		if acct.CycleEndTime != "" {
 			// 上游时间为 UTC+8 墙钟（与 softRateResetLoc 同口径，官网展示时区）。
-			if end, perr := time.ParseInLocation(packageEndLayout, acct.CycleEndTime, softRateResetLoc); perr == nil {
-				if !end.After(now.Add(soon)) {
-					buckets.Expiring += r
-					continue
-				}
+			if t, perr := time.ParseInLocation(packageEndLayout, acct.CycleEndTime, softRateResetLoc); perr == nil {
+				end, parsed = t, true
 			}
+		}
+		// 最早到期快照（v1.20.0，prefer_expiring 的数据源）：在有余额的包里取
+		// 失效时刻最近且仍在未来的一笔，连同它的剩余量一起透出。与 soon 窗口
+		// 无关（窗口只管分桶），故不受 soon<=0 影响。
+		if r > 0 && parsed && now.Before(end) &&
+			(buckets.EarliestExpiry.IsZero() || end.Before(buckets.EarliestExpiry)) {
+			buckets.EarliestExpiry = end
+			buckets.EarliestRemaining = r
+		}
+		// 分桶：仅 soon>0 且能解析出有效到期时间、且确实在窗口内 → Expiring。
+		if soon > 0 && r > 0 && parsed && !end.After(now.Add(soon)) {
+			buckets.Expiring += r
+			continue
 		}
 		buckets.Stable += r
 	}
@@ -2140,6 +2209,229 @@ func IsAlreadyCheckin(err error) bool {
 		return false
 	}
 	return alreadyCheckinRule.hit(ue.Msg, strings.ToLower(ue.Msg))
+}
+
+// ============================================================================
+// 活动补偿（一键领取；wbm 1.0.93 / CHANGELOG 1.0.93 吸收件）
+// ============================================================================
+//
+// 平台会把「活动补偿」（如 2026-10-16 的 DeepSeek 故障补偿）发给账号，官方网页入口在
+// https://www.workbuddy.cn/profile/plans-usage 「用量管理 → 领取」。两个端点：
+//
+//	POST {billingBase}/billing/meter/compensation-status   查询状态（有没有得领 / 领过没）
+//	POST {billingBase}/billing/meter/claim-compensation    领取（有则领）
+//
+// **路径不带 `/v2` 前缀**：与 daily-checkin / get-user-resource 不同（那两个两种前缀都
+// 通），compensation 这两个端点只有非前缀形式——2026-10-16 实测
+//
+//	POST https://www.codebuddy.cn/billing/meter/compensation-status    → 401（存在，待鉴权）
+//	POST https://www.codebuddy.cn/v2/billing/meter/compensation-status → 404
+//
+// 所以**不能**走 billingMeterPaths()（它给 CN 拼的正是 /v2）：那样每次 404，而 404 的表现
+// 与「今天没得领」一模一样 —— 静默失效（endpoint 名字与网页 bundle 里的调用逐字一致）。
+//
+// 基址用既有 billingBase（CN = https://www.codebuddy.cn，desktop 客户端的 billing 基址，
+// **不是**公告链接里的 workbuddy.cn）：我们的账号是客户端账号，出站形态（Origin/Referer/
+// UA/身份头）属于客户端那套，而该域上已有成功的领取记录（wbm 升级日志出现过
+// 「compensation ok (+100 credit)」）。将来若要改基址，身份头必须一起改——不匹配的
+// Origin 正是风控最容易挑出来的形态。
+//
+// 国际版（global）**没有这套活动**（公告原话「面向 WorkBuddy 国内版全量用户」），两个
+// 方法都直接返回 ErrCompensationGlobal 而不发请求——与 checkin/travel 的 global 门控同理
+//（打过去只会白吃一次 4xx，还可能被当成异常形态）。调用侧（scheduler/panel）另有一道
+// 账号级门控，这里是客户端侧的防御性第二道（同 ClaimTrial 的 realm 防线）。
+
+// compensationStatusPath 「活动补偿」状态查询端点（不带 /v2，理由见上方段落）。
+// claim 侧复用 growth_bonus.go 的 claimCompensationPath（同一字面量，勿再声明一份，
+// 否则两处路径会各自漂移）。
+const compensationStatusPath = "/billing/meter/compensation-status"
+
+// ErrCompensationGlobal 国际版没有活动补偿体系：调用方按「跳过」处理，不当失败。
+var ErrCompensationGlobal = errors.New("compensation: global realm has no such program")
+
+// CompensationStatus 「活动补偿」状态回执（官方网页 /profile/plans-usage「领取」模块读的
+// 同一组字段，口径对齐 wbm tencent.compensation_status）。
+//
+// 字段全为可选：不同版本/realm 可能缺少任意一个——缺字段按零值处理（= 未领过、
+// 无可展示文案），不 panic 也不报错（结构识别失败另见 parseCompensationStatus）。
+type CompensationStatus struct {
+	Claimed     bool   `json:"claimed"`      // 是否已领过（网页据此灰掉「领取」按钮）
+	ClaimedAt   string `json:"claimed_at"`   // 领取时刻（有值即视为已领过，见 AlreadyClaimed）
+	ClaimedText string `json:"claimed_text"` // 「已于 X 月 X 日领取」文案（同上）
+	ButtonText  string `json:"button_text"`  // 按钮文案（网页按它显示「领取/已领取」）
+	CreditNum   int64  `json:"credit_num"`   // 可领/已领积分数（展示用）
+	Title       string `json:"title"`        // 补偿标题
+}
+
+// AlreadyClaimed 报告该状态是否表示「已经领过」。
+//
+// 宽容三判据（对齐 wbm compensation_already_claimed）：claimed 为真、claimed_at 或
+// claimed_text 非空——任一成立即算领过。字段全缺时返回 false：那表示我们**认不出**这个
+// 结构，此时应继续尝试领取，而不是当成「已领」把一次有时限的机会放过
+//（认不出 ≠ 领过了）。
+func (s *CompensationStatus) AlreadyClaimed() bool {
+	if s == nil {
+		return false
+	}
+	if s.Claimed {
+		return true
+	}
+	return s.ClaimedAt != "" || s.ClaimedText != ""
+}
+
+// CompensationStatus 查询「活动补偿」当前状态（POST /billing/meter/compensation-status）。
+//
+// 返回 err != nil 只表示**查询**失败（网络/协议/业务错误）——调用方仍应照常尝试领取
+//（认不出/查不到不等于领过了，见 AlreadyClaimed）；结构能识别但字段缺失时返回零值
+//状态且 err=nil。瞬时错误（5xx/网络抖动）走 retryBillingTransient 有界重试，与
+// checkin/余额同口径。
+func (c *Client) CompensationStatus(a *auth.Auth) (*CompensationStatus, error) {
+	if c.globalOn(a) {
+		return nil, ErrCompensationGlobal
+	}
+	var st *CompensationStatus
+	err := c.retryBillingTransient(func() error {
+		data, err := c.billingJSON(a, http.MethodPost, compensationStatusPath, map[string]any{})
+		if err != nil {
+			return err
+		}
+		st = parseCompensationStatus(data)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
+// parseCompensationStatus 容错解析状态回执（data 层）。
+//
+// 逐字段按「有没有值」解析而不是一次性 Unmarshal 进结构体：几个判据字段的实际类型随
+// 版本可能是字符串/数字/布尔（网页 bundle 里 claimed 是布尔、claimed_at 是时间戳数字），
+// 一次性解结构体会因单个字段类型不符而整体失败 → 状态退回「未领过」→ 多发一次注定
+// 失败的写请求（且当时的汇报里少掉「已领过」这一类）。逐字段解析则符合 wbm Python 侧
+// 的动态类型语义（那边只判 `value not in (None,'',0)`）。
+func parseCompensationStatus(data json.RawMessage) *CompensationStatus {
+	st := &CompensationStatus{}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return st // 结构不可识别（null/字符串/数组）→ 零值 = 未领过 → 调用方照常尝试领取
+	}
+	// claimed 只认真布尔 true（字符串 "true"/数字 1 不算「已领过」的唯一证据，
+	// 但 claimed_at/claimed_text 有值时 AlreadyClaimed 仍会判已领）。
+	_ = json.Unmarshal(m["claimed"], &st.Claimed)
+	st.ClaimedAt = rawToText(m["claimed_at"])
+	st.ClaimedText = rawToText(m["claimed_text"])
+	st.ButtonText = rawToText(m["button_text"])
+	st.Title = rawToText(m["title"])
+	st.CreditNum = rawToInt(m["credit_num"])
+	return st
+}
+
+// rawToText 把回执字段读成可读文本：字符串原样；数字/布尔转文本（0 / false 视为无值）；
+// 缺失或对象/数组等认不出的形态返回 ""。
+func rawToText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var n float64
+	if err := json.Unmarshal(raw, &n); err == nil {
+		if n == 0 {
+			return ""
+		}
+		return strconv.FormatFloat(n, 'f', -1, 64)
+	}
+	var b bool
+	if err := json.Unmarshal(raw, &b); err == nil {
+		if !b {
+			return ""
+		}
+		return "true"
+	}
+	return ""
+}
+
+// rawToInt 把回执字段读成整数：数字直读；字符串形态的数字（"500"）也认；其余 0。
+func rawToInt(raw json.RawMessage) int64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var n int64
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n
+	}
+	var f float64
+	if err := json.Unmarshal(raw, &f); err == nil {
+		return int64(f)
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		if v, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil {
+			return v
+		}
+	}
+	return 0
+}
+
+// CompensationClaim 领取「活动补偿」（POST /billing/meter/claim-compensation，有则领）。
+//
+// 三态刻意分开（对齐 wbm tencent.claim_compensation）——「没有可领 / 已经领过」在上游是
+// **业务错误**，但它不是故障：混成一个 error，界面会把「今天本来就没得领」报成
+//「N 个账号失败」，用户于是反复重试一个永远不会成功的动作。故：
+//
+//	claimed=true,  err=nil   → 本次到账（credits 为回执积分，回执缺字段记 0）
+//	claimed=false, err=nil   → 没有可领 / 已经领过（业务拒绝：正常态，调用方静默跳过）
+//	claimed=false, err!=nil  → 网络或协议层失败（可重试）
+//	                          （ErrCompensationGlobal = 国际版，未发请求）
+//
+// 业务拒绝的判据是「HTTP < 400 的信封业务码」（实测形态：HTTP 200 + code != 0）；
+// HTTP 4xx/5xx 一律算失败——宁可把罕见的「4xx + 业务信封」报成失败（用户重试一次即可），
+// 也不把 401（token 失效）/404（端点搬家）/5xx（上游故障）咽成「今天没得领」，
+// 那正是本方法要避免的静默失效。
+//
+// 瞬时错误走 retryBillingTransient 有界重试：补偿公告带截止日期，单次抖动漏掉就真没了。
+// 重试唯一的含糊处是「上游已落库但回执丢失」——那时补打会得到业务拒绝而报 nothing，
+// 与「确实没得领」不可区分；但领取本身幂等（不会多领），歧义只影响一次汇报，故优先保
+// 成功率（重复执行时状态查询那道闸也会把它识别成「已领过」）。
+func (c *Client) CompensationClaim(a *auth.Auth) (claimed bool, credits int64, err error) {
+	if c.globalOn(a) {
+		return false, 0, ErrCompensationGlobal
+	}
+	err = c.retryBillingTransient(func() error {
+		data, e := c.billingJSON(a, http.MethodPost, claimCompensationPath, map[string]any{})
+		if e != nil {
+			return e
+		}
+		claimed = true
+		var resp struct {
+			Credit int64 `json:"credit"` // 回执积分；缺字段/类型不符 → 0（不视为失败）
+		}
+		_ = json.Unmarshal(data, &resp)
+		credits = resp.Credit
+		return nil
+	})
+	if err != nil {
+		if isCompensationBusinessErr(err) {
+			return false, 0, nil
+		}
+		return false, 0, err
+	}
+	return claimed, credits, nil
+}
+
+// isCompensationBusinessErr 报告 err 是否属于「上游用业务码拒绝」而非故障。
+// 只认 HTTP < 400 的 *Error（200 + code!=0，实测的业务拒绝形态）；其余（含 4xx/5xx/
+// 网络/解析错误）都不是业务拒绝——详见 CompensationClaim 注释里的取舍。
+func isCompensationBusinessErr(err error) bool {
+	var ue *Error
+	if !errors.As(err, &ue) {
+		return false
+	}
+	return ue.Status > 0 && ue.Status < 400
 }
 
 func truncate(s string, n int) string {

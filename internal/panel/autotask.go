@@ -315,6 +315,31 @@ func acceptStatusOr(t *upstream.Task) string {
 	return t.AcceptStatus
 }
 
+// taskTarget 任务目标次数：未 accept 的 mp 任务上游下发 progress=null（target 落 0），
+// 按 1 兜底；accept 落地后须回读真实 target 重算（见 refreshTaskAfterAcceptMP）。
+// nil 任务同兜底 1——调用点已判空，这里只是防御，避免各调用点重复 `<=0 → 1` 分支。
+func taskTarget(t *upstream.Task) int64 {
+	if t == nil || t.Target <= 0 {
+		return 1
+	}
+	return t.Target
+}
+
+// refreshTaskAfterAcceptMP accept 成功后回读真实任务进度（吸收 panel d9edc067）。
+// 背景：accept **之前**上游下发 progress=null（target=0），按兜底 target=1 只会补报
+// 1 条事件，且随后与陈旧 target 比较会误判达标 → claim 400 task not completed。
+// panel 首轮实测 Sequential_Tasks_6（真实 target=10）进度 0→1 即触发误领，故 accept
+// 登记生效后回读一次，用真实的 target/current 参与差额补报与达标判定。
+// 回读失败、任务缺失或仍无有效 target（<=0，进度尚未落账）时返回原任务——保持旧兜底
+// 逻辑，不阻塞、不把读失败升级成错误（下次调度自然重试）。
+func (p *Panel) refreshTaskAfterAcceptMP(a *auth.Auth, code string, t *upstream.Task) *upstream.Task {
+	t2, err := p.taskByCodeMP(a, code)
+	if err != nil || t2 == nil || t2.Target <= 0 {
+		return t
+	}
+	return t2
+}
+
 // mpActionGap mp 任务写动作间隔（accept/上报/领奖之间，防频控）。
 var mpActionGap = 2 * time.Second
 
@@ -343,6 +368,19 @@ func sleepAbortable(d time.Duration, abort chan struct{}) bool {
 // sleep gap + 0~10s 抖动；首条也等（上一轮残留进度被回滚后立即重报同样无效）。
 var mpChatEventGap = 45 * time.Second
 
+// mpChatEventJitter 每条上报在 gap 之上叠加的随机抖动上限（取 0~上限）：固定节奏
+// 同样是机器特征。var 而非 const：测试置 0 可在秒级跑完多条补报路径（生产恒 10s）。
+var mpChatEventJitter = 10 * time.Second
+
+// mpChatEventDelay 单条 mp 对话上报前的等待 = gap + 随机抖动。抖动上限 <=0 时退化
+// 为固定 gap（测试路径），同时避开 rand.Int64N(0)（该参数会 panic）。
+func mpChatEventDelay() time.Duration {
+	if mpChatEventJitter <= 0 {
+		return mpChatEventGap
+	}
+	return mpChatEventGap + time.Duration(rand.Int64N(int64(mpChatEventJitter)))
+}
+
 // maxMPChatEvents 单账号单轮 mp 对话补报上限。need 源自上游 target 差额，
 // target 异常放大时 45s/条的节奏会把账号锁占住数小时（队列 worker 持锁贯穿
 // 整个条目）——钳到已知批量上限（Sequential 链最大 target=10，留余量），
@@ -368,12 +406,13 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 		if !p.acceptWithVerifyMP(a, code) {
 			return "accept 未登记生效（上游 200+OK 但未落账形态），待下次重试", nil
 		}
+		// accept 前 progress 为 null（target=0），acceptWithVerifyMP 只回 bool 丢掉了
+		// 它那次回读的任务——这里再回读一次拿真实 target/current 重算，否则按兜底
+		// target=1 只补一条事件即误判达标（claim 400 task not completed，d9edc067）。
+		t = p.refreshTaskAfterAcceptMP(a, code, t)
 	}
 	// 已达标（含 completed 未领）：直接领奖。
-	target := t.Target
-	if target <= 0 {
-		target = 1
-	}
+	target := taskTarget(t)
 	if t.Current >= target || t.AcceptStatus == "completed" {
 		credit, energy, err := p.cfg.Upstream.ClaimRewardMP(a, code)
 		if err != nil {
@@ -381,7 +420,7 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 		}
 		return fmt.Sprintf("已领取奖励（+%dc +%de）", credit, energy), nil
 	}
-	// 判据上报：按差额补 mini chat 事件。每条前 sleep mpChatEventGap+抖动——
+	// 判据上报：按差额补 mini chat 事件。每条前 sleep mpChatEventDelay()——
 	// 连发会被上游反作弊判无效（见 mpChatEventGap 注释），宁可慢不可白报。
 	// need 钳 maxMPChatEvents（上游 target 异常时不至于占锁数小时）；等待期
 	// 监听队列中断信号（tasksCancelQueue 广播），提前退出保留进度下次续报。
@@ -391,7 +430,7 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 	}
 	abort := p.taskAbortCh()
 	for i := int64(0); i < need; i++ {
-		if interrupted := sleepAbortable(mpChatEventGap+time.Duration(rand.Int64N(int64(10*time.Second))), abort); interrupted {
+		if interrupted := sleepAbortable(mpChatEventDelay(), abort); interrupted {
 			return fmt.Sprintf("已取消（完成 %d/%d 次，进度保留待下轮续报）", i, need), nil
 		}
 		conv := fmt.Sprintf("wb2api-mp-%d-%d", time.Now().UnixMilli(), i)
@@ -472,10 +511,9 @@ func runMiniExpert(p *Panel, a *auth.Auth) (string, error) {
 	if t.Claimed {
 		return "已领取", nil
 	}
-	target := t.Target
-	if target <= 0 {
-		target = 1 // 未 accept 的 mp 任务 progress 为 null，target 兜底
-	}
+	// 未 accept 的 mp 任务 progress 为 null（target=0）→ 兜底 1；accept 成功后
+	// 立即回读真实 target 重算（见 refreshTaskAfterAcceptMP）。
+	target := taskTarget(t)
 	// 已达标（含 completed 未领）：直接领奖。
 	if t.Current >= target || t.AcceptStatus == "completed" {
 		credit, energy, err := p.cfg.Upstream.ClaimRewardMP(a, code)
@@ -498,6 +536,10 @@ func runMiniExpert(p *Panel, a *auth.Auth) (string, error) {
 		if !p.acceptWithVerifyMP(a, code) {
 			return "accept 未登记生效（上游 200+OK 但未落账形态），待下次重试", nil
 		}
+		// accept 只登记不产生进度（accept 前 target=0），回读真实 target/current
+		// 重算达标判据——否则按兜底 1 上报一条即误判达标（claim 400 task not completed）。
+		t = p.refreshTaskAfterAcceptMP(a, code, t)
+		target = taskTarget(t)
 	}
 	ev := upstream.MiniExpertUseEvent(e.ExpertID, name, e.ExpertType)
 	if err := p.cfg.Upstream.ReportMPEvent(a, ev); err != nil {
@@ -549,10 +591,9 @@ func (p *Panel) runSequentialEventTask(a *auth.Auth, code string, primary, fallb
 	if t.Claimed {
 		return "已领取", nil
 	}
-	target := t.Target
-	if target <= 0 {
-		target = 1
-	}
+	// 未 accept 时 progress 为 null（target=0）→ 兜底 1；accept 成功后立即回读
+	// 真实 target 重算（见 refreshTaskAfterAcceptMP）。
+	target := taskTarget(t)
 	if t.Current >= target || t.AcceptStatus == "completed" {
 		credit, energy, err := p.cfg.Upstream.ClaimRewardMP(a, code)
 		if err != nil {
@@ -564,6 +605,10 @@ func (p *Panel) runSequentialEventTask(a *auth.Auth, code string, primary, fallb
 		if !p.acceptWithVerifyMP(a, code) {
 			return "accept 未登记生效（任务可能处于每日锁定窗口，等解锁后自动重试）", nil
 		}
+		// accept 只登记不产生进度（accept 前 target=0），回读真实 target/current
+		// 重算达标判据——否则按兜底 1 上报一条即误判达标（claim 400 task not completed）。
+		t = p.refreshTaskAfterAcceptMP(a, code, t)
+		target = taskTarget(t)
 	}
 	if err := primary(); err != nil {
 		return fmt.Sprintf("判据上报失败: %v", err), nil
@@ -1324,4 +1369,58 @@ func (p *Panel) accountTaskAutoAll(w http.ResponseWriter, r *http.Request) {
 		// 期间重复点击会被 409 挡住，不会出现两轮并发。
 		writeErr(w, http.StatusGatewayTimeout, "执行超时（任务仍在后台继续）")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 活动补偿一键领取（v1.19.1）
+// ---------------------------------------------------------------------------
+
+// runCompensation 立即给池内账号领一遍「活动补偿」，返回前端契约形状的响应体。
+//
+// 契约（web/lib/types.ts CompensationRunResponse，前端超时 10 分钟）：
+//
+//	ok       true = 无失败（「没有可领」不算失败：补偿是一次性的，多数时候本来就没得领）
+//	accounts 本次尝试的账号数（真的发起了领取请求；已领过/跳过/无凭据不计）
+//	claimed  本次领到的账号数
+//	credits  本次领到的积分合计
+//	message  可读说明（含首个失败原因 / 跳过说明，见 scheduler.CompensationOutcome.Summary）
+//
+// 逐账号逻辑（状态前置 → 领取 → 汇总）、账号口径（跳过自动禁用 / 面板手动停用 / 国际版）
+// 与幂等语义全部在 scheduler.RunCompensation 内实现——勾选「立即执行」与到点自动跑
+// 共用同一份实现，两条路的计数口径与文案不会漂移。
+// ctx 来自 HTTP 请求：客户端断开/超时时立即放弃剩余账号（已完成的号照常汇总，
+// ok 转 false 并说明「已取消」），不会在无人接听的连接上继续打上游。
+func (p *Panel) runCompensation(ctx context.Context) map[string]any {
+	out := p.cfg.Scheduler.RunCompensation(ctx)
+	log.Printf("panel: 手动领取活动补偿：%s", out.Summary())
+	return map[string]any{
+		"ok":       out.OK(),
+		"accounts": out.Accounts,
+		"claimed":  out.Claimed,
+		"credits":  out.Credits,
+		"message":  out.Summary(),
+	}
+}
+
+// compensationRun 任务页「每日领补偿 → 立即执行」：当场领一次并同步回报结果。
+//
+// 与全量签到族（异步触发 + 刷列表看结果）不同，这里**同步**返回聚合结果——用户点的是
+// 「领一次，告诉我有几个号领到多少积分」，异步回执没有落点（前端按 10 分钟超时等待）。
+// 按类型 TryLock 防重入：同步端点更怕叠加（每次都等全程），已在跑返回 409（balanceAll 同口径）。
+// 注意本锁只挡面板手动重入；定时排程/`/admin` 手动触发走 scheduler 自己的 runMu——
+// 两条路理论上可能重叠（与其它全量族同形），而领取本身幂等（第二次多半拿到「已领过」
+// 业务拒绝），故不为此再加一层跨路径互斥。
+func (p *Panel) compensationRun(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Scheduler == nil {
+		writeErr(w, http.StatusNotImplemented, "scheduler not available")
+		return
+	}
+	if !p.tryLockBatch("compensation") {
+		writeErr(w, http.StatusConflict, "同类任务正在执行（活动补偿领取），请等本轮结束后再试")
+		return
+	}
+	defer p.unlockBatch("compensation")
+	// 失败（含部分失败）走 HTTP 200 + ok=false + message 说明原因：前端据 ok 决定
+	// 提示样式，非 2xx 会被 fetch 层当成「请求本身失败」而丢掉计数明细。
+	writeJSON(w, http.StatusOK, p.runCompensation(r.Context()))
 }

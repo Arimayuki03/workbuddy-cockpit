@@ -4,7 +4,7 @@
  * 设置页「模型映射」分区（原 TabsContent value="models"，原样搬移，只拆不重构）：
  * 新增别名 + 别名→目标 映射表。数据与保存动作在 settings-context。
  */
-import {Plus, Trash2} from 'lucide-react';
+import {Info, Plus, Trash2} from 'lucide-react';
 import {useI18n} from '@/lib/i18n/provider';
 import {RichText} from '@/lib/i18n/rich-text';
 import {useAuth} from '@/lib/auth-context';
@@ -41,6 +41,11 @@ export function ModelsTab() {
           <RichText text={t('settings.mapNewAliasDesc')} />
           {/* 映射目标列表跟随当前版本域（realm）；切换版本后建议重选目标 */}
           <div>{t('settings.mapRealmNote')}</div>
+          {/* `*` 兜底模型：接住所有未命中映射的模型名，副作用是拼错的名字也会被接住 */}
+          <div className="mt-1 flex items-start gap-1.5 rounded-xl bg-background/60 px-2.5 py-1.5">
+            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <RichText text={t('settings.mapFallbackNote')} />
+          </div>
         </div>
         <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-4">
           <div className="space-y-1.5">

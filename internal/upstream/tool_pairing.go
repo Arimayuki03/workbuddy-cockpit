@@ -12,6 +12,8 @@
 // 的条目让会话自愈，宁可丢一轮工具上下文，也好过整条会话死亡。
 package upstream
 
+import "strings"
+
 // repackToolResultBlocks 把插在 assistant.tool_calls 与其 tool 结果之间的非 tool 消息
 // 挪到整组之后，保证同一批 tool_call 的结果在 wire 上连续。
 //
@@ -200,6 +202,7 @@ func cleanupOrphanToolCalls(messages []any) ([]any, bool) {
 	}
 	callIDs := map[string]bool{}
 	resultIDs := map[string]bool{}
+	nameBadIDs := map[string]bool{}
 	hasTraffic := false
 	for _, m := range messages {
 		msg, ok := m.(map[string]any)
@@ -221,6 +224,12 @@ func cleanupOrphanToolCalls(messages []any) ([]any, bool) {
 					}
 					if id, ok := tc["id"].(string); ok && id != "" {
 						callIDs[id] = true
+						// 空 name 照常登记 callIDs/hasTraffic（保住 hasTraffic 语义，否则
+						// 「空 name 且无结果」这种本可被孤儿规则删掉的形态会漏出站），
+						// 仅在 keepCalls 处否决。
+						if toolCallNameEmpty(tc) {
+							nameBadIDs[id] = true
+						}
 						hasTraffic = true
 					}
 				}
@@ -231,8 +240,17 @@ func cleanupOrphanToolCalls(messages []any) ([]any, bool) {
 		return messages, false
 	}
 	// keepCalls：调用 id 是否双侧齐全（调用存在且结果存在）。重复 id 与乱序均按集合处理。
+	//
+	// 追加否决条件：function.name 为空（含纯空白）的调用一律不保留。上游对这类条目直接
+	// 判 400 code=11133 model_param_invalid（tool_calls[i].function.name must be a
+	// non-empty string），带不带配对结果都会拒——带结果的脏条目原本会命中 keepCalls
+	// 原样出站，正是线上整条会话每轮 503 的成因。删除动作完全复用下方两侧对称裁剪：
+	// 调用与其结果成对剔除，配对对称不变式不受影响。
 	keepCalls := map[string]bool{}
 	for id := range callIDs {
+		if nameBadIDs[id] {
+			continue
+		}
 		if resultIDs[id] {
 			keepCalls[id] = true
 		}
@@ -423,4 +441,20 @@ func emptyContent(v any) bool {
 		return len(c) == 0
 	}
 	return false
+}
+
+// toolCallNameEmpty 判断 assistant.tool_calls[] 单项的 function.name 是否为空。
+// 仅当 function 对象存在、name 字段存在且为空白字符串时判真；
+// function / name 字段缺失时判假——历史报文里存在不带 function 的占位条目，
+// 上游不会因此拒参，这里不扩大打击面。
+func toolCallNameEmpty(tc map[string]any) bool {
+	fn, ok := tc["function"].(map[string]any)
+	if !ok {
+		return false
+	}
+	name, ok := fn["name"].(string)
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(name) == ""
 }

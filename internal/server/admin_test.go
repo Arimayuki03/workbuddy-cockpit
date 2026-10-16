@@ -105,9 +105,9 @@ func TestAdminTasksAuthAndBody(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
 		t.Fatal(err)
 	}
-	// 八类任务：checkin/travel/activity/keepalive/school/cat/queue/renew
-	// （renew 为 opt-in 续期巡检，scheduler.go kindCount）。
-	if v.Service != ServiceName || len(v.Tasks) != 8 {
+	// 九类任务：checkin/travel/activity/keepalive/school/cat/queue/renew/compensation
+	// （renew/compensation 为 opt-in，见 scheduler.go kindCount）。
+	if v.Service != ServiceName || len(v.Tasks) != 9 {
 		t.Fatalf("响应结构异常：%+v", v)
 	}
 	if v.Tasks[0].Kind != "checkin" || v.Tasks[0].Label == "" {
@@ -320,6 +320,48 @@ func TestAdminTaskPatchHours(t *testing.T) {
 	rec = do(t, h, "PATCH", "/admin/tasks", "sekret", `{"kind":"checkin","hours":[24]}`, "")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("小时 24 应 400，实得 %d", rec.Code)
+	}
+}
+
+// TestAdminTaskPatchHoursCompensationClear 补偿族的空小时表是**合法态**（留空 = 只手动执行，
+// 见 scheduler.ClearHours）：PATCH hours:[] 应 200、运行态小时表被显式清空、config.json 写回 []。
+// 审查修复：此路径此前对补偿同样按「空数组 = 非法」拒绝，与面板保存语义不一致。
+func TestAdminTaskPatchHoursCompensationClear(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	orig := "{\n  \"listen\": \":7863\",\n  \"schedule\": {\n    \"compensation_enabled\": true,\n    \"compensation_hours\": [9]\n  }\n}\n"
+	if err := os.WriteFile(path, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := adminHandler(t, "sekret", path)
+	// 先设一次非空小时，确保运行态小时表被占用——清空才有可观察的效果。
+	if rec := do(t, h, "PATCH", "/admin/tasks", "sekret", `{"kind":"compensation","hours":[9]}`, ""); rec.Code != http.StatusOK {
+		t.Fatalf("设置补偿小时应 200，实得 %d body=%s", rec.Code, rec.Body)
+	}
+
+	rec := do(t, h, "PATCH", "/admin/tasks", "sekret", `{"kind":"compensation","hours":[]}`, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("补偿空小时应 200（留空 = 只手动），实得 %d body=%s", rec.Code, rec.Body)
+	}
+	for _, ts := range h.cfg.Sched.SnapshotAll() {
+		if ts.Kind != "compensation" {
+			continue
+		}
+		if len(ts.Hours) != 0 {
+			t.Fatalf("补偿小时表应被清空，实得 %v", ts.Hours)
+		}
+		if ts.NextFire != "" {
+			t.Fatalf("空小时表的 next_fire 应为空串，实得 %q", ts.NextFire)
+		}
+	}
+	raw, _ := os.ReadFile(path)
+	var v map[string]any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("写回后 JSON 非法：%v", err)
+	}
+	schSec, _ := v["schedule"].(map[string]any)
+	if hl, ok := schSec["compensation_hours"].([]any); !ok || len(hl) != 0 {
+		t.Fatalf("落盘 compensation_hours = %v，want []", schSec["compensation_hours"])
 	}
 }
 

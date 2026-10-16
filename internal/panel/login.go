@@ -291,6 +291,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		p.cfg.Pool.ReenableIfCredits(acct.UID, rm)
 		// 分桶补写：与 scheduler 签到口径一致（先解冻再补快过期子集）。
 		p.cfg.Pool.SetCreditsDetailed(acct.UID, rm, buckets.Expiring)
+		p.cfg.Pool.SetCreditEarliest(acct.UID, buckets.EarliestExpiry, buckets.EarliestRemaining) // v1.20.0 最早到期快照
 	}
 
 	// state 已在开头原子认领时删除（无 TOCTOU 窗口），这里直接进入收尾日志。

@@ -65,8 +65,8 @@ type bucket struct {
 	TPSN  int64   `json:"vn"` // 速率样本数
 	// Cr 实测扣费积分累计（上游 usage.credit，v2 新增）。缺失≠0：旧桶无此字段
 	// 反序列化为 0，恰好等于"无观测"——聚合侧的 CreditN 与之配套区分。
-	Cr    float64 `json:"cr,omitempty"`
-	CreditN int64 `json:"cn,omitempty"` // credit 观测样本数（累计进 Cr 的次数）
+	Cr      float64 `json:"cr,omitempty"`
+	CreditN int64   `json:"cn,omitempty"` // credit 观测样本数（累计进 Cr 的次数）
 }
 
 // file 落盘结构。
@@ -520,6 +520,12 @@ type Snapshot struct {
 	FileBytes int64      `json:"file_bytes"`
 	Since     string     `json:"since,omitempty"`
 	Generated string     `json:"generated"`
+	// WindowFrom / WindowTo 实际生效的时间窗（unix 秒，左闭右开 [from, to)）。
+	// 仅 SnapshotWindow（面板 /api/usage 的显式 from/to 档）填充；hours 档与
+	// 「启动以来」档恒为 0 = 未使用窗口——调用方据此回显「服务端到底按哪个范围
+	// 算的」，也据此发现「只给了一侧边界 → 窗口未生效」。
+	WindowFrom int64 `json:"window_from"`
+	WindowTo   int64 `json:"window_to"`
 }
 
 // Snapshot 聚合当前全部桶。hours 控制时间窗：>0 时 series / by_account /
@@ -531,12 +537,108 @@ type Snapshot struct {
 // totals / by_realm 恒为全量累计（「累计请求」卡片的文案就是累计口径）。
 // nicks 是 uid→昵称映射，仅用于展示。
 func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
-	if r == nil {
-		return Snapshot{Series: []Point{}, Generated: time.Now().Format(time.RFC3339)}
-	}
 	allTime := hours <= 0 // 面板「启动以来」档：排行与时序都吃全部桶
 	if !allTime && hours > 24*60 {
 		hours = 72
+	}
+	nowHour := time.Now().Truncate(time.Hour)
+	if allTime {
+		// 全量档：排行无界（吃全部桶），时序保留近 30 天小时粒度、更早的小时桶并回日点。
+		return r.snapshotCore(snapshotScope{
+			hourFrom:  nowHour.Add(-(30*24 - 1) * time.Hour),
+			dayPoints: true,
+			foldOld:   true,
+		}, nicks)
+	}
+	// 数字档：排行与时序同窗（下界 = 窗口起点，上界不设——窗口「之后」的桶严格
+	// 说不该出现，实际也不存在：桶按事件时间生成，未来无事件）。日桶必在 90 天
+	// 折叠线之外、而窗口上限 60 天，故数字档的日桶天然在窗口外，不上图。
+	from := nowHour.Add(-time.Duration(hours-1) * time.Hour)
+	return r.snapshotCore(snapshotScope{aggFrom: from, hourFrom: from}, nicks)
+}
+
+// SnapshotWindow 窗口版聚合：聚合口径与 Snapshot 完全一致，只把时间窗换成显式
+// [from, to)（左闭右开——与桶片起点判定一致：from <= 桶起点 < to 才计入；与
+// Snapshot 数字档「下界含、上界不设」是同一套比较）。totals / by_realm 同样恒为
+// 全量累计（「累计请求」卡片口径不随窗口变）。
+//
+// 与 Snapshot(hours) 唯一的口径差别在时序的日点：窗口可以落在 90 天折叠线之前
+// （那段历史只剩日桶），此时把窗口内的日桶画成日点；数字 hours 档因窗口上限
+// （60 天）在折叠线之内而假定「日桶必在窗口外」，该假定不适用于显式窗口。
+// 反过来，窗口档**不折叠**窗口内的小时桶：30~90 天前的数据只有小时桶，折叠成
+// 日点会把用户明确要看的范围糊掉。
+//
+// 保留策略与跨天分桶沿用既有实现：本函数不触发折叠，只按桶片起点过滤。
+// from >= to 时窗口为空：排行与时序为空、totals 仍全量（空态由调用方展示）。
+// 调用方须传有效窗口（零值 time.Time 会被回显成 -62135596800 之类的 unix 秒）。
+func (r *Recorder) SnapshotWindow(from, to time.Time, nicks map[string]string) Snapshot {
+	snap := r.snapshotCore(snapshotScope{
+		aggFrom:   from,
+		aggTo:     to,
+		hourFrom:  from,
+		hourTo:    to,
+		dayPoints: true,
+	}, nicks)
+	snap.WindowFrom = from.Unix()
+	snap.WindowTo = to.Unix()
+	return snap
+}
+
+// snapshotScope 聚合内核的时间范围参数（快照族共用一份实现，口径不漂移）。
+// 边界一律左闭右开：桶片起点 ts 满足 from <= ts < to 才计入；零值 = 该侧不设界。
+type snapshotScope struct {
+	aggFrom   time.Time // 排行（by_account/by_model）与日桶归属的下界
+	aggTo     time.Time // 排行上界（零值 = 不设上界，数字 hours 档既有语义）
+	hourFrom  time.Time // 时序小时点下界
+	hourTo    time.Time // 时序小时点上界（零值 = 不设上界）
+	dayPoints bool      // 日桶是否上图（数字 hours 档为 false，见 SnapshotWindow 注释）
+	foldOld   bool      // 超下界的小时桶是否并回日点（全量档保长期趋势）
+}
+
+// bucketStart 解析桶片起点（本地时区，与 Add/Rollup 的键格式一致）。
+// 解析失败（脏 scope）返回 ok=false，由各窗口判定决定如何处置（一律不上图）。
+func bucketStart(scope string) (time.Time, bool) {
+	if strings.HasPrefix(scope, "h:") {
+		ts, err := time.ParseInLocation(hourLayout, strings.TrimPrefix(scope, "h:"), time.Local)
+		return ts, err == nil
+	}
+	day, ok := strings.CutPrefix(scope, "d:")
+	if !ok {
+		return time.Time{}, false
+	}
+	ts, err := time.ParseInLocation(dayLayout, day, time.Local)
+	return ts, err == nil
+}
+
+// inScope 报告桶片起点是否落在 [from, to)（零值边界 = 该侧不设界）。
+// 起点解析失败（ok=false）恒不入窗：宁缺勿滥，脏数据不进任何排行。
+func inScope(ts time.Time, ok bool, from, to time.Time) bool {
+	if !ok {
+		return false
+	}
+	if !from.IsZero() && ts.Before(from) {
+		return false
+	}
+	if !to.IsZero() && !ts.Before(to) {
+		return false
+	}
+	return true
+}
+
+// dayInScope 报告日桶是否上图：无界档（全量）恒上——保持既有语义逐字不变
+// （历史上全量档对日桶不加任何判定）；有界档按片起点过滤，解析失败不上图。
+func dayInScope(ts time.Time, ok bool, from, to time.Time) bool {
+	if from.IsZero() && to.IsZero() {
+		return true
+	}
+	return inScope(ts, ok, from, to)
+}
+
+// snapshotCore 聚合内核：Snapshot / SnapshotWindow 共用，保证两个档位（hours /
+// 显式窗口）的 totals / by_realm / 排行 / 时序口径完全同源，不会各写一份走样。
+func (r *Recorder) snapshotCore(sc snapshotScope, nicks map[string]string) Snapshot {
+	if r == nil {
+		return Snapshot{Series: []Point{}, Generated: time.Now().Format(time.RFC3339)}
 	}
 
 	r.mu.Lock()
@@ -558,13 +660,6 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 	hourSeries := map[string]*aggAcc{}
 	daySeries := map[string]*aggAcc{}
 
-	nowHour := time.Now().Truncate(time.Hour)
-	hourFrom := nowHour.Add(-time.Duration(hours-1) * time.Hour)
-	// allTime 档时序的小时粒度窗口：与最长数字档（30 天）一致。全部按日折叠会让
-	// 短历史（如仅 2 天数据）的图塌成 3 个日点、观感上「启动以来反而变糊」；
-	// 保留近 30 天小时点，更早的折叠为日点，排行表才是全量口径。
-	allHourFrom := nowHour.Add(-(30*24 - 1) * time.Hour)
-
 	for i := range bs {
 		b := &bs[i]
 		total.add(b)
@@ -574,22 +669,11 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 		}
 		realmAgg[b.Realm].add(b)
 
-		// 账号/模型行跟随时间窗（allTime 时全量）：小时桶按时间戳判断，日桶落在窗口内才计入。
-		// 注意与 series 的 stitching 口径不同——那里窗口外的小时点并回日点保时序
-		// 连续；这里是筛选，窗口外的数据直接不计入。
-		inWindow := allTime
-		if !inWindow {
-			if strings.HasPrefix(b.Scope, "h:") {
-				if ts, err := time.ParseInLocation(hourLayout, strings.TrimPrefix(b.Scope, "h:"), time.Local); err == nil {
-					inWindow = !ts.Before(hourFrom)
-				}
-			} else if day, ok := strings.CutPrefix(b.Scope, "d:"); ok {
-				if ts, err := time.ParseInLocation(dayLayout, day, time.Local); err == nil {
-					inWindow = !ts.Before(hourFrom)
-				}
-			}
-		}
-		if inWindow {
+		// 账号/模型行跟随时间窗（全量档无界）：桶按**片起点**归属窗口（左闭右开），
+		// 日桶即当日 00:00。注意与 series 的 stitching 口径不同——那里窗口外的小时点
+		// 并回日点保时序连续（仅全量档）；这里是筛选，窗口外的数据直接不计入。
+		ts, tsOK := bucketStart(b.Scope)
+		if inScope(ts, tsOK, sc.aggFrom, sc.aggTo) {
 			if acctAgg[b.UID] == nil {
 				acctAgg[b.UID] = &aggAcc{}
 			}
@@ -607,21 +691,19 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 		}
 
 		scope := strings.TrimPrefix(b.Scope, "h:")
-		isHour := strings.HasPrefix(b.Scope, "h:")
-		if isHour {
-			ts, err := time.ParseInLocation(hourLayout, scope, time.Local)
-			if err != nil {
+		if strings.HasPrefix(b.Scope, "h:") {
+			if !tsOK {
 				continue
 			}
-			// allTime 档保留近 30 天的小时粒度（与最长数字档一致），更早的按日归并；
-			// 数字档只保留窗口内的小时点（时间窗对时序同样生效，横轴不出现窗口外
-			// 日期），窗口外的小时点直接不画。
-			if (!allTime && !ts.Before(hourFrom)) || (allTime && !ts.Before(allHourFrom)) {
+			// 小时点：落在时序窗口内就上图。全量档下超下界（30 天小时粒度窗口）的桶
+			// 并回其所在日点，长期趋势不丢；窗口档不并——窗口是用户显式指定的范围，
+			// 30~90 天前的数据只有小时桶，折叠成日点会把要看的范围糊掉。
+			if inScope(ts, tsOK, sc.hourFrom, sc.hourTo) {
 				if hourSeries[b.Realm+"|"+scope] == nil {
 					hourSeries[b.Realm+"|"+scope] = &aggAcc{}
 				}
 				hourSeries[b.Realm+"|"+scope].add(b)
-			} else if allTime {
+			} else if sc.foldOld {
 				// 全量档超出 30 天小时粒度的细粒度数据并入其所在日，长期趋势不丢。
 				d := ts.Format(dayLayout)
 				if daySeries[b.Realm+"|"+d] == nil {
@@ -629,10 +711,11 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 				}
 				daySeries[b.Realm+"|"+d].add(b)
 			}
-		} else if allTime {
-			// 日桶只在全量档上图。数字档的窗口上限（60 天）小于折叠线（90 天），
-			// 日桶必然在窗口外——时序按窗口过滤，不上图（此即本修复：曾经日桶
-			// 无条件下图，切 24h 图上仍挂着历史日期）。
+		} else if sc.dayPoints && dayInScope(ts, tsOK, sc.aggFrom, sc.aggTo) {
+			// 日桶（Rollup 折叠产物）只在「可能出现它们」的档上图：全量档恒上图；
+			// 窗口档按窗口过滤（窗口可能落在 90 天折叠线之前）；数字 hours 档的窗口
+			// 上限（60 天）小于折叠线，日桶必然在窗口外——时序按窗口过滤，不上图
+			//（此即历史修复：曾经日桶无条件下图，切 24h 图上仍挂着历史日期）。
 			if daySeries[b.Realm+"|"+scope] == nil {
 				daySeries[b.Realm+"|"+scope] = &aggAcc{}
 			}

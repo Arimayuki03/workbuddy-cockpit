@@ -611,7 +611,12 @@ export interface SystemLogsResponse {
  *
  * 后端已实现 /api/request_logs（internal/server/requestlog.go：chatStat.done()
  * 单一埋点写入环形缓冲，容量 1000 条，重启即清；持久化由 usage 分桶承担）。
- * 字段与后端 requestLogEntry 的 json tag 一一对应。
+ * 字段名与后端 requestLogEntry 的 json tag 一一对应。后端带 omitempty 的字段
+ * （uid / nick / error / cache_* / client_ip / user_agent）会在 JSON 里缺席，
+ * 本类型一律标为可选：缺失 = 该项未采集，读取时按缺省处理，不当成零值。
+ *
+ * 注意查询参数名 ≠ 字段名：服务端筛选参数是 `ip` / `ua`（见 lib/api.ts 的
+ * RequestLogFilters），它们匹配的正是响应里的 client_ip / user_agent。
  */
 export interface RequestLog {
   /** 全局递增序号（重启清零） */
@@ -619,8 +624,8 @@ export interface RequestLog {
   /** 时刻（RFC3339） */
   time: string;
   model: string;
-  uid: string;
-  nick: string;
+  uid?: string;
+  nick?: string;
   /** "stream" | "sync" */
   mode: string;
   /** HTTP 状态码 */
@@ -633,20 +638,58 @@ export interface RequestLog {
   credit: number;
   has_credit: boolean;
   /** 缓存命中 token 数（上游 usage.prompt_cache_hit_tokens；has_cache_obs=false 时无观测） */
-  cache_hit_tokens: number;
+  cache_hit_tokens?: number;
   /** 缓存未命中 token 数 */
-  cache_miss_tokens: number;
+  cache_miss_tokens?: number;
   /** 缓存写入 token 数 */
-  cache_write_tokens: number;
+  cache_write_tokens?: number;
   /** 上游 usage 是否带缓存三段观测（缺失 ≠ 命中 0） */
-  has_cache_obs: boolean;
-  error: string;
+  has_cache_obs?: boolean;
+  /** 客户端 IP（反代下取真实来源地址）；缺失 = 未采集（logging.request_client_info 关闭） */
+  client_ip?: string;
+  /** 客户端 User-Agent 原文；缺失 = 未采集 */
+  user_agent?: string;
+  /** 非 200 的原因摘要；缺失 = 无错误 */
+  error?: string;
 }
 
 export interface RequestLogsResponse {
   items: RequestLog[];
+  /** 被环形缓冲覆盖掉的旧条数（观测用） */
   dropped: number;
+  /** 环形缓冲容量 */
   cap: number;
+  /**
+   * 请求日志归档（config.json: `logging.request_archive`，默认 false）是否启用。
+   *
+   * 服务端筛选（from / to / ip / ua）只读磁盘 JSONL 归档：false 时筛选结果
+   * **恒为空**（后端不静默降级成别的数据源）。日志页据此把「归档没开」与
+   * 「确实无匹配」区分开。旧版后端不返回本字段：undefined = 未知，不下断言。
+   */
+  archive_enabled?: boolean;
+  /**
+   * 本次响应的数据来源（后端字段，契约冻结）：
+   *   - "ring"：内存环形缓冲（未带任何筛选参数时的既有路径）；
+   *   - "archive"：磁盘 JSONL 归档（带 from / to / ip / ua 任一筛选时）。
+   * 旧版后端不返回本字段（undefined = 未知）。
+   */
+  source?: 'ring' | 'archive';
+}
+
+/* ── 活动补偿（POST /api/compensation/run）─────────────────
+ * 平台发给账号的活动补偿（如故障补偿）：有则领、没有就跳过，幂等。
+ * 字段可能缺失（老版本后端 / 部分失败），前端一律按 0 容错显示。
+ */
+export interface CompensationRunResponse {
+  ok: boolean;
+  /** 本次尝试的账号数（国际版账号会被自动跳过） */
+  accounts?: number;
+  /** 真正领到补偿的账号数 */
+  claimed?: number;
+  /** 本次累计领到的积分 */
+  credits?: number;
+  /** 服务端补充说明（失败原因 / 跳过说明等） */
+  message?: string;
 }
 
 /* ── 配置热编辑（panel config.go）────────────────────────── */

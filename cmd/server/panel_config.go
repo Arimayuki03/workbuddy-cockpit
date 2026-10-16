@@ -4,8 +4,11 @@
 // 热生效范围（设计取舍）：
 //   - api_key / cooldown.soft_rate / features.sanitize_blacklist_fingerprints → livecfg 快照
 //   - pool.* → pool.SetBreaker/SetMaxInFlight/SetSoftRateMax/SetWeights/SetCostExploreInterval/SetDegrade/SetPickStrategy
+//   - cooldown.credit_exhausted → pool.SetCreditExhausted（积分耗尽冷却时长热生效；
+//     0 = 回到「硬冷却到次日 04:00」旧行为）
 //   - schedule.*_enabled → scheduler.SetEnabled；schedule.*_hours → scheduler.SetHours
-//     （两者均热生效免重启；normalize 保证 hours 非空、SetHours 拒绝非法小时）
+//     （两者均热生效免重启；normalize 保证八类 hours 非空、SetHours 拒绝非法小时；
+//     compensation_hours 例外：空 = 只手动执行，走 ClearHours 显式清空运行态）
 //   - model_map → server.SetModelMap（模型映射链头热替换）
 //
 // 需重启（监听地址、HTTP client 超时、auth_dir 等装配期依赖）：
@@ -114,9 +117,14 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetMaxInFlightGlobal(newCfg.Pool.MaxInFlightGlobal)
 	p.SetDegrade(newCfg.Pool.DegradeThreshold, newCfg.DegradeCooldownDur, newCfg.DegradeCooldownMaxD)
 	p.SetSoftRateMax(newCfg.SoftRateMaxDur)
+	// 积分耗尽冷却时长（cooldown.credit_exhausted）热生效：与 soft_rate_max 同路——
+	// 面板保存即改运行态，0 = 回到「硬冷却到次日 04:00」旧行为。落盘由上面的深合并
+	// 保证（cooldown 段是普通嵌套对象，credit_exhausted 作为兄弟键被写回，不丢键）。
+	p.SetCreditExhausted(newCfg.CreditExhaustedDur)
 	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
 	p.SetPickStrategy(pool.ParsePickStrategy(newCfg.Pool.PickStrategy)) // 选号策略热生效（weighted/credits_desc）
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
+	p.SetPreferExpiring(newCfg.Pool.PreferExpiring) // 快过期积分优先消耗热生效（v1.20.0；依赖下一次余额刷新供给快照）
 	// 代理线路表热生效（proxy_routes 整段替换语义，与 model_map 的整段替换同类；
 	// normalize 已校验 URL，SetProxyRoutes 防御性复验 + 重建 per-route 连接池缓存）。
 	if err := up.SetProxyRoutes(newCfg.ProxyRoutes); err != nil {
@@ -143,6 +151,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 			enabled = newCfg.Schedule.QueueEnabled
 		case "renew":
 			enabled = newCfg.Schedule.RenewEnabled
+		case "compensation":
+			enabled = newCfg.Schedule.CompensationEnabled
 		}
 		_ = sch.SetEnabled(kind, enabled)
 	}
@@ -155,6 +165,15 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	_ = sch.SetHours("cat", newCfg.Schedule.CatHours)
 	_ = sch.SetHours("queue", newCfg.Schedule.QueueHours)
 	_ = sch.SetHours("renew", newCfg.Schedule.RenewHours)
+	// 领补偿是上述唯一「空小时 = 合法（只手动执行）」的族：SetHours 拒绝空数组，
+	// 故留空时必须显式 ClearHours 把空表落进运行态——只跳过 SetHours 会让旧
+	// hoursTab（或启动快照）继续按旧整点自动领，直到重启才生效，而前端「留空 =
+	// 只手动执行」的语义要求立即停排。
+	if len(newCfg.Schedule.CompensationHours) > 0 {
+		_ = sch.SetHours("compensation", newCfg.Schedule.CompensationHours)
+	} else {
+		_ = sch.ClearHours("compensation")
+	}
 
 	return restartRequiredFields(newCfg), nil
 }
@@ -178,6 +197,10 @@ func restartRequiredFields(c *Config) []string {
 		out = append(out, "upstash")
 	}
 	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
+	// 随机延后 / 账号错峰（v1.19.2）在 scheduler 装配期进 Config（与 activity_report_count
+	// 同口径），只能重启生效；hours/开关是热改的，故不在此列。
+	out = append(out, "schedule.random_delay_minutes",
+		"schedule.account_delay_min_seconds", "schedule.account_delay_max_seconds")
 	// global.enabled 在 auth.SetGlobalEnabled / handler GlobalEnabled / upstream.GlobalEnabled
 	// 三处装配期注入；prompt 文本与 global base 同理。
 	out = append(out, "global.enabled", "global.chat_base", "global.billing_base",

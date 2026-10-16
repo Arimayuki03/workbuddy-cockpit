@@ -347,6 +347,11 @@ func (p *Panel) routes() {
 	p.api("POST", "/api/activity_all", "/api/activity_all", p.activityAll)
 	p.api("POST", "/api/keepalive_all", "/api/keepalive_all", p.keepaliveAll)
 	p.api("POST", "/api/balance_all", "/api/balance_all", p.balanceAll)
+	// 活动补偿一键领取（autotask.go 的 runCompensation/compensationRun）：
+	// 同步返回「尝试几个号 / 领到几个号 / 共多少积分」，失败走 ok=false + message。
+	// 写语义（对上游打领取写接口），不进 wbt_ token 分级表 = 分级表外恒拒
+	//（与上面的批量族同口径：都触发真实业务动作）。
+	p.api("POST", "/api/compensation/run", "/api/compensation/run", p.compensationRun)
 	p.api("GET", "/api/packages", "/api/packages", p.packages)
 	p.api("GET", "/api/usage", "/api/usage", p.usage)
 	p.api("POST", "/api/usage/save", "/api/usage/save", p.usageSave)
@@ -862,6 +867,7 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	// 分桶补写：快过期子集供三因子选号的 ×8 权重因子，与 scheduler.go 签到口径一致
 	// （先解冻再补分桶；SetCreditsDetailed 会把 expiring 钳到 [0, credits]）。
 	p.cfg.Pool.SetCreditsDetailed(uid, remain, buckets.Expiring)
+	p.cfg.Pool.SetCreditEarliest(uid, buckets.EarliestExpiry, buckets.EarliestRemaining) // v1.20.0 最早到期快照
 	// 签到到账流水：以签到前基线记精确差值；基线查询失败时不记（0 基线会把全部
 	// 余额误报成「刚获得」）。tracker 未装配时零开销直返。
 	if creditBeforeOK {
@@ -888,6 +894,7 @@ func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.cfg.Pool.SetCreditsDetailed(uid, remain, buckets.Expiring)
+	p.cfg.Pool.SetCreditEarliest(uid, buckets.EarliestExpiry, buckets.EarliestRemaining) // v1.20.0 最早到期快照
 	p.recordBalance(uid, remain) // 积分流水（同 accountCheckin）
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credits": remain, "credits_total": buckets.Total()})
 }
@@ -1047,18 +1054,44 @@ func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 // helpers
 // ---------------------------------------------------------------------------
 
-// usage 返回逐请求用量聚合。hours 查询参数控制时间窗（默认 72；"all" 或 <=0
-// 表示自记录以来全量，即「启动以来」档的模型/账号排行；数字上限 1440=60 天）：
+// usage 返回逐请求用量聚合。时间窗两种给法（响应里回显实际生效的窗口）：
+//   - hours（既有）：默认 72；"all" 或 <=0 表示自记录以来全量，即「启动以来」档的
+//     模型/账号排行；数字上限 1440=60 天；
+//   - from / to（unix 秒，v1.19.0 新增）：**两者同时给出**时改用该显式窗口
+//     [from, to)（左闭右开，与桶片起点判定一致）并优先于 hours；只给一侧 = 窗口
+//     不成立，按 hours 档处理。
+//
 // series / by_account / by_model 只聚合窗口内的桶（面板的时间筛选对图和表同时生效）；
 // totals / by_realm 恒为全量累计。「启动以来」档的时序保留近 30 天小时粒度，
 // 更早折叠为日点，长期趋势不丢。
+// 窗口档下窗口可能落在 90 天折叠线之前（那段历史只有日桶），此时把窗口内的日桶
+// 画成日点——「图上空着但数据存在」比多点几个日点糟糕得多。
+// 生效窗口经 usage.Snapshot 的 window_from/window_to 回显（unix 秒；hours 档为 0）：
+// 前端据此确认 from/to 是否被采纳（例如只给一侧时窗口未生效），排障也不用猜服务端
+// 到底按哪个范围算的。
 func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Usage == nil {
 		writeErr(w, http.StatusNotImplemented, "usage recorder not available")
 		return
 	}
+	// 昵称仅用于展示，取自池快照（不含任何凭证）。
+	nicks := map[string]string{}
+	for _, s := range p.cfg.Pool.List() {
+		if s.Nickname != "" {
+			nicks[s.UID] = s.Nickname
+		}
+	}
+	q := r.URL.Query()
+	// 非法 from/to（非整数）或 <=0 按「未给」处理——与 hours/limit 的既有风格一致
+	//（静默回落默认口径，不因一个拼错的参数整页报错；0 是前端空态哨兵）。
+	from, okFrom := unixSecondsParam(q.Get("from"))
+	to, okTo := unixSecondsParam(q.Get("to"))
+	if okFrom && okTo {
+		writeJSON(w, http.StatusOK, p.cfg.Usage.SnapshotWindow(time.Unix(from, 0), time.Unix(to, 0), nicks))
+		return
+	}
 	hours := 72
-	if v := r.URL.Query().Get("hours"); v != "" {
+	if v := q.Get("hours"); v != "" {
 		if strings.EqualFold(v, "all") {
 			hours = 0
 		} else if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -1068,14 +1101,21 @@ func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 	if hours > 1440 {
 		hours = 1440
 	}
-	// 昵称仅用于展示，取自池快照（不含任何凭证）。
-	nicks := map[string]string{}
-	for _, s := range p.cfg.Pool.List() {
-		if s.Nickname != "" {
-			nicks[s.UID] = s.Nickname
-		}
-	}
 	writeJSON(w, http.StatusOK, p.cfg.Usage.Snapshot(hours, nicks))
+}
+
+// unixSecondsParam 解析 unix 秒时间参数（from/to 共用）。缺省、非法或 <=0 返回
+// ok=false，调用方按「该参数未给」处理：面板侧 0 是空态哨兵（前端 `value ? … : 0`），
+// 若把 to=0 当真会变成「1970 之前」的空窗口，纯属埋雷。
+func unixSecondsParam(v string) (int64, bool) {
+	if v == "" {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // usageSave 立即把内存中的用量桶落盘（正常由后台 30s 防抖刷新负责）。

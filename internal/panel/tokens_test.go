@@ -207,6 +207,8 @@ func TestTokenScopesOnRealRoutes(t *testing.T) {
 		"/api/accounts/u1/balance", // POST 幂等运维也仅 admin
 		"/api/config", "/api/usage/save", "/api/checkin_all", "/api/balance_all",
 		"/api/accounts/import", "/api/settings/model-map", "/api/tasks/scan_all",
+		// 活动补偿领取（v1.19.1）：对上游打领取写接口 = 真实业务动作，分级表外恒拒。
+		"/api/compensation/run",
 	} {
 		rec := post(ro, path, `{}`)
 		if rec.Code != http.StatusForbidden {

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -64,6 +65,29 @@ func TestClassify(t *testing.T) {
 		{400, `{"error": {"code": 11135, "message": "image rejected"}}`, ErrImageInvalid},
 		// 其他 code 不得被 11135 口径误伤（防过宽）。
 		{400, `{"code": 11133, "msg": "other business error"}`, ErrClient},
+		// 11148 工具调用/结果历史错配（任务书 tool-call-mismatch §1）：请求级确定性错误
+		// ——上游校验的是这份 messages 的 tool_call↔结果配对，同一 body 换账号结果不变，
+		// 必须不轮转不罚号（落 ErrClient 会轮转全池 + NoteFailures 连败计数打健康号出池）。
+		// 多种嵌套/引号形态都命中：紧凑信封、error.data 深层嵌套 + 字符串 code、
+		// extError.code 文案、msg 文案、带 JSON 空白的 code。
+		{400, `{"code":11148,"msg":"tool calls and tool results do not match"}`, ErrToolCallMismatch},
+		{400, `{"error":{"data":{"code":"11148","message":"invalid tool history"}}}`, ErrToolCallMismatch},
+		{400, `{"code":11148,"msg":"The request is invalid","extError":{"code":"tool_call_sequence_broken","message":"tool calls and tool results do not match"}}`, ErrToolCallMismatch},
+		{400, `tool_call_sequence_broken`, ErrToolCallMismatch},
+		{400, `Tool calls and tool results do not match, please start a new conversation`, ErrToolCallMismatch},
+		{400, `{"code": 11148, "msg": "mismatch"}`, ErrToolCallMismatch},
+		{400, `{"code":"11148"}`, ErrToolCallMismatch},
+		// "11148" 只认 code 字段锚定：撞在无关字段（requestId/时间戳/更长业务码）上
+		// 不得命中——否则普通 4xx 会被误判成请求级错配而丢掉「换号再试」的机会
+		// （与 IsSessionDead 拒绝裸 "12153" 同一条纪律）。
+		{400, `{"requestId":"11148","msg":"bad request"}`, ErrClient},
+		{400, `{"code":0,"msg":"ok","trace":"req-11148-abc"}`, ErrClient},
+		{400, `{"code":111489,"msg":"another business error"}`, ErrClient},
+		// 状态码分界：只有 400 才判 11148（5xx 是服务端故障语义优先，429/403 同理）；
+		// hint/文案命中也不例外——状态码比文案更权威。
+		{500, `{"code":11148,"msg":"tool calls and tool results do not match"}`, ErrServer},
+		{503, `tool_call_sequence_broken`, ErrServer},
+		{429, `{"code":11148,"msg":"tool calls and tool results do not match"}`, ErrSoftRate},
 		{200, `quota exceeded`, ErrHardCredit},
 		// 账号级授权/配额故障（与 429 一起纳入轮换）：11140 request illegal = auth_forbidden
 		// 风控（需重登），14017 = quota_not_activated（试用未激活，需完成 register）。修复前
@@ -1165,5 +1189,416 @@ func TestRefreshTokenExpiresInWithinCapApplied(t *testing.T) {
 	want := before + 5184000
 	if a.ExpiresAt < want-2 || a.ExpiresAt > want+2 {
 		t.Errorf("ExpiresAt=%d want ~%d (60d 正常推进)", a.ExpiresAt, want)
+	}
+}
+
+// TestToolCallMismatchKindAndHint 11148 的 Kind 可读名与 gateway_hint 映射：
+// 分类（ErrToolCallMismatch）必须能出 "tool_call_mismatch" 名（日志/观测/错误码共用），
+// 且 hint 指向「重建历史 + 与账号无关」——客户端据此换会话而非换账号重试。
+func TestToolCallMismatchKindAndHint(t *testing.T) {
+	if got := ErrToolCallMismatch.String(); got != "tool_call_mismatch" {
+		t.Errorf("ErrToolCallMismatch.String()=%q want tool_call_mismatch", got)
+	}
+	const body = `{"code":11148,"msg":"tool calls and tool results do not match","extError":{"code":"tool_call_sequence_broken"}}`
+	hint := GatewayHint(ErrToolCallMismatch, body, HintContext{})
+	if !strings.Contains(hint, "new conversation") || !strings.Contains(hint, "not an account issue") {
+		t.Errorf("GatewayHint(tool_call_mismatch)=%q want 重建历史指向 + 与账号无关声明", hint)
+	}
+	// hint 是并列补充，绝不改写上游原文；上游 body 里也不该把它当成账号故障。
+	if strings.Contains(hint, "account is disabled") || strings.Contains(hint, "credits") {
+		t.Errorf("hint must not blame the account: %q", hint)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// v1.20.0「快过期积分优先消耗」：UserResourceDetailed 的最早到期快照
+// ---------------------------------------------------------------------------
+
+// TestUserResourceDetailedEarliestExpiring 同一趟遍历额外产出「最早到期且仍有余量
+// 的包」（EarliestExpiry/EarliestRemaining），供 pool 的虚拟实例加成使用。
+// 与 Expiring 桶正交：桶按 soon 窗口聚合"有多少要作废"，本对字段给出"最先失效的那
+// 一笔何时失效、还剩多少"。判据与分桶同源（CycleEndTime），且跳过已用尽的包
+// （remain=0 不构成"可被优先消耗"，即便它到期最早）。
+func TestUserResourceDetailedEarliestExpiring(t *testing.T) {
+	now := time.Now()
+	in3d := now.Add(3 * 24 * time.Hour).Format(packageEndLayout)
+	in10d := now.Add(10 * 24 * time.Hour).Format(packageEndLayout)
+	in30d := now.Add(30 * 24 * time.Hour).Format(packageEndLayout)
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return mkDetailedResp(
+			`{"PackageName":"已用尽","CycleEndTime":"` + in3d + `","CycleCapacitySize":100,"CycleCapacityRemain":0,"CycleCapacityUsed":100},` +
+				`{"PackageName":"奖励包","CycleEndTime":"` + in10d + `","CycleCapacitySize":500,"CycleCapacityRemain":40,"CycleCapacityUsed":460},` +
+				`{"PackageName":"周期包","CycleEndTime":"` + in30d + `","CycleCapacitySize":900,"CycleCapacityRemain":900,"CycleCapacityUsed":0}`), nil
+	})
+	remain, buckets, err := c.UserResourceDetailed(&auth.Auth{AccessToken: "at"}, 7*24*time.Hour)
+	if err != nil {
+		t.Fatalf("detailed: %v", err)
+	}
+	if remain != 940 {
+		t.Errorf("remain=%d want 940 (0+40+900)", remain)
+	}
+	wantEnd, perr := time.ParseInLocation(packageEndLayout, in10d, softRateResetLoc)
+	if perr != nil {
+		t.Fatalf("parse want: %v", perr)
+	}
+	if !buckets.EarliestExpiry.Equal(wantEnd) {
+		t.Errorf("EarliestExpiry=%v want %v（最早到期且仍有余量的包，跳过已用尽的 3 天包）",
+			buckets.EarliestExpiry, wantEnd)
+	}
+	if buckets.EarliestRemaining != 40 {
+		t.Errorf("EarliestRemaining=%d want 40（该包的剩余量）", buckets.EarliestRemaining)
+	}
+	// 与既有分桶口径互不影响（7 天窗内无包 → Expiring=0；940 全归 Stable）。
+	if buckets.Expiring != 0 || buckets.Stable != 940 {
+		t.Errorf("buckets=%+v want {Expiring:0 Stable:940}", buckets)
+	}
+}
+
+// TestUserResourceDetailedEarliestIgnoresExpired 已过期的包不参与最早到期快照：
+// 它的余量不可能再被"优先消耗"（上游 FEFO 下要么已扣完要么已作废），纳入只会
+// 遮住真正可用的最近到期包。
+func TestUserResourceDetailedEarliestIgnoresExpired(t *testing.T) {
+	now := time.Now()
+	past := now.Add(-2 * time.Hour).Format(packageEndLayout)
+	in20d := now.Add(20 * 24 * time.Hour).Format(packageEndLayout)
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return mkDetailedResp(
+			`{"PackageName":"已过期","CycleEndTime":"` + past + `","CycleCapacitySize":200,"CycleCapacityRemain":50,"CycleCapacityUsed":150},` +
+				`{"PackageName":"周期包","CycleEndTime":"` + in20d + `","CycleCapacitySize":300,"CycleCapacityRemain":70,"CycleCapacityUsed":230}`), nil
+	})
+	_, buckets, err := c.UserResourceDetailed(&auth.Auth{AccessToken: "at"}, 7*24*time.Hour)
+	if err != nil {
+		t.Fatalf("detailed: %v", err)
+	}
+	wantEnd, _ := time.ParseInLocation(packageEndLayout, in20d, softRateResetLoc)
+	if !buckets.EarliestExpiry.Equal(wantEnd) {
+		t.Errorf("EarliestExpiry=%v want %v（已过期包被跳过）", buckets.EarliestExpiry, wantEnd)
+	}
+	if buckets.EarliestRemaining != 70 {
+		t.Errorf("EarliestRemaining=%d want 70", buckets.EarliestRemaining)
+	}
+}
+
+// TestUserResourceDetailedEarliestIndependentOfSoon soon<=0（禁分桶）时最早到期快照
+// 照常计算：它与 soon 窗口无关（窗口只管"多少算快过期"），不随 expiring_soon 配 0 漂移。
+func TestUserResourceDetailedEarliestIndependentOfSoon(t *testing.T) {
+	in5d := time.Now().Add(5 * 24 * time.Hour).Format(packageEndLayout)
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return mkDetailedResp(
+			`{"PackageName":"p","CycleEndTime":"` + in5d + `","CycleCapacitySize":100,"CycleCapacityRemain":80,"CycleCapacityUsed":20}`), nil
+	})
+	_, buckets, err := c.UserResourceDetailed(&auth.Auth{AccessToken: "at"}, 0)
+	if err != nil {
+		t.Fatalf("detailed: %v", err)
+	}
+	wantEnd, _ := time.ParseInLocation(packageEndLayout, in5d, softRateResetLoc)
+	if !buckets.EarliestExpiry.Equal(wantEnd) || buckets.EarliestRemaining != 80 {
+		t.Errorf("earliest=(%v,%d) want (%v,80) when soon=0",
+			buckets.EarliestExpiry, buckets.EarliestRemaining, wantEnd)
+	}
+	if buckets.Expiring != 0 || buckets.Stable != 80 {
+		t.Errorf("buckets=%+v want {Expiring:0 Stable:80} when soon=0", buckets)
+	}
+}
+
+// TestUserResourceDetailedEarliestAbsentWhenNoEndTime 无到期信息的包 → 快照零值
+// （"无信息"，不伪造 1970）；pool 侧零值 = 不加成（旧行为）。
+func TestUserResourceDetailedEarliestAbsentWhenNoEndTime(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return mkDetailedResp(
+			`{"PackageName":"p","CycleCapacitySize":100,"CycleCapacityRemain":80,"CycleCapacityUsed":20}`), nil
+	})
+	_, buckets, err := c.UserResourceDetailed(&auth.Auth{AccessToken: "at"}, 7*24*time.Hour)
+	if err != nil {
+		t.Fatalf("detailed: %v", err)
+	}
+	if !buckets.EarliestExpiry.IsZero() || buckets.EarliestRemaining != 0 {
+		t.Errorf("earliest=(%v,%d) want 零值（无到期信息）", buckets.EarliestExpiry, buckets.EarliestRemaining)
+	}
+}
+
+// ============================================================================
+// 活动补偿（compensation-status / claim-compensation）
+// ============================================================================
+
+// compensationStub 活动补偿两端点假上游：记录每次请求计数，并可按端点返回指定信封。
+// 默认：状态=未领过、领取=到账 500 积分。带 /v2 前缀的路径刻意打不中（404）——
+// 打中说明端点拼错了（线上恒 404，表现为「今天没得领」的静默失效）。
+type compensationStub struct {
+	statusBody string
+	claimBody  string
+	claims     int32 // 领取请求计数（atomic）
+	statuses   int32 // 状态请求计数（atomic）
+}
+
+func newCompensationStub() *compensationStub {
+	return &compensationStub{
+		statusBody: `{"code":0,"data":{"claimed":false,"credit_num":500,"button_text":"领取"}}`,
+		claimBody:  `{"code":0,"data":{"credit":500}}`,
+	}
+}
+
+func (s *compensationStub) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/billing/meter/compensation-status":
+			atomic.AddInt32(&s.statuses, 1)
+			w.Write([]byte(s.statusBody))
+		case "/billing/meter/claim-compensation":
+			atomic.AddInt32(&s.claims, 1)
+			w.Write([]byte(s.claimBody))
+		default:
+			w.WriteHeader(404)
+			w.Write([]byte(`{"code":404,"msg":"not found"}`))
+		}
+	})
+}
+
+// TestCompensationStatusRequestShape 状态查询的请求构造：路径**不带 /v2**（带前缀的
+// 形态实测 404，会被伪造成「今天没得领」）、POST、空 JSON 体、billing 域身份头。
+func TestCompensationStatusRequestShape(t *testing.T) {
+	stub := newCompensationStub()
+	var gotPath, gotMethod, gotAuth, gotUID, gotReq, gotLang, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		gotAuth = r.Header.Get("Authorization")
+		gotUID = r.Header.Get("X-User-Id")
+		gotReq = r.Header.Get("X-CodeBuddy-Request")
+		gotLang = r.Header.Get("Accept-Language")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		stub.handler().ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	c := &Client{HTTP: srv.Client(), BillingBaseCN: srv.URL}
+	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
+	a := &auth.Auth{AccessToken: "at", UID: "u1", Domain: "www.codebuddy.cn"}
+
+	st, err := c.CompensationStatus(a)
+	if err != nil {
+		t.Fatalf("CompensationStatus: %v", err)
+	}
+	if st.AlreadyClaimed() {
+		t.Error("未领过的回执被判成已领过")
+	}
+	if st.CreditNum != 500 || st.ButtonText != "领取" {
+		t.Errorf("字段解析：credit_num=%d button_text=%q want 500/领取", st.CreditNum, st.ButtonText)
+	}
+	if gotPath != "/billing/meter/compensation-status" {
+		t.Errorf("path=%q want /billing/meter/compensation-status（**不带 /v2**）", gotPath)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method=%q want POST", gotMethod)
+	}
+	if gotBody != "{}" {
+		t.Errorf("body=%q want {}", gotBody)
+	}
+	if gotAuth != "Bearer at" {
+		t.Errorf("Authorization=%q want Bearer at", gotAuth)
+	}
+	if gotUID != "u1" {
+		t.Errorf("X-User-Id=%q want u1（billing 域身份头）", gotUID)
+	}
+	if gotReq != "1" {
+		t.Errorf("X-CodeBuddy-Request=%q want 1（官方客户端风控闸门头）", gotReq)
+	}
+	if gotLang == "" {
+		t.Error("Accept-Language 未注入（billing 域按 realm 切语言的承诺）")
+	}
+	if n := atomic.LoadInt32(&stub.statuses); n != 1 {
+		t.Errorf("status calls=%d want 1", n)
+	}
+}
+
+// TestCompensationClaimRequestShape 领取的请求构造 + 回执解析：同一路径口径、
+// 到账积分取自 data.credit。
+func TestCompensationClaimRequestShape(t *testing.T) {
+	stub := newCompensationStub()
+	var gotPath, gotMethod string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		stub.handler().ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	c := &Client{HTTP: srv.Client(), BillingBaseCN: srv.URL}
+	c.SyncHot()
+	a := &auth.Auth{AccessToken: "at", UID: "u1", Domain: "www.codebuddy.cn"}
+
+	claimed, credits, err := c.CompensationClaim(a)
+	if err != nil {
+		t.Fatalf("CompensationClaim: %v", err)
+	}
+	if !claimed || credits != 500 {
+		t.Errorf("claimed=%v credits=%d want true/500", claimed, credits)
+	}
+	if gotPath != "/billing/meter/claim-compensation" || gotMethod != http.MethodPost {
+		t.Errorf("请求形态 %s %s want POST /billing/meter/claim-compensation", gotMethod, gotPath)
+	}
+}
+
+// TestCompensationClaimWithoutCreditFieldIsNotFailure 回执缺 credit 字段不算失败
+// （上游可能只回空 data）：claimed=true、credits=0。
+func TestCompensationClaimWithoutCreditFieldIsNotFailure(t *testing.T) {
+	stub := newCompensationStub()
+	stub.claimBody = `{"code":0,"data":{}}`
+	srv := httptest.NewServer(stub.handler())
+	defer srv.Close()
+
+	c := &Client{HTTP: srv.Client(), BillingBaseCN: srv.URL}
+	c.SyncHot()
+	claimed, credits, err := c.CompensationClaim(&auth.Auth{AccessToken: "at", UID: "u1"})
+	if err != nil || !claimed || credits != 0 {
+		t.Errorf("claimed=%v credits=%d err=%v want true/0/nil", claimed, credits, err)
+	}
+}
+
+// TestCompensationClaimNothingIsNotFailure 业务拒绝（HTTP 200 + code!=0：没有可领 /
+// 已经领过）→ claimed=false 且 err=nil —— **不是失败**，调用方静默跳过。
+// 混成 error 会让界面把「今天本来就没得领」报成「N 个账号失败」，用户反复重试。
+func TestCompensationClaimNothingIsNotFailure(t *testing.T) {
+	stub := newCompensationStub()
+	stub.claimBody = `{"code":40001,"msg":"no compensation"}`
+	srv := httptest.NewServer(stub.handler())
+	defer srv.Close()
+
+	c := &Client{HTTP: srv.Client(), BillingBaseCN: srv.URL}
+	c.SyncHot()
+	claimed, credits, err := c.CompensationClaim(&auth.Auth{AccessToken: "at", UID: "u1"})
+	if err != nil {
+		t.Fatalf("业务拒绝不得报成失败: %v", err)
+	}
+	if claimed || credits != 0 {
+		t.Errorf("claimed=%v credits=%d want false/0", claimed, credits)
+	}
+}
+
+// TestCompensationClaimHTTPFailureIsFailed 真故障（5xx / 401 / 404）**不得**咽成
+// 「无可领」：必须回 err（否则 token 失效/端点搬家会被伪装成「今天没得领」）。
+// 5xx 走瞬时重试（shortBillingRetry 缩短间隔 → 首次 + 2 次补打）。
+func TestCompensationClaimHTTPFailureIsFailed(t *testing.T) {
+	shortBillingRetry(t)
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		calls  int32
+	}{
+		{"http500", 500, `{"code":10000,"msg":"API request failed with status code: 500"}`, 3},
+		{"http401", 401, `{"code":12153,"msg":"offline session"}`, 1},
+		{"http404", 404, `{"code":404,"msg":"not found"}`, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				atomic.AddInt32(&calls, 1)
+				w.WriteHeader(tc.status)
+				w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			c := &Client{HTTP: srv.Client(), BillingBaseCN: srv.URL}
+			c.SyncHot()
+			claimed, credits, err := c.CompensationClaim(&auth.Auth{AccessToken: "at", UID: "u1"})
+			if err == nil {
+				t.Fatalf("HTTP %d 必须报失败（不得静默成无可领）", tc.status)
+			}
+			if claimed || credits != 0 {
+				t.Errorf("claimed=%v credits=%d want false/0", claimed, credits)
+			}
+			if n := atomic.LoadInt32(&calls); n != tc.calls {
+				t.Errorf("calls=%d want %d", n, tc.calls)
+			}
+		})
+	}
+}
+
+// TestCompensationStatusBusinessErrorSurfaces 状态查询的业务错误（200 + code!=0）
+// 返回 err：调用方据此「照常尝试领取」，而不是当成「已领过」跳过。
+func TestCompensationStatusBusinessErrorSurfaces(t *testing.T) {
+	stub := newCompensationStub()
+	stub.statusBody = `{"code":10001,"msg":"x"}`
+	srv := httptest.NewServer(stub.handler())
+	defer srv.Close()
+
+	c := &Client{HTTP: srv.Client(), BillingBaseCN: srv.URL}
+	c.SyncHot()
+	st, err := c.CompensationStatus(&auth.Auth{AccessToken: "at", UID: "u1"})
+	if err == nil {
+		t.Fatal("状态查询业务错误应回 err（调用方照常尝试领取）")
+	}
+	if st != nil {
+		t.Errorf("失败时状态应为 nil，得到 %+v", st)
+	}
+}
+
+// TestCompensationStatusTolerantParsing 状态回执的容错解析（缺字段/类型不符不 panic、
+// 不整体失败）：判据字段任一有值即「已领过」；结构认不出 → 未领过（继续尝试领取，
+// 认不出不等于领过了）。
+func TestCompensationStatusTolerantParsing(t *testing.T) {
+	cases := []struct {
+		name    string
+		data    string
+		claimed bool
+	}{
+		{"claimed_true", `{"claimed":true}`, true},
+		{"claimed_false", `{"claimed":false}`, false},
+		{"claimed_at_number", `{"claimed_at":1760000000}`, true},
+		{"claimed_at_string", `{"claimed_at":"2026-10-16 12:00:00"}`, true},
+		{"claimed_text", `{"claimed_text":"已于 10 月 16 日领取"}`, true},
+		{"empty_values_not_claimed", `{"claimed_at":"","claimed_text":"","claimed":false}`, false},
+		{"zero_number_not_claimed", `{"claimed_at":0}`, false},
+		{"only_title", `{"title":"故障补偿"}`, false},
+		{"missing_all_fields", `{}`, false},
+		{"unknown_shape", `"nope"`, false},
+		{"null_data", `null`, false},
+		{"array_data", `[1,2]`, false},
+		{"nested_object_field", `{"claimed_at":{"a":1}}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := parseCompensationStatus(json.RawMessage(tc.data))
+			if got := st.AlreadyClaimed(); got != tc.claimed {
+				t.Errorf("AlreadyClaimed()=%v want %v（data=%s）", got, tc.claimed, tc.data)
+			}
+		})
+	}
+	// credit_num / button_text 的字符串形态数字也要认（不同版本的类型漂移）。
+	st := parseCompensationStatus(json.RawMessage(`{"credit_num":"500","button_text":"已领取"}`))
+	if st.CreditNum != 500 || st.ButtonText != "已领取" {
+		t.Errorf("credit_num=%d button_text=%q want 500/已领取", st.CreditNum, st.ButtonText)
+	}
+}
+
+// TestCompensationGlobalSkipsWithoutRequest 国际版没有这套活动：两个方法都直接回
+// ErrCompensationGlobal 且**零上游请求**（打过去只会白吃 4xx，还可能被当成异常形态）。
+func TestCompensationGlobalSkipsWithoutRequest(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		http.Error(w, "no upstream call expected for global", 404)
+	}))
+	defer srv.Close()
+
+	auth.SetGlobalEnabled(true)
+	c := &Client{
+		HTTP:              srv.Client(),
+		BillingBaseCN:     "https://billing.cn",
+		BillingBaseGlobal: srv.URL,
+		GlobalEnabled:     true,
+	}
+	c.SyncHot()
+	a := &auth.Auth{AccessToken: "at", UID: "g1", Domain: "www.workbuddy.ai"}
+
+	if _, err := c.CompensationStatus(a); !errors.Is(err, ErrCompensationGlobal) {
+		t.Errorf("global status err=%v want ErrCompensationGlobal", err)
+	}
+	if _, _, err := c.CompensationClaim(a); !errors.Is(err, ErrCompensationGlobal) {
+		t.Errorf("global claim err=%v want ErrCompensationGlobal", err)
+	}
+	if n := atomic.LoadInt32(&calls); n != 0 {
+		t.Errorf("global calls=%d want 0（国际版不发请求）", n)
 	}
 }

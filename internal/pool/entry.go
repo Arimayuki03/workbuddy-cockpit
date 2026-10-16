@@ -130,23 +130,41 @@ type entry struct {
 	// 签到之间第四因子（weightOf ×8）不应失忆——签到 09:00/21:00 定期刷新，
 	// 窗口外重启会丢快过期积分偏好，可能让奖励积分到期作废。
 	creditsExpiring int64
-	successCount    int64     // 累计成功
+	// earliestExpiry / earliestRemaining 最早到期的那笔仍有余量的积分包的失效
+	// 时刻与剩余量（v1.20.0「快过期积分优先消耗」）。
+	//
+	// 与 creditsExpiring 的分工（正交互补，不是重复）：
+	//   - creditsExpiring 是「窗口内快过期的积分总量」，回答"这个号有多少要作废"
+	//     （weightOf 的占比因子 ×8，与开关无关，始终生效）；
+	//   - 本对字段是「最先失效的那一笔」，回答"这个号是不是马上就有东西要作废"
+	//     （prefer_expiring 的虚拟实例加成 ×expiringVirtualSlots）。
+	// 前者只进 window 内的积分，后者记录精确的最近失效时刻——两个维度都要，
+	// 才能既照顾"快过期量大"的号，也照顾"快过期最紧迫"的号。
+	//
+	// 由余额刷新/签到路径经 SetCreditEarliest 写入（与 SetCreditsDetailed 同路）；
+	// 零值 = 无信息（旧 state.json 缺键、上游未下发到期信息、包已失效）。只有
+	// prefer_expiring 开启时选号才消费（pick.go 权重 / realm.go 虚拟槽位）。
+	// 持久化（stateAccount.EarliestExpiry/EarliestRemaining）：重启后到下一个刷新
+	// 周期之间不失忆。
+	earliestExpiry    time.Time
+	earliestRemaining int64
+	successCount      int64 // 累计成功
 	// errTotal 累计错误（终身累计，仅状态展示用；选号权重不消费——原「成功率」
 	// 因子已删，见 pick.weightOf 注释与 success-ema-review）。
-	errTotal    int64         // 累计错误（终身累计，供状态展示；选号权重不消费，原成功率因子已删）
-	lastErr     time.Time     // 最近一次错误时间
-	lastSuccess     time.Time // 最近一次成功时间
-	coolKind        CoolKind
-	until           time.Time // 冷却截止（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）
-	disabled        bool
-	reason          string
+	errTotal    int64     // 累计错误（终身累计，供状态展示；选号权重不消费，原成功率因子已删）
+	lastErr     time.Time // 最近一次错误时间
+	lastSuccess time.Time // 最近一次成功时间
+	coolKind    CoolKind
+	until       time.Time // 冷却截止（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）
+	disabled    bool
+	reason      string
 	// manualDisabled 运维手动停用（issue #138/#118）：与 disabled 并列的独立状态位。
 	// 语义是「对话流量摘除」而非「账号冻结」——停用期间签到/token 保活/排程照常执行，
 	// 凭证与积分都是活的，只是不参与选号。与 disabled 各自独立清除，两位都清才回池。
 	// 持久化（stateAccount.ManualDisabled）：重启保留运维意图。
 	manualDisabled bool
 	manualReason   string
-	lastUsed        time.Time // 最近被选中时刻（防并发撞号）
+	lastUsed       time.Time // 最近被选中时刻（防并发撞号）
 	// usedSeq 单调递增的选中序号：每次被 pick 选中时取 p.pickSeq 自增值。
 	// Windows 等平台 time.Now() 精度有限（~0.5ms），高并发/快速连续选号时多个
 	// 账号 lastUsed 完全相等，基于 wall-clock 的 LRU/防惊群判定失效（高并发/低精度时钟下：
@@ -316,6 +334,28 @@ func (e *entry) modelCostOf(model string, now time.Time) (modelCostEntry, bool) 
 		return modelCostEntry{}, false // 过期：时段性优惠（夜间免费）不得跨时段生效
 	}
 	return mc, true
+}
+
+// expiringNow 报告账号当前是否满足「快过期积分优先消耗」的虚拟实例条件
+// （v1.20.0，pick.go 权重 ×3 与 realm.go 虚拟槽位共用的唯一判据）：
+// 有正余量的最早到期包，且其失效时刻仍在未来。
+//
+// 三个条件都是必需的：
+//   - earliestRemaining > 0：没有余量就没有可被"优先消耗"的积分；
+//   - earliestExpiry 非零：零值 = 从无快过期信息（旧 state.json / 上游未下发），
+//     不是"1970 年到期"，不能当成紧迫；
+//   - now.Before(earliestExpiry)：已过期的包不可能再被消耗（上游 FEFO 下其剩余
+//     量要么已扣完要么已作废），按过期处理——否则一个失效时刻在过去的陈旧快照
+//     会让加成永久生效。
+//
+// credits <= 0 时一并按不可用处理：余额已空（或本地插值扣穿）时"优先消耗"
+// 无从谈起，且这类快照多为刷新空窗期的陈旧数据（SetCreditsDetailed 归零后、
+// SetCreditEarliest 尚未跟上的瞬间），保守不加成。
+func (e *entry) expiringNow(now time.Time) bool {
+	if e.earliestRemaining <= 0 || e.credits <= 0 || e.earliestExpiry.IsZero() {
+		return false
+	}
+	return now.Before(e.earliestExpiry)
 }
 
 // healthy 报告账号当前是否可选（未禁用、未处于任一冷却/熔断/连败降权期）。
@@ -519,6 +559,15 @@ type stateAccount struct {
 	// （weightOf ×8）的快过期积分偏好——重启后到下次签到之间不应失忆。
 	// 零值也显式写出（运维口径，见 err_total 注释）。
 	CreditsExpiring int64 `json:"credits_expiring"`
+	// EarliestExpiry 最早到期且仍有余量的积分包失效时刻（entry.earliestExpiry，
+	// v1.20.0）。用指针 + 仅「非零且在未来」才落盘：与 BreakerUntil 同一惰性过滤
+	// 口径（已失效的包信息不写、不复活），且指针才能让 omitempty 真正省略零值
+	//（非指针 time.Time 会写成 0001-01-01T00:00:00Z，与"无信息"混淆）。
+	// 旧 state.json 缺此键 → nil → 零值恢复（视为未设置），不报错、不迁移。
+	EarliestExpiry *time.Time `json:"earliest_expiry,omitempty"`
+	// EarliestRemaining 上述包的剩余量（entry.earliestRemaining）。仅与
+	// EarliestExpiry 同时写出（余量 0/无到期时刻 = 无信息，omitempty 省略）。
+	EarliestRemaining int64 `json:"earliest_remaining,omitempty"`
 	// ModelCooldowns 6004 模型级独立冷却表（model → 冷却记录）。持久化：
 	// PR #96 把 6004 改成精确对齐上游重置墙钟后，单模型冷却可长达数小时，
 	// 跨重启是常态；不持久化导致每次重启 healthyForModel 失忆、重新踩一遍

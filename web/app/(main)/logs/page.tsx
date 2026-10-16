@@ -10,12 +10,14 @@ import {
   ScrollText,
   ServerCrash,
   Terminal,
+  X,
 } from 'lucide-react';
 import {useHeartbeat} from '@/lib/use-heartbeat';
+import {useDebounce} from '@/hooks/use-debounce';
 import {logApi, errText} from '@/lib/api';
 import {useCachedAsync} from '@/lib/data-cache';
 import type {RequestLog, RequestLogsResponse, SystemLogsResponse} from '@/lib/types';
-import {fmtCredit, fmtDateTime, fmtLatency, fmtNumber} from '@/lib/format';
+import {fmtCredit, fmtDateTime, fmtLatency, fmtNumber, localInputToSec} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {TableSkeleton} from '@/components/common/layout/LoadSkeleton';
@@ -83,6 +85,39 @@ export default function LogsPage() {
   /** 实时刷新开关（请求日志与系统日志共用）：默认开，5 秒一轮 */
   const [live, setLive] = useState(true);
 
+  /* ── 服务端筛选（时间范围 + IP / UA）─────────────────────
+   * 契约 GET /api/request_logs?limit&from&to&ip&ua：from/to 为 unix 秒（闭区间），
+   * ip/ua 为子串匹配。时间范围用 datetime-local 输入（本地时间）经
+   * localInputToSec 换算（与统计页共用同一实现，口径同源）；IP / UA 是逐字符
+   * 输入，防抖 400ms 后才落成查询条件——否则每敲一个字都会换缓存键、向后端
+   * 打一次请求。 */
+  const [fromInput, setFromInput] = useState('');
+  const [toInput, setToInput] = useState('');
+  const [ipInput, setIpInput] = useState('');
+  const [uaInput, setUaInput] = useState('');
+  const ipQuery = useDebounce(ipInput.trim(), 400);
+  const uaQuery = useDebounce(uaInput.trim(), 400);
+
+  /* 区间合法性（与统计页同口径：两端齐全且起 ≥ 止 = 非法）。非法区间是空集，
+   * 下发必然命中空结果、界面只会说「暂无日志」——像数据丢了。所以这种情况
+   * **不下发时间条件**（from/to 都不发，等价于「不限这一端」），并在筛选条下方
+   * 显式提示；只填一端是合法开区间，照常下发。 */
+  const fromRaw = localInputToSec(fromInput);
+  const toRaw = localInputToSec(toInput);
+  const rangeInvalid = fromRaw !== undefined && toRaw !== undefined && fromRaw >= toRaw;
+  const fromSec = rangeInvalid ? undefined : fromRaw;
+  const toSec = rangeInvalid ? undefined : toRaw;
+  /** 实际下发的服务端条件（区间非法时时间条件被摘掉，IP / UA 独立生效） */
+  const hasServerFilter = fromSec !== undefined || toSec !== undefined || !!ipQuery || !!uaQuery;
+  /** 筛选输入框里有没有内容（含尚未防抖落地的输入）：决定「清除筛选」入口显示 */
+  const hasFilterInput = !!fromInput || !!toInput || !!ipInput || !!uaInput;
+  const clearServerFilters = useCallback(() => {
+    setFromInput('');
+    setToInput('');
+    setIpInput('');
+    setUaInput('');
+  }, []);
+
   /* ── 首载错误态（区分「加载失败」与「环形缓冲真的是空的」）───────
    * 错误在各 fetcher 里捕获：useCachedAsync 内部的挂载刷新会先占住请求锁
    * 并把失败静默吞掉，页面层对 refresh 的 .catch 收不到 rejection——捕获
@@ -92,14 +127,23 @@ export default function LogsPage() {
   const [sysError, setSysError] = useState<string | null>(null);
 
   // 两个日志源接缓存：切页先出上次的列表再静默续新（日志是环形缓冲快照，
-  // 缓存值与新值形状一致）。key 带 limit——改条数上限等于换数据集。
+  // 缓存值与新值形状一致）。key 带 limit 与服务端筛选条件——改条数上限或
+  // 时间范围 / IP / UA 都等于换一份数据集（换 key 自动重取，旧 key 的响应
+  // 只落自己的缓存，不会串窗）。
   const requestsCache = useCachedAsync<RequestLogsResponse>(
-    `logs:requests:${limit}`,
+    `logs:requests:${limit}:${fromSec ?? ''}:${toSec ?? ''}:${ipQuery}:${uaQuery}`,
     () =>
-      logApi.requestLogs(Number(limit) || 200).catch((e) => {
-        setReqError((prev) => prev ?? errText(e)); // 已有错误不覆盖
-        throw e; // 继续抛给 hook 的常规错误路径
-      }),
+      logApi
+        .requestLogs(Number(limit) || 200, {
+          from: fromSec,
+          to: toSec,
+          ip: ipQuery || undefined,
+          ua: uaQuery || undefined,
+        })
+        .catch((e) => {
+          setReqError((prev) => prev ?? errText(e)); // 已有错误不覆盖
+          throw e; // 继续抛给 hook 的常规错误路径
+        }),
     {ttl: 4000},
   );
   const logs = useMemo(() => requestsCache.data?.items ?? [], [requestsCache.data]);
@@ -135,6 +179,25 @@ export default function LogsPage() {
     return items;
   }, [logs, model, status, query]);
 
+  /* 空态分三类，不能混同（OCR 审查）：
+   *  1. 没有任何筛选 →「暂无日志」（确实没有记录）；
+   *  2. 服务端筛选生效、但归档未启用（archive_enabled === false）→ 说明「结果恒为
+   *     空」的根因是配置开关（config.json: logging.request_archive），不是日志丢了；
+   *  3. 其余「有筛选但无命中」（服务端条件或本页即时筛选）→「无匹配记录」。
+   * 后端未返回 archive_enabled（旧版本 / 未知）按未知处理，走第 3 类，
+   * 不贸然替后端断言归档状态。 */
+  const archiveOff = requestsCache.data?.archive_enabled === false;
+  const frontFilterActive = !!model || status !== 'all' || !!query.trim();
+  const emptyState = useMemo(() => {
+    if (hasServerFilter && archiveOff) {
+      return {title: t('logs.emptyArchiveOffTitle'), desc: t('logs.emptyArchiveOffDesc')};
+    }
+    if (hasServerFilter || frontFilterActive) {
+      return {title: t('logs.emptyNoMatchTitle'), desc: t('logs.emptyNoMatchDesc')};
+    }
+    return {title: t('logs.emptyTitle'), desc: t('logs.emptyDesc')};
+  }, [hasServerFilter, archiveOff, frontFilterActive, t]);
+
   /* ── 系统日志（三频道）──────────────────────────────── */
   const [channel, setChannel] = useState(ALL_CHANNEL);
   /** 时间方向：desc（新→旧，默认）/ asc（旧→新，追排到底部看实时） */
@@ -166,6 +229,7 @@ export default function LogsPage() {
     if (tab === 'requests') loadRequests();
     else loadSystem();
     // 依赖是「会改变查询范围」的项；筛选/搜索/排序在前端即时生效
+    // （时间范围 / IP / UA 换档 = 换缓存键，由 useCachedAsync 的 key 变化自动重取）
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, limit]);
 
@@ -174,13 +238,17 @@ export default function LogsPage() {
   // 它拿到新数据后 setData 更新界面（putCache 只写缓存、不会触发重渲染），
   // 缓存已有数据时不进 loading、不闪骨架屏；失败静默吞掉（心跳稍后再试），
   // 与「网关临时无响应时不刷错误弹窗雨」的意图一致。
+  //
+  // 服务端筛选生效时**暂停实时刷新**（传 0）：筛选查询走磁盘归档回读，5 秒一轮
+  // 的归档重扫只是白耗 I/O，且列表被筛选钉住时新日志本来就不会出现——刷新反而
+  // 干扰对照。筛选条下方有一句话说明暂停原因，避免用户误以为界面卡住。
   useHeartbeat(
     () => {
       // 心跳失败静默（等下一轮自愈）；错误条保留到手动重试成功
       if (tab === 'requests') loadRequests().catch(() => {/* 静默 */});
       else loadSystem().catch(() => {/* 静默 */});
     },
-    live ? 5000 : 0,
+    live && !(tab === 'requests' && hasServerFilter) ? 5000 : 0,
   );
 
   // 系统日志展示条目：频道 → 关键词 → 条数截取 → 时间方向，纯前端即时过滤。
@@ -338,9 +406,71 @@ export default function LogsPage() {
                 />
               </div>
             </div>
+            {/* 服务端筛选：时间范围（起/止，本地时间）与 IP / UA 子串。
+                这四项换算成查询参数发给后端，与上面的本页即时过滤并存。 */}
+            <div className="mt-3 grid grid-cols-1 items-end gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <div className="space-y-1.5">
+                <Label className="text-[11px] text-muted-foreground">{t('logs.filterFrom')}</Label>
+                <Input
+                  type="datetime-local"
+                  value={fromInput}
+                  onChange={(e) => setFromInput(e.target.value)}
+                  className="bg-background"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-[11px] text-muted-foreground">{t('logs.filterTo')}</Label>
+                <Input
+                  type="datetime-local"
+                  value={toInput}
+                  onChange={(e) => setToInput(e.target.value)}
+                  className="bg-background"
+                />
+              </div>
+              <div className="space-y-1.5">
+                {/* 列头与筛选同用一个标签：都是「来源 IP / User-Agent」 */}
+                <Label className="text-[11px] text-muted-foreground">{t('logs.rowIp')}</Label>
+                <Input
+                  value={ipInput}
+                  onChange={(e) => setIpInput(e.target.value)}
+                  placeholder={t('logs.filterIpPlaceholder')}
+                  className="bg-background font-mono"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-[11px] text-muted-foreground">{t('logs.rowUa')}</Label>
+                <Input
+                  value={uaInput}
+                  onChange={(e) => setUaInput(e.target.value)}
+                  placeholder={t('logs.filterUaPlaceholder')}
+                  className="bg-background font-mono"
+                />
+              </div>
+            </div>
+            {/* 区间填反（起 ≥ 止）时不下发时间条件——这里必须给出提示（不静默），
+                否则用户看到的是「填了区间却还是全部日志」，比空结果更迷惑。 */}
+            {rangeInvalid && (
+              <div className="mt-2 rounded-xl bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+                {t('logs.rangeInvalid')}
+              </div>
+            )}
             <p className="mt-2 text-[10px] leading-4 text-muted-foreground/70">
               {t('logs.requestsNote')}
-              {live ? ` ${t('logs.liveOnNote')}` : ` ${t('logs.liveOffNote')}`}
+              {hasServerFilter
+                ? ` ${t('logs.filterPausedLive')}`
+                : live
+                  ? ` ${t('logs.liveOnNote')}`
+                  : ` ${t('logs.liveOffNote')}`}
+              {hasFilterInput && (
+                <button
+                  type="button"
+                  onClick={clearServerFilters}
+                  className="ml-2 inline-flex items-center gap-1 rounded-full bg-background/70 px-2 py-0.5 align-middle text-[10px] hover:text-foreground"
+                >
+                  <X className="h-3 w-3" />
+                  {t('logs.clearFilters')}
+                </button>
+              )}
             </p>
           </section>
 
@@ -351,7 +481,10 @@ export default function LogsPage() {
                   <TableHead className="pl-4 text-[11px] text-muted-foreground">{t('logs.colTime')}</TableHead>
                   <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colNickname')}</TableHead>
                   <TableHead className="text-[11px] text-muted-foreground">{t('tasks.colAccount')}</TableHead>
+                  {/* 客户端 IP / UA：定位「是谁在调」——多密钥、多设备排查时最直接的两列 */}
+                  <TableHead className="text-[11px] text-muted-foreground">{t('logs.rowIp')}</TableHead>
                   <TableHead className="text-[11px] text-muted-foreground">{t('nav.models')}</TableHead>
+                  <TableHead className="text-[11px] text-muted-foreground">{t('logs.rowUa')}</TableHead>
                   <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colStatus')}</TableHead>
                   <TableHead className="text-[11px] text-muted-foreground">{t('logs.colFirstToken')}</TableHead>
                   <TableHead className="text-[11px] text-muted-foreground">Token</TableHead>
@@ -368,7 +501,16 @@ export default function LogsPage() {
                     <TableCell className="pl-4 text-xs text-muted-foreground">{fmtLogTime(l.time)}</TableCell>
                     <TableCell className="max-w-[10rem] truncate text-xs" title={l.nick || undefined}>{l.nick || '—'}</TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground">{l.uid || '—'}</TableCell>
+                    {/* 老记录 / 未采集时为缺字段：显示 —，不伪装成空串。
+                        字段名照后端 json tag：client_ip（不是 ip，ip 是查询参数名） */}
+                    <TableCell className="font-mono text-xs text-muted-foreground">{l.client_ip || '—'}</TableCell>
                     <TableCell className="text-xs">{l.model || '—'}</TableCell>
+                    <TableCell
+                      className="max-w-[14rem] truncate text-xs text-muted-foreground"
+                      title={l.user_agent || undefined}
+                    >
+                      {l.user_agent || '—'}
+                    </TableCell>
                     <TableCell>
                       {l.status >= 200 && l.status < 300 ? (
                         <Badge variant="secondary" className="rounded-full text-emerald-600 dark:text-emerald-400">{l.status}</Badge>
@@ -434,8 +576,8 @@ export default function LogsPage() {
             {!filteredLogs.length && !loading && (
               <EmptyState
                 icon={ScrollText}
-                title={t('logs.emptyTitle')}
-                description={t('logs.emptyDesc')}
+                title={emptyState.title}
+                description={emptyState.desc}
                 className="flex flex-col items-center justify-center py-16 text-center"
               />
             )}
@@ -564,6 +706,8 @@ export default function LogsPage() {
               {([
                 ['uid', t('accounts.colNickname'), detail.nick || '—'],
                 ['uid2', t('tasks.colAccount'), detail.uid || '—'],
+                ['ip', t('logs.rowIp'), detail.client_ip || '—'],
+                ['ua', t('logs.rowUa'), detail.user_agent || '—'],
                 ['model', t('logs.rowModel'), detail.model || '—'],
                 ['status', t('logs.rowStatus'), String(detail.status)],
                 ['ttfb', t('logs.rowFirstToken'), detail.ttfb_ms ? fmtLatency(detail.ttfb_ms) : t('logs.notCollected')],
@@ -585,7 +729,7 @@ export default function LogsPage() {
                 ['error', t('logs.rowError'), detail.error || '—'],
               ] as [string, string, string][]).map(([id, k, v]) => {
                 // 这些字段内容较长且常需要贴出来（排查 / 反馈），给出复制入口
-                const copyable = ['uid', 'uid2', 'error'].includes(id) && v !== '—';
+                const copyable = ['uid', 'uid2', 'ip', 'ua', 'error'].includes(id) && v !== '—';
                 return (
                   <div key={id} className="flex items-start gap-3">
                     <div className="w-32 shrink-0 text-muted-foreground">{k}</div>

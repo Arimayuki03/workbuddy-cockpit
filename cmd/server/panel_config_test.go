@@ -212,3 +212,73 @@ func TestPanelSaveModelMapReplace(t *testing.T) {
 		t.Errorf("api_key = %v, want k1 (untouched)", got["api_key"])
 	}
 }
+
+// TestPanelSaveConfigCompensationHoursClear 面板把 compensation_hours 留空保存后，
+// 运行态小时表必须被**显式清空**：补偿族「空 = 只手动执行」（config.Schedule 的
+// 不回落例外），而 SetHours 拒绝空数组——保存路径若只跳过 SetHours，运行态仍按
+// 启动快照（或旧 hoursTab）的整点自动领，直到重启才生效（回归：前端语义当场失效）。
+func TestPanelSaveConfigCompensationHoursClear(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "config.json")
+	orig := `{"api_key":"k1","schedule":{"compensation_enabled":true,"compensation_hours":[3]}}`
+	if err := os.WriteFile(fp, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	live := livecfg.New(livecfg.Snapshot{APIKey: "k1"})
+	p := pool.New("")
+	up := upstream.New()
+	// 启动期装配态：开关开 + 小时表 [3]（运行态本来在凌晨 3 点自动领补偿）。
+	sch := scheduler.New(scheduler.Config{Pool: p, Upstream: up,
+		CompensationEnabled: true, CompensationHours: []int{3}})
+
+	if _, err := saveConfig([]byte(`{"schedule":{"compensation_enabled":true,"compensation_hours":[]}}`), fp, live, p, up, sch); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+
+	// 落盘：空数组原样保留（下次启动也按「只手动」装载，不回落默认整点）。
+	raw, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("config not valid json: %v", err)
+	}
+	schedSec, _ := got["schedule"].(map[string]any)
+	if hours, ok := schedSec["compensation_hours"].([]any); !ok || len(hours) != 0 {
+		t.Errorf("schedule.compensation_hours = %v (%T), want []", schedSec["compensation_hours"], schedSec["compensation_hours"])
+	}
+
+	// 运行态：开关仍开但无排程时点（hours 空 + next_fire 空串）——「留空 = 只手动」当场生效。
+	var sn scheduler.KindSnapshot
+	for _, ts := range sch.SnapshotAll() {
+		if ts.Kind == "compensation" {
+			sn = ts
+		}
+	}
+	if !sn.Enabled {
+		t.Fatalf("补偿开关应保持启用（提交了 enabled=true）：%+v", sn)
+	}
+	if len(sn.Hours) != 0 {
+		t.Errorf("运行态小时表未清空（旧表/启动快照仍在自动领）：%v", sn.Hours)
+	}
+	if sn.NextFire != "" {
+		t.Errorf("留空 = 不排程，next_fire 应为空串，实得 %q（修复前是零时点 0001-01-01T00:00:00Z）", sn.NextFire)
+	}
+
+	// 对称方向：再配回整点 → SetHours 路径热生效（if/else 两支都被覆盖）。
+	if _, err := saveConfig([]byte(`{"schedule":{"compensation_hours":[5]}}`), fp, live, p, up, sch); err != nil {
+		t.Fatalf("saveConfig(non-empty): %v", err)
+	}
+	for _, ts := range sch.SnapshotAll() {
+		if ts.Kind != "compensation" {
+			continue
+		}
+		if len(ts.Hours) != 1 || ts.Hours[0] != 5 {
+			t.Errorf("配回整点后运行态 hours = %v, want [5]", ts.Hours)
+		}
+		if ts.NextFire == "" {
+			t.Error("配回整点后 next_fire 不应为空")
+		}
+	}
+}

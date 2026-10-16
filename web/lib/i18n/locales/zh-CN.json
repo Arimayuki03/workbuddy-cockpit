@@ -259,7 +259,11 @@
     "axisTokens": "Token（左轴）",
     "axisRequests": "请求（右轴）",
     "chartEmptyRange": "所选时间范围内暂无用量",
-    "globalNote": "全局统计（国内版 + 国际版合计）"
+    "globalNote": "全局统计（国内版 + 国际版合计）",
+    "customRange": "自定义区间",
+    "rangeFrom": "起始时间",
+    "rangeTo": "结束时间",
+    "customInvalid": "起始时间需早于结束时间；图表仍显示上一次的有效区间"
   },
   "accounts": {
     "title": "账号管理",
@@ -548,7 +552,7 @@
     "sysEmptyTitle": "暂无日志",
     "sysEmptyDesc": "系统日志为环形缓冲（最近 500 行），重启即清",
     "limitLabel": "条数上限",
-    "requestsNote": "请求日志为环形缓冲（最近约 1000 条，重启即清）；筛选在本页进行。长期用量趋势见「用量」页。",
+    "requestsNote": "请求日志为环形缓冲（最近约 1000 条，重启即清）；模型 / 状态 / 关键词在本页即时过滤，时间范围与 IP / UA 由后端过滤。长期用量趋势见「用量」页。",
     "systemNote": "任务 / 对话 / 系统三频道，环形缓冲最近 500 行；支持频道筛选、条数上限、内容搜索与时间正/倒序切换。",
     "searchPlaceholder": "搜索日志内容…",
     "searchRequests": "搜索模型 / 账号 / 错误信息…",
@@ -559,7 +563,19 @@
     "liveToggle": "实时",
     "liveOnNote": "当前每 5 秒自动刷新；右上角开关可暂停。",
     "liveOffNote": "实时刷新已暂停，内容冻结在暂停那一刻；右上角开关可恢复。",
-    "loadErrorTitle": "日志加载失败"
+    "loadErrorTitle": "日志加载失败",
+    "rowUa": "User-Agent",
+    "filterFrom": "起始时间",
+    "filterTo": "结束时间",
+    "filterIpPlaceholder": "如 203.0.113. 或 10.0.",
+    "filterUaPlaceholder": "如 curl / WorkBuddy",
+    "clearFilters": "清除时间与 IP / UA 筛选",
+    "rangeInvalid": "起始时间需早于结束时间；该时间范围未下发（IP / UA 筛选照常生效）",
+    "emptyArchiveOffTitle": "服务端筛选依赖归档，当前未开启",
+    "emptyArchiveOffDesc": "服务端筛选依赖请求日志归档（config.json: logging.request_archive），当前未开启，结果恒为空。请先开启归档或清除筛选。",
+    "emptyNoMatchTitle": "无匹配记录",
+    "emptyNoMatchDesc": "当前筛选条件下没有匹配的请求日志；可放宽条件、检查 IP / UA 关键词，或清除筛选后重试。",
+    "filterPausedLive": "服务端筛选已生效，实时刷新已暂停；清除筛选后恢复。"
   },
   "security": {
     "title": "安全与 IP 管控",
@@ -906,7 +922,20 @@
     "colTime": "时间",
     "colChange": "变动",
     "colBalance": "余额",
-    "colMessage": "说明"
+    "colMessage": "说明",
+    "compTitle": "每日领补偿",
+    "compDesc": "平台发给账号的活动补偿（如故障补偿）以前要去网页「用量管理」手动领；这里点「立即执行」当场领一次，结束时回报「几个号领到、共多少积分」。**有则领、没有就跳过**，重复执行不会多领。**默认不自动跑**——补偿公告常带截止日期，手动点更稳妥；要每天自动跑就打开开关并设整点。国际版账号会自动跳过。",
+    "compAutoOn": "每天自动",
+    "compAutoOff": "仅手动",
+    "compEnabled": "每天自动领取",
+    "compEnabledDesc": "打开后按下面的整点每天自动领一次；关闭 = 只在需要时手动点「立即执行」",
+    "compHours": "自动领取时刻",
+    "compHoursDesc": "在哪些整点自动领（0-23，可多个）。留空 = 只手动执行，不自动跑",
+    "compHoursPlaceholder": "留空 = 不自动跑",
+    "compRun": "立即执行",
+    "compRunDone": "补偿领取完成",
+    "compRunDetail": "{accounts} 个号尝试 · {claimed} 个领到 · 共 {credits} 积分",
+    "compRunFailed": "补偿领取失败"
   },
   "addAccount": {
     "title": "添加腾讯账号 · {realm}",
@@ -1037,6 +1066,7 @@
     "mapTarget": "实际调用模型",
     "mapAdd": "添加映射",
     "mapEmpty": "暂无映射，下游可直接使用上方「可用模型」中的名字",
+    "mapFallbackNote": "别名填 `*` 时是**兜底模型**：所有未命中映射的模型名都会被转发到它，适合 Codex 这类会自己冒出新模型名的客户端。副作用：**拼错的模型名也会被一起接住**（不会报错），排查问题时留意这一点。",
     "aboutDesc": "本项目为 workbuddy2api（腾讯 CodeBuddy → OpenAI 兼容代理）提供网页管理界面与对外接口网关。账号轮询、并发与熔断由 workbuddy2api 负责；本管理端负责账号纳管、密钥分发、IP 管控、请求日志与用量统计。",
     "aboutCredits": "界面风格参考 linux-do/cdk（MIT），特此致谢。",
     "aboutUsage": "下游接入：Base URL 填 `https://你的域名/v1`，密钥用「API 密钥」页生成的 `wbk_...`。",
@@ -1057,12 +1087,13 @@
     "errNumber": "请填写数字",
     "errRange": "请填 {min}–{max}{unit}",
     "errDuration": "格式如 30s / 10m / 2h / 1d",
+    "errDurationZero": "不能填 0（零时长），请填如 10m / 1h，或留空",
     "errNoNewline": "不能包含换行或控制字符",
     "errHourFormat": "时刻格式有误",
     "errEnum": "取值不在允许范围内",
     "configPath": "配置文件",
     "savedRestart": "已保存，部分字段需重启",
-    "restartHint": "提示词 / 出站标识 / 国际版路由在装配期读取，重启服务后生效；其余字段已热生效",
+    "restartHint": "提示词 / 出站标识 / 国际版路由 / 会话粘性 TTL / 定时任务的随机延后与账号间隔在装配期读取，重启服务后生效；其余字段已热生效",
     "advancedNote": "保存时后端做深合并 + 原子替换，未展示的未知键会原样保留。",
     "reloaded": "已重新加载",
     "cfgLoadFailed": "配置加载失败",
@@ -1099,7 +1130,8 @@
       "lastUsed": "最近使用",
       "createdAt": "创建时间",
       "prefix": "前缀"
-    }
+    },
+    "errRangeOrder": "下限不能大于上限（{min} > {max}）"
   },
   "activity": {
     "title": "开学季活动",

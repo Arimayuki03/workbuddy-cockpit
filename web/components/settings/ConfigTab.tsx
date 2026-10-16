@@ -35,7 +35,16 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import {useSettings} from './settings-context';
-import {GROUPS, fieldError} from './settings-fields';
+import {GROUPS, fieldError, pairError, type Field} from './settings-fields';
+
+/**
+ * 时刻 / 时长输入框的宽度类名。
+ * 时刻字段带占位提示（如「留空 = 不自动跑」）时给宽一点，别把提示截断；
+ * 其余（时长 / 无提示的时刻）走窄框。
+ */
+function inputWidth(f: Field): string {
+  return f.kind === 'hours' ? (f.placeholder ? 'w-40' : 'w-32') : 'w-24';
+}
 
 export function ConfigTab() {
   const {t, tp} = useI18n();
@@ -133,7 +142,9 @@ export function ConfigTab() {
               {/* 宽屏两列：开关与它对应的时刻/数值字段天然成对，行数减半 */}
               <div className="grid grid-cols-1 gap-1.5 xl:grid-cols-2">
                 {g.fields.map((f) => {
-                  const err = fieldError(f, s.form[g.id][f.key]);
+                  // 单字段校验之外还有成对区间校验（下限 ≤ 上限），
+                  // 它需要整组表单才能判断，所以两个都跑、任一报错即提示
+                  const err = fieldError(f, s.form[g.id][f.key]) ?? pairError(f, s.form[g.id]);
                   const caution = 'caution' in f ? f.caution : undefined;
                   return (
                     <div
@@ -219,11 +230,16 @@ export function ConfigTab() {
                         <Input
                           value={String(s.form[g.id][f.key] ?? '')}
                           disabled={!isAdmin || !cfgReady}
-                          placeholder={f.kind === 'hours' ? '9, 21' : '600s'}
+                          // 时刻字段可自带占位（如「留空 = 不自动跑」），走短语文案
+                          placeholder={
+                            f.kind === 'hours'
+                              ? tp(f.placeholder ?? '9, 21')
+                              : f.placeholder ?? '600s'
+                          }
                           onChange={(e) => s.setField(g.id, f.key, e.target.value)}
                           className={
                             'h-8 shrink-0 bg-background text-right tabular-nums ' +
-                            (f.kind === 'hours' ? 'w-32' : 'w-24') +
+                            inputWidth(f) +
                             (err ? ' border-destructive' : '')
                           }
                         />

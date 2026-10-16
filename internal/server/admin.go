@@ -276,11 +276,20 @@ func (h *Handler) adminTaskPatch(w http.ResponseWriter, r *http.Request) {
 	// —— 改触发小时 ——（TM 插件「应用」按钮与面板设置页走这里）
 	if req.Hours != nil {
 		if len(*req.Hours) == 0 {
-			writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
-				fmt.Sprintf("hours 不能为空数组（禁用任务请用 schedule.%s_enabled=false）", req.Kind))
-			return
-		}
-		if !h.cfg.Sched.SetHours(req.Kind, *req.Hours) {
+			// 补偿族的空表是**合法态**（留空 = 只手动执行，见 scheduler.ClearHours）：
+			// 其他族空表仍是误用（禁用请走 schedule.*_enabled=false），保持 400。
+			if req.Kind != "compensation" {
+				writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
+					fmt.Sprintf("hours 不能为空数组（禁用任务请用 schedule.%s_enabled=false）", req.Kind))
+				return
+			}
+			// 清空必须显式落进运行态：SetHours 拒空表，不清则旧小时表会继续自动跑。
+			if !h.cfg.Sched.ClearHours(req.Kind) {
+				writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
+					fmt.Sprintf("kind=%q 非法（可选：%v）", req.Kind, scheduler.Kinds()))
+				return
+			}
+		} else if !h.cfg.Sched.SetHours(req.Kind, *req.Hours) {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
 				"hours 需为 0-23 的小时数字")
 			return

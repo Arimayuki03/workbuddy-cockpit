@@ -25,7 +25,7 @@ func TestKindNamesAndParse(t *testing.T) {
 	if len(names) != kindCount {
 		t.Fatalf("Kinds()=%d 类，应为 %d", len(names), kindCount)
 	}
-	want := []string{"checkin", "travel", "activity", "keepalive", "school", "cat", "queue"}
+	want := []string{"checkin", "travel", "activity", "keepalive", "school", "cat", "queue", "renew", "compensation"}
 	for i, w := range want {
 		if names[i] != w {
 			t.Fatalf("Kinds()[%d]=%q 应为 %q", i, names[i], w)
@@ -47,9 +47,9 @@ func TestSnapshotAllDefaults(t *testing.T) {
 		t.Fatalf("快照 %d 项", len(snap))
 	}
 	for _, sn := range snap {
-		// queue/renew 是 opt-in 任务（renew 对临期账号主动打 refresh 写接口），
-		// 缺省关；其余六类缺省开。
-		if sn.Kind == "queue" || sn.Kind == "renew" {
+		// queue/renew/compensation 是 opt-in 任务（renew 对临期账号主动打 refresh 写接口、
+		// compensation 是有截止日期的领取类写请求），缺省关；其余六类缺省开。
+		if sn.Kind == "queue" || sn.Kind == "renew" || sn.Kind == "compensation" {
 			if sn.Enabled || sn.NextFire != "" {
 				t.Fatalf("%s 缺省应禁用（opt-in）：%+v", sn.Kind, sn)
 			}

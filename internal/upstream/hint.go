@@ -47,6 +47,14 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		return "request context exceeds the model's limit; reduce history/message size"
 	case ErrImageInvalid:
 		return "image request was rejected by upstream; check image_url format and image data"
+	case ErrToolCallMismatch:
+		// 11148 工具调用/结果错配：问题在请求历史（assistant.tool_calls 与其 tool 结果
+		// 的配对/顺序被客户端回放弄坏），**与账号无关**——换号/重试同一份历史仍会撞同一
+		// 判定。给客户端的可行动作只有重建历史，故明确指向「开始新会话」；再点明
+		// 「不换账号也会如此」，避免客户端把它当成账号故障去反复重试（那正是本次要
+		// 消灭的行为）。措辞与 11135 家族（同样是历史/图片不可修复 → new conversation）
+		// 保持一致口径。
+		return "request history has tool calls that do not match their tool results; start a new conversation to rebuild history (not an account issue)"
 	case ErrWafBlock:
 		// 账号级 WAF 403 与 IP 级 fail-fast 同 hint：两者对客户端的动作一致
 		// （等待窗口过去再试，换号/立刻重试无意义）。

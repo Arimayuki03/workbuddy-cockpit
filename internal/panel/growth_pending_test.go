@@ -26,14 +26,18 @@ func TestGrowthPendingSkipsLocked(t *testing.T) {
 	}
 }
 
-// TestGrowthPendingClaimedAndDone 既有语义回归：已领取 / 已达标未领 / 未登记动作
+// TestGrowthPendingClaimedAndDone 语义回归：已领取 / 已达标未领 / 未登记动作
 // 三类的判定不因 Locked 过滤的加入而改变。
+//
+// 注意第 35-38 行的方向：本断言此前是反写的（写成「为真即报错」，报错文案却写着
+// 「应入待办」），在 growthPending 对达标未领恒返回 false 的旧口径下恒过；
+// 吸收 panel 5f6c7caf（达标未领也要入队自动补领）后按文案口径修正为正向断言。
 func TestGrowthPendingClaimedAndDone(t *testing.T) {
 	if growthPending(upstream.Task{TaskCode: "Sequential_Tasks_2", Claimed: true}) {
 		t.Error("已领取任务不得入待办")
 	}
-	if growthPending(upstream.Task{TaskCode: "Sequential_Tasks_2", Target: 5, Current: 5}) {
-		// 达标未领仍入队（队列执行后自动领奖），Locked 过滤不得改变这一分支。
+	if !growthPending(upstream.Task{TaskCode: "Sequential_Tasks_2", Target: 5, Current: 5}) {
+		// 达标未领入队（队列执行后自动领奖），Locked 过滤不得改变这一分支。
 		t.Error("达标未领任务应入待办（队列会自动领奖）")
 	}
 	if growthPending(upstream.Task{TaskCode: "no_such_task"}) {

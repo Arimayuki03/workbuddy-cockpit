@@ -307,6 +307,24 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 		if s.DegradeUntil != nil && !s.DegradeUntil.IsZero() && now.Before(*s.DegradeUntil) {
 			e.degradeUntil = *s.DegradeUntil
 		}
+		// 恢复最早到期积分快照（v1.20.0，与 degrades/breaker 同口径）：
+		//   - 缺键（旧 state.json）→ 指针 nil → 零值，视为"未设置"，不报错、不迁移；
+		//   - 失效时刻非未来 → 丢弃（过期快照不复活，避免陈旧快照让加成生效）；
+		//   - 余量钳到 [0, credits]（与 SetCreditEarliest/SetCreditsDetailed 的写入
+		//     钳制对称：state.json 手工脏数据不得让"包余量 > 总余额"）。
+		if s.EarliestExpiry != nil && !s.EarliestExpiry.IsZero() && now.Before(*s.EarliestExpiry) {
+			er := s.EarliestRemaining
+			if er < 0 {
+				er = 0
+			}
+			if er > s.Credits {
+				er = s.Credits
+			}
+			if er > 0 {
+				e.earliestExpiry = *s.EarliestExpiry
+				e.earliestRemaining = er
+			}
+		}
 		// 恢复 modelCooldowns，惰性过滤已过期条目（Until 在未来才恢复）。
 		// 防止重启后残留已过期的模型级冷却条目（与 pick 路径的 pruneExpiredModelCooldowns 同口径）。
 		if len(s.ModelCooldowns) > 0 {
@@ -579,6 +597,16 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			du := e.degradeUntil
 			degradeUntil = &du
 		}
+		// 最早到期积分快照落盘（v1.20.0，同惰性过滤口径）：仅「失效时刻在未来且
+		// 余量 > 0」才写出——已失效的包信息不落盘（落盘即清理，避免重启后带着
+		// 过期快照去算虚拟实例加成；恢复侧同样过滤，双保险）。
+		var earliestExpiry *time.Time
+		var earliestRemaining int64
+		if e.earliestRemaining > 0 && !e.earliestExpiry.IsZero() && now.Before(e.earliestExpiry) {
+			ee := e.earliestExpiry
+			earliestExpiry = &ee
+			earliestRemaining = e.earliestRemaining
+		}
 		// 惰性清理僵尸 reason：until 为零值或已过期时不写出 cool_kind/reason，
 		// 避免 state.json 残留「until=0001 零值 + reason=6004 model rate limit」
 		// 的不一致快照（模型级冷却不该污染账号级 coolKind/reason 域）。disabled
@@ -604,6 +632,10 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			BreakerUntil:     breakerUntil,
 			RetryCount:       retryCount,
 			CreditsExpiring:  e.creditsExpiring,
+			// 最早到期积分快照（v1.20.0）：与 CreditsExpiring 并列的独立观测，
+			// 落盘过滤见上方注释。
+			EarliestExpiry:    earliestExpiry,
+			EarliestRemaining: earliestRemaining,
 			// 续期观测（schedule.renew_enabled 巡检 + 保活/签到刷新路径共同维护）：
 			// lastRenewed 零值也写（运维口径，见 stateAccount.LastRenewed 注释）；
 			// renewLastErr 成功态为空串（omitempty 省略），失败态原样落盘。

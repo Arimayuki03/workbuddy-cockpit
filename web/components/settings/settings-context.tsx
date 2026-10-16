@@ -30,6 +30,7 @@ import {
   pickValues,
   emptyForm,
   toWire,
+  pairError,
   SCHEDULE_FIELDS,
   PROMPT_FIELDS,
   COOLDOWN_FIELDS,
@@ -327,6 +328,13 @@ export function SettingsProvider({children}: {children: ReactNode}) {
       const w = toWire(f, cur[k]);
       if (!w.ok) {
         notify.err(t('settings.fieldInvalid', {label: tp(f.label)}), w.error);
+        return;
+      }
+      // 成对区间校验（下限 ≤ 上限）：单字段合法但区间填反时必须拦下，
+      // 提交给后端也只会被拒（甚至落盘一份坏配置）
+      const pair = pairError(f, cur);
+      if (pair) {
+        notify.err(t('settings.fieldInvalid', {label: tp(f.label)}), pair);
         return;
       }
       patch[k] = w.value;
