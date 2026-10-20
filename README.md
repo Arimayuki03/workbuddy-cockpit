@@ -139,6 +139,13 @@ go build -trimpath -tags embed_panel -ldflags="-s -w" -o wb2api ./cmd/server
 
 双击 **启动服务.bat** 交互菜单即可（自动编译所需工具、自动检测端口与僵死进程）。发行版 exe 双击即可用：配置文件不存在时首启引导会自动生成带随机 `api_key` 的最小 `config.json` 并打印密钥（双击报错窗口保持可见）。详见 [使用指南.md](使用指南.md)。
 
+### 方式四：NanoPi R28S / OpenWrt ARM64（当前自用部署）
+
+在 FriendlyWrt / OpenWrt（aarch64、约 1 GiB 内存）上以**单容器 + host 网络**运行：`/opt/wb2api/{config,auths,data}` 三个目录 bind mount，主程序与 `resolv.conf` 只读挂载；另有一个 procd 托管的 `wb2api-admin-proxy`，把内网 / Tailscale 的 `17863` 转发到 `127.0.0.1:7863`。
+
+- 完整目录布局、`docker run` 参数、低写入 / 升级 / 备份 / 安全边界：[docs/DEPLOY-R28S.md](docs/DEPLOY-R28S.md)
+- 适用场景：ARM64 小主机 / 软路由 / NAS；x86 与桌面端仍推荐方式一 / 二 / 三
+
 ### 验证
 
 ```bash
@@ -273,6 +280,7 @@ workbuddy-cockpit/
 | 文档 | 内容 |
 |---|---|
 | [使用指南.md](使用指南.md) | 启停 / 配置 / 账号管理 / 接口验证 / 多密钥分发 / 双协议接入 / 入站 IP 安全 / credit_floor / 作用域 Token / 面板用法（含凭据导入导出）/ 常见问题排查 |
+| [docs/DEPLOY-R28S.md](docs/DEPLOY-R28S.md) | NanoPi R28S（FriendlyWrt / OpenWrt ARM64）单容器部署：目录布局、管理桥、升级、备份、SD 卡写入与安全边界 |
 | [docs/DESIGN-v1.2.0-panel-manager.md](docs/DESIGN-v1.2.0-panel-manager.md) | v1.2.0 面板整合设计定稿 |
 | [config.example.json](config.example.json) | 全量配置键参考（含注释级说明） |
 
@@ -298,6 +306,7 @@ workbuddy-cockpit/
 | v1.19.0 | 2026-10-16 | **吸收两上游修复与增强（自用轮，10 个任务区并行实施）**——**11148 判请求级错误**（工具调用/结果配对错乱对同一 body 是确定性的：不再轮转全池、不再喂连败——此前会把健康号逐个打出池；改为立即 400 透传上游原文 + hint 指向「开新会话」）；**空 `function.name` 的 tool_call 剔除**（防线上 11133）；**`prompt_cache_key` 无 `conversation_id` 时回退会话键**（跨轮缓存不再退化成 `sha256(uid+"|")` 常量键，补钉住用例）；**越界 `max_tokens` 上限钳制**（客户端按剩余额度算出的 99 亿不再被上游包成 503 `no_healthy_account` 而反复重试）；**`cooldown.credit_exhausted` 积分耗尽冷却可调**（留空 = 旧行为：硬冷却到次日 04:00；填 `10m`/`1h` 则只退出这一小段、到期自动回池，中途充值或额度刷新即可用上；`WB2A_CREDIT_EXHAUSTED` 可覆盖、面板热改、非法值启动报错含键名）；**私网/本机目标自动直连不走出口代理**（账号绑定线路时上游在本机/内网不再被绕死；判定零分配，http/https 校验不变）；**夜猫子跳过手动停用号**（仅夜猫口径——夜猫是真实对话，让位号不参与；旅行/成长/签到照常）；**任务补领两修**（任务中心「达标未领」入队自动补领，修 `growthPending` 旧口径；mp 对话任务 accept 后回读真实 target，三处入口同修——此前少报事件致 claim 报 400）；**模型映射兜底键 `*`**（接住所有未命中映射的模型名、精确条目优先；副作用：拼错的模型名也会被接住）；**`/v1/models` 第三方目录兼容字段**（`modalities.input` + `supported_reasoning_levels`，只增不改，服务 Magpie 类只读这两个字段的客户端）；定格：全仓 24 包测试绿 + 面板 tsc/lint/静态导出三绿 + dist 清空重放（17 页 / 205 文件） |
 | v1.19.1 | 2026-10-16 | **第二波：任务自动化 + 可观测（四件）**——**每日领补偿**（`schedule.compensation_*` 默认关：平台活动补偿一键领——有则领、没有就跳过、重复执行不会多领、国际版与停用号跳过；面板任务页「立即执行」当场跑并回报"几个号领到 / 共多少积分"，`POST /api/compensation/run`；端点 = 计费基址 `POST /billing/meter/compensation-status` + `/claim-compensation`，**实测必须打 codebuddy.cn 且不带 `/v2` 前缀**——`/v2` 路径会 404 并伪装成"今天没得领"；业务拒绝（code≠0）视为正常"无可领"，HTTP 4xx/5xx 才是真错误）；**任务随机延后 + 账号错峰**（`random_delay_minutes` 0–60 与 `account_delay_min/max_seconds` 0–600，默认全关；偏移用「部署种子 + 日期 + 任务族」sha256 确定性派生、重启当天不变、种子不入日志；排程内核重写为**槽位枚举**——同小时先后两个延后槽位（如 09:12 旅行 / 09:37 签到）都按各自真实时刻派发、不丢槽不重复；仅自动排程，手动立即执行不受影响）；**快过期积分优先消耗**（`pool.prefer_expiring` 默认开：最早到期且仍有余量的账号在加权选号 ×3 虚拟实例、粘性可用列表放 3 份；**不采纳上游「到期升序硬排序 + 删四因子」方案**，保留现有三因子与 `credits_desc` 语义；快照随余额刷新供给，热改下一个刷新周期生效）；**日志 / 用量暴露层**（`/api/request_logs` 补 `from`/`to`/`ip`/`ua` 过滤——复用早已实现却无生产者的 `reqlog.Filter`，面板日志页新增来源 IP / UA 列、起止时间与子串过滤；`/api/usage` 补 `from`/`to` 窗口并回显，面板统计页新增「自定义区间」；日志侧 IP 采集接入可信代理解析，**默认安全口径不变**）；**集成修复**：面板保存配置不再把新任务族静默关掉（`applyConfig` 未知 kind 一律归零的旧行为），新键的"需重启"提示入 `restartRequiredFields`；定格：全仓 24 包测试绿 + 面板 tsc/lint/静态导出三绿 + dist 清空重放 |
 | v1.19.2 | 2026-10-16 | **审查修复轮**（OCR 全量审查 51 文件 → 23 条评论逐条验证后全修）——**跨层字段错位（high）**：日志页新列与详情读 `ip`/`ua` 而后端序列化的是 `client_ip`/`user_agent`，来源列恒显示「—」（服务端过滤仍生效、故不易发现）→ 前端 4 处读点与类型声明统一对齐后端 json tag；**补偿「小时清空」清不掉**：`SetHours` 拒空表、`hoursOf` 又优先运行态表，面板/`PATCH /admin/tasks` 提交 `[]`（留空 = 只手动）后仍按旧整点自动领直到重启 → 新增 `scheduler.ClearHours`（写非 nil 空表 + 唤醒重排）并接通面板保存与 admin PATCH 两条路径；**越界钳制的 float64 溢出**：`int64(n)` 在 `1e19` 量级溢出为 MinInt64 致上限钳制静默失效，下限钳制同款溢出还会把「要长输出」的请求压成 16 → 两处均改浮点比较；**界面口径三修**：补偿卡片「保存开关不再吞掉未提交的时刻」+ 禁用口径统一 `canEdit`、统计页「今日请求」改独立今日快照（自定义区间不含今天时不再误显示 0）且 `pickWindow` 不再反复覆盖已填区间、日志页补区间合法性校验 +「归档未开启」空态提示 + 筛选期暂停实时刷新；**其他**：`/api/request_logs` 响应补 `source`/`archive_enabled`、归档读取失败的 500 不再回显绝对路径、`/admin/tasks` 的 `next_fire` 零时点输出空串、补偿末号取消不再误报「半程中断」、账号间隔空串校验与 `toWire` 同口径（不再依赖后端拒绝）、`session_sticky` 进重启段清单 + 五语言重启提示文案补全、`localInputToSec` 抽公共 helper；定格：全仓 24 包测试绿 + 面板 tsc/lint/静态导出三绿 + dist 清空重放（206 文件） |
+| v1.19.3 | 2026-10-20 | **401 网关页自动禁用 + R28S 部署手册**——上游鉴权层对已吊销会话直接返回 **401 HTML**（APISIX / openresty），body 没有业务信封，旧分类落入 `ErrClient` 只换号不罚号，死号会留在池里反复 401。新增形态判定 `IsGatewayAuthPage`（只认 **401 + HTML 文档**；纯文本 / 空体 / JSON 信封一律不判，避免凭状态码误杀），聊天、签到、余额、续期、保活、余额刷新六条链路统一自动禁用并写入 `disabled_reason = upstream 401 gateway page (session revoked), re-login required`；面板徽章显示「需重新登录」，`gateway_hint` 与 12153 会话过期分开提示；签到/余额回执不再透传整段 HTML。新增 [docs/DEPLOY-R28S.md](docs/DEPLOY-R28S.md)：NanoPi R28S（FriendlyWrt / OpenWrt ARM64）单容器、host 网络、`/opt/wb2api` 目录布局、17863 管理桥、低写入与 SD 卡注意事项、升级/备份/安全边界 |
 
 完整变更见 [Releases](https://github.com/Arimayuki03/workbuddy-cockpit/releases)。
 

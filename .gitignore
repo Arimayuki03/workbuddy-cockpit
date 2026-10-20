@@ -43,6 +43,10 @@ workbuddy2api-dist.zip
 # Session artifacts
 .omo/
 .v2c/
+# 本地审查 / Mimosa 会话产物（可能含扫描上下文，不入库）
+.mimosa/
+.review/
+web/.mimosa/
 # Claude 本地配置（settings.local.json 的 curl 授权规则串内嵌真实 api_key，不得入库）
 .claude/
 
@@ -81,6 +85,7 @@ SPEC.md
 !README.md
 !使用指南.md
 !docs/DESIGN-v1.2.0-panel-manager.md
+!docs/DEPLOY-R28S.md
 
 web/node_modules/
 web/.next/
