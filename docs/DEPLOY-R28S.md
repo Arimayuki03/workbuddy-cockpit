@@ -16,7 +16,7 @@
 | 应用目录 | `/opt/wb2api`（SD 卡） |
 | 监听 | `:7863` 网关 + 面板；`:17863` 内网管理桥 → `127.0.0.1:7863` |
 | 账号 | 15 个 cn 账号（2026-10-20 全部健康；以 `/healthz` 实时值为准） |
-| 资源占用 | 空载约 52 MiB RSS / 约 5% CPU（仅供参考） |
+| 资源占用 | 实测约 52 MiB RSS / 约 5% CPU（采样时仍有请求，仅供参考） |
 
 > 这是**低写入**部署：可执行文件和 `resolv.conf` 只读挂载，只有 `config`、`auths`、`data` 三个目录可写；适用于 SD 卡 / eMMC 寿命敏感的小主机。
 
@@ -61,7 +61,7 @@ docker run -d --name workbuddy2api \
   workbuddy2api:router /app/wb2api -config /app/config/config.json
 ```
 
-- 当前容器以 root 运行（未设置 `--user`），`/opt/wb2api/{config,auths,data}` 属主 root、目录 0700、文件 0600。若改为非 root，必须同步 `chown`，否则写 `auths/*.json.tmp` 会 `permission denied`。
+- 当前容器以 root 运行（未设置 `--user`），`/opt/wb2api/{config,auths,data}` 属主 root；`auths/`、`data/` 目录 0700，`config/` 目录 755，敏感文件 0600。若改为非 root，必须同步 `chown`，否则写 `auths/*.json.tmp` 会 `permission denied`。
 - `--network host` 下没有 `-p` 端口映射；7863 / 17863 的可达性由宿主防火墙和 Tailscale ACL 决定。
 - `docker logs` 走 json-file；当前未设置 `max-size` / `max-file`。长期运行建议重建容器时加 `--log-opt max-size=10m --log-opt max-file=3`，减少 SD 卡写入（见 §10）。
 
@@ -139,7 +139,7 @@ wget -qO- http://127.0.0.1:17863/healthz
 ```
 
 - `api_key`、`upstash.token/url` 等敏感值只存在于 R28S 的 `/opt/wb2api/config/config.json`，不进入仓库、本文和截图。
-- 当前启用了 Upstash 状态镜像；地址与令牌不入文档。
+- 当前配置了 Upstash 状态镜像；地址与令牌不入文档。
 - `panel.enabled` 或 `admin.enabled` 为 true 时 `api_key` 不能为空，否则服务拒绝启动。
 
 ## 7. 日常启停与检查
@@ -219,7 +219,7 @@ netstat -tlnp | grep -E '7863|17863'
 - 17863 管理桥没有额外鉴权，**禁止公网放行**；只给本人管理设备使用。
 - `api_key` 是面板和 API 的唯一凭证；不要写进仓库、聊天记录或截图。`auths/`、`data/`、`config/config.json` 已在 `.gitignore` 中排除。
 - 外部/共享入口只放行 7863 时，仍需注意它同时承载面板与 `/admin/*`；不要在共享入口上使用弱 key，必要时用 `security.ip_whitelist` / Tailscale ACL 限定来源。
-- 面板 HTTPS、MFA 当前未启用；Tailscale 隧道加密不等于浏览器 HTTPS。公网场景务必加反代 TLS。
+- 如需公网访问，务必加 HTTPS 反代；Tailscale 隧道加密不等于浏览器 HTTPS。
 
 ## 12. 已知差异与排障
 
