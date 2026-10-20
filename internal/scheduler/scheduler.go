@@ -775,7 +775,11 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 				log.Printf("checkin %s refresh: %v", logfmt.Label(st.UID, st.Nickname), err)
 				var ue *upstream.Error
 				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
-					if s.cfg.Pool.NoteSessionDead(st.UID) {
+					if upstream.IsGatewayAuthPageError(err) {
+						// 401 + HTML 网关页：鉴权层已拒绝凭证，刷新不可自愈，立即禁用。
+						s.cfg.Pool.Disable(st.UID, upstream.SessionRevokedReason)
+						log.Printf("WARN: checkin %s: upstream 401 gateway page — auto-disabled (re-login required)", logfmt.Label(st.UID, st.Nickname))
+					} else if s.cfg.Pool.NoteSessionDead(st.UID) {
 						log.Printf("WARN: checkin %s: 连续 %d 次 12153 session dead — 禁用", logfmt.Label(st.UID, st.Nickname), pool.SessionDeadThreshold())
 					}
 				}
@@ -823,8 +827,16 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 		remain, buckets, err := s.cfg.Upstream.UserResourceDetailed(a, s.cfg.ExpiringSoonWindow)
 		if err != nil {
 			log.Printf("user-resource %s: %v", logfmt.Label(st.UID, st.Nickname), err)
+			detail := err.Error()
+			if upstream.IsGatewayAuthPageError(err) {
+				// 余额接口也撞 401 网关页：同一账号的会话已吊销，立即禁用并把
+				// 回执 detail 换成可读提示（避免整段 HTML 出现在签到结果里）。
+				s.cfg.Pool.Disable(st.UID, upstream.SessionRevokedReason)
+				log.Printf("WARN: user-resource %s: upstream 401 gateway page — auto-disabled (re-login required)", logfmt.Label(st.UID, st.Nickname))
+				detail = upstream.SessionRevokedReason
+			}
 			oc.Status = CheckinFail
-			oc.Detail = joinDetail(oc.Detail, "resource: "+err.Error())
+			oc.Detail = joinDetail(oc.Detail, "resource: "+detail)
 			failN++
 			out = append(out, oc)
 			continue
@@ -1216,7 +1228,11 @@ func (s *Scheduler) runKeepalive(ctx context.Context) {
 			log.Printf("keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			var ue *upstream.Error
 			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
-				if s.cfg.Pool.NoteSessionDead(st.UID) {
+				if upstream.IsGatewayAuthPageError(err) {
+					// 401 + HTML 网关页：token 已被鉴权层吊销，连续计数等不来恢复。
+					s.cfg.Pool.Disable(st.UID, upstream.SessionRevokedReason)
+					log.Printf("WARN: keepalive %s: upstream 401 gateway page — auto-disabled (re-login required)", logfmt.Label(st.UID, st.Nickname))
+				} else if s.cfg.Pool.NoteSessionDead(st.UID) {
 					log.Printf("WARN: keepalive %s: 连续 %d 次 12153 session dead — 禁用", logfmt.Label(st.UID, st.Nickname), pool.SessionDeadThreshold())
 				}
 			}

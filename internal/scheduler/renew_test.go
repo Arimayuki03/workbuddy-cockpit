@@ -221,3 +221,35 @@ func TestRenewDisabledByDefaultAndScheduled(t *testing.T) {
 		t.Fatalf("renew next_fire 应在 3 点：%q (err=%v)", sn2.NextFire, err)
 	}
 }
+
+// TestRenewGatewayAuthPageDisables 401 + HTML 网关鉴权页（会话吊销）在续期巡检里
+// 必须**立即自动禁用**：刷新接口已被鉴权层拒绝，继续只记 renew_last_error 等下去
+// 也不会自愈，账号会一直留在池里被选中刷 401。
+func TestRenewGatewayAuthPageDisables(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/token/refresh") {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`<html><head><title>401 Authorization Required</title></head><body>openresty</body></html>`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "old", RefreshToken: "rt", ExpiresAt: 1})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up, ExpiringSoonWindow: 7 * 24 * time.Hour})
+	s.runRenewOnce()
+
+	st, ok := p.Status("u1")
+	if !ok {
+		t.Fatal("账号应仍在池内")
+	}
+	if !st.Disabled {
+		t.Fatalf("401 网关页必须自动禁用：%+v", st)
+	}
+	if !strings.Contains(st.DisabledReason, "401 gateway page") {
+		t.Errorf("disabled_reason=%q want 401 gateway page", st.DisabledReason)
+	}
+}

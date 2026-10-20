@@ -1069,6 +1069,47 @@ func TestChatSessionDeadDisables(t *testing.T) {
 	}
 }
 
+// TestChatGatewayAuthPageDisablesWithReason 401 + HTML 网关鉴权页（APISIX/openresty
+// 拒绝已吊销会话）与 12153 同属 ErrSessionDead：聊天链路必须**立即自动禁用**，
+// 并把可读原因写进 disabled_reason（面板据此显示「需重新登录」），同时末端
+// 错误响应带 gateway_hint 指向重登。
+func TestChatGatewayAuthPageDisablesWithReason(t *testing.T) {
+	const html401 = `<html> <head><title>401 Authorization Required</title></head> <body> <center><h1>401 Authorization Required</h1></center> <hr><center>openresty</center> <p><em>Powered by <a href="https://apisix.apache.org/">APISIX</a></p> </body></html>`
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 401, html401, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 503 {
+		t.Errorf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	st, _ := p.Status("u1")
+	if !st.Disabled {
+		t.Fatalf("account should be disabled: %+v", st)
+	}
+	if !strings.Contains(st.DisabledReason, "401 gateway page") {
+		t.Errorf("disabled_reason=%q want 401 gateway page", st.DisabledReason)
+	}
+	var env struct {
+		Error struct {
+			Message     string `json:"message"`
+			GatewayHint string `json:"gateway_hint"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("error envelope: %v body=%s", err, rec.Body)
+	}
+	if !strings.Contains(env.Error.Message, "401 Authorization Required") {
+		t.Errorf("message should passthrough upstream body, got %q", env.Error.Message)
+	}
+	if !strings.Contains(env.Error.GatewayHint, "401 gateway page") {
+		t.Errorf("gateway_hint=%q want 401 gateway page hint", env.Error.GatewayHint)
+	}
+}
+
 func TestChatTransportErrorDoesNotPenalize(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	up := &upstream.Client{

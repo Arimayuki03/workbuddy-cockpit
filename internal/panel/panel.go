@@ -859,7 +859,15 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	}
 	remain, buckets, err := p.cfg.Upstream.UserResourceDetailed(a, p.cfg.ExpiringSoonWindow)
 	if err != nil {
-		resp["balance_error"] = err.Error()
+		// 401 + HTML 网关页 = 账号会话已被上游吊销：签到/余额都不可能成功，
+		// 立即自动禁用并在回执里给可读提示（不再把整段 HTML 抛给前端）。
+		if upstream.IsGatewayAuthPageError(err) {
+			p.cfg.Pool.Disable(uid, upstream.SessionRevokedReason)
+			log.Printf("WARN: panel: checkin uid=%s: upstream 401 gateway page — auto-disabled (re-login required)", uid)
+			resp["balance_error"] = upstream.SessionRevokedReason
+		} else {
+			resp["balance_error"] = err.Error()
+		}
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
@@ -890,12 +898,20 @@ func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 	}
 	remain, buckets, err := p.cfg.Upstream.UserResourceDetailed(a, p.cfg.ExpiringSoonWindow)
 	if err != nil {
+		if upstream.IsGatewayAuthPageError(err) {
+			// 401 + HTML 网关页：上游鉴权层已拒绝该账号凭证，立即自动禁用并给
+			// 前端一条可操作的提示（重新登录），不再透传整段 HTML。
+			p.cfg.Pool.Disable(uid, upstream.SessionRevokedReason)
+			log.Printf("WARN: panel: balance uid=%s: upstream 401 gateway page — auto-disabled (re-login required)", uid)
+			writeErr(w, http.StatusBadGateway, upstream.SessionRevokedReason)
+			return
+		}
 		writeErr(w, http.StatusBadGateway, "user resource: "+err.Error())
 		return
 	}
 	p.cfg.Pool.SetCreditsDetailed(uid, remain, buckets.Expiring)
 	p.cfg.Pool.SetCreditEarliest(uid, buckets.EarliestExpiry, buckets.EarliestRemaining) // v1.20.0 最早到期快照
-	p.recordBalance(uid, remain) // 积分流水（同 accountCheckin）
+	p.recordBalance(uid, remain)                                                         // 积分流水（同 accountCheckin）
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credits": remain, "credits_total": buckets.Total()})
 }
 

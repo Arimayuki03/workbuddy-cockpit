@@ -20,6 +20,7 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/logfmt"
+	"workbuddy2api/internal/upstream"
 )
 
 // nickOf 从昵称快照取展示名（缺账号回落 uid；仅日志/文案用途）。
@@ -76,6 +77,12 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 			remain, buckets, err := s.cfg.Upstream.UserResourceDetailed(a, s.cfg.ExpiringSoonWindow)
 			if err != nil {
 				log.Printf("balance %s: %v", logfmt.Label(uid, a.NicknameValue()), err)
+				if upstream.IsGatewayAuthPageError(err) {
+					// 401 + HTML 网关页：同一账号所有接口都已被拒，余额刷新不可能
+					// 成功。立即自动禁用，避免后续轮换继续选中死号。
+					s.cfg.Pool.Disable(uid, upstream.SessionRevokedReason)
+					log.Printf("WARN: balance %s: upstream 401 gateway page — auto-disabled (re-login required)", logfmt.Label(uid, a.NicknameValue()))
+				}
 				return
 			}
 			if buckets.Expiring > 0 {

@@ -102,6 +102,15 @@ func TestClassify(t *testing.T) {
 		{401, `{"code":12153,"msg":"Offline user session not found, rate limit"}`, ErrSessionDead},
 		{401, `Offline user session not found`, ErrSessionDead},
 		{401, `{"code":12153,"msg":"Offline user session not found"}`, ErrSessionDead},
+		// 401 + HTML 网关鉴权页（APISIX/openresty 形态，实测会话被吊销时的响应）：
+		// body 没有业务信封，IsSessionDead 判不到；必须归 ErrSessionDead 触发自动
+		// 禁用，否则落 ErrClient 只换号不罚，死号永远留在池里反复 401。
+		{401, `<html> <head><title>401 Authorization Required</title></head> <body> <center><h1>401 Authorization Required</h1></center> <hr><center>openresty</center> <p><em>Powered by <a href="https://apisix.apache.org/">APISIX</a></p> </body></html>`, ErrSessionDead},
+		{401, `<!DOCTYPE html><html><body><h1>401 Authorization Required</h1></body></html>`, ErrSessionDead},
+		// 纯文本/空体 401 不判 session dead：可能是代理/传输层异常，不能凭状态码
+		// 永久禁号（与 12153 的「宁缺毋滥」同一条纪律）。
+		{401, `unauthorized`, ErrClient},
+		{401, ``, ErrClient},
 		// 12153 结构化判定（audit 修复）：code 字段各形态仍命中；裸 "12153" 数字串
 		// 撞在 requestId/时间戳等任意字段上不再触发禁号判据（chat 路径单次即 Disable，
 		// 误判代价是永久禁号）。
@@ -219,6 +228,55 @@ func TestIsWafBlocked(t *testing.T) {
 		if got := IsWafBlocked(c.status, c.body); got != c.want {
 			t.Errorf("IsWafBlocked(%d,%q)=%v want %v", c.status, c.body, got, c.want)
 		}
+	}
+}
+
+// TestIsGatewayAuthPage 401 + HTML 网关鉴权页判定（会话吊销形态）：
+// 只认 HTML 文档，纯文本/空体/JSON 信封一律 false（避免凭状态码误杀账号）；
+// 状态码必须是 401。
+func TestIsGatewayAuthPage(t *testing.T) {
+	htmlBody := `<html> <head><title>401 Authorization Required</title></head> <body> <center><h1>401 Authorization Required</h1></center> <hr><center>openresty</center> <p><em>Powered by <a href="https://apisix.apache.org/">APISIX</a></p> </body></html>`
+	cases := []struct {
+		status int
+		body   string
+		want   bool
+	}{
+		{401, htmlBody, true},
+		{401, "  \n" + htmlBody + "\n ", true}, // 前后空白容差
+		{401, `<!DOCTYPE html><html><body>401</body></html>`, true},
+		{401, `<head><title>401</title></head>`, true},
+		{401, `unauthorized`, false},                   // 纯文本不判
+		{401, ``, false},                               // 空体不判
+		{401, `{"code":12153,"msg":"session"}`, false}, // 业务信封走 IsSessionDead
+		{403, htmlBody, false},                         // 非 401
+		{500, htmlBody, false},                         // 非 401
+	}
+	for _, c := range cases {
+		if got := IsGatewayAuthPage(c.status, c.body); got != c.want {
+			t.Errorf("IsGatewayAuthPage(%d,%q)=%v want %v", c.status, c.body, got, c.want)
+		}
+	}
+	// IsGatewayAuthPageBody 只看 body（状态码无关）：HTML 为 true，其余 false。
+	for _, body := range []string{htmlBody, `<!DOCTYPE html>`, `<head>`, `<body>`} {
+		if !IsGatewayAuthPageBody(body) {
+			t.Errorf("IsGatewayAuthPageBody(%q) = false, want true", body)
+		}
+	}
+	for _, body := range []string{"", "unauthorized", `{"code":12153,"msg":"session"}`} {
+		if IsGatewayAuthPageBody(body) {
+			t.Errorf("IsGatewayAuthPageBody(%q) = true, want false", body)
+		}
+	}
+	// Error 形态：Msg 截断到 200 字符后仍能命中。
+	err := &Error{Kind: ErrSessionDead, Status: 401, Msg: htmlBody[:200]}
+	if !IsGatewayAuthPageError(err) {
+		t.Error("IsGatewayAuthPageError(401 HTML) = false, want true")
+	}
+	if IsGatewayAuthPageError(&Error{Kind: ErrSessionDead, Status: 401, Msg: `{"code":12153}`}) {
+		t.Error("IsGatewayAuthPageError(401 JSON) = true, want false")
+	}
+	if IsGatewayAuthPageError(nil) {
+		t.Error("IsGatewayAuthPageError(nil) = true, want false")
 	}
 }
 

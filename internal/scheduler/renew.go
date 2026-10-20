@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/logfmt"
+	"workbuddy2api/internal/upstream"
 )
 
 // renewWindow 巡检判定「临期」的额外提前量：NeedsRefresh(within) 判据是
@@ -125,6 +126,12 @@ func (s *Scheduler) runRenewOnce() {
 		checked++
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
 			log.Printf("renew %s: %v", logfmt.Label(st.UID, st.Nickname), err)
+			if upstream.IsGatewayAuthPageError(err) {
+				// 401 + HTML 网关页：凭证已被上游鉴权层拒绝，续期不可能成功，
+				// 直接禁用（保留 renew_last_error 供排障）。
+				s.cfg.Pool.Disable(st.UID, upstream.SessionRevokedReason)
+				log.Printf("WARN: renew %s: upstream 401 gateway page — auto-disabled (re-login required)", logfmt.Label(st.UID, st.Nickname))
+			}
 			s.cfg.Pool.SetRenewState(st.UID, err) // 失败留痕（renew_last_error）
 			failed++
 			continue

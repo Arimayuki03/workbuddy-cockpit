@@ -437,7 +437,7 @@ const (
 
 // models 返回模型列表：纯动态（缓存 1h），失败/无号返回空列表（无静态兜底）。
 // wbk_ 分发密钥上下文（withAuth 段1 塞入）时按密钥 realm + 模型白名单裁剪
-//（keystore_auth.go filterModelsForKey；无密钥/未接线时原样输出，零回归）。
+// （keystore_auth.go filterModelsForKey；无密钥/未接线时原样输出，零回归）。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
@@ -1062,9 +1062,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				lastErr = err
 				var ue *upstream.Error
 				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
-					// 12153 一次失败不杀号（临时触发会误杀）：与 scheduler keepalive/checkin
-					// 同口径走连续计数，达到 sessionDeadThreshold 才禁用。
-					h.cfg.Pool.NoteSessionDead(acct.UID)
+					if upstream.IsGatewayAuthPageError(err) {
+						// 401 + HTML 网关鉴权页：token 已被上游鉴权层直接拒绝，刷新接口
+						// 也拿不到新凭证。这不是可自愈的抖动，直接禁用并提示重登。
+						h.cfg.Pool.Disable(acct.UID, upstream.SessionRevokedReason)
+						log.Printf("WARN: [server] chat refresh acct=%s: upstream 401 gateway page — auto-disabled (re-login required)", logfmt.Label(acct.UID, acct.Nickname))
+					} else {
+						// 12153 一次失败不杀号（临时触发会误杀）：与 scheduler keepalive/checkin
+						// 同口径走连续计数，达到 sessionDeadThreshold 才禁用。
+						h.cfg.Pool.NoteSessionDead(acct.UID)
+					}
 				} else {
 					h.cfg.Pool.NoteError(acct.UID)
 				}
@@ -1593,7 +1600,8 @@ func rotateBackoff(i int, ctx context.Context) bool {
 //     基数小但响应快；WAF 信号带 IP 级粘性故指数升级保底存在）。基数经 jitterDur
 //     抖动（复用 backoff.go 单一抖动来源，防多账号同相位冷却到期再聚团）。
 //   - ErrNotFound → Cooldown(CoolSoft, notFoundCooldown 固定 60s)：短冷却防雪崩，不随 soft_rate 退避。
-//   - ErrSessionDead → Disable：session 死亡，永久禁用（需人工重登）。
+//   - ErrSessionDead → Disable：session 死亡/凭证被吊销，永久禁用（需人工重登）。
+//     12153 业务信封与 401 HTML 网关页同属该 kind，禁用原因分开写。
 //   - ErrContentBlocked → 不罚账号（无冷却/熔断/NoteError）；passthrough 首遇触发
 //     降级重试，最终仍拦则回 400 content_blocked（防火墙文案，不含账号/错误码）。
 //   - ErrBadParams → 不罚账号（无冷却/熔断/NoteError，同 ErrContentBlocked 待遇），但仍轮转。
@@ -1668,6 +1676,13 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		}
 		h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "waf 403 block")
 	case upstream.ErrSessionDead:
+		// 401 + HTML 网关鉴权页与 12153 都是「需人工重登」终态。两者禁用原因分开，
+		// 面板 disabled_reason 才能告诉运维到底是会话过期还是网关直接拒绝凭证。
+		if upstream.IsGatewayAuthPageBody(body) {
+			h.cfg.Pool.Disable(uid, upstream.SessionRevokedReason)
+			log.Printf("WARN: [server] chat acct=%s: upstream 401 gateway page — auto-disabled (re-login required)", uid)
+			return
+		}
 		h.cfg.Pool.Disable(uid, "12153 session dead")
 	case upstream.ErrNotFound:
 		// 404 短冷却（软冷却），防雪崩。固定 notFoundCooldown，不随 soft_rate 退避：

@@ -30,7 +30,7 @@ const (
 	ErrNone           ErrKind = iota // 成功
 	ErrHardCredit                    // 余额不足（402 或 body 关键词）→ 长冷却
 	ErrSoftRate                      // 429 软限流 → 短冷却
-	ErrSessionDead                   // 401 + 12153 offline session 失效 → 禁用
+	ErrSessionDead                   // 401 + 12153 offline session 失效，或 401 + HTML 网关鉴权页 → 禁用
 	ErrNotFound                      // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
 	ErrServer                        // 5xx 上游故障
 	ErrContentBlocked                // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
@@ -474,6 +474,44 @@ func IsWafBlocked(status int, body string) bool {
 	return status == http.StatusForbidden && !hasBusinessEnvelope(body)
 }
 
+// SessionRevokedReason 上游 401 HTML 网关鉴权页（登录会话被吊销）的自动禁用原因。
+// 面板/状态端点直接展示该字符串；英文与既有 disable reason 口径一致。
+const SessionRevokedReason = "upstream 401 gateway page (session revoked), re-login required"
+
+// IsGatewayAuthPageBody 报告 body 是否是网关鉴权失败页（HTML 形态）。
+//
+// 与 IsSessionDead（12153 JSON 业务信封）并列：上游会话被吊销后，APISIX/openresty
+// 会在鉴权层直接返回 401 的 HTML 页面（实测正文 `<html><head><title>401
+// Authorization Required</title>...openresty...apisix`），body 里没有业务信封。
+// 这种情况与 12153 等价——token 已不可用，只能重新登录，继续轮换只会白打上游。
+//
+// 判定边界刻意收窄：只认「以 < 开头且含 HTML 文档标记」的 body。纯文本/空体/JSON
+// 信封一律 false——空体或纯文本 401 可能是代理/传输层异常，不能单凭状态码永久禁号；
+// 带 `"code":`/`"msg":` 的业务信封仍走 IsSessionDead 的结构化判定。
+func IsGatewayAuthPageBody(body string) bool {
+	s := strings.TrimSpace(body)
+	if s == "" || !strings.HasPrefix(s, "<") || hasBusinessEnvelope(s) {
+		return false
+	}
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, "<html") ||
+		strings.Contains(lower, "<!doctype") ||
+		strings.Contains(lower, "<head") ||
+		strings.Contains(lower, "<body")
+}
+
+// IsGatewayAuthPage 报告 status+body 是否构成「401 + HTML 网关鉴权页」。
+func IsGatewayAuthPage(status int, body string) bool {
+	return status == http.StatusUnauthorized && IsGatewayAuthPageBody(body)
+}
+
+// IsGatewayAuthPageError 报告 err 是否是「401 + HTML 网关鉴权页」。
+// Error.Msg 在上游客户端截断到 200 字符，HTML 文档标记位于 body 前部，仍可命中。
+func IsGatewayAuthPageError(err error) bool {
+	var ue *Error
+	return errors.As(err, &ue) && ue.Status == http.StatusUnauthorized && IsGatewayAuthPageBody(ue.Msg)
+}
+
 // retryAfterHeaderCandidates 冷却时长优先解析的响应头候选序列（P1-2，对齐
 // intl CLI parseRetryAfterMs / parseRateLimitResetMs 的头族）：
 // retry-after（秒，RFC 7231）/ retry-after-ms（毫秒）/ x-ratelimit-reset
@@ -593,11 +631,14 @@ func ParseRateReset(body string) (time.Time, bool) {
 //  0. 11102（IsModelBlocked）——「该后端无此模型」确定性答复，语义最具体，最先判
 //     （详见 IsModelBlocked 注释；只认 400/404，429+11102 属限流语义走第 3 层）。
 //  1. 402 —— 真正的计费余额耗尽状态码，最严、最不可自愈，最先判。
-//  2. IsSessionDead（12153）—— 需要人工重登的终态。若 401 body 同时含 code 12153 与
-//     "rate limit"（如网关错误页混排），归 session_dead：短冷却救不活失效 session，
-//     误判为限流会让该死号留在池中反复被选中；code 字段结构化判定比限流层的大范围
-//     子串更具体，具体优先于宽泛（裸 "12153" 数字子串不参与判定，防 requestId/时间戳
-//     撞串误禁号，见 IsSessionDead）。
+//  2. IsSessionDead（12153）/ IsGatewayAuthPage（401 + HTML 网关鉴权页）—— 需要人工
+//     重登的终态。若 401 body 同时含 code 12153 与 "rate limit"（如网关错误页混排），
+//     归 session_dead：短冷却救不活失效 session，误判为限流会让该死号留在池中反复
+//     被选中；code 字段结构化判定比限流层的大范围子串更具体，具体优先于宽泛（裸
+//     "12153" 数字子串不参与判定，防 requestId/时间戳撞串误禁号，见 IsSessionDead）。
+//     401 + HTML 是上游鉴权层（APISIX/openresty）拒绝已吊销会话的形态，body 里没有
+//     业务信封、不会有 12153，必须用形态判定单独兜住；否则会落 ErrClient 只换号不罚
+//     （账号永远留在池里反复 401）。
 //  3. accountFaultRule —— 账号级授权/配额故障（11140 request illegal auth 风控、
 //     14017 trial not activated register 未完成）。与 429 一起纳入轮换冷却，且必须
 //     先于 status==429 判定：14017 常带 429 状态码，若落到 status==429 会误归
@@ -650,6 +691,13 @@ func Classify(status int, body string) ErrKind {
 	// 429 前移保持相对次序）：账号级终态等不来自愈，限流状态码不得掩盖它们
 	// （429+14017 必须 accountFault，401+12153 混排 "rate limit" 必须 sessionDead）。
 	if IsSessionDead(body) {
+		return ErrSessionDead
+	}
+	// 401 + HTML 网关鉴权页：上游鉴权层拒绝已吊销的会话（APISIX/openresty 错误页）。
+	// 与 12153 同为「需人工重登」终态，但 body 无业务信封，IsSessionDead 判定不到。
+	// 必须在通用 4xx 兜底之前分流：落 ErrClient 只会换号 + 累计连败，死号留在池内
+	// 反复被选中，且不会触发自动禁用。
+	if IsGatewayAuthPage(status, body) {
 		return ErrSessionDead
 	}
 	if accountFaultRule.hit(body, lower) {
@@ -1203,8 +1251,8 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 		UID:          a.UID,
 		EnterpriseID: a.EnterpriseID,
 		// 直读字段：本段已持 a.mu（快照语义），NicknameValue 会自锁。
-		Nickname:     a.Nickname,
-		DeviceToken:  a.DeviceToken,
+		Nickname:    a.Nickname,
+		DeviceToken: a.DeviceToken,
 	}
 	a.Unlock()
 	c.RefreshHeaders(req, &hdrSnapshot)
@@ -2268,7 +2316,7 @@ type CompensationStatus struct {
 // 宽容三判据（对齐 wbm compensation_already_claimed）：claimed 为真、claimed_at 或
 // claimed_text 非空——任一成立即算领过。字段全缺时返回 false：那表示我们**认不出**这个
 // 结构，此时应继续尝试领取，而不是当成「已领」把一次有时限的机会放过
-//（认不出 ≠ 领过了）。
+// （认不出 ≠ 领过了）。
 func (s *CompensationStatus) AlreadyClaimed() bool {
 	if s == nil {
 		return false
@@ -2282,8 +2330,8 @@ func (s *CompensationStatus) AlreadyClaimed() bool {
 // CompensationStatus 查询「活动补偿」当前状态（POST /billing/meter/compensation-status）。
 //
 // 返回 err != nil 只表示**查询**失败（网络/协议/业务错误）——调用方仍应照常尝试领取
-//（认不出/查不到不等于领过了，见 AlreadyClaimed）；结构能识别但字段缺失时返回零值
-//状态且 err=nil。瞬时错误（5xx/网络抖动）走 retryBillingTransient 有界重试，与
+// （认不出/查不到不等于领过了，见 AlreadyClaimed）；结构能识别但字段缺失时返回零值
+// 状态且 err=nil。瞬时错误（5xx/网络抖动）走 retryBillingTransient 有界重试，与
 // checkin/余额同口径。
 func (c *Client) CompensationStatus(a *auth.Auth) (*CompensationStatus, error) {
 	if c.globalOn(a) {
@@ -2310,7 +2358,7 @@ func (c *Client) CompensationStatus(a *auth.Auth) (*CompensationStatus, error) {
 // 版本可能是字符串/数字/布尔（网页 bundle 里 claimed 是布尔、claimed_at 是时间戳数字），
 // 一次性解结构体会因单个字段类型不符而整体失败 → 状态退回「未领过」→ 多发一次注定
 // 失败的写请求（且当时的汇报里少掉「已领过」这一类）。逐字段解析则符合 wbm Python 侧
-// 的动态类型语义（那边只判 `value not in (None,'',0)`）。
+// 的动态类型语义（那边只判 `value not in (None,”,0)`）。
 func parseCompensationStatus(data json.RawMessage) *CompensationStatus {
 	st := &CompensationStatus{}
 	var m map[string]json.RawMessage
@@ -2381,7 +2429,7 @@ func rawToInt(raw json.RawMessage) int64 {
 //
 // 三态刻意分开（对齐 wbm tencent.claim_compensation）——「没有可领 / 已经领过」在上游是
 // **业务错误**，但它不是故障：混成一个 error，界面会把「今天本来就没得领」报成
-//「N 个账号失败」，用户于是反复重试一个永远不会成功的动作。故：
+// 「N 个账号失败」，用户于是反复重试一个永远不会成功的动作。故：
 //
 //	claimed=true,  err=nil   → 本次到账（credits 为回执积分，回执缺字段记 0）
 //	claimed=false, err=nil   → 没有可领 / 已经领过（业务拒绝：正常态，调用方静默跳过）

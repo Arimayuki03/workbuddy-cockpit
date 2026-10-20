@@ -64,6 +64,12 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 	case ErrAccountFault:
 		return "account-level fault at upstream (auth/quota state); the gateway will rotate or disable this account"
 	case ErrSessionDead:
+		// 401 + HTML 网关鉴权页与 12153 同属「需人工重登」终态，但给客户端的
+		// 提示要能区分：前者是 token 被上游鉴权层直接拒绝（常见于会话被吊销/
+		// 账号在别处重新登录），后者是离线会话过期。
+		if IsGatewayAuthPageBody(msg) {
+			return "upstream rejected the account credentials (HTTP 401 gateway page); the account is disabled until re-login"
+		}
 		return "account session expired at upstream; the account is disabled until re-login"
 	case ErrHardCredit:
 		return "account credits exhausted at upstream; waiting for daily check-in to restore"
