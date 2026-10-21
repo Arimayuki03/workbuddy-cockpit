@@ -313,6 +313,9 @@ func (p *Panel) routes() {
 	// 账号备注（accounts_note.go）：面板 accounts 页后端化备注的写入端点，空串=清除。
 	// 写语义，不进 wbt_ token 分级表（分级表外恒拒，与 disable/enable 同口径）。
 	p.api("POST", "/api/accounts/{uid}/note", "/api/accounts/{uid}/note", p.accountNote)
+	// 账号手写权重（account_weight.go）：选号乘数，写 auth 文件顶层 weight。
+	// 写语义，不进 wbt_ token 分级表（与 note 同口径）。
+	p.api("POST", "/api/accounts/{uid}/weight", "/api/accounts/{uid}/weight", p.accountWeight)
 	// 出口代理线路（proxy_route.go）：线路表回显（密码脱敏）+ 账号绑定/解绑
 	// （空 route = 解绑直连）。写语义，不进 wbt_ token 分级表（与 note 同口径）。
 	p.api("GET", "/api/proxy_routes", "/api/proxy_routes", p.proxyRoutes)

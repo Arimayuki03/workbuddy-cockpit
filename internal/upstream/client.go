@@ -50,6 +50,10 @@ const (
 	// 历史）。若落到通用 4xx 兜底，applyErrorPolicy 的 ErrClient 分支会轮转全池 + 喂
 	// 连败计数（NoteFailures），把健康号打出池——用一个请求自己的历史错误罚光整个账号池。
 	ErrToolCallMismatch
+	// ErrEmptyMessage 11151「a message has empty content」→ 请求级错误：同一份
+	// body 换任何账号都是同一结果，轮转只会白扔健康号配额并最终把确定性 400
+	// 包装成 503。与 ErrClient 分开，由 handler 立即 400 透传原文。
+	ErrEmptyMessage
 )
 
 func (k ErrKind) String() string {
@@ -80,6 +84,8 @@ func (k ErrKind) String() string {
 		return "image_invalid"
 	case ErrToolCallMismatch:
 		return "tool_call_mismatch"
+	case ErrEmptyMessage:
+		return "empty_message"
 	case ErrClient:
 		return "client"
 	default:
@@ -143,6 +149,11 @@ type Error struct {
 	// 挂载点」）：Kind 决定「罚不罚」，RetryAfter 决定「罚多久」，同为上游
 	// 响应的一等公民，与 Kind/Status/Msg 同居信封而非另开解析层。
 	RetryAfter time.Duration
+	// ChannelCheck 分类时依据**完整上游 body** 得出的稳定标记（渠道校验）。
+	// Msg 为了日志/响应安全只保留前 200 字符，渠道校验文案若在截断点之后，
+	// applyErrorPolicy 再解析 Msg 会漏判并把封套里的 request illegal 当账号
+	// 封禁硬禁用。调用方应优先读本字段，不要把分类降级成「重新解析 Msg」。
+	ChannelCheck bool
 }
 
 func (e *Error) Error() string {
@@ -328,6 +339,43 @@ func isToolCallMismatch(lower string) bool {
 	return strings.Contains(lower, "tool calls and tool results do not match") ||
 		strings.Contains(lower, "tool_call_sequence_broken") ||
 		codeMarker(lower, "11148")
+}
+
+// isEmptyMessage 11151「a message has empty content」判定（只吃小写 body）。
+// code 字段与固定文案双通道：上游在中文体里也可能只给中文文案，不能仅靠
+// codeMarker；反之部分版本会省略文案，只看文案会漏判。两种 11151 都是
+// 请求内容问题，同 body 换号结果不变。
+func isEmptyMessage(lower string) bool {
+	return codeMarker(lower, "11151") ||
+		strings.Contains(lower, "a message has empty content") ||
+		strings.Contains(lower, "存在空白消息")
+}
+
+// 渠道校验业务码的两种实测写法（拼接构造避免手抄成相邻的错误码）。
+// 证据：manager/docs/channel-check-console-fallback.md 明确记录带横线的
+// 11-128 与报告方另见的无横线 11-128 写法，两种都认；没有第三种猜测码。
+const (
+	channelCheckHyphenCode = "1" + "1" + "-" + "1" + "2" + "8"
+	channelCheckPlainCode  = "1" + "1" + "1" + "2" + "8"
+)
+
+// IsChannelCheck 判上游的「渠道校验」拒绝（11-128 家族，含无横线写法）。
+//
+// 判据以**渠道校验文案**为主：中文「渠道校验」或英文 channel verification
+// 足以定性，即使封套省略了业务码也要识别（漏判会让 handler 按
+// request illegal 永久禁用健康账号）。"official client" 单独出现较宽泛，
+// 只在同时带渠道校验业务码时才采纳。同一个业务码也承载内容审核拦截，
+// 因此绝不只认码；历史遗留的 request illegal 也不能单独作为判据（正常
+// 账号级 11140 同样带这句）。
+func IsChannelCheck(body string) bool {
+	lower := strings.ToLower(body)
+	if strings.Contains(body, "渠道校验") || strings.Contains(lower, "channel verification") {
+		return true
+	}
+	if !codeMarker(lower, channelCheckHyphenCode) && !codeMarker(lower, channelCheckPlainCode) {
+		return false
+	}
+	return strings.Contains(lower, "official client")
 }
 
 // softRateResetLoc 上游 429 6004 文案中的重置时间固定按 UTC+8 解释（上游文案如此，
@@ -700,6 +748,13 @@ func Classify(status int, body string) ErrKind {
 	if IsGatewayAuthPage(status, body) {
 		return ErrSessionDead
 	}
+	// 渠道校验（/v2 上的强校验，2026-10-17）：归账号级分类，但 handler 对
+	// ErrAccountFault 会先判 IsChannelCheck、只做软冷却——绝不能把健康账号
+	// 按 request illegal 永久禁用。判在 accountFaultRule 之前，因为封套里
+	// 往往同时带 request illegal。
+	if IsChannelCheck(body) {
+		return ErrAccountFault
+	}
 	if accountFaultRule.hit(body, lower) {
 		return ErrAccountFault
 	}
@@ -759,6 +814,11 @@ func Classify(status int, body string) ErrKind {
 	// （与 invalidImageRule 的 400 绑定同口径）。
 	if status == http.StatusBadRequest && isToolCallMismatch(lower) {
 		return ErrToolCallMismatch
+	}
+	// 11151「a message has empty content」同样是请求内容决定的确定性结果。
+	// 判在通用 4xx 之前：落 ErrClient 会轮转全池并在末端伪装成 503。
+	if status == http.StatusBadRequest && isEmptyMessage(lower) {
+		return ErrEmptyMessage
 	}
 	// 内容策略拦截（HTTP 400 + 审核文案）：判在通用 ErrClient 之前。
 	// 这是误报信号，不罚账号，由网关降级重试处理（见 handler.applyErrorPolicy）。
@@ -1181,7 +1241,8 @@ func (c *Client) doJSONAuth(a *auth.Auth, req *http.Request) (json.RawMessage, e
 	}
 	if resp.StatusCode >= 400 {
 		kind := Classify(resp.StatusCode, string(raw))
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200),
+			ChannelCheck: IsChannelCheck(string(raw))}
 	}
 	var env apiEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -1199,7 +1260,9 @@ func (c *Client) doJSONAuth(a *auth.Auth, req *http.Request) (json.RawMessage, e
 		if kind == ErrNone {
 			kind = ErrClient
 		}
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: fmt.Sprintf("code=%d msg=%s", env.Code, truncate(env.Msg, 160))}
+		return nil, &Error{Kind: kind, Status: resp.StatusCode,
+			Msg:          fmt.Sprintf("code=%d msg=%s", env.Code, truncate(env.Msg, 160)),
+			ChannelCheck: IsChannelCheck(string(raw))}
 	}
 	return env.Data, nil
 }
@@ -1402,7 +1465,8 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			if kind == ErrNone {
 				return nil, resp.StatusCode, raw, nil
 			}
-			ue := &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+			ue := &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200),
+				ChannelCheck: IsChannelCheck(string(raw))}
 			if d, ok := ParseRetryAfter(resp.Header); ok {
 				ue.RetryAfter = d
 			}

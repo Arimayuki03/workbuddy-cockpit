@@ -24,6 +24,25 @@ var errEmptyStream = errors.New("upstream stream contained no valid data events"
 // upstream_parse 同语义），与客户端断连类错误区分。
 func IsEmptyStreamError(err error) bool { return errors.Is(err, errEmptyStream) }
 
+// errTruncatedStream 上游流「中途断掉」：转发过有效帧，但既没有 finish_reason
+// 也没有 data: [DONE] 就 EOF（流超时、限流后直接关 TCP 等）。与 errEmptyStream
+// 分开：那是一条有效帧都没有，这是有内容但未正常收尾，排障时性质不同。
+var errTruncatedStream = errors.New("upstream stream ended before completion")
+
+// IsTruncatedStreamError 报告错误是否为「上游截断」。HTTP 响应头已经发出时
+// HTTP 状态无法再改，handler 用该哨兵把请求日志/指标收敛为 502，避免留下
+// 一条 tok=... 的假成功；客户端侧由 StreamHint 在 [DONE] 前插入 error 帧告知。
+func IsTruncatedStreamError(err error) bool { return errors.Is(err, errTruncatedStream) }
+
+// errUpstreamRead 上游 SSE 读中断（非 EOF 的 read error：连接被重置、读超时、
+// 代理层半路断开等）。与 errTruncatedStream 区分：截断是「干净 EOF 但没收到
+// finish_reason/[DONE]」，读中断是传输层直接报错。两者都必须收敛为失败，但
+// handler 需要把它们与「下游客户端写失败」分开——后者不能罚账号/清负缓存。
+var errUpstreamRead = errors.New("upstream stream read failed")
+
+// IsUpstreamReadError 报告错误是否为上游流读中断（供 handler 区分客户端断连）。
+func IsUpstreamReadError(err error) bool { return errors.Is(err, errUpstreamRead) }
+
 // Aggregate 读取完整 SSE 流，聚合 delta.content 为单个 OpenAI chat.completion 响应。
 // 分片/半行由 bufio.Reader.ReadString 处理；遇到 "data: [DONE]" 结束。
 // tool_calls 以流式 delta 到达（按 index 合并：首片带 id/type/name，后续只带 arguments 片段）。
@@ -42,6 +61,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		gotAnyContent bool
 		validEvents   int
 		sawDone       bool // 上游显式发过 data: [DONE]（正常收尾）
+		sawFinish     bool // 上游显式发过非空 finish_reason（语义收尾）
 		toolCalls     = map[int]map[string]any{}
 		toolOrder     []int
 		// toolSeq 缺 index 的 tool_call 的分配序号源：跨帧延续「最近分配」槽位，
@@ -192,6 +212,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 							}
 							if fr, ok := c["finish_reason"].(string); ok && fr != "" {
 								finishReason = fr
+								sawFinish = true
 							}
 							if delta, ok := c["delta"].(map[string]any); ok {
 								if r2, ok := delta["role"].(string); ok && r2 != "" {
@@ -231,15 +252,28 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		// 由 handler 映射为 502 upstream_parse。
 		return nil, errEmptyStream
 	}
+	// 干净 EOF 但既无 finish_reason 也无 [DONE]：流在语义完成前断掉。
+	// 不能把已聚合的半截 content 伪装成 200 正常响应（此前默认 finish_reason
+	// = "stop" 会让非流式路径整条链路误记成功）；只允许「有 finish_reason
+	// 但漏发 [DONE]」的兼容形态（真实上游曾出现，见 TestAggregate... 用例）。
+	if !sawDone && !sawFinish {
+		return nil, errTruncatedStream
+	}
 	if id == "" {
 		id = fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
 	}
 	if created == 0 {
 		created = float64(time.Now().Unix())
 	}
+	// reasoning fallback: only when the whole turn has neither assistant text
+	// nor tool calls. Normal turns and disabled deployments are byte-identical.
+	bodyText := content.String()
+	if ReasoningFallbackEnabled() && bodyText == "" && len(toolOrder) == 0 && reasoning.Len() > 0 {
+		bodyText = reasoning.String()
+	}
 	message := map[string]any{
 		"role":    role,
-		"content": content.String(),
+		"content": bodyText,
 	}
 	if reasoning.Len() > 0 {
 		message["reasoning_content"] = reasoning.String()
@@ -586,6 +620,29 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	// 一律补 chatcmpl-wb2api 哨兵，造成同流 id 分裂）。全流无真实 id → 才出现哨兵。
 	firstID := ""
 
+	// reasoning fallback / frame-order state. When the fallback is disabled the
+	// tail buffer is never used, so the pass-through bytes remain unchanged.
+	sawContent := false
+	sawToolCalls := false
+	var reasoningBuf strings.Builder
+	sawDone := false
+	sawFinish := false
+	sawErrorFrame := false
+	var tailBuf []string
+	tailing := false
+	flushTail := func() error {
+		for _, p := range tailBuf {
+			if _, err := io.WriteString(w, "data: "+p+"\n\n"); err != nil {
+				return err
+			}
+		}
+		if len(tailBuf) > 0 && fl != nil {
+			fl.Flush()
+		}
+		tailBuf = nil
+		return nil
+	}
+
 	// writeRaw 原样写出一帧（绕过 normalizeFrame）并 flush。上游 error 帧（error-passthrough）
 	// 与空流错误帧需保留 error 字段，不能被白名单剥掉，故经此写出。
 	// gateway_hint：上游 error 帧透出前按 hintFn 附加 error.gateway_hint 字段
@@ -615,6 +672,11 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			// code/msg/requestId。error.message 即上游原文（如 6004 限流、审核拦截），
 			// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
 			if _, hasErr := obj["error"]; hasErr {
+				sawErrorFrame = true
+				// 已进入收尾段：先发缓冲帧，再发错误帧，避免顺序反转。
+				if werr := flushTail(); werr != nil {
+					return 0, werr
+				}
 				// 旁路通知（账号处置用）：原始 payload 交给观察者，透传字节不变。
 				if so.onErrorFrame != nil {
 					so.onErrorFrame(payload)
@@ -623,6 +685,35 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 					return 0, werr
 				}
 				return 1, nil
+			}
+			// Track the whole-turn state before normalization (which drops empty
+			// content and finish-only frames). Fallback conditions are intentionally
+			// narrow: no assistant text and no tool calls at all.
+			if ReasoningFallbackEnabled() {
+				if chs, ok := obj["choices"].([]any); ok {
+					for _, ci := range chs {
+						c, _ := ci.(map[string]any)
+						if c == nil {
+							continue
+						}
+						d, _ := c["delta"].(map[string]any)
+						if d == nil {
+							continue
+						}
+						if v, ok := d["content"].(string); ok && v != "" {
+							sawContent = true
+						}
+						if tcs, ok := d["tool_calls"].([]any); ok && len(tcs) > 0 {
+							sawToolCalls = true
+						}
+						if v, ok := d["reasoning_content"].(string); ok && v != "" {
+							reasoningBuf.WriteString(v)
+						}
+					}
+				}
+			}
+			if frameHasFinish(obj) {
+				sawFinish = true
 			}
 			// 先按 index 收敛 tool_calls name（每 index 仅首片保留，后续分片删 name 键），再规范化透传。
 			stripToolCallNames(obj, toolCallSeen)
@@ -641,6 +732,20 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 				payload = string(raw)
 			}
 			valid = 1
+			// Frame-order fix: once finish_reason appears, hold it and every
+			// following frame (usage typically follows) until the optional
+			// reasoning-as-content frame has been written.
+			if ReasoningFallbackEnabled() && (tailing || frameHasFinish(obj)) {
+				tailing = true
+				tailBuf = append(tailBuf, payload)
+				return valid, nil
+			}
+		}
+		if ReasoningFallbackEnabled() && tailing {
+			// Non-JSON data after finish: keep it in the same tail so it cannot
+			// overtake the synthesized content frame.
+			tailBuf = append(tailBuf, payload)
+			return valid, nil
 		}
 		if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
 			return 0, werr
@@ -653,6 +758,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 
 	br := bufio.NewReaderSize(r, 64*1024)
 	validFrames := 0
+	var readErr error
 readLoop:
 	for {
 		line, err := br.ReadString('\n')
@@ -661,6 +767,7 @@ readLoop:
 		case strings.HasPrefix(trimmed, "data: [DONE]"):
 			// 上游显式结束：停止读取，DONE 之后的任何数据（含垃圾帧）一律不再透传。
 			// [DONE] 统一在循环结束后写出，保证恰好一个。
+			sawDone = true
 			break readLoop
 		case strings.HasPrefix(trimmed, "data: "):
 			n, werr := writeFrame(strings.TrimPrefix(trimmed, "data: "))
@@ -689,7 +796,11 @@ readLoop:
 			if err == io.EOF {
 				break
 			}
-			return err
+			// 非 EOF 读错误：这是上游读中断，不是客户端写失败。继续走到收尾
+			// 段写 error 帧 + [DONE]（如果下游还能写），并返回独立哨兵让 handler
+			// 把它归为上游失败——不能把它当客户端断连去 NoteSuccess。
+			readErr = err
+			break
 		}
 	}
 	// 空流（0 有效帧）：先写一帧 error（绕过 normalizeFrame 原样保留 error 字段），
@@ -697,7 +808,58 @@ readLoop:
 	// 网关本地空流兜底帧走 hintFn=nil 的直写路径：该形态未覆盖（不编造 hint），
 	// 且 writeRaw 的 hintFn 闭包在空流路径下可能携带上一帧的上下文造成误配。
 	if validFrames == 0 {
-		_ = writeRaw(`{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}`)
+		if readErr != nil {
+			_ = writeRaw(`{"error":{"message":"upstream stream read failed","type":"upstream_error","code":"upstream_read_error"}}`)
+		} else {
+			_ = writeRaw(`{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}`)
+		}
+	} else if ReasoningFallbackEnabled() && !sawErrorFrame && !sawContent && !sawToolCalls && reasoningBuf.Len() > 0 {
+		// Whole turn had reasoning only. Emit the same text as assistant content
+		// before finish_reason/[DONE] so clients stop accumulating only after it.
+		rid := firstID
+		if rid == "" {
+			rid = "chatcmpl-wb2api"
+		}
+		chunk := map[string]any{
+			"id":      rid,
+			"object":  "chat.completion.chunk",
+			"created": time.Now().Unix(),
+			"choices": []any{map[string]any{
+				"index":         0,
+				"delta":         map[string]any{"content": reasoningBuf.String()},
+				"finish_reason": nil,
+			}},
+		}
+		if raw, merr := json.Marshal(chunk); merr == nil {
+			if _, werr := io.WriteString(w, "data: "+string(raw)+"\n\n"); werr != nil {
+				return werr
+			}
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+	}
+	// Finish/usage frames buffered during frame-order repair go out only after
+	// the synthesized content frame above.
+	if err := flushTail(); err != nil {
+		return err
+	}
+	// Truncation/read-failure: valid content was forwarded, but upstream supplied
+	// neither a finish_reason nor [DONE], or the transport returned a non-EOF read
+	// error. Keep the [DONE] fallback (downstream converters rely on it) and
+	// insert a protocol error immediately before it. A stream that already
+	// delivered an upstream error frame does not get a second synthetic error.
+	truncated := readErr == nil && validFrames > 0 && !sawDone && !sawFinish && !sawErrorFrame
+	if readErr != nil && validFrames > 0 && !sawErrorFrame {
+		if _, werr := io.WriteString(w,
+			"data: {\"error\":{\"message\":\"upstream stream read failed\",\"type\":\"upstream_error\",\"code\":\"upstream_read_error\"}}\n\n"); werr != nil {
+			return werr
+		}
+	} else if truncated {
+		if _, werr := io.WriteString(w,
+			"data: {\"error\":{\"message\":\"upstream stream ended before completion\",\"type\":\"upstream_error\",\"code\":\"upstream_truncated\"}}\n\n"); werr != nil {
+			return werr
+		}
 	}
 	// 保证恰好写一个 [DONE]（上游漏发时兜底补上）。
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
@@ -706,10 +868,43 @@ readLoop:
 	if fl != nil {
 		fl.Flush()
 	}
+	if readErr != nil {
+		return fmt.Errorf("%w: %v", errUpstreamRead, readErr)
+	}
 	if validFrames == 0 {
 		return errEmptyStream
 	}
+	if truncated {
+		return errTruncatedStream
+	}
 	return nil
+}
+
+// frameHasFinish reports whether a chunk carries a non-null/non-empty
+// choices[].finish_reason. Used only for frame-order repair and truncation
+// detection; it must not treat the normal `finish_reason: null` as completion.
+func frameHasFinish(obj map[string]any) bool {
+	chs, ok := obj["choices"].([]any)
+	if !ok {
+		return false
+	}
+	for _, ci := range chs {
+		c, _ := ci.(map[string]any)
+		if c == nil {
+			continue
+		}
+		switch v := c["finish_reason"].(type) {
+		case nil:
+			// null = still generating
+		case string:
+			if v != "" {
+				return true
+			}
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // frameGatewayHint 取 error 帧的 gateway_hint（hintFn 缺失/异常返回空串 → 不附加）。

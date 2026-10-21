@@ -8,6 +8,13 @@ package config
 
 import "fmt"
 
+// 任务奖励补扫周期常量（分钟）。与 internal/panel.MinTaskSweepInterval 的 15m
+// 同口径：面板启动函数仍会兜底钳制，配置层提前给出可定位的键名错误。
+const (
+	DefaultTaskSweepIntervalMinutes = 15
+	MinTaskSweepIntervalMinutes     = 15
+)
+
 // Schedule 排程配置段（对应 config.json 的 "schedule" 对象）。
 //
 // 多类独立排程：签到 / 活跃上报 / 猫猫旅行 / token keepalive / 开学季 / 夜猫子 /
@@ -69,6 +76,15 @@ type Schedule struct {
 	// enabled=true 但本表为空 → 不排程（等价「只手动」），由 scheduler.New 记一行 WARN
 	// 说明；不报错也不回落（用户可能是先开开关、还没填时刻）。
 	CompensationHours []int `json:"compensation_hours"`
+	// TaskSweepEnabled 任务奖励「只领取」补扫开关（schedule.task_sweep_enabled）。
+	// 缺省 **false**（opt-in）：该循环会周期性扫描全池成长任务列表，只对已经
+	// 达标（Claimable）的奖励执行 accept/claim，不跑对话、不执行任务动作；
+	// 与 queue/compensation 是不同路径，默认不开启以免无感放大上游请求。
+	TaskSweepEnabled bool `json:"task_sweep_enabled"`
+	// TaskSweepIntervalMinutes 补扫周期（分钟）。缺省/0 = 15 分钟；显式小于
+	// 15 分钟在 Normalize 直接报错（不能静默改成别的值）。15 分钟是产品
+	// 保守下限：claim/accept 都是幂等轻写，但全账号扫描仍会放大上游请求。
+	TaskSweepIntervalMinutes int `json:"task_sweep_interval_minutes"`
 	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
 	// 默认 5 条把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int `json:"activity_report_count"`
@@ -96,21 +112,24 @@ type Schedule struct {
 // ActivityReportCount 默认 5：领猫前置需 5 次对话，5 连发刷满 chat_5。
 func DefaultSchedule() Schedule {
 	return Schedule{
-		CheckinHours:         []int{9, 21},
-		TravelHours:          []int{9, 21},
-		ActivityHours:        []int{10},
-		KeepaliveHours:       []int{22},
-		SchoolHours:          []int{12},
-		CatHours:             []int{1},
-		QueueHours:           []int{10},
-		RenewHours:           []int{3}, // 续期巡检默认凌晨 3 点：避开签到/活跃/队列高峰
-		CheckinEnabled:       true,
-		TravelEnabled:        true,
-		ActivityEnabled:      true,
-		KeepaliveEnabled:     true,
-		SchoolEnabled:        true,
-		CatEnabled:           true,
-		ActivityReportCount:  5, // 领猫前置需 5 次对话，5 连发刷满 chat_5
+		CheckinHours:        []int{9, 21},
+		TravelHours:         []int{9, 21},
+		ActivityHours:       []int{10},
+		KeepaliveHours:      []int{22},
+		SchoolHours:         []int{12},
+		CatHours:            []int{1},
+		QueueHours:          []int{10},
+		RenewHours:          []int{3}, // 续期巡检默认凌晨 3 点：避开签到/活跃/队列高峰
+		CheckinEnabled:      true,
+		TravelEnabled:       true,
+		ActivityEnabled:     true,
+		KeepaliveEnabled:    true,
+		SchoolEnabled:       true,
+		CatEnabled:          true,
+		ActivityReportCount: 5, // 领猫前置需 5 次对话，5 连发刷满 chat_5
+		// TaskSweepEnabled 零值 = 关闭（opt-in）；周期预置 15 分钟，便于
+		// 用户只打开开关就得到安全默认值。
+		TaskSweepIntervalMinutes: DefaultTaskSweepIntervalMinutes,
 		// RandomDelayMinutes/AccountDelayMinSeconds/AccountDelayMaxSeconds 缺省保持
 		// 零值 0（关）＝旧行为逐字不变：随机延后与账号错峰都是 opt-in 的「摊开流量」
 		// 开关，与六个 *_enabled 的「缺省 true」不同，不需要在此显式置 0。
@@ -168,6 +187,16 @@ func (s *Schedule) Normalize() error {
 	// 0/负数 → 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
 	if s.ActivityReportCount <= 0 {
 		s.ActivityReportCount = 1
+	}
+	// 任务补扫周期：0 = 未配置 → 15 分钟；显式小于 15 直接报错（键名可定位）。
+	// 不能静默钳制：用户写下 5 分钟却实际 15 分钟，会误判「配置没生效」。
+	if s.TaskSweepIntervalMinutes == 0 {
+		s.TaskSweepIntervalMinutes = DefaultTaskSweepIntervalMinutes
+	}
+	if s.TaskSweepIntervalMinutes < MinTaskSweepIntervalMinutes {
+		return fmt.Errorf("schedule.task_sweep_interval_minutes: %d 分钟低于安全下限 %d（默认 %d）；请配置 >= %d 分钟",
+			s.TaskSweepIntervalMinutes, MinTaskSweepIntervalMinutes,
+			DefaultTaskSweepIntervalMinutes, MinTaskSweepIntervalMinutes)
 	}
 	return s.validateHours()
 }

@@ -282,3 +282,49 @@ func TestPanelSaveConfigCompensationHoursClear(t *testing.T) {
 		}
 	}
 }
+
+// reasoning_as_content 是 main 启动期 applyReasoningFallback 的装配参数：
+// 面板保存只能落盘，不能热生效，必须明确出现在需重启提示里。
+func TestPanelSaveConfigReasoningAsContentRequiresRestart(t *testing.T) {
+	upstream.ConfigureReasoningFallback(false)
+	t.Cleanup(func() { upstream.ConfigureReasoningFallback(false) })
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(fp, []byte(`{"api_key":"k1","reasoning_as_content":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	live := livecfg.New(livecfg.Snapshot{APIKey: "k1"})
+	p := pool.New("")
+	up := upstream.New()
+	sch := scheduler.New(scheduler.Config{Pool: p, Upstream: up})
+
+	restart, err := saveConfig([]byte(`{"reasoning_as_content":true}`), fp, live, p, up, sch)
+	if err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+	found := false
+	for _, f := range restart {
+		if f == "reasoning_as_content" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("restartRequired missing reasoning_as_content; got %v", restart)
+	}
+	if upstream.ReasoningFallbackEnabled() {
+		t.Fatal("saveConfig must not hot-apply reasoning_as_content")
+	}
+	raw, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["reasoning_as_content"] != true {
+		t.Errorf("reasoning_as_content persisted=%v want true", got["reasoning_as_content"])
+	}
+}

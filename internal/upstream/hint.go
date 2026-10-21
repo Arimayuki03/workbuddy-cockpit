@@ -47,6 +47,8 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		return "request context exceeds the model's limit; reduce history/message size"
 	case ErrImageInvalid:
 		return "image request was rejected by upstream; check image_url format and image data"
+	case ErrEmptyMessage:
+		return "the conversation contains an empty message; fill in or remove it and retry (not an account issue)"
 	case ErrToolCallMismatch:
 		// 11148 工具调用/结果错配：问题在请求历史（assistant.tool_calls 与其 tool 结果
 		// 的配对/顺序被客户端回放弄坏），**与账号无关**——换号/重试同一份历史仍会撞同一
@@ -62,6 +64,11 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 	case ErrSoftRate:
 		return "rate limited by upstream; retry after reset"
 	case ErrAccountFault:
+		if IsChannelCheck(msg) {
+			// Channel checks are request/path rejections, not proof that the
+			// credential is dead. Do not tell clients the account was disabled.
+			return "upstream channel verification rejected this request; the gateway soft-cools the account and retries can succeed later (not a credential failure)"
+		}
 		return "account-level fault at upstream (auth/quota state); the gateway will rotate or disable this account"
 	case ErrSessionDead:
 		// 401 + HTML 网关鉴权页与 12153 同属「需人工重登」终态，但给客户端的

@@ -121,7 +121,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	// 面板保存即改运行态，0 = 回到「硬冷却到次日 04:00」旧行为。落盘由上面的深合并
 	// 保证（cooldown 段是普通嵌套对象，credit_exhausted 作为兄弟键被写回，不丢键）。
 	p.SetCreditExhausted(newCfg.CreditExhaustedDur)
-	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
+	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur)             // costTier 探索窗口热生效（0 关停）
 	p.SetPickStrategy(pool.ParsePickStrategy(newCfg.Pool.PickStrategy)) // 选号策略热生效（weighted/credits_desc）
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring) // 快过期积分优先消耗热生效（v1.20.0；依赖下一次余额刷新供给快照）
@@ -201,6 +201,13 @@ func restartRequiredFields(c *Config) []string {
 	// 同口径），只能重启生效；hours/开关是热改的，故不在此列。
 	out = append(out, "schedule.random_delay_minutes",
 		"schedule.account_delay_min_seconds", "schedule.account_delay_max_seconds")
+	// 任务奖励补扫在 panel 装配期启动（interval/开关都进启动参数），面板保存
+	// 只落盘不热重启循环；提示用户重启生效，避免"保存了但没跑"的错觉。
+	out = append(out, "schedule.task_sweep_enabled", "schedule.task_sweep_interval_minutes")
+	// reasoning_as_content 由 main 启动期 applyReasoningFallback 写入 upstream
+	// 进程级开关；saveConfig 不做热更新（避免运行中突然改变所有存量流的渲染语义），
+	// 保存后必须提示重启。
+	out = append(out, "reasoning_as_content")
 	// global.enabled 在 auth.SetGlobalEnabled / handler GlobalEnabled / upstream.GlobalEnabled
 	// 三处装配期注入；prompt 文本与 global base 同理。
 	out = append(out, "global.enabled", "global.chat_base", "global.billing_base",

@@ -23,6 +23,7 @@ import {
   Search,
   ServerCrash,
   SquarePen,
+  Scale,
   TimerReset,
   TriangleAlert,
   Waypoints,
@@ -44,6 +45,7 @@ import {EmptyState} from '@/components/common/layout/EmptyState';
 import {CardRowsSkeleton, TableSkeleton} from '@/components/common/layout/LoadSkeleton';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {AddAccountDialog} from '@/components/common/accounts/AddAccountDialog';
+import {AccountWeightDialog} from '@/components/common/accounts/AccountWeightDialog';
 import {
   ExportAccountsButton,
   ImportAccountsButton,
@@ -81,6 +83,9 @@ export default function AccountsPage() {
   const {isAdmin} = useAuth();
   const [addOpen, setAddOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  // 权重弹窗：单个实例 + 当前编辑目标（避免每行挂一个 Dialog）。
+  const [weightTarget, setWeightTarget] = useState<Account | null>(null);
+  const [weightOpen, setWeightOpen] = useState(false);
   const [busyUid, setBusyUid] = useState<string | null>(null);
 
   /* ── 账号备注（后端化）──────────────────────────────────
@@ -808,6 +813,36 @@ export default function AccountsPage() {
     );
   }
 
+  /** 手写权重入口（管理员）：天平图标；非默认权重（≠1）染色，一眼看出特殊对待。 */
+  function renderWeightButton(a: Account) {
+    if (!isAdmin) return null;
+    const weight = Number(a.weight ?? 1);
+    const custom = Number.isFinite(weight) && weight !== 1;
+    return (
+      <Button
+        variant="ghost"
+        size="icon"
+        className={
+          'h-7 w-7 rounded-md ' +
+          (custom
+            ? 'text-orange-600 hover:text-orange-600 dark:text-orange-400'
+            : 'text-muted-foreground hover:text-foreground')
+        }
+        title={
+          custom
+            ? t('accounts.weightTitleWith', {weight: String(weight)})
+            : t('accounts.weightTitle')
+        }
+        onClick={() => {
+          setWeightTarget(a);
+          setWeightOpen(true);
+        }}
+      >
+        <Scale className="h-3.5 w-3.5" />
+      </Button>
+    );
+  }
+
   /** 单账号操作按钮组 */
   function renderActions(a: Account) {
     const busy = busyUid === a.uid;
@@ -817,6 +852,8 @@ export default function AccountsPage() {
     const manualOff = a.manual_disabled === true;
     return (
       <div className="flex justify-end gap-1">
+        {/* 手写权重（选号乘数）：管理员可编辑，改完立即生效（见 AccountWeightDialog）。 */}
+        {renderWeightButton(a)}
         {/* 签到：手动触发单号签到 + 余额查询解冻。
             「今日已签」态（会话内）：图标打勾 + 禁用，防当天重复点击白打上游。 */}
         {canCheckin && !off && (
@@ -1198,6 +1235,12 @@ export default function AccountsPage() {
 
       <AddAccountDialog open={addOpen} onOpenChange={setAddOpen} onSuccess={load} />
       <ImportAccountsDialog open={importOpen} onOpenChange={setImportOpen} onSuccess={load} />
+      <AccountWeightDialog
+        account={weightTarget}
+        open={weightOpen}
+        onOpenChange={setWeightOpen}
+        onSaved={load}
+      />
     </div>
   );
 }

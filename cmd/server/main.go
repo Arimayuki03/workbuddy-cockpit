@@ -58,6 +58,30 @@ func sessionKeySupplier(enabled bool, live *livecfg.Holder) func() string {
 	return func() string { return live.Load().APIKey }
 }
 
+// applyReasoningFallback 把已加载配置的 reasoning_as_content 落到 upstream 的
+// 进程级开关，并返回是否启用。抽成函数是为了让生产 wiring 有可执行回归
+// （cmd/server 测试直接调用），而不是只在 main 里藏一行不可测的赋值。
+func applyReasoningFallback(c *Config) bool {
+	on := c != nil && c.ReasoningAsContent != nil && *c.ReasoningAsContent
+	upstream.ConfigureReasoningFallback(on)
+	return on
+}
+
+// taskSweepOptionsFromConfig 把 schedule.task_sweep_* 映射成面板清扫参数。
+// 配置 normalize 已保证 0 → 15、<15 报错；这里再兜底一次默认值，保证任何
+// 最小装配/测试传入零值 Config 时也不会以 0 周期空转。
+func taskSweepOptionsFromConfig(c *Config) panel.TaskSweepOptions {
+	enabled := c != nil && c.Schedule.TaskSweepEnabled
+	minutes := 0
+	if c != nil {
+		minutes = c.Schedule.TaskSweepIntervalMinutes
+	}
+	if minutes <= 0 {
+		return panel.TaskSweepOptions{Enabled: enabled, Interval: panel.DefaultTaskSweepInterval}
+	}
+	return panel.TaskSweepOptions{Enabled: enabled, Interval: time.Duration(minutes) * time.Minute}
+}
+
 // stateSibling 返回与 state 文件同目录的指定文件名路径（相对路径场景回落当前目录）。
 // output_probes.json（模型上限探测，panel 移植件）共用本规则。
 func stateSibling(stateFile, name string) string {
@@ -284,6 +308,11 @@ func main() {
 	}
 
 	up := upstream.New()
+	// reasoning-as-content compatibility fallback: disabled by default so
+	// clients that render both reasoning_content and content do not duplicate.
+	if applyReasoningFallback(cfg) {
+		log.Printf("reasoning_as_content enabled: reasoning-only turns are also emitted as content")
+	}
 	// 短 RPC 总时长上限（refresh/checkin/balance/FetchModels），语义不变。
 	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	// 聊天 SSE 首字节前（响应头）上限：cfg 已 normalize（缺省回落 timeout_seconds）。
@@ -471,10 +500,12 @@ func main() {
 	// 与引入前一致）。panel.enabled=true 且 api_key 空已在 normalize fail-fast。
 	var panelHandler http.Handler
 	var staticFS http.FileSystem
+	var pn *panel.Panel
+	var taskSweeper *panel.TaskSweeper
 	if cfg.Panel.Enabled {
 		// 管理面板日志镜像：标准 log（stderr）与 chat 表格日志（stdout）双路复制
 		// 进面板环形缓冲，供 /panel/api/logs（与 /api/logs 别名）读取；控制台输出不变。
-		pn := panel.New(panel.Config{
+		pn = panel.New(panel.Config{
 			Pool:               p,
 			Usage:              usageRec,
 			Upstream:           up,
@@ -497,12 +528,12 @@ func main() {
 			TokenPath:         stateSibling(cfg.StateFile, "panel_tokens.json"),
 			// 安全页的 IP 规则引擎：与 server.Handler 共用同一实例（面板热改
 			// 规则即时生效于网关鉴权链，落盘 ip_rules.json 是单一事实来源）。
-			IPRules:    ipRules,
-			Credits:    creditTracker,
+			IPRules: ipRules,
+			Credits: creditTracker,
 			// API 密钥页（keys_ep.go）：与网关侧 keystore_auth 共用同一实例
 			// （面板建/停/删密钥，网关 Resolve 链即时生效；空库也注入）。
-			KeyStore: keyStore,
-			ConfigPath:        absPath,
+			KeyStore:   keyStore,
+			ConfigPath: absPath,
 			LoadConfig: func() (any, error) {
 				return Load(*cfgPath)
 			},
@@ -528,6 +559,21 @@ func main() {
 		// 到点只记 WARN 跳过，不影响其余六类任务。
 		sch.SetQueueRunner(pn.ScheduledQueueRunner)
 
+		// 任务奖励补扫（schedule.task_sweep_enabled，默认关）：只领取已达标奖励，
+		// 不执行任务动作/对话。随 signal ctx 启停；首轮等一个完整周期后才跑，
+		// 避免启动瞬间扫全池。上游任务 API 无 context 参数，取消只能阻止后续
+		// 请求，在途单次 HTTP 请求可能继续到自身超时——生产退出用 StopContext
+		// 限时等待，不无限阻塞进程。
+		if cfg.Schedule.TaskSweepEnabled {
+			opts := taskSweepOptionsFromConfig(cfg)
+			taskSweeper = pn.StartTaskSweepWithOptions(ctx, opts)
+			if taskSweeper != nil {
+				log.Printf("任务奖励补扫已启用：每 %s（仅领取已达标奖励，不执行任务动作；schedule.task_sweep_enabled）", taskSweeper.Interval())
+			} else {
+				log.Printf("WARN: 任务奖励补扫启动失败（schedule.task_sweep_enabled=true 但启动句柄为空）")
+			}
+		}
+
 		// 前端静态托管：embed_panel 标签构建内嵌 manager 壳产物（DistFS）；
 		// 默认构建 HasEmbeddedFrontend()=false，根路径不注册静态路由（网关照常）。
 		if panel.HasEmbeddedFrontend() {
@@ -538,7 +584,21 @@ func main() {
 		} else {
 			log.Printf("[panel] 未内嵌前端（默认构建）：根路径不提供管理页面；生产构建请用 -tags embed_panel（先在 web/ 执行前端构建并拷入 internal/panel/dist/）")
 		}
+	} else if cfg.Schedule.TaskSweepEnabled {
+		log.Printf("WARN: schedule.task_sweep_enabled=true 但 panel.enabled=false，任务奖励补扫不启动（该功能依赖面板任务 API）")
 	}
+	// 停机收尾：signal ctx 已取消时 StopContext 只等当前在途任务请求（上游任务
+	// API 无 ctx 参数），最多 5 秒；不把进程退出无限期拖住。未启动时 nil-safe。
+	defer func() {
+		if taskSweeper == nil {
+			return
+		}
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if !taskSweeper.StopContext(stopCtx) {
+			log.Printf("WARN: 任务奖励补扫未在 5s 内退出（在途上游请求仍在收尾；进程退出将终止它，后续请求不会再发）")
+		}
+	}()
 
 	h := server.NewHandler(server.Config{
 		Pool:         p,
@@ -600,6 +660,11 @@ func main() {
 	// Anthropic Messages 协议（/v1/messages 与 /v1/messages/count_tokens）：同一
 	// 导出挂载模式，与 /v1/chat/completions 完全同口径鉴权（anthropic.go）。
 	h.MountAnthropic()
+	// 联网搜索协议壳（/v1/search/messages，Anthropic Messages 兼容）：与上面两个
+	// Mount 同模式，由 main 在 NewHandler 之后显式挂载；复用 withAuth/IP 闸、
+	// 账号池选号/刷新/错误策略。wbk_ 分发密钥在该端点显式拒绝（搜索配额语义
+	// 未定义前不放行，避免绕过模型/token/积分限制）。
+	h.MountSearch()
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,

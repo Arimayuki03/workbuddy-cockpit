@@ -48,8 +48,11 @@
       3
     ],
     "renew_enabled": false,
+    "task_sweep_enabled": false,
+    "task_sweep_interval_minutes": 15,
     "_note_school": "school_* 键保留仅为老配置兼容：开学季任务已随活动 2026-09-24 结束下线，school_enabled/school_hours 不再生效",
-    "_note_renew": "renew_*：Token 独立续期巡检（默认关）。开启后按 renew_hours 扫描全部账号，对有效期不足 pool.expiring_soon 窗口的账号主动刷新令牌（覆盖长期闲置无对话流量的号）；面板手动停用的账号跳过，仅熔断/冷却等状态位异常的照常续期。每账号最近一次续期时间与失败原因经 /api/overview 账号条目的 last_renewed / renew_last_error 字段暴露"
+    "_note_renew": "renew_*：Token 独立续期巡检（默认关）。开启后按 renew_hours 扫描全部账号，对有效期不足 pool.expiring_soon 窗口的账号主动刷新令牌（覆盖长期闲置无对话流量的号）；面板手动停用的账号跳过，仅熔断/冷却等状态位异常的照常续期。每账号最近一次续期时间与失败原因经 /api/overview 账号条目的 last_renewed / renew_last_error 字段暴露",
+    "_note_task_sweep": "task_sweep_*：任务奖励只领取补扫（默认关，opt-in）。开启后每 task_sweep_interval_minutes 分钟（最小 15）扫描全池成长任务，只对上游已报告 Claimable 的已完成奖励执行 accept/claim；不发起对话、不执行任务动作、不自动做耗费聊天的任务。与 queue/compensation 是独立路径；国际版、企业号、禁用/手动停用账号零请求。进程退出随 signal context 停止后续请求，在途单次上游任务请求可能做到自身超时（沿用 HTTP 超时），不会无限等待"
   },
   "global": {
     "enabled": true,
@@ -71,6 +74,8 @@
   "features": {
     "sanitize_blacklist_fingerprints": true
   },
+  "reasoning_as_content": false,
+  "_note_reasoning_as_content": "reasoning_as_content：思考通道兜底（默认 false，需重启生效）。仅当整轮既无正文也无工具调用时，把 reasoning_content 原文同时作为 content 下发，服务只看 content 的客户端；同时渲染两个字段的客户端保持 false 以避免重复显示。JSON 布尔或 WB2A_REASONING_AS_CONTENT=1/0 覆盖；面板保存只落盘并提示重启（main 启动期才应用），不影响 OpenAI/Anthropic/Responses 既有协议的正常帧序",
   "prompt": {
     "mode": "passthrough",
     "file": ""

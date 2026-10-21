@@ -43,18 +43,36 @@ func TestEffortListingStaticFallback(t *testing.T) {
 }
 
 // TestEffortListingRealmSplit issue #84 核心：同模型 deepseek-v4.1-flash 在两个 realm 档位刻意不同。
-// global 只有 ['high']（WorkBuddy 国际版实测），不能沿用 CN 三档。
+// global 已扩展为 ['high','max']（issue #238），但仍不能沿用 CN 的 low。
 func TestEffortListingRealmSplit(t *testing.T) {
 	cnEfforts, cnDef := EffortListing("cn", "deepseek-v4.1-flash", nil, "")
 	if !reflect.DeepEqual(cnEfforts, []string{"low", "high", "max"}) || cnDef != "high" {
 		t.Errorf("cn deepseek-v4.1-flash=%v/%q want [low high max]/high", cnEfforts, cnDef)
 	}
 	gEfforts, gDef := EffortListing("global", "deepseek-v4.1-flash", nil, "")
-	if !reflect.DeepEqual(gEfforts, []string{"high"}) {
-		t.Errorf("global deepseek-v4.1-flash=%v want [high]", gEfforts)
+	if !reflect.DeepEqual(gEfforts, []string{"high", "max"}) {
+		t.Errorf("global deepseek-v4.1-flash=%v want [high max]", gEfforts)
 	}
-	if gDef != "" {
-		t.Errorf("global deepseek-v4.1-flash defaultEffort=%q want empty (无 defaultReasoningEffort)", gDef)
+	if gDef != "high" {
+		t.Errorf("global deepseek-v4.1-flash defaultEffort=%q want high", gDef)
+	}
+}
+
+// Remote metadata can lag behind the product capability. The request/listing
+// path must still expose Max for global deepseek-v4.1-flash instead of
+// downgrading it away.
+func TestEffortListingGlobalRemoteLagAddsMax(t *testing.T) {
+	efforts, def := EffortListing("global", "deepseek-v4.1-flash",
+		[]string{"high"}, "high")
+	if !reflect.DeepEqual(efforts, []string{"high", "max"}) {
+		t.Errorf("efforts=%v want [high max]", efforts)
+	}
+	if def != "high" {
+		t.Errorf("defaultEffort=%q want high", def)
+	}
+	// No invented Max for an unknown model with no declared efforts.
+	if efforts, _ := EffortListing("global", "unknown-model", []string{"high"}, ""); !reflect.DeepEqual(efforts, []string{"high"}) {
+		t.Errorf("unknown model efforts=%v want [high] (no invented extras)", efforts)
 	}
 }
 
@@ -102,17 +120,30 @@ func TestEffortListingDeepSeekV4FlashDefault(t *testing.T) {
 // EffortListing 的跨源防御同口径：仅当远端也下发了该模型档位（remoteEfforts[id]
 // 非空）才覆盖默认档，不得拼出「档位是静态、默认档是 remote」的矛盾组合。
 func TestGlobalEffortMapDefaultOverrideGated(t *testing.T) {
-	// deepseek-v4.1-flash global 静态档位 ['high'] 无默认档；远端只给了默认档
-	// 没给档位 → 默认档不得落 defs（否则 high 之外无档位可回退，矛盾组合）。
+	// Static global capabilities now include Max and declare high as default.
+	// A remote default without matching remote efforts must still be ignored.
 	efforts, defs := globalEffortMap(
 		nil,
 		map[string]string{"deepseek-v4.1-flash": "max"},
 	)
-	if !sameStrings(efforts["deepseek-v4.1-flash"], []string{"high"}) {
-		t.Errorf("static efforts must stay: %v want [high]", efforts["deepseek-v4.1-flash"])
+	if !sameStrings(efforts["deepseek-v4.1-flash"], []string{"high", "max"}) {
+		t.Errorf("static efforts must stay: %v want [high max]", efforts["deepseek-v4.1-flash"])
 	}
-	if defs["deepseek-v4.1-flash"] != "" {
-		t.Errorf("default without remote efforts must be dropped, got %q", defs["deepseek-v4.1-flash"])
+	if defs["deepseek-v4.1-flash"] != "high" {
+		t.Errorf("static default must stay high, got %q", defs["deepseek-v4.1-flash"])
+	}
+
+	// Remote metadata lagging at only high must get Max added for the request
+	// path too, otherwise max is silently downgraded before reaching upstream.
+	efforts, defs = globalEffortMap(
+		map[string][]string{"deepseek-v4.1-flash": {"high"}},
+		map[string]string{"deepseek-v4.1-flash": "high"},
+	)
+	if !sameStrings(efforts["deepseek-v4.1-flash"], []string{"high", "max"}) {
+		t.Errorf("remote-lag efforts=%v want [high max]", efforts["deepseek-v4.1-flash"])
+	}
+	if defs["deepseek-v4.1-flash"] != "high" {
+		t.Errorf("remote-lag default=%q want high", defs["deepseek-v4.1-flash"])
 	}
 
 	// 远端档位+默认档成对下发 → 正常覆盖（静态表没有的远端新模型也成立）。

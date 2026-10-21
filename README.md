@@ -51,6 +51,10 @@ WorkBuddy Cockpit 是一个自托管的一体化项目：**后端**是多账号 
 - **Anthropic Messages API**（`/v1/messages` + `/v1/messages/count_tokens`）— Claude Code 等 Anthropic 协议客户端免转换层直连；`thinking` 的 enabled / adaptive 两态都支持；tool_result 内嵌图片正确提取为视觉输入（不再把 base64 塞进文本撑爆上下文）；count_tokens 按 CJK / 非 CJK 分类保守估算；鉴权与 chat completions 同口径（同一把 key）。流式经 io.Pipe 边生成边翻译下发（v1.17.1 前为全量缓冲伪流式）；并行 tool_calls 按上游 `index` 分槽成块，参数交错分片不串块（v1.17.1）。
 - **OpenAI Responses API**（`/v1/responses`）— Codex 等 Responses 客户端直连；instructions / input items 完整转换、reasoning item 宽容回填（防上游 11155「推理内容缺失」死循环）、`prompt_cache_key` 透传（缓存命中后费用差约 17 倍）、namespace 工具桥接为 function call；非流式工具调用回传客户端原名而非内部出站名（v1.17.1）。
 
+### 🔎 联网搜索协议壳（`POST /v1/search/messages`）
+
+面向 DSH 内置搜索 provider：把搜索 baseURL 配到 `<网关>/v1/search` 即可发出 Anthropic Messages 兼容的 `web_search` 请求，网关直接调用上游 `/agenttool/v1/search` 并返回 `web_search_tool_result` + citations 结构，不做模型调用。与 chat 共用 `withAuth` / IP 黑白名单 / 全局 api_key / 面板会话通道，并复用账号池选号、在途租约、token 预刷新与 `applyErrorPolicy` 冷却；不新增未鉴权入口。**`wbk_` 分发密钥在该端点显式 403**：搜索不产生模型 token/credit usage，在搜索配额语义定义前不放行，避免绕过既有模型/token/积分限制。`allowed_domains` / `blocked_domains` / `user_location` / `stream=true` 因上游不支持而显式 400（不静默忽略）；每次请求执行一次搜索、`max_results` 上限 10。测试仅使用 fake upstream，未做真实外部搜索验证。
+
 ### 🛡️ 入站 IP 安全
 
 `security` 配置段（`trusted_proxy_cidrs` / `trusted_proxy_hops` / `ip_blacklist` / `ip_whitelist` / `ip_whitelist_mode`）：**默认零配置完全不信任转发头**——直连部署下伪造 `X-Real-IP` 无法绕过任何 IP 管控；反代 / CDN 后部署按网段声明可信代理，网关才从 `X-Forwarded-For` 还原真实来源（多跳场景 `X-Real-IP` 一律不采信、只走 XFF 从右往左穿透，v1.17.1）。面板「安全」页提供 IP 规则热编辑（校验失败整体不生效、绝不因"回滚"清空已存规则，v1.17.1）、拦截日志（只记拦截，环形 512 条）与模型锁池卡片；规则文件读盘 / 解析失败时明确告警并保留原文件供排查，不静默回落（v1.17.1）。
@@ -64,7 +68,7 @@ WorkBuddy Cockpit 是一个自托管的一体化项目：**后端**是多账号 
 浏览器打开即用，与网关同端口同鉴权，明暗主题，简中 / 繁中 / 英 / 日 / 韩五语言：
 
 - **总览** — 账号健康分布、今日请求 / token / 积分扣费一目了然；到期积分按天归并口径切换（本地偏好）
-- **账号** — 池总览（状态 / 积分进度条 / 冷却倒计时 / 成功失败计数 / 在途数）；单号禁用 / 恢复 / 复活 / 签到 / 查余额 / 移除；批量签到 / 保活 / 余额刷新；**扫码 / 授权登录添加账号**，凭证落盘后热加载进池，免重启；**凭据导出 / 导入**（跨部署迁移账号，同 UID 覆盖更新）；**强制清冷却**（冷却 / 熔断 / 连败降权 / 模型级限流一键归零，不碰禁用位）；**账号备注**（后端持久化进 state.json，换浏览器不丢）与**搜索 + 分页**；积分变动流水（余额刷新对比快照，增加即记）
+- **账号** — 池总览（状态 / 积分进度条 / 冷却倒计时 / 成功失败计数 / 在途数）；单号禁用 / 恢复 / 复活 / 签到 / 查余额 / 移除；批量签到 / 保活 / 余额刷新；**扫码 / 授权登录添加账号**，凭证落盘后热加载进池，免重启；**凭据导出 / 导入**（跨部署迁移账号，同 UID 覆盖更新）；**强制清冷却**（冷却 / 熔断 / 连败降权 / 模型级限流一键归零，不碰禁用位）；**账号备注**（后端持久化进 state.json，换浏览器不丢）与**搜索 + 分页**；**手写选号权重**（天平图标，`0.1..100` 乘数，默认 1；持久化进 auth 文件顶层 `weight`，导出/导入与 token 刷新保留；冷却/熔断/禁用/在途/成本分层/`credits_desc` 硬门槛不受影响）；积分变动流水（余额刷新对比快照，增加即记）
 - **任务** — 成长任务一键自动化（25 个任务动作纯 API 完成：推进 → 轮询计分 → 自动领奖，执行队列账号内串行、账号间并发；含小程序 Sequential_Tasks_1..7 顺序任务链——专家对话、5/10 次对话、GLM5.2、灵感功能等，链式依赖每日解锁自动重试，**锁定环不扫入待办**，小程序对话上报按真人节奏执行——每条间隔 45s+ 随机抖动、可被队列取消中断）；历史券码二维码查询（开学季任务闭环已随活动 2026-09-24 结束下线）；六类定时任务快照与手动触发；**积分变动流水**（任务中心记录流 kind=credit）
 - **统计** — 逐请求用量分桶（时间片 × 域 × 账号 × 模型）时间轴图表 + 按模型 / 账号聚合的请求量 / token / 延迟 / 扣费 / **积分（含积分每百万 token 单价，与积分同时观测的配对 token 才计入比例）**；时间窗筛选图和表同步生效；时间窗含近 24h / 72h / 7d / 30d 数字档与「启动以来」全量档
 - **日志** — 请求日志（模型 / 账号 / 状态 / tokens / 首字延迟 / 扣费 / 错误 / **prompt 缓存命中三段观测**，环形缓冲最近约 1000 条）+ 系统日志（任务 / 对话 / 系统三频道）；请求日志可 **JSONL 归档**（`data/requests/` 按天轮转，重启不丢，`logging` 段配置保留天数与容量上限；client_ip / user_agent 脱敏开关默认不采集）
@@ -87,12 +91,12 @@ WorkBuddy Cockpit 是一个自托管的一体化项目：**后端**是多账号 
 
 ### ⏰ 定时积分任务
 
-七类任务独立排程、独立开关（`schedule.*_enabled`），**触发小时可在面板 / API 热改（免重启）**：签到（09/21 点，尾部自动跑连登管家：7/14/28 档自动兑换 + 抽奖自动抽完）、活跃地图（10 点）、猫猫旅行（09/21 点，领养状态机修正）、token 保活（22 点）、夜猫子（01 点）、任务执行队列（10 点，默认关）、**每日领补偿**（`compensation_*`，默认关——平台活动补偿原需网页「用量管理」手动领，开启后每天自动领一次；有则领、没有就跳过、重复执行不会多领，国际版账号跳过；面板任务页也可「立即执行」当场领并回报几个号领到/共多少积分）。**任务随机化**（`schedule.random_delay_minutes` / `account_delay_min_seconds` / `account_delay_max_seconds`，默认全关）：自动任务可在整点后随机延后 0~60 分钟（偏移按「部署种子 + 日期 + 任务族」确定性派生——重启后当天偏移不变、不同部署互不相同，种子不入日志），批量任务里账号之间可随机错峰 0~600 秒（真人节奏）；只作用于自动排程，面板「立即执行」照旧立即跑。**Token 续期巡检**（`schedule.renew_hours` / `renew_enabled`，默认 [3] 点、缺省关）：按剩余寿命挑号——有效期不足 `pool.expiring_soon` 窗口（默认 7 天）的临期账号主动刷新，覆盖长期闲置无对话流量的号；面板手动停用的账号跳过（摘流量不摘凭证），仅冷却 / 熔断等计时位异常的照常续期。**睡眠补跑**：进程睡眠跨过整点槽位时（如系统休眠 / 宿主机挂起），唤醒后按时间升序自动补跑窗口内（24h）已到点的槽位，同刻多类合并、批内并行；开学季 `school_*` 配置键仅为老配置兼容保留（活动已结束，触发即跳过）。面板与 `/admin/tasks` 均可手动触发；单任务 panic 有 recover 兜底，不会击穿网关进程。
+七类任务独立排程、独立开关（`schedule.*_enabled`），**触发小时可在面板 / API 热改（免重启）**：签到（09/21 点，尾部自动跑连登管家：7/14/28 档自动兑换 + 抽奖自动抽完）、活跃地图（10 点）、猫猫旅行（09/21 点，领养状态机修正）、token 保活（22 点）、夜猫子（01 点）、任务执行队列（10 点，默认关）、**每日领补偿**（`compensation_*`，默认关——平台活动补偿原需网页「用量管理」手动领，开启后每天自动领一次；有则领、没有就跳过、重复执行不会多领，国际版账号跳过；面板任务页也可「立即执行」当场领并回报几个号领到/共多少积分）。**任务随机化**（`schedule.random_delay_minutes` / `account_delay_min_seconds` / `account_delay_max_seconds`，默认全关）：自动任务可在整点后随机延后 0~60 分钟（偏移按「部署种子 + 日期 + 任务族」确定性派生——重启后当天偏移不变、不同部署互不相同，种子不入日志），批量任务里账号之间可随机错峰 0~600 秒（真人节奏）；只作用于自动排程，面板「立即执行」照旧立即跑。**Token 续期巡检**（`schedule.renew_hours` / `renew_enabled`，默认 [3] 点、缺省关）：按剩余寿命挑号——有效期不足 `pool.expiring_soon` 窗口（默认 7 天）的临期账号主动刷新，覆盖长期闲置无对话流量的号；面板手动停用的账号跳过（摘流量不摘凭证），仅冷却 / 熔断等计时位异常的照常续期。**睡眠补跑**：进程睡眠跨过整点槽位时（如系统休眠 / 宿主机挂起），唤醒后按时间升序自动补跑窗口内（24h）已到点的槽位，同刻多类合并、批内并行；开学季 `school_*` 配置键仅为老配置兼容保留（活动已结束，触发即跳过）。面板与 `/admin/tasks` 均可手动触发；单任务 panic 有 recover 兜底，不会击穿网关进程。**任务奖励只领取补扫**（`schedule.task_sweep_enabled` / `task_sweep_interval_minutes`，默认关、周期最小 15 分钟）：独立于任务队列与活动补偿，只扫描成长任务列表，对上游已报告 `Claimable` 的已完成奖励做前置 accept + claim；不发起对话、不执行任务动作、不自动做耗费聊天的任务，国际版/企业号/禁用/手动停用账号零请求。与任务锁/队列互斥：账号任务锁被占用则跳过该号，任务中心队列 running 时整轮跳过；进程退出随 signal context 停止后续请求（上游任务 API 无 ctx 参数，在途单次 HTTP 请求可能做到自身超时，生产退出最多等 5s 后终止进程）。
 
 ### 🔌 OpenAI 兼容接口
 
-- `/v1/chat/completions` 流式 + 非流式（出站强制 stream，SSE 白名单重建，非流式本地聚合）、**`/v1/messages` + `/v1/messages/count_tokens`（Anthropic Messages 协议，Claude Code 直连）**、**`/v1/responses`（OpenAI Responses 协议，Codex 直连）**、`/v1/models`（effort 档位 / 积分倍率 / 上下文全字段）、`/v1/stats`、`/status`、`/healthz`——三族端点同一套鉴权
-- 出站改写管线：强制 `stream:true`、`developer` 角色归一、tool_choice 归一、`image_url` 字符串兼容、DeepSeek 思维链注入、`reasoning_effort` 档位降级、`reasoning_content` 回填、指纹脱敏、**prompt 缓存命中别名归一**（部分上游 `details.cached_tokens` 有真值而扁平别名留 0 时取全部别名最大正值回写，下游不再误判未命中）
+- `/v1/chat/completions` 流式 + 非流式（出站强制 stream，SSE 白名单重建，非流式本地聚合）、**`/v1/messages` + `/v1/messages/count_tokens`（Anthropic Messages 协议，Claude Code 直连）**、**`/v1/responses`（OpenAI Responses 协议，Codex 直连）**、**`/v1/search/messages`（DSH 联网搜索协议壳，Anthropic web_search_tool_result 兼容）**、`/v1/models`（effort 档位 / 积分倍率 / 上下文全字段）、`/v1/stats`、`/status`、`/healthz`——同一套鉴权
+- 出站改写管线：强制 `stream:true`、`developer` 角色归一、tool_choice 归一、`image_url` 字符串兼容、DeepSeek 思维链注入、`reasoning_effort` 档位降级、`reasoning_content` 回填、指纹脱敏、**prompt 缓存命中别名归一**（部分上游 `details.cached_tokens` 有真值而扁平别名留 0 时取全部别名最大正值回写，下游不再误判未命中）；`reasoning_as_content`（默认 false，需重启生效）仅对「整轮无正文且无工具调用」的 reasoning-only 回合把思考文本同时作为 content 下发，content-only 客户端显式开启，双字段客户端保持默认避免重复显示
 - **出站修复一批**（吸收两上游实案）：GPT 系 `max_tokens<16` 钳制（防 11133 触发全号轮转）；工具 schema pattern `\_` 转义归一（防 11129 整体拒收）；背靠背 tool_calls 消息合并（防 11148 tool_call_sequence_broken 顶死会话）；11101 bad_params 立即 400 直通不再轮转（确定性失败不伪装成「账号不可用」）；上游超时止损（不换号、不罚号、不喂连败计数）；流式成功判定延后到真成功（上游「200 开流 + 一帧 error」不再把限流号记成健康号、粘性不再被钉死在它身上）
 - 系统提示词三模式（passthrough / custom / append）+ 内容拦截降级重试
 - 模型映射、错误分类轮转退避；国际版模型目录**多 UA 并发探测取并集**（桌面 / IDE / CLI 三路 UA——桌面 UA 补齐、IDE UA 字段权威、CLI UA 补 deepseek 系缺失 id），试用横幅模型自动补入目录；上下文窗口按「远端权威 → 静态知识表 → model.json 缓存 → models.dev 按需拉取」四级回退
@@ -139,9 +143,11 @@ go build -trimpath -tags embed_panel -ldflags="-s -w" -o wb2api ./cmd/server
 
 双击 **启动服务.bat** 交互菜单即可（自动编译所需工具、自动检测端口与僵死进程）。发行版 exe 双击即可用：配置文件不存在时首启引导会自动生成带随机 `api_key` 的最小 `config.json` 并打印密钥（双击报错窗口保持可见）。详见 [使用指南.md](使用指南.md)。
 
-### 方式四：NanoPi R28S / OpenWrt ARM64（当前自用部署）
+### 方式四：NanoPi R28S / OpenWrt ARM64
 
 在 FriendlyWrt / OpenWrt（aarch64、约 1 GiB 内存）上以**单容器 + host 网络**运行：`/opt/wb2api/{config,auths,data}` 三个目录 bind mount，主程序与 `resolv.conf` 只读挂载；另有一个 procd 托管的 `wb2api-admin-proxy`，把内网 / Tailscale 的 `17863` 转发到 `127.0.0.1:7863`。
+
+部署手册使用通用路径与地址占位符，包含停服备份、上传与运行文件校验、失败回退和鉴权验收步骤；管理桥为可选组件，需自行提供。
 
 - 完整目录布局、`docker run` 参数、低写入 / 升级 / 备份 / 安全边界：[docs/DEPLOY-R28S.md](docs/DEPLOY-R28S.md)
 - 适用场景：ARM64 小主机 / 软路由 / NAS；x86 与桌面端仍推荐方式一 / 二 / 三
@@ -175,7 +181,7 @@ v1.16.0 起 Claude Code 与 Codex 可**免转换层直连**（Anthropic 协议�
 
 ## ⚙️ 配置
 
-配置以 [`config.example.json`](config.example.json) 为完整参考，`WB2A_*` 环境变量可覆盖（28 个，含 `WB2A_CONFIG` 指定配置路径）。常用段：
+配置以 [`config.example.json`](config.example.json) 为完整参考，`WB2A_*` 环境变量可覆盖（含 `WB2A_CONFIG` 指定配置路径）。常用段：
 
 ```jsonc
 {
@@ -202,6 +208,8 @@ v1.16.0 起 Claude Code 与 Codex 可**免转换层直连**（Anthropic 协议�
 | `cooldown.credit_exhausted` | `""` | 积分耗尽的冷却时长：留空 = 旧行为（硬冷却到次日 04:00 等签到）；填 `10m`/`1h` 则只退出这一段、到期自动回池（固定时长不堆加；面板热改，`WB2A_CREDIT_EXHAUSTED` 可覆盖） |
 | `schedule.random_delay_minutes` / `account_delay_min_seconds` / `account_delay_max_seconds` | `0` / `0` / `0` | 自动任务随机延后 0–60 分钟 与 账号间随机错峰 0–600 秒（默认全关；偏移按部署种子 + 日期 + 任务族确定性派生，重启当天不变、种子不入日志；只作用于自动排程，需重启生效） |
 | `schedule.compensation_enabled` / `compensation_hours` | `false` / `[]` | 每日领活动补偿（默认关；小时**留空 = 只手动执行**、不会被回落成默认整点；国际版与停用号跳过；面板任务页可「立即执行」，`POST /api/compensation/run`） |
+| `schedule.task_sweep_enabled` / `task_sweep_interval_minutes` | `false` / `15` | 任务奖励**只领取**补扫（默认关、opt-in；周期最小 15 分钟，小于 15 配置直接报错）。只对上游已报告 Claimable 的已完成任务做 accept/claim，不跑对话/任务动作；与任务锁、任务中心队列互斥；国际版/企业号/禁用/手动停用号跳过。需重启生效（进程退出随 signal context 停止后续请求，在途单次请求受既有 HTTP 超时约束） |
+| `reasoning_as_content` | `false` | reasoning-only 回合把 `reasoning_content` 同时作为 `content` 下发（仅当整轮无正文且无工具调用）。默认 false 防双字段客户端重复显示；content-only 客户端用 `true` 或 `WB2A_REASONING_AS_CONTENT=1` 开启；`/v1/chat/completions`、Anthropic、Responses 正常帧序不变。**需重启生效**：main 启动期写入进程级开关，面板保存只落盘并提示重启，不做热更新 |
 
 `security` 段（入站 IP 安全，均可在面板「安全」页热改）与 `logging` 段（请求日志归档，**归档默认关**）：
 
@@ -307,6 +315,7 @@ workbuddy-cockpit/
 | v1.19.1 | 2026-10-16 | **第二波：任务自动化 + 可观测（四件）**——**每日领补偿**（`schedule.compensation_*` 默认关：平台活动补偿一键领——有则领、没有就跳过、重复执行不会多领、国际版与停用号跳过；面板任务页「立即执行」当场跑并回报"几个号领到 / 共多少积分"，`POST /api/compensation/run`；端点 = 计费基址 `POST /billing/meter/compensation-status` + `/claim-compensation`，**实测必须打 codebuddy.cn 且不带 `/v2` 前缀**——`/v2` 路径会 404 并伪装成"今天没得领"；业务拒绝（code≠0）视为正常"无可领"，HTTP 4xx/5xx 才是真错误）；**任务随机延后 + 账号错峰**（`random_delay_minutes` 0–60 与 `account_delay_min/max_seconds` 0–600，默认全关；偏移用「部署种子 + 日期 + 任务族」sha256 确定性派生、重启当天不变、种子不入日志；排程内核重写为**槽位枚举**——同小时先后两个延后槽位（如 09:12 旅行 / 09:37 签到）都按各自真实时刻派发、不丢槽不重复；仅自动排程，手动立即执行不受影响）；**快过期积分优先消耗**（`pool.prefer_expiring` 默认开：最早到期且仍有余量的账号在加权选号 ×3 虚拟实例、粘性可用列表放 3 份；**不采纳上游「到期升序硬排序 + 删四因子」方案**，保留现有三因子与 `credits_desc` 语义；快照随余额刷新供给，热改下一个刷新周期生效）；**日志 / 用量暴露层**（`/api/request_logs` 补 `from`/`to`/`ip`/`ua` 过滤——复用早已实现却无生产者的 `reqlog.Filter`，面板日志页新增来源 IP / UA 列、起止时间与子串过滤；`/api/usage` 补 `from`/`to` 窗口并回显，面板统计页新增「自定义区间」；日志侧 IP 采集接入可信代理解析，**默认安全口径不变**）；**集成修复**：面板保存配置不再把新任务族静默关掉（`applyConfig` 未知 kind 一律归零的旧行为），新键的"需重启"提示入 `restartRequiredFields`；定格：全仓 24 包测试绿 + 面板 tsc/lint/静态导出三绿 + dist 清空重放 |
 | v1.19.2 | 2026-10-16 | **审查修复轮**（OCR 全量审查 51 文件 → 23 条评论逐条验证后全修）——**跨层字段错位（high）**：日志页新列与详情读 `ip`/`ua` 而后端序列化的是 `client_ip`/`user_agent`，来源列恒显示「—」（服务端过滤仍生效、故不易发现）→ 前端 4 处读点与类型声明统一对齐后端 json tag；**补偿「小时清空」清不掉**：`SetHours` 拒空表、`hoursOf` 又优先运行态表，面板/`PATCH /admin/tasks` 提交 `[]`（留空 = 只手动）后仍按旧整点自动领直到重启 → 新增 `scheduler.ClearHours`（写非 nil 空表 + 唤醒重排）并接通面板保存与 admin PATCH 两条路径；**越界钳制的 float64 溢出**：`int64(n)` 在 `1e19` 量级溢出为 MinInt64 致上限钳制静默失效，下限钳制同款溢出还会把「要长输出」的请求压成 16 → 两处均改浮点比较；**界面口径三修**：补偿卡片「保存开关不再吞掉未提交的时刻」+ 禁用口径统一 `canEdit`、统计页「今日请求」改独立今日快照（自定义区间不含今天时不再误显示 0）且 `pickWindow` 不再反复覆盖已填区间、日志页补区间合法性校验 +「归档未开启」空态提示 + 筛选期暂停实时刷新；**其他**：`/api/request_logs` 响应补 `source`/`archive_enabled`、归档读取失败的 500 不再回显绝对路径、`/admin/tasks` 的 `next_fire` 零时点输出空串、补偿末号取消不再误报「半程中断」、账号间隔空串校验与 `toWire` 同口径（不再依赖后端拒绝）、`session_sticky` 进重启段清单 + 五语言重启提示文案补全、`localInputToSec` 抽公共 helper；定格：全仓 24 包测试绿 + 面板 tsc/lint/静态导出三绿 + dist 清空重放（206 文件） |
 | v1.19.3 | 2026-10-20 | **401 网关页自动禁用 + R28S 部署手册**——上游鉴权层对已吊销会话直接返回 **401 HTML**（APISIX / openresty），body 没有业务信封，旧分类落入 `ErrClient` 只换号不罚号，死号会留在池里反复 401。新增形态判定 `IsGatewayAuthPage`（只认 **401 + HTML 文档**；纯文本 / 空体 / JSON 信封一律不判，避免凭状态码误杀），聊天、签到、余额、续期、保活、余额刷新六条链路统一自动禁用并写入 `disabled_reason = upstream 401 gateway page (session revoked), re-login required`；面板徽章显示「需重新登录」，`gateway_hint` 与 12153 会话过期分开提示；签到/余额回执不再透传整段 HTML。新增 [docs/DEPLOY-R28S.md](docs/DEPLOY-R28S.md)：NanoPi R28S（FriendlyWrt / OpenWrt ARM64）单容器、host 网络、`/opt/wb2api` 目录布局、17863 管理桥、低写入与 SD 卡注意事项、升级/备份/安全边界 |
+| v1.20.0 | 2026-10-22 | **吸收 panel / manager 2026-10-21 可适用更新**——DSH system prompt 指纹重写；11-128 渠道校验软冷却；11151 空消息确定性 400（不轮转/不罚号）；reasoning-only 回合 `reasoning_as_content`（默认 false）+ finish/usage 帧序修复；上游流截断/读中断在 `[DONE]` 前发 `upstream_truncated` / `upstream_read_error`，日志/指标收敛 502 且不记成功；国际版只读余额刷新 + credit ledger，保留强制冷却；global DeepSeek-V4.1-Flash 补 `max`；账号手写权重（`0.1..100`，默认 1，凭据持久化/导入导出/token 刷新保留）；`POST /v1/search/messages`（共用鉴权/IP/账号池，拒绝 wbk_）；任务奖励只领取补扫（默认关、最小 15m、退出取消、任务锁/队列互斥）。迁移与验证限制见 [发行说明](docs/RELEASE-v1.20.0.md) |
 
 完整变更见 [Releases](https://github.com/Arimayuki03/workbuddy-cockpit/releases)。
 

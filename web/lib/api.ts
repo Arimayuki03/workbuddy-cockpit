@@ -5,6 +5,7 @@ import type {
   Account,
   AccountBalanceResponse,
   AccountCheckinResponse,
+  AccountWeightResponse,
   AccountTasksResponse,
   AuthPollResponse,
   AuthRegionsResponse,
@@ -170,6 +171,13 @@ export const accountApi = {
   /** 保存账号备注（后端化，落 state.json；空串 = 清除）。旧 localStorage 数据首载迁移 */
   setNote: (uid: string, note: string) =>
     post<OkResponse>(`/api/accounts/${encodeURIComponent(uid)}/note`, {note}),
+  /**
+   * 保存账号手写权重（选号乘数，落 auth 文件顶层 weight；0 = 恢复默认）。
+   * 后端只接受 0 或 [0.1,100] 的有限值，越界/NaN/Inf 返回 400。
+   * 响应 weight 是持久化值（0 = 已恢复默认），effective_weight 是实际生效乘数。
+   */
+  setWeight: (uid: string, weight: number) =>
+    post<AccountWeightResponse>(`/api/accounts/${encodeURIComponent(uid)}/weight`, {weight}),
   /** 出口线路表（密码脱敏 ***）+ 全池账号当前绑定视图 */
   proxyRoutes: () => get<ProxyRoutesResponse>('/api/proxy_routes'),
   /** 绑定/解绑账号出口线路（空 route = 解绑恢复直连；落 auth 文件 + 内存即时生效） */

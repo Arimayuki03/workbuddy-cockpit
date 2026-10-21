@@ -275,21 +275,19 @@ data: [DONE]
 	}
 }
 
-// TestAggregateEOFDropsTruncatedToolCalls RED：上游流被掐断（EOF 收尾、无 [DONE]、
-// 无 finish_reason）时，tool_calls 的 arguments 是残缺 JSON。规约：截断来源
-// 除 finish_reason=="length" 外还包括连接中断（sawDone=false）——残缺调用必须
-// 丢弃，否则客户端解析非法 JSON 卡死会话；正常 [DONE] 收尾的完整调用不受影响。
-func TestAggregateEOFDropsTruncatedToolCalls(t *testing.T) {
+// TestAggregateEOFWithoutFinishIsTruncated 回归：上游流被掐断（EOF 收尾、无
+// [DONE]、无 finish_reason）时不能聚合成正常响应——即使已经收到部分 content/
+// tool_calls，也必须报 truncation 哨兵（否则非流式路径会把半截结果记成功）。
+// 有 finish_reason 但漏发 [DONE] 的兼容形态仍允许（见 sse_aggregate 正常例）。
+func TestAggregateEOFWithoutFinishIsTruncated(t *testing.T) {
 	raw := `data: {"id":"x1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"","tool_calls":[{"id":"call_a","type":"function","function":{"name":"bash","arguments":"{\"cmd\":"},"index":0}]}}]}
 data: {"id":"x1","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"\"ls\""},"index":0}]}}]}` // EOF 截断，无 DONE
 	resp, err := Aggregate(strings.NewReader(raw))
-	if err != nil {
-		t.Fatalf("EOF-truncated stream must still aggregate: %v", err)
+	if !IsTruncatedStreamError(err) {
+		t.Fatalf("EOF-truncated stream must return truncation sentinel, got resp=%v err=%v", resp, err)
 	}
-	choice := resp["choices"].([]any)[0].(map[string]any)
-	msg := choice["message"].(map[string]any)
-	if calls, ok := msg["tool_calls"].([]map[string]any); ok && len(calls) != 0 {
-		t.Fatalf("truncated tool_calls must be dropped: %#v", msg["tool_calls"])
+	if resp != nil {
+		t.Fatalf("truncated aggregate must not return a response: %#v", resp)
 	}
 }
 
@@ -765,24 +763,35 @@ func TestStreamNoIdFallsBackToSentinel(t *testing.T) {
 }
 
 func TestStreamDoneFallback(t *testing.T) {
-	// 上游流在无 [DONE] 时 EOF，Stream 必须兜底写一个 [DONE]
+	// A stream with content but neither finish_reason nor [DONE] is truncated.
+	// Keep the [DONE] fallback (downstream converters rely on it), but insert a
+	// protocol error before it and return the truncation sentinel.
 	rec := httptest.NewRecorder()
 	err := Stream(rec, strings.NewReader("data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"))
-	if err != nil {
-		t.Fatal(err)
+	if !IsTruncatedStreamError(err) {
+		t.Fatalf("err=%v want errTruncatedStream", err)
 	}
 	body := rec.Body.String()
 	if !strings.HasSuffix(strings.TrimRight(body, "\n"), "data: [DONE]") {
 		t.Errorf("missing [DONE] fallback: %q", body)
 	}
+	if !strings.Contains(body, `"code":"upstream_truncated"`) {
+		t.Errorf("missing truncation error frame: %q", body)
+	}
+	if strings.Index(body, "upstream_truncated") > strings.Index(body, "data: [DONE]") {
+		t.Errorf("truncation error must precede [DONE]: %q", body)
+	}
 
-	// 已有 [DONE] 时只写一次，不重复
+	// A normal [DONE] is written exactly once and is not flagged as truncated.
 	rec2 := httptest.NewRecorder()
 	if err := Stream(rec2, strings.NewReader("data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n")); err != nil {
 		t.Fatal(err)
 	}
 	if n := strings.Count(rec2.Body.String(), "data: [DONE]"); n != 1 {
 		t.Errorf("[DONE] count=%d want 1: %q", n, rec2.Body.String())
+	}
+	if strings.Contains(rec2.Body.String(), "upstream_truncated") {
+		t.Errorf("unexpected truncation error frame: %q", rec2.Body.String())
 	}
 }
 
@@ -993,14 +1002,16 @@ func TestStreamGarbageAfterDone(t *testing.T) {
 }
 
 // TestStreamNormalPassthroughRegression 校验正常透传回归：帧被 normalize 后透传、
-// 末尾恰好一个 [DONE]、无 error 帧；上游漏发 DONE 时自动补。
+// 末尾恰好一个 [DONE]、无 error 帧；上游有 finish_reason 但漏发 DONE 时自动补，
+// 且不能被误判成截断（判据是 finish_reason / [DONE] 任一存在）。
 func TestStreamNormalPassthroughRegression(t *testing.T) {
 	cases := []struct {
 		name string
 		raw  string
 	}{
 		{"带 DONE 的正常流", sseFixture},
-		{"漏发 DONE 自动补", "data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"},
+		{"有 finish_reason 但漏发 DONE", "data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+			"data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

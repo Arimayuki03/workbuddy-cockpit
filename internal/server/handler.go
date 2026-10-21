@@ -1205,6 +1205,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadRequest
 				return
 			}
+			// 11151「对话里有空消息」：请求内容问题，同一 body 换任何账号结果
+			// 都一样。直接 400 透传上游原文（含 code/requestId），不轮转、不罚号
+			// ——落到通用 4xx 会轮完一圈再伪装成 503，客户端无从自查。
+			if kind == upstream.ErrEmptyMessage {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "a message in the conversation has empty content"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "empty_message", msg,
+					h.hintOf(upstream.ErrEmptyMessage, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				return
+			}
 			// 图片格式/数据无效：立即透传上游原文回客户端，不罚号不轮转。
 			// 同一 body 换账号仍是同样的解析结果，轮转只会放大无效请求。
 			if kind == upstream.ErrImageInvalid {
@@ -1321,6 +1336,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 502 观测没有意义）。**不记成功**（此前 NoteSuccess 在流前已执行）。
 				st.status = http.StatusBadGateway
 				log.Printf("WARN: [server] stream acct=%s model=%s: empty upstream stream (200+0 frames)", logfmt.Label(acct.UID, acct.Nickname), bareModel)
+			case upstream.IsTruncatedStreamError(sErr):
+				// 上游 200 但流中途断掉（转发过内容帧，无 finish_reason/[DONE]）：
+				// StreamHint 已在 [DONE] 前插入 upstream_truncated error 帧。HTTP
+				// 头已发出不能改成 502，但请求日志/指标必须收敛为失败，不能再留
+				// 一条 tok=... 的假成功；账号侧不记成功、不绑粘性。
+				st.status = http.StatusBadGateway
+				st.setError("upstream stream truncated before finish_reason/[DONE]")
+				log.Printf("WARN: [server] stream acct=%s model=%s: upstream truncated (no finish_reason/[DONE])", logfmt.Label(acct.UID, acct.Nickname), bareModel)
+			case upstream.IsUpstreamReadError(sErr) && errFrame == "":
+				// 上游流非 EOF 读中断（连接重置/读超时/代理断开）：StreamHint 已
+				// 在 [DONE] 前写 upstream_read_error。HTTP 头已发出只能 200，但
+				// 日志/指标必须收敛失败，账号侧不记成功、不清负缓存、不绑粘性
+				// ——把上游断流误当客户端断连会放过一个坏号。
+				st.status = http.StatusBadGateway
+				st.setError("upstream stream read failed: " + sErr.Error())
+				log.Printf("WARN: [server] stream acct=%s model=%s: upstream read error: %v", logfmt.Label(acct.UID, acct.Nickname), bareModel, sErr)
 			case errFrame != "":
 				// 上游以 error 帧报错（6004 限流 / 内容拦截 / 审核）：按帧内容分类并
 				// 处置账号——**不记成功、不清 11102 负缓存、不绑粘性**，粘性号则解绑
@@ -1401,7 +1432,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		rc.Close()
 		if err != nil {
 			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
-			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
+			// 截断流给独立可诊断 code（与流式路径的 upstream_truncated 对齐）；
+			// 空流/解析失败保持既有 upstream_parse。
+			code := "upstream_parse"
+			if upstream.IsTruncatedStreamError(err) {
+				code = "upstream_truncated"
+			}
+			writeOpenAIError(w, http.StatusBadGateway, code, err.Error())
 			st.status = http.StatusBadGateway
 			st.setError("aggregate: " + err.Error())
 			// 非流式聚合失败**不记成功、不绑粘性**（延后绑定语义：此前 NoteSuccess
@@ -1494,6 +1531,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 对必然失败的请求无限重试）。上游原文由下方 ue.Msg 覆盖 message。
 			status = http.StatusBadRequest
 			code = "tool_call_mismatch"
+		case upstream.ErrEmptyMessage:
+			// 11151 同上：确定性请求级 400，末端也绝不伪装成 503。
+			status = http.StatusBadRequest
+			code = "empty_message"
 		case upstream.ErrWafBlock:
 			if h.wafIP.active() {
 				// IP 级拦截措辞（fail-fast 终止路径）：空 body 时给出明确可读文案——
@@ -1697,6 +1738,16 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		//     **保持软冷却**（禁用会让用户补完 register 后仍无法用）。
 		// 两条路径对坏号都立刻换号（同一请求轮转出池），只是后续可恢复性不同。
 		// 大小写不敏感（与 Classify 的 marker 匹配同口径）。
+		//
+		// 渠道校验必须先于 request illegal 判定：同一封套常带历史遗留的
+		// `request illegal`，按它硬禁用会把凭证健康的账号标成「需重新登录」。
+		// 优先读错误信封上的稳定 ChannelCheck（由完整 body 分类时固化）：搜索
+		// 等路径只把 ue.Msg（前 200 字符）交给本函数，重新解析会被截断骗过。
+		if (uerr != nil && uerr.ChannelCheck) || upstream.IsChannelCheck(body) {
+			h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(),
+				"channel check ("+kind.String()+")")
+			return
+		}
 		if strings.Contains(strings.ToLower(body), "request illegal") {
 			h.cfg.Pool.Disable(uid, "account banned by upstream (11140 request illegal), re-login required")
 			return
@@ -1720,6 +1771,9 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 号都超限）。零动作（不冷却/不熔断/不 NoteError，同 ErrContentBlocked
 		// 待遇），chatCompletions 已直接透传原文返回不轮转——该分支只为文档完备，
 		// 不指望走到换号路径。
+	case upstream.ErrEmptyMessage:
+		// 11151 空消息：请求内容问题，同 body 换号结果不变。零动作（不冷却/
+		// 不熔断/不 NoteError/不喂连败），chatCompletions 已直接 400 透传。
 	case upstream.ErrImageInvalid:
 		// 图片格式/数据无效：请求的问题不是账号的问题（同一 body 换任何号都会
 		// 得到相同解析错误）。零动作，chatCompletions 已 fail-fast 透传。

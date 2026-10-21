@@ -72,6 +72,16 @@ dev/
 
 # Backups (contains auth tokens)
 backups/
+/maintenance-backups/
+*.tar
+*.tar.gz
+*.tgz
+# Local deployment / release output (may include configuration and machine details)
+/dist/
+/release-assets/
+/deploy-local/
+*.private.json
+*.private.md
 
 # IDE
 .idea/
@@ -86,6 +96,7 @@ SPEC.md
 !使用指南.md
 !docs/DESIGN-v1.2.0-panel-manager.md
 !docs/DEPLOY-R28S.md
+!docs/RELEASE-v1.20.0.md
 
 web/node_modules/
 web/.next/

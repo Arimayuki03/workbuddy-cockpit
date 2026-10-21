@@ -264,6 +264,15 @@ type Config struct {
 	// **拒绝发出**（绝不静默回退直连）。空/缺省 = 无线路（全部直连，零回归）。
 	ProxyRoutes map[string]string `json:"proxy_routes"`
 
+	// ReasoningAsContent 思考通道兜底：整轮既无正文也无工具调用时，把
+	// reasoning_content 原文同时作为 content 下发，服务只看 content 的客户端。
+	//
+	// 默认 false：同时渲染 reasoning_content 与 content 的客户端会把同一段
+	// 内容显示两遍；content-only 客户端需要显式打开
+	// reasoning_as_content=true（或 WB2A_REASONING_AS_CONTENT=1）。
+	// 指针用于区分「缺省」与显式 false（归一化后两者都是关闭）。
+	ReasoningAsContent *bool `json:"reasoning_as_content"`
+
 	// 解析后
 	SoftRateDur         time.Duration `json:"-"`
 	SoftRateMaxDur      time.Duration `json:"-"`
@@ -311,6 +320,8 @@ func Default() *Config {
 	// 显式 client_name="SaaS" 还原旧行为。
 	c.Upstream.ClientName = "WorkBuddy"
 	c.Features.SanitizeBlacklistFingerprints = true
+	reasoningAsContent := false
+	c.ReasoningAsContent = &reasoningAsContent
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：默认透传客户端原始 system；显式配置 custom 仍可覆盖回替换
 	c.Pool.MaxInFlight = 3
 	// MaxInFlightGlobal 缺省 2：global 域 WAF 风控更紧，压低单号并发（WAF 403
@@ -394,6 +405,23 @@ func applyEnv(c *Config) {
 	// 积分耗尽冷却时长覆盖（空/缺省 = 保持硬冷却到次日 04:00 的旧行为）。
 	if v := os.Getenv("WB2A_CREDIT_EXHAUSTED"); v != "" {
 		c.Cooldown.CreditExhausted = v
+	}
+	if v := strings.TrimSpace(os.Getenv("WB2A_REASONING_AS_CONTENT")); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.ReasoningAsContent = &b
+		}
+	}
+	// 任务奖励补扫（默认关，显式 opt-in）。环境变量与 JSON 同口径：非法值忽略
+	// 交由 normalize/默认值兜底，interval 越界仍在 normalize 报错。
+	if v := strings.TrimSpace(os.Getenv("WB2A_TASK_SWEEP_ENABLED")); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Schedule.TaskSweepEnabled = b
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("WB2A_TASK_SWEEP_INTERVAL_MINUTES")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Schedule.TaskSweepIntervalMinutes = n
+		}
 	}
 	if v := os.Getenv("WB2A_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -549,6 +577,12 @@ func (c *Config) normalize() error {
 			return fmt.Errorf("cooldown.credit_exhausted: 必须是正时长，got %q", v)
 		}
 		c.CreditExhaustedDur = d
+	}
+	// reasoning_as_content 缺省关闭：双字段客户端不会重复显示，content-only
+	// 部署可显式开启。nil 归一为 false（指针只用于区分配置缺省，不改变行为）。
+	if c.ReasoningAsContent == nil {
+		off := false
+		c.ReasoningAsContent = &off
 	}
 	// 空值回落默认（与 soft_rate_max / degrade_cooldown 同风格：显式 "" 不应直接启动失败）。
 	if c.Pool.BreakerCooldown == "" {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -31,11 +32,11 @@ type Auth struct {
 	//
 	// 命名注记：Go 不允许字段与方法同名，持久化字段用未导出 realm，计算访问器用
 	// 导出的 Realm()（跨包调用全部走方法）。Parse/SaveAtomic/login 在包内读写字段。
-	realm          string
-	UID            string
-	EnterpriseID   string
-	Nickname       string
-	FilePath       string // 来源文件；refresh 后原子写回此处
+	realm        string
+	UID          string
+	EnterpriseID string
+	Nickname     string
+	FilePath     string // 来源文件；refresh 后原子写回此处
 
 	// DeviceToken 设备风控 Token（X-Device-Token 头），来源 auth 文件的 device_token 键。
 	// 缺省为空 = 不注入该头（容器内无桌面端 Turing SDK 的常见部署）。
@@ -50,6 +51,133 @@ type Auth struct {
 	// 非空但线路表查无此名 → upstream 侧拒绝发出请求（绝不静默回退直连：回落
 	// = 出口隔离失效且无人发现）。落盘于嵌套形 auth 段内 + 扁平形顶层 proxy_route。
 	ProxyRoute string
+
+	// Weight 账号级手写权重（issue #187），来源 auth 文件顶层 `weight` 字段，
+	// 由面板的「权重」写入。0 = 未设置（等价 1.0）。
+	//
+	// 语义是**乘数**而非优先级：选号本来就按「余额 + 快过期占比 + 闲置时长」
+	// 三因子加权随机（见 pool.weightOf），这里把结果再乘上该值 —— 权重 3 表示
+	// 同等条件下被抽中的机会约为默认的 3 倍。之所以不做成「权重高的恒定优先」：
+	// 那会让低权重的号一直闲置，积分用不完就过期（正是 #187 另一半诉求要避免的）。
+	// 硬门槛（冷却 / 熔断 / 禁用 / 在途占满 / 成本分层）与 credits_desc 策略不受
+	// 本字段影响。运行期写入必须经 SetWeightAndSave（同一临界区落盘）或
+	// SetWeight（纯内存测试）；与 RefreshToken/SaveAtomic 共用 a.mu。
+	Weight float64
+}
+
+// 手写权重的取值区间：低于 MinWeight 等于「几乎不用」（但仍留一丝机会，
+// 与 pickWeighted 的权重保底 ≥1 同口径），高于 MaxWeight 没有实际意义。
+const (
+	MinWeight = 0.1
+	MaxWeight = 100.0
+)
+
+// PickWeight 返回用于选号的权重乘数：未设置（0）或非法值给 1，合法值钳制在
+// [MinWeight, MaxWeight]。选号侧只读本方法、不直读字段 —— 钳制口径只有一处，
+// 否则「文件里写了 1e9」这种输入会把选号直接压成一号独大。
+//
+// 加锁读取：面板权重端点会在运行期改写 Weight，而 weightOf/Status 在选号与
+// 状态查询路径并发读取（与 AccessTokenValue 同款数据竞争防线）。
+func (a *Auth) PickWeight() float64 {
+	if a == nil {
+		return 1
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return pickWeightLocked(a.Weight)
+}
+
+// pickWeightLocked 无锁版 PickWeight：调用方必须已持 a.mu（sync.Mutex 不可重入）。
+func pickWeightLocked(weight float64) float64 {
+	w := weight
+	if math.IsNaN(w) || math.IsInf(w, 0) || w <= 0 {
+		return 1
+	}
+	if w < MinWeight {
+		return MinWeight
+	}
+	if w > MaxWeight {
+		return MaxWeight
+	}
+	return w
+}
+
+// WeightValue 加锁读取原始持久化值（0 = 未设置；不做钳制，供面板回显「用户填了
+// 什么」与保存失败回滚使用）。选择/展示权重一律用 PickWeight。
+func (a *Auth) WeightValue() float64 {
+	if a == nil {
+		return 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.Weight
+}
+
+// SetWeight 加锁写入原始权重值。负数/NaN/Inf 按「未设置」处理（与解析期
+// sanitizeWeight 同口径）；合法越界值保留原样，选号时由 PickWeight 钳制。
+func (a *Auth) SetWeight(weight float64) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.Weight = sanitizeWeight(weight)
+	a.mu.Unlock()
+}
+
+// SetWeightAndSave 在同一把 a.mu 内完成「设置权重 + 整份原子落盘」，返回实际
+// 持久化的原始值（0 = 未设置）。面板端点必须走本方法，而不是 SetWeight +
+// SaveAtomic 两步：两步之间另一个并发保存可能已写入新权重，本请求落盘失败
+// 后回滚则会把这个成功值覆盖回旧值（lost update）。
+//
+// FilePath 为空 = 纯内存装配（测试/最小形态）：只改内存并返回新值，不落盘。
+// 落盘失败时把内存权重回滚到调用前值，文件保持旧内容（writeFileAtomic 的 tmp
+// 写入失败不会 rename，故不会出现半份文件）。
+func (a *Auth) SetWeightAndSave(weight float64) (float64, error) {
+	if a == nil {
+		return 0, fmt.Errorf("nil auth")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	prev := a.Weight
+	a.Weight = sanitizeWeight(weight)
+	if a.FilePath == "" {
+		return a.Weight, nil
+	}
+	if err := a.saveAtomicLocked(); err != nil {
+		a.Weight = prev
+		return prev, err
+	}
+	return a.Weight, nil
+}
+
+// sanitizeWeight 解析期清洗：非有限值与负数一律当「未设置」（0）。合法但越界的
+// 值**保留原样**，由 PickWeight 在选号时钳制 —— 面板靠原值回显「用户填了什么」，
+// 这里改写会让界面显示与文件内容不一致。手改坏的值打一行 WARN，否则「权重没生效」
+// 会变成没有线索的悬案。
+func sanitizeWeight(weight float64) float64 {
+	if math.IsNaN(weight) || math.IsInf(weight, 0) || weight < 0 {
+		log.Printf("WARN: [auth] 忽略非法的 weight=%v（按未设置处理，应为 %v..%v）",
+			weight, MinWeight, MaxWeight)
+		return 0
+	}
+	return weight
+}
+
+// parseWeightRaw 解析 auth 文件里的 weight 原始值：缺省/类型错误/超大数字都
+// 不阻断整份凭证加载，统一按「未设置」(0) 处理并打 WARN。权重只是选号调参，
+// 不能因为一个手改坏的字段让整个账号被 LoadDir 跳过（那会让账号静默消失）。
+// 合法但越界的数值仍原样保留，钳制交给 PickWeight。
+func parseWeightRaw(raw json.RawMessage) float64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var weight float64
+	if err := json.Unmarshal(raw, &weight); err != nil {
+		log.Printf("WARN: [auth] 忽略无法解析的 weight=%q（按未设置处理，应为 %v..%v）",
+			strings.TrimSpace(string(raw)), MinWeight, MaxWeight)
+		return 0
+	}
+	return sanitizeWeight(weight)
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -287,6 +415,10 @@ func Parse(raw []byte) (*Auth, error) {
 			// ProxyRouteTop 顶层 proxy_route 兼容形态：与 auth 段内等价（面板绑定
 			// 端点写 auth 段内，手工维护的文件可直接写顶层，两形态都能读）。
 			ProxyRouteTop string `json:"proxy_route"`
+			// Weight 顶层 weight（手写权重，面板写入；见 Auth.Weight）。
+			// 用 RawMessage 容忍手改坏的类型：解析失败按未设置处理，不让整份
+			// 凭证文件被 LoadDir 跳过。
+			Weight json.RawMessage `json:"weight"`
 		}
 		if err := json.Unmarshal(raw, &n); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -306,6 +438,7 @@ func Parse(raw []byte) (*Auth, error) {
 			Nickname:     n.Account.Nickname,
 			DeviceToken:  n.DeviceToken,
 			ProxyRoute:   strings.TrimSpace(proxyRoute),
+			Weight:       parseWeightRaw(n.Weight),
 		}
 	} else {
 		var f struct {
@@ -319,6 +452,9 @@ func Parse(raw []byte) (*Auth, error) {
 			Nickname     string `json:"nickname"`
 			DeviceToken  string `json:"device_token"`
 			ProxyRoute   string `json:"proxy_route"`
+			// Weight 顶层 weight（与 proxy_route 同层级，面板写入；见 Auth.Weight）。
+			// RawMessage 理由见嵌套形同名注释。
+			Weight json.RawMessage `json:"weight"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -334,6 +470,7 @@ func Parse(raw []byte) (*Auth, error) {
 			Nickname:     f.Nickname,
 			DeviceToken:  f.DeviceToken,
 			ProxyRoute:   strings.TrimSpace(f.ProxyRoute),
+			Weight:       parseWeightRaw(f.Weight),
 		}
 	}
 	if strings.TrimSpace(a.AccessToken) == "" {
@@ -348,6 +485,14 @@ func Parse(raw []byte) (*Auth, error) {
 func (a *Auth) SaveAtomic() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.saveAtomicLocked()
+}
+
+// saveAtomicLocked 是 SaveAtomic 的无锁实现：调用方必须已持 a.mu。
+// 供 SetWeightAndSave 在同一临界区内完成「改字段 + 整份落盘」，避免两次
+// 加锁之间被另一个面板请求插入——否则一个请求落盘失败回滚时，会把另一个
+// 已成功写入的权重覆盖回旧值。
+func (a *Auth) saveAtomicLocked() error {
 	if strings.TrimSpace(a.AccessToken) == "" {
 		return fmt.Errorf("save refused: empty accessToken (uid=%s)", a.UID)
 	}
@@ -369,13 +514,19 @@ func (a *Auth) SaveAtomic() error {
 			"uid":          a.UID,
 			"enterpriseId": a.EnterpriseID,
 			// 直读字段：本函数全程持 a.mu（防止半更新快照），NicknameValue 会自锁。
-			"nickname":     a.Nickname,
+			"nickname": a.Nickname,
 		},
 	}
 	// DeviceToken 非空才写回顶层 device_token：避免在无该字段的旧文件里引入空键
 	// （保持与插件 OAuth 输出形状一致，插件读取忽略未知键）。
 	if a.DeviceToken != "" {
 		doc["device_token"] = a.DeviceToken
+	}
+	// Weight 同理只在非零时写回（issue #187）：刷新 token 会整份重建文件，
+	// 不保留等于把用户设的权重静默清零。0 = 未设置，不写键（面板把 1 当默认，
+	// 手改过的文件也不会因此多出 weight: 1 这种噪音）。
+	if a.Weight != 0 {
+		doc["weight"] = a.Weight
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -436,11 +587,16 @@ func (a *Auth) ExportDoc() map[string]any {
 			"uid":          a.UID,
 			"enterpriseId": a.EnterpriseID,
 			// 直读字段：本函数全程持 a.mu（完整 token 快照语义），NicknameValue 会自锁。
-			"nickname":     a.Nickname,
+			"nickname": a.Nickname,
 		},
 	}
 	if a.DeviceToken != "" {
 		doc["device_token"] = a.DeviceToken
+	}
+	// 权重属于账号配置而非秘密，随导出文件往返（导入方 Parse 直接读回）。
+	// 只在非零时写出，未设置的文件不会凭空多出 weight: 1。
+	if a.Weight != 0 {
+		doc["weight"] = a.Weight
 	}
 	return doc
 }

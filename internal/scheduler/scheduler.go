@@ -749,15 +749,9 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 			out = append(out, oc)
 			continue
 		}
-		// D4 门控：realm=global 账号无签到体系/任务中心，直接跳过（不发起任何上游调用，避免风控）。
-		// 经 auth.Realm() 统一判定：逃生门（global.enabled=false）下 global 账号被降级为 cn、
-		// 按 CN 处理——这是 D5 逃生门的刻意语义（纯 CN 部署锁死一切 global），与引用处一致。
-		if a.IsGlobal() {
-			oc.Status, oc.Detail = CheckinSkipped, "global"
-			skipN++
-			out = append(out, oc)
-			continue
-		}
+		// D4 门控见下方 token 预刷新之后：global 账号虽无签到/任务体系，但仍要
+		// 参与统一的 ctx 检查与账号错峰（不能连续无视取消信号打余额接口），
+		// 且必须先用有效 token 才能成功读余额。
 		// 账号错峰（仅定时路径生效，见 accountGap）：等不满 = ctx 取消，放弃剩余账号，
 		// 已完成的回执照常返回（与 runActivity 的取消口径一致）。
 		if !first {
@@ -769,6 +763,11 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 			}
 		}
 		first = false
+		// 首个账号之前也要检查：不能因为 first=true 绕过取消信号去刷新 token /
+		// 打余额（定时路径关停时仍可能停在首个账号）。
+		if ctx.Err() != nil {
+			return out, ctx.Err()
+		}
 		// 停机跨过 token 有效期（关机过夜/容器长期停跑）时先补一次刷新，否则签到必然 401 白跑。
 		if a.NeedsRefresh(checkinRefreshSkew) {
 			if err := s.cfg.Upstream.RefreshToken(a); err != nil {
@@ -798,6 +797,35 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 					log.Printf("checkin %s save: %v", logfmt.Label(st.UID, st.Nickname), err)
 				}
 			}
+		}
+		// D4 门控：realm=global 账号无签到体系/任务中心，签到/旅行/任务一律跳过，
+		// 但做一次**只读**余额查询：否则 pool credits 恒 0，权重里的余额/快过期
+		// 因子对 global 完全失效。UserResourceDetailed 只读 billing/meter，不触碰
+		// 签到或任务接口，风控语义不变。
+		// 经 auth.Realm() 统一判定：逃生门（global.enabled=false）下 global 账号被降级为 cn、
+		// 按 CN 处理——这是 D5 逃生门的刻意语义（纯 CN 部署锁死一切 global），与引用处一致。
+		if a.IsGlobal() {
+			oc.Status, oc.Detail = CheckinSkipped, "global"
+			skipN++
+			// 取消/错峰已在上面统一处理；请求前再确认一次，避免刚睡醒即发的
+			// 那一个请求背离取消语义。
+			if ctx.Err() != nil {
+				return out, ctx.Err()
+			}
+			if remain, buckets, err := s.cfg.Upstream.UserResourceDetailed(a, s.cfg.ExpiringSoonWindow); err != nil {
+				log.Printf("user-resource(global) %s: %v", logfmt.Label(st.UID, st.Nickname), err)
+			} else {
+				// 只写余额观测：**不调用 ReenableIfCredits**。签到解冻语义不适用于
+				// global（没有签到回血），且不能把运维强制冷却/余额耗尽冷却提前清掉。
+				s.cfg.Pool.SetCreditsDetailed(st.UID, remain, buckets.Expiring)
+				s.cfg.Pool.SetCreditEarliest(st.UID, buckets.EarliestExpiry, buckets.EarliestRemaining)
+				// 积分流水观测：global 只读余额也必须进 ledger（与 CN 签到后的
+				// RecordCheckinChecked / 余额刷新路径同口径）；不做签到口径记录。
+				s.RecordBalanceChecked(st.UID, st.Nickname, remain)
+				oc.Credits = &remain
+			}
+			out = append(out, oc)
+			continue
 		}
 		// 签到前基线查询：签到到账流水（RecordCheckinChecked）以「签到前余额」
 		// 为基线——签到与上次快照刷新之间隔着 API 消耗，快照口径会把奖励抵成

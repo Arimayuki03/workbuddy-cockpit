@@ -39,6 +39,9 @@ export interface Account {
   /** 账号域：cn / global；旧 state 无该字段时前端按 cn 处理 */
   realm?: 'cn' | 'global';
   credits: number;
+  /** 账号手写权重的**生效值**（选号乘数）：未设置 = 1，范围 0.1..100。
+   *  持久化原始值在 auth 文件顶层 weight；面板只展示/编辑该生效值。 */
+  weight?: number;
   /** 积分总额度（各套餐聚合）；0 = 未知 */
   credits_total?: number;
   cooling: boolean;
@@ -181,6 +184,15 @@ export interface AccountBalanceResponse {
   ok: boolean;
   credits: number;
   credits_total: number;
+}
+
+/** POST /api/accounts/{uid}/weight（panel account_weight.go） */
+export interface AccountWeightResponse {
+  ok: boolean;
+  /** 持久化值：0 = 已恢复默认（auth 文件不再保留 weight 键） */
+  weight: number;
+  /** 实际生效的选号乘数（未设置/非法 = 1，范围 0.1..100） */
+  effective_weight: number;
 }
 
 export interface OkResponse {

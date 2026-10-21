@@ -105,7 +105,7 @@ func globalEffortChatSrv(t *testing.T, modelsBody string, capture func([]byte)) 
 }
 
 // TestGlobalEffortDowngradeStatic 探测失败（负缓存）→ global 请求按静态兜底表降级：
-// deepseek-v4.1-flash 只认 high，客户端传 low → 降级 high（issue #84 核心）。
+// deepseek-v4.1-flash 不认 low，客户端传 low → 降级 high（issue #84 核心）。
 func TestGlobalEffortDowngradeStatic(t *testing.T) {
 	auth.SetGlobalEnabled(true)
 	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
@@ -119,7 +119,7 @@ func TestGlobalEffortDowngradeStatic(t *testing.T) {
 		ChatBaseGlobal: strings.TrimSuffix(srv.URL, "/"),
 		GlobalEnabled:  true,
 	}
-	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
+	c.SyncHot()                       // 热改快照与结构体字段同步（读侧走 HotFields）
 	c.FetchGlobalModels(globalAcct()) // models endpoint 返回 code:500 → 解析失败 → 负缓存，桶空
 
 	rc, status, _, err := c.ChatStream(globalAcct(), []byte(`{"model":"deepseek-v4.1-flash","reasoning_effort":"low","messages":[]}`), "", ChatMeta{})
@@ -134,6 +134,42 @@ func TestGlobalEffortDowngradeStatic(t *testing.T) {
 	}
 	if got, _ := m["reasoning_effort"].(string); got != "high" {
 		t.Errorf("reasoning_effort=%v want high (global 静态兜底降级 low→high)", m["reasoning_effort"])
+	}
+}
+
+// TestGlobalEffortRemoteLagKeepsMax issue #238: metadata may still advertise
+// only high while the product supports Max. A max request must survive the
+// request-side downgrade path, otherwise the capability is never usable.
+func TestGlobalEffortRemoteLagKeepsMax(t *testing.T) {
+	auth.SetGlobalEnabled(true)
+	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
+
+	var outbound []byte
+	srv := globalEffortChatSrv(t, `{"code":0,"data":{"models":[
+		{"id":"deepseek-v4.1-flash","reasoning":{"supportedEfforts":["high"],"defaultEffort":"high"}}
+	]}}`, func(b []byte) { outbound = b })
+	defer srv.Close()
+
+	c := &Client{
+		HTTP:           &http.Client{},
+		ChatBaseGlobal: strings.TrimSuffix(srv.URL, "/"),
+		GlobalEnabled:  true,
+	}
+	c.SyncHot()
+	c.FetchGlobalModels(globalAcct())
+
+	rc, status, _, err := c.ChatStream(globalAcct(), []byte(`{"model":"deepseek-v4.1-flash","reasoning_effort":"max","messages":[]}`), "", ChatMeta{})
+	if err != nil || status != 200 {
+		t.Fatalf("chat status=%d err=%v", status, err)
+	}
+	rc.Close()
+
+	var m map[string]any
+	if err := json.Unmarshal(outbound, &m); err != nil {
+		t.Fatalf("unmarshal outbound: %v (%s)", err, outbound)
+	}
+	if got, _ := m["reasoning_effort"].(string); got != "max" {
+		t.Errorf("reasoning_effort=%v want max (global product supports Max)", m["reasoning_effort"])
 	}
 }
 
@@ -154,7 +190,7 @@ func TestGlobalEffortDowngradeRemote(t *testing.T) {
 		ChatBaseGlobal: strings.TrimSuffix(srv.URL, "/"),
 		GlobalEnabled:  true,
 	}
-	c.SyncHot() // 热改快照与结构体字段同步（读侧走 HotFields）
+	c.SyncHot()                       // 热改快照与结构体字段同步（读侧走 HotFields）
 	c.FetchGlobalModels(globalAcct()) // 探测成功写桶
 
 	rc, status, _, err := c.ChatStream(globalAcct(), []byte(`{"model":"gpt-5.4","reasoning_effort":"max","messages":[]}`), "", ChatMeta{})

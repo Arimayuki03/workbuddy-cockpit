@@ -614,6 +614,9 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Realm:      e.a.Realm(),
 		Nickname:   e.a.NicknameValue(),
 		Credits:    e.credits,
+		// 手写权重生效值（0 = 未设置 → PickWeight 给 1；越界钳到 0.1..100）。
+		// 只读乘数，与凭证无关；/status 与 /api/overview 都据此回显。
+		Weight: e.a.PickWeight(),
 		// Cooling 口径含连败降权（degradeUntil）：降权期账号不可选，运维在 /status
 		// 应看到它处于非健康态（CoolRemaining 取三截止最远者，与 healthy 或门同口径）。
 		Cooling:          now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil),
@@ -636,10 +639,10 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		InFlightByModel: e.inFlightByModelSnapshot(),
 		// 续期观测（schedule.renew_enabled 巡检 + 保活/签到刷新路径共同维护）：
 		// last_renewed 恒透出（零值 = 从未续期），renew_last_error 仅失败时非空。
-		LastRenewed:     e.lastRenewed,
-		RenewLastError:  e.renewLastErr,
+		LastRenewed:    e.lastRenewed,
+		RenewLastError: e.renewLastErr,
 		// 运维备注透出（SetNote 写入，面板 accounts 页展示/编辑；空 = 未写）。
-		Note:            e.note,
+		Note: e.note,
 	}
 	if st.Disabled {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。

@@ -79,6 +79,23 @@ var sanitizeRewrites = [][2]string{
 	},
 }
 
+// sanitizeDshRe DSH（DeepSeek Harness）system 自我介绍句的模板匹配。
+//
+// 上游拦截的是句式而不是品牌名：DSH 的 system 首句常见
+// "You are an AI agent powered by <brand>." 与
+// "You are a coding agent powered by the <model> model."，把品牌换掉同样会
+// 返回 400 code=11-128。按句式整句替换为中性介绍，避免只替换品牌后留下残句。
+//
+// 句尾必须按「点 + 空白/行尾」收口：模型名自带点（deepseek-v4.1-flash），
+// 用 [^\n]*\. 会停在 "v4." 并留下 "1-flash model."。`{0,120}` 只是防病态长行
+// 的上限，正常情况下非贪婪匹配会在第一个句号收口。起点不限行首，兼容客户端
+// 把该句嵌在模板里的形态；`${1}` 回填句尾空白，防止两条指令被粘在一起。
+var sanitizeDshRe = regexp.MustCompile(
+	`(?i)\byou are (?:a|an) (?:ai )?(?:coding )?(?:agent|assistant) (?:powered by|built on) [^\n]{0,120}?\.(\s|$)`)
+
+// sanitizeDshRepl 中性、无品牌的替身（自身不含 sanitizeFeatures 的任何片段）。
+const sanitizeDshRepl = "You are a helpful AI assistant.${1}"
+
 // sanitizeText 单段文本净化：预检不中 → 返回原串（零分配）。
 func sanitizeText(text string) string {
 	if !hasFingerprint(text) {
@@ -87,6 +104,7 @@ func sanitizeText(text string) string {
 	for _, rw := range sanitizeRewrites {
 		text = strings.ReplaceAll(text, rw[0], rw[1])
 	}
+	text = sanitizeDshRe.ReplaceAllString(text, sanitizeDshRepl)
 	if sanitizeHdrRe.MatchString(text) {
 		text = sanitizeHdrRe.ReplaceAllString(text, "")
 	}
@@ -112,6 +130,11 @@ func hasFingerprint(text string) bool {
 		if strings.Contains(text, f) {
 			return true
 		}
+	}
+	// DSH 句式指纹必须在这里也命中，否则预检直接返回、改写层根本执行不到。
+	// 正则自带 (?i)：原文是 "AI agent" 大写，不能靠大小写敏感的 Contains 特征串。
+	if sanitizeDshRe.MatchString(text) {
+		return true
 	}
 	return sanitizeBareHdrRe.MatchString(text)
 }

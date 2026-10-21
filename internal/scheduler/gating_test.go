@@ -1,67 +1,84 @@
 package scheduler
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/upstream"
 )
 
-// TestGlobalAccountsSkipCheckinTravel gating（活动已放开，见下方两个 activity 用例）：
-// 池内 global 账号在 checkin/travel 两类循环中**零上游调用**；activity 已不再跳过
-// global（PR #45 实测 /v2/report 在 workbuddy.ai code=0 OK）。
-//
-// fake upstream 全路径统计调用数：global 账号若被误放行，会打到 fake server
-// 的 /daily-checkin /buddy/info 等任意路径，调用数即 >0。
+// globalResourceBody is a successful read-only billing/meter response carrying
+// 100 usable credits. It must be wrapped once in the API envelope.
+const globalResourceBody = `{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CapacityRemain":100}]}}}}`
+
+func newGlobalCreditServer(t *testing.T) (*httptest.Server, *atomic.Int32, *[]string) {
+	t.Helper()
+	var calls atomic.Int32
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, globalResourceBody)
+	}))
+	return srv, &calls, &paths
+}
+
+func newGlobalTestClient(srv *httptest.Server) *upstream.Client {
+	return &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL,
+		BillingBaseGlobal: srv.URL, GlobalEnabled: true}
+}
+
+// TestGlobalAccountsSkipCheckinTravel gating: global accounts must not call
+// CN checkin/travel endpoints, but scheduled checkin performs exactly one
+// read-only balance request so pool credits are not stale.
 func TestGlobalAccountsSkipCheckinTravel(t *testing.T) {
 	fastTravel(t)
 	fastActivity(t)
 
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		http.Error(w, "no upstream call expected for global", 404)
-	}))
+	srv, calls, paths := newGlobalCreditServer(t)
 	defer srv.Close()
 
 	p := pool.New("")
-	// 显式 realm=global（下行 Domain 兜底场景在 auth 包单测覆盖，这里直接构造 global）。
 	p.Add(&auth.Auth{UID: "g1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999,
 		Domain: "www.workbuddy.ai"})
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, GlobalEnabled: true}
-	s := New(Config{Pool: p, Upstream: up})
+	s := New(Config{Pool: p, Upstream: newGlobalTestClient(srv)})
 
-	// 签到/旅行循环：global 账号不应发起任何上游调用。
 	s.CheckinAll()
 	s.RunTravelNow()
 
-	if n := calls.Load(); n != 0 {
-		t.Errorf("global account checkin/travel upstream calls=%d want 0（checkin/travel 仍跳过）", n)
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("global checkin/travel upstream calls=%d want 1 (only read-only balance)", n)
+	}
+	if len(*paths) != 1 || !strings.Contains((*paths)[0], "/billing/meter/get-user-resource") {
+		t.Errorf("global account made non-read-only calls: %v", *paths)
+	}
+	st, ok := p.Status("g1")
+	if !ok || st.Credits != 100 {
+		t.Errorf("global credits were not refreshed: ok=%v credits=%d", ok, st.Credits)
 	}
 }
 
-// TestGlobalAccountSkippedListedWithStatus 门控跳过的 global 账号在 CheckinAll
-// 回执里以 skipped(global) 呈现——手动触发时结果可读，不再是"未覆盖"的空白。
+// TestGlobalAccountSkippedListedWithStatus verifies the skipped(global) receipt
+// still carries refreshed credits.
 func TestGlobalAccountSkippedListedWithStatus(t *testing.T) {
 	fastTravel(t)
 	fastActivity(t)
 
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		http.Error(w, "no upstream call expected for global", 404)
-	}))
+	srv, calls, _ := newGlobalCreditServer(t)
 	defer srv.Close()
 
 	p := pool.New("")
 	p.Add(&auth.Auth{UID: "g1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999,
 		Domain: "www.workbuddy.ai"})
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
-	s := New(Config{Pool: p, Upstream: up})
+	s := New(Config{Pool: p, Upstream: newGlobalTestClient(srv)})
 
 	out, err := s.CheckinAll()
 	if err != nil {
@@ -71,13 +88,48 @@ func TestGlobalAccountSkippedListedWithStatus(t *testing.T) {
 		t.Fatalf("out=%+v want 1 row for g1", out)
 	}
 	if out[0].Status != CheckinSkipped {
-		t.Errorf("status=%q want skipped（global 门控回执）", out[0].Status)
+		t.Errorf("status=%q want skipped (global gating)", out[0].Status)
 	}
 	if out[0].Detail != "global" {
 		t.Errorf("detail=%q want global", out[0].Detail)
 	}
-	if calls.Load() != 0 {
-		t.Errorf("upstream calls=%d want 0", calls.Load())
+	if out[0].Credits == nil || *out[0].Credits != 100 {
+		t.Errorf("outcome credits=%v want 100", out[0].Credits)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("upstream calls=%d want 1 (only read-only balance)", calls.Load())
+	}
+}
+
+// A read-only balance refresh must not clear an explicitly forced cooldown.
+func TestGlobalCheckinDoesNotClearForcedCooldown(t *testing.T) {
+	fastTravel(t)
+	fastActivity(t)
+
+	srv, calls, _ := newGlobalCreditServer(t)
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "g1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999,
+		Domain: "www.workbuddy.ai"})
+	p.Cooldown("g1", pool.CoolHard, time.Hour, "forced cooldown")
+	s := New(Config{Pool: p, Upstream: newGlobalTestClient(srv)})
+
+	if _, err := s.CheckinAll(); err != nil {
+		t.Fatalf("checkin: %v", err)
+	}
+	st, ok := p.Status("g1")
+	if !ok {
+		t.Fatal("global account missing from pool")
+	}
+	if !st.Cooling || st.CoolKind != pool.CoolHard.String() {
+		t.Fatalf("read-only credit refresh cleared forced cooldown: %+v", st)
+	}
+	if st.Credits != 100 {
+		t.Errorf("credits=%d want 100 after read-only refresh", st.Credits)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("upstream calls=%d want 1", calls.Load())
 	}
 }
 
