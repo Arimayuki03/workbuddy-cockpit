@@ -55,6 +55,19 @@ type Config struct {
 	// 注释）；weighted 返回 nil，粘性保持哈希打散零改动。既有绑定（含 Redis
 	// 恢复的）不受影响——优先序只决定"给新会话绑谁"，不动"已绑定的继续用"。
 	PreferredForModel func(model string) []string
+	// PickForModel 在给定候选集内为新会话选一个 uid（可选，manager bbbf40c1
+	// 吸收）。nil / 返回空串 / 返回候选外 uid 时回落哈希打散——无 pool 依赖的
+	// 调用方零回归。
+	//
+	// 为什么 PreferredForModel 之外还需要它：优先序是"序首即定"的硬排序，只
+	// 适合 credits_desc 这类严格序策略；weighted（三因子：credits ×10 + 快过期
+	// 积分 ×8 + 闲置补偿）需要的是**抽签**而不是排序——首绑若也按序取首，全部
+	// 新会话都会收敛到同一个权重最高号，把加权退化成垄断。注入后（wiring 接
+	// pool.WeightedPickAmong）：weighted 策略下首绑在"未被会话绑定的空闲号优先"
+	// 候选段内按权重抽取，快过期积分在默认配置下终于轮得到被优先消耗
+	//（issue #265：哈希取模与三因子全部无关，绑定后滚动续期永远走不到 Pick）。
+	// PreferredForModel（credits_desc）非空时仍以其为准——两条钩子各管一个策略。
+	PickForModel func(model string, candidates []string) string
 }
 
 // Router 会话粘性路由器。
@@ -245,6 +258,18 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	pool2 := idle
 	if len(pool2) == 0 {
 		pool2 = uids
+	}
+	// 首绑加权（manager bbbf40c1 吸收）：在候选段内按注入的选号闭包抽签
+	//（weighted 三因子）。回调缺省 / 返回空 / 返回候选外 uid 时回落哈希打散。
+	if r.cfg.PickForModel != nil {
+		if picked := r.cfg.PickForModel(model, pool2); picked != "" {
+			for _, u := range pool2 {
+				if u == picked {
+					pool2 = []string{picked}
+					break
+				}
+			}
+		}
 	}
 	uid := pool2[hashIndex(key, len(pool2))]
 
@@ -555,6 +580,10 @@ type Parsed struct {
 	ConversationID string
 	// HasImage 请求是否携带 image_url part（hint 判定，畸形/其他形态 false）。
 	HasImage bool
+	// ReasoningEffort 客户端请求的思考档位（reasoning_effort 优先、reasoningEffort
+	// 兜底，均缺省空串）。观测字段：日志行/请求日志/归档的「入站档位」，改写后的
+	// 出站档位由 upstream.EffectiveReasoningEffort 另行推算。
+	ReasoningEffort string
 }
 
 // ParseRequest 两次解码（顶层 map + messages 骨架，原六次全量解码）并填充
@@ -577,6 +606,11 @@ func ParseRequest(body []byte) Parsed {
 		p.Stream = v
 	}
 	p.Model = strOrEmpty(obj["model"])
+	// 思考档位（观测）：snake 优先于 camel，与 normalizeReasoningEffort 的键序一致。
+	p.ReasoningEffort = strOrEmpty(obj["reasoning_effort"])
+	if p.ReasoningEffort == "" {
+		p.ReasoningEffort = strOrEmpty(obj["reasoningEffort"])
+	}
 
 	// 会话键：与 ExtractKey 完全同序同口径（metadata 优先、snake 优先于 camel、
 	// prompt_cache_key 兜底）。

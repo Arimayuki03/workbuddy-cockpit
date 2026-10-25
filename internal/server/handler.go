@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -96,6 +97,9 @@ type Config struct {
 	// 用 http.MaxBytesReader 包裹请求体，超限就地 413，不再无上限读入内存。
 	// <=0 回落默认 64MB。
 	MaxBodyBytes int64
+	// ChannelGuard 上游渠道校验（11-128）守卫：抓取被拒请求体 + body/模板负缓存
+	// 本地拦截（channel_guard.go）。零值 = 关闭（既有测试/最小装配形态零行为）。
+	ChannelGuard ChannelGuardConfig
 	// IPRules 入站 IP 黑白名单规则引擎（security 段，iprules.go；可选）。
 	// nil = 无规则恒放行（零配置零回归）——Evaluate/NoteBlocked 是 nil 安全的
 	// 指针方法，withAuth 直接调用无需判空。
@@ -189,6 +193,10 @@ type Handler struct {
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
+	// channelGuard 上游渠道校验（11-128）守卫：抓取 + body/模板负缓存。
+	// atomic 指针：面板保存 features.channel_check_guard 后经 SetChannelGuard
+	// 整体热替换（读路径无锁，替换即生效，无需重启）。
+	channelGuard atomic.Pointer[ChannelGuard]
 	// trustedCIDRs / trustedHops 可信代理解析参数（Config.TrustedProxyCIDRs/Hops
 	// 的平移，requestClientIP 单一取值点用）。
 	trustedCIDRs []netip.Prefix
@@ -213,6 +221,7 @@ func NewHandler(cfg Config) *Handler {
 		cfg.MaxBodyBytes = defaultMaxBodyBytes
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux(), trustedCIDRs: cfg.TrustedProxyCIDRs, trustedHops: cfg.TrustedProxyHops}
+	h.channelGuard.Store(NewChannelGuard(cfg.ChannelGuard))
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
@@ -765,7 +774,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		parsedErr := session.ParseRequest(body)
 		_, realmErr := resolveModel(parsedErr.Model)
 		st := newChatStat(time.Now(), parsedErr, realmErr)
-		st.noteClientInfo(r, h.cfg.RequestClientInfo) // 调用来源采集（开关关=no-op）
+		st.noteClientInfo(r, h.requestClientInfo()) // 调用来源采集（开关关=no-op；面板热改即时生效）
 		st.status = status
 		if status == http.StatusRequestEntityTooLarge {
 			st.setError("request body exceeds limit")
@@ -823,7 +832,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// realm 先记请求模型域（cn/global；global: 前缀请求若最终由 CN 号兜底服务，
 	// 选号成功处会以账号实际 Realm() 覆盖——用量分桶按账号归属域计）。
 	st := newChatStat(time.Now(), parsed, realm)
-	st.noteClientInfo(r, h.cfg.RequestClientInfo) // 调用来源采集（开关关=no-op）
+	st.noteClientInfo(r, h.requestClientInfo()) // 调用来源采集（开关关=no-op；面板热改即时生效）
 	defer st.done()
 
 	tried := map[string]bool{}
@@ -907,6 +916,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 降级裁决：append 在降级期退化为 replace（Rewrite(Degraded)）——append 带
 	// 指纹原文重试是确定性再撞墙，replace 是一次性最小抢救（issue #129 设计 §4）。
 	degradedApplied := false
+	// 出站思考档位观测（st.effortOut）：按账号 realm 缓存推算（upstream.
+	// EffectiveReasoningEffort 与 prepareBody 的 effort 管线同口径，只读副本不改写
+	// 出站）。降级重写换 body 后置 effortComputed=false 强制重算。
+	effortComputed := false
+	effortRealm := ""
 	if h.cfg.PromptMode == "custom" && h.cfg.PromptText != "" {
 		body = prompt.Rewrite(body, h.cfg.PromptText)
 	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !h.degrade.Active() {
@@ -920,6 +934,28 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 上游不认前缀（global 账号也请求裸模型名）。裸名时 bareModel==parsed.Model 恒等。
 	if bareModel != parsed.Model {
 		body = rewriteModel(body, bareModel)
+	}
+
+	// 渠道校验守卫预检（channel_guard.go）：已知坏 body/坏模板/配置短语 → 本地 400，
+	// 不选号、不冷却、不消耗账号。放在提示词改写与模型名改写之后，看到的是真正的
+	// 出站模板（passthrough 与入站一致；custom/append 为改写后的模板）。
+	if hit := h.guard().Check(body); hit != nil {
+		if h.guard().Mode() == "warn" {
+			log.Printf("WARN: [server] channel-check guard (warn) model=%s body=%s template=%s: %s",
+				bareModel, shortHash(hit.BodyHash), shortHash(hit.TemplateHash), hit.Reason)
+		} else {
+			// 命中也抓一份现场（每个 body 一次）：核对拦截是否误伤、短语命中时留证据。
+			if note := h.guard().NoteBlocked(body, ChannelGuardMeta{
+				Model: bareModel, Realm: realm, Mode: st.mode,
+				ClientIP: st.clientIP, UserAgent: st.userAgent,
+			}); note != nil && note.Captured {
+				hit.CapturePath = note.CapturePath
+				log.Printf("WARN: [server] channel-check guard captured (local block) body=%s template=%s path=%s",
+					shortHash(note.BodyHash), shortHash(note.TemplateHash), note.CapturePath)
+			}
+			h.channelGuardReject(w, st, hit, bareModel)
+			return
+		}
 	}
 
 	// 会话头族（issue #35 / #170）：后台按 X-Conversation-Request-ID 聚合请求，官方
@@ -1038,6 +1074,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 请求域初值。每次选号覆盖，done() 以最终值为准。
 		st.realm = acct.Realm()
 		tried[acct.UID] = true
+		// 出站思考档位观测：realm 未变时复用上次推算（换号重试零额外解析）。
+		if h.cfg.Upstream != nil && (!effortComputed || effortRealm != acct.Realm()) {
+			effortComputed = true
+			effortRealm = acct.Realm()
+			st.effortOut = h.cfg.Upstream.EffectiveReasoningEffort(body, effortRealm)
+		}
 
 		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。
 		// AcquireModel：CAS 成功后同步记入每模型在途台账（bareModel，与选号/账本同键）。
@@ -1156,6 +1198,42 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				uerr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
 			}
 			st.setError(fmt.Sprintf("http %d: %s", status, string(respBody)))
+			// 渠道校验（11-128）：抓取当前出站 body + 写入 body/模板负缓存。fail_fast
+			// 时首个号就终止轮转并回 400（不再烧第二个号、不再把确定性拒绝包装成 503）。
+			if kind == upstream.ErrAccountFault && upstream.IsChannelCheck(string(respBody)) {
+				note := h.guard().NoteRejected(body, ChannelGuardMeta{
+					Model:        bareModel,
+					Realm:        realm,
+					Mode:         st.mode,
+					Account:      logfmt.Label(acct.UID, acct.Nickname),
+					Status:       status,
+					UpstreamBody: string(respBody),
+					RequestID:    chatMeta.ConversationRequestID,
+					ClientIP:     st.clientIP,
+					UserAgent:    st.userAgent,
+				})
+				if note != nil {
+					log.Printf("WARN: [server] channel check captured acct=%s model=%s body=%s template=%s messages=%d tools=%d path=%s",
+						logfmt.Label(acct.UID, acct.Nickname), bareModel, shortHash(note.BodyHash),
+						shortHash(note.TemplateHash), note.MessageCount, note.ToolCount, note.CapturePath)
+				}
+				if h.guard().FailFast() {
+					h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+					fail(acct.UID)
+					msg := string(respBody)
+					if strings.TrimSpace(msg) == "" {
+						msg = "upstream channel verification rejected this request"
+					}
+					hint := h.hintOf(kind, string(respBody), bareModel, reqHasImage, uerr)
+					if note != nil && note.CapturePath != "" {
+						hint += "; captured request body: " + note.CapturePath
+					}
+					st.status = http.StatusBadRequest
+					st.setError("channel check guard: fail-fast")
+					writeOpenAIErrorHint(w, http.StatusBadRequest, "channel_check_blocked", msg, hint)
+					return
+				}
+			}
 			// 内容拦截误报（passthrough/append 模式首遇）：判定为 system 指纹误报，
 			// 触发降级到次日 00:00 CST，换 Degraded 中性提示词同请求内重试（append
 			// 降级重试同样退化为 replace——原文在场只会确定性再撞 400）。
@@ -1165,6 +1243,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				h.degrade.Trigger()
 				body = prompt.Rewrite(body, prompt.Degraded)
 				degradedApplied = true
+				effortComputed = false  // body 已换：出站档位需按新 body 重算
 				delete(tried, acct.UID) // 同号重试：从 tried 摘除，单账号池也能立即重试
 				releaseHeld()
 				log.Printf("WARN: [server] content-blocked (likely fingerprint false positive) -> degraded prompt retry")
@@ -1290,9 +1369,31 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.setError(fmt.Sprintf("http %d: %s", status, string(respBody)))
 				return
 			}
+			// 11133「Invalid request parameters」（manager 52f2407c 吸收）：上游对
+			// **请求本身**的拒绝（如 Kimi 系模型要求工具 schema 里 enum 必须带 type，
+			// 缺了整单 400）。同一 body 换任何账号都会得到同一个 400——轮转只会把
+			// 无效请求放大 MaxRotate 倍，而 ErrClient 默认策略里的 NoteFailures 还会把
+			// 健康账号的连败计数喂高、临时踢出池。因此 fail-fast：400 + 上游原文，
+			// 不轮转、不罚号（不走 applyErrorPolicy，ErrClient 的 NoteFailures 不执行）。
+			// 判据用结构化 code 字段（HasBusinessCode）而非裸子串：requestId/时间戳
+			// 撞 "11133" 数字串不会误命中。
+			if kind == upstream.ErrClient && upstream.HasBusinessCode(string(respBody), "11133") {
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "request parameters were rejected by the model provider"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "invalid_request", msg,
+					h.hintOf(kind, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				return
+			}
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
-			// 5755fe3 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
-			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
+			// 5755fe3 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）+
+			// ChannelCheck（末端据此把 11-128 映射为 400 而非 503）。
+			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody),
+				RetryAfter:   uerr.RetryAfter,
+				ChannelCheck: uerr.ChannelCheck || upstream.IsChannelCheck(string(respBody))}
 			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 			fail(acct.UID)
 			// WAF IP 级 fail-fast（优先于 rotateBackoff 退避——IP 级拦截时退避无意义，
@@ -1403,6 +1504,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			st.hasUsage = hasUsage
 			st.prompt = stats.PromptTokens()
 			st.cacheHit, st.cacheMiss, st.cacheWr = stats.CacheTokens()
+			st.reason = stats.ReasoningTokens()
 			if credit, ok := stats.Credit(); ok {
 				st.credit = credit
 				st.hasCredit = true
@@ -1517,6 +1619,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusTooManyRequests
 			code = "rate_limit_exceeded"
 			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
+		case upstream.ErrAccountFault:
+			// 渠道校验（11-128）落到末端：这是请求/渠道级拒绝，不是「账号池暂时
+			// 不可用」。回 400 + 上游原文（code/requestId 保留），客户端不应按 503
+			// 无限重试；账号已按 channel_check_cooldown 短冷却，不是死号。
+			if ue.ChannelCheck || upstream.IsChannelCheck(ue.Msg) {
+				status = http.StatusBadRequest
+				code = "channel_check_blocked"
+				msg = "upstream channel verification rejected this request; update the client/system prompt or retry later"
+			}
 		case upstream.ErrContentBlocked:
 			// 内容拦截落到末端（防御兜底：如降级重试豁免后仍拦但轮转预算耗尽）→
 			// 与循环内第二分支同口径：400 content_blocked，客户端应看到
@@ -1725,6 +1836,13 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 			return
 		}
 		h.cfg.Pool.Disable(uid, "12153 session dead")
+	case upstream.ErrAuthRejected:
+		// 纯 401（无 12153、无业务信封，manager 87a4e092 吸收）：凭证被上游拒绝，
+		// 但单次可能是网关抖动或 token 轮换竞态——不直接 Disable（chat 路径误判
+		// 一次就是永久杀号），改走连续计数，达到 sessionDeadThreshold（3）才禁用。
+		// 计数器与 12153 共用（NoteAuthFailure）：同一账号先后撞到两种形态，
+		// 本来就说明凭证不会自己好转。
+		h.cfg.Pool.NoteAuthFailure(uid, "401 auth rejected")
 	case upstream.ErrNotFound:
 		// 404 短冷却（软冷却），防雪崩。固定 notFoundCooldown，不随 soft_rate 退避：
 		// 偶发路径缺失不是限流信号，不该按限流惩罚升级。
@@ -1744,8 +1862,14 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 优先读错误信封上的稳定 ChannelCheck（由完整 body 分类时固化）：搜索
 		// 等路径只把 ue.Msg（前 200 字符）交给本函数，重新解析会被截断骗过。
 		if (uerr != nil && uerr.ChannelCheck) || upstream.IsChannelCheck(body) {
-			h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(),
-				"channel check ("+kind.String()+")")
+			// 渠道校验是请求/渠道级问题，不是账号故障：默认用 channel_check_cooldown
+			// （60s）而不是 cooldown.soft_rate（可能 6h）软冷却，避免一个坏模板把
+			// 健康号停半天。显式配 0 = 回落旧口径（soft_rate）。
+			d := h.softCooldown()
+			if cd := h.guard().ChannelCooldown(); cd > 0 {
+				d = cd
+			}
+			h.cfg.Pool.Cooldown(uid, pool.CoolSoft, d, "channel check ("+kind.String()+")")
 			return
 		}
 		if strings.Contains(strings.ToLower(body), "request illegal") {
@@ -1831,9 +1955,43 @@ func writeOpenAIError(w http.ResponseWriter, status int, code, msg string) {
 	})
 }
 
-// writeOpenAIErrorHint 同 writeOpenAIError，另在 error 对象上附加
-// error.gateway_hint（hint 为空串时不带字段——未覆盖形态不编造）。
-// message 仍是上游原文透传（hint 只做并列补充，绝不替换/包装 message）。
+// guard 当前渠道校验守卫（atomic 快照；ChannelGuard 全方法 nil 接收者安全）。
+func (h *Handler) guard() *ChannelGuard { return h.channelGuard.Load() }
+
+// SetChannelGuard 热替换渠道校验守卫（面板保存 features.channel_check_guard 后由
+// saveConfig 调用；整体替换保证 config/caches/dedup 一致，无半新半旧窗口）。
+func (h *Handler) SetChannelGuard(g *ChannelGuard) {
+	if g != nil {
+		h.channelGuard.Store(g)
+	}
+}
+
+// requestClientInfo 当前是否采集调用来源：Live 快照（面板热改 logging.
+// request_client_info 即时生效）优先，无热改形态回落启动期静态值。
+func (h *Handler) requestClientInfo() bool {
+	if h.cfg.Live != nil {
+		return h.cfg.Live.Load().RequestClientInfo
+	}
+	return h.cfg.RequestClientInfo
+}
+
+// channelGuardReject 渠道校验守卫的本地拒绝出口：400 channel_check_blocked，
+// 不选号、不冷却、不轮转。message 里带抓取路径（若有），便于运维直接打开被拒 body。
+func (h *Handler) channelGuardReject(w http.ResponseWriter, st *chatStat, hit *ChannelGuardHit, bareModel string) {
+	st.status = http.StatusBadRequest
+	st.setError("channel check guard: " + hit.Reason)
+	hint := "upstream channel verification rejected this request/template; the gateway blocks repeats locally to protect the account pool (not a credential failure)"
+	msg := "request blocked by gateway channel-check guard: " + hit.Reason
+	if hit.CapturePath != "" {
+		hint += "; captured request body: " + hit.CapturePath
+		msg += " (captured: " + hit.CapturePath + ")"
+	}
+	log.Printf("WARN: [server] channel-check guard blocked acct=%s model=%s body=%s template=%s: %s",
+		logfmt.Label(st.uid, st.nick), bareModel, shortHash(hit.BodyHash), shortHash(hit.TemplateHash), hit.Reason)
+	writeOpenAIErrorHint(w, http.StatusBadRequest, "channel_check_blocked", msg, hint)
+}
+
+// writeOpenAIErrorHint 写 OpenAI 兼容错误信封；hint 为空时退化为旧形态（无 gateway_hint）。
 func writeOpenAIErrorHint(w http.ResponseWriter, status int, code, msg, hint string) {
 	if hint == "" {
 		writeOpenAIError(w, status, code, msg)

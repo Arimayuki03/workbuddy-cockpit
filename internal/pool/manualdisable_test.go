@@ -262,3 +262,26 @@ func TestManualDisableServable(t *testing.T) {
 		t.Error("解除手动停用后 ServableNow 应回归 true")
 	}
 }
+
+// TestNoteAuthFailureSharedCounter 纯 401（ErrAuthRejected，manager 87a4e092 吸收）
+// 与 12153 共用同一套连续计数：先撞 2 次 12153 再撞 1 次纯 401 达阈禁用，
+// reason 用调用方给出的「401 auth rejected」。
+func TestNoteAuthFailureSharedCounter(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+
+	if p.NoteSessionDead("u1") || p.NoteSessionDead("u1") {
+		t.Fatal("前两次不应达阈")
+	}
+	st, _ := p.Status("u1")
+	if st.Disabled {
+		t.Fatal("未达阈不应禁用")
+	}
+	if !p.NoteAuthFailure("u1", "401 auth rejected") {
+		t.Fatal("第三次（跨形态）应达阈并禁用")
+	}
+	st, _ = p.Status("u1")
+	if !st.Disabled || st.DisabledReason != "401 auth rejected" {
+		t.Fatalf("应带调用方 reason 禁用: %+v", st)
+	}
+}

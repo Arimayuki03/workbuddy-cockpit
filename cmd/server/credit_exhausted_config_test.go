@@ -147,7 +147,7 @@ func TestCreditExhaustedPanelSavePersistsAndHotApplies(t *testing.T) {
 	p.Add(&auth.Auth{UID: "u1"})
 
 	// 面板提交：只带它管理的键（soft_rate 与新的 credit_exhausted）。
-	if _, err := saveConfig([]byte(`{"cooldown":{"soft_rate":"300s","credit_exhausted":"10m"}}`), fp, live, p, up, sch); err != nil {
+	if _, err := saveConfig([]byte(`{"cooldown":{"soft_rate":"300s","credit_exhausted":"10m"}}`), fp, live, p, up, sch, nil); err != nil {
 		t.Fatalf("saveConfig: %v", err)
 	}
 
@@ -185,7 +185,7 @@ func TestCreditExhaustedPanelSavePersistsAndHotApplies(t *testing.T) {
 	}
 
 	// 3) 非法值被拒且不落盘（文件保持上一版）。
-	if _, err := saveConfig([]byte(`{"cooldown":{"credit_exhausted":"不是时长"}}`), fp, live, p, up, sch); err == nil {
+	if _, err := saveConfig([]byte(`{"cooldown":{"credit_exhausted":"不是时长"}}`), fp, live, p, up, sch, nil); err == nil {
 		t.Fatal("非法 credit_exhausted 必须被拒")
 	}
 	raw2, err := os.ReadFile(fp)

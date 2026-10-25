@@ -811,7 +811,10 @@ readLoop:
 		if readErr != nil {
 			_ = writeRaw(`{"error":{"message":"upstream stream read failed","type":"upstream_error","code":"upstream_read_error"}}`)
 		} else {
-			_ = writeRaw(`{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}`)
+			// message 带上「stream ended before completion」前缀（manager patch 0028
+			// 吸收）：OpenAI 兼容客户端把它识别为传输层可重试错误并自动重试；旧文案
+			// "empty upstream stream" 会被多数客户端当不可重试的解析错误直接抛出。
+			_ = writeRaw(`{"error":{"message":"upstream stream ended before completion (empty upstream stream)","type":"upstream_error","code":"upstream_parse"}}`)
 		}
 	} else if ReasoningFallbackEnabled() && !sawErrorFrame && !sawContent && !sawToolCalls && reasoningBuf.Len() > 0 {
 		// Whole turn had reasoning only. Emit the same text as assistant content

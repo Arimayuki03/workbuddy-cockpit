@@ -109,7 +109,7 @@ func TestSaveConfigAppliesProxyRoutes(t *testing.T) {
 	up.SetProxyRoutes(map[string]string{"old": "http://h1:80"})
 
 	raw := `{"api_key":"k","proxy_routes":{"new":"http://h2:8080"}}`
-	if _, err := saveConfig([]byte(raw), cfgPath, live, p, up, sch); err != nil {
+	if _, err := saveConfig([]byte(raw), cfgPath, live, p, up, sch, nil); err != nil {
 		t.Fatalf("saveConfig: %v", err)
 	}
 	// 新表生效

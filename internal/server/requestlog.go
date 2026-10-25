@@ -40,6 +40,16 @@ type requestLogEntry struct {
 	// omitempty 序列化时缺省）。采集口径见 newChatStat 的 TODO（iputil 接线）。
 	ClientIP  string `json:"client_ip,omitempty"`
 	UserAgent string `json:"user_agent,omitempty"`
+	// EffortIn / EffortOut 思考档位观测（下游入站值 / 出站最终值；空 = 无档位，
+	// omitempty 不落）。与表格日志 eff=in>out 列同一观测源。
+	EffortIn  string `json:"effort_in,omitempty"`
+	EffortOut string `json:"effort_out,omitempty"`
+	// PromptTokens / ReasoningTokens usage 观测（输入侧 / 思考侧 token；上游
+	// 未下发时为 0，omitempty 不落）。ReasoningTokens 是 effort 档位的实测代理。
+	PromptTokens    int    `json:"prompt_tokens,omitempty"`
+	ReasoningTokens int    `json:"reasoning_tokens,omitempty"`
+	DurationMS      int64  `json:"duration_ms,omitempty"` // 端到端耗时（done() 时落）
+	Realm           string `json:"realm,omitempty"`       // 账号归属域 cn/global
 }
 
 // requestLogCap 环形缓冲容量（设计文档 §4.3.2：~1000 条，重启即清）。
@@ -115,22 +125,28 @@ func appendRequestLog(e requestLogEntry) {
 // ——归档文件可被人工 cat/grep，最小化可识别信息。
 func requestLogArchiveEvent(e requestLogEntry) reqlog.Event {
 	return reqlog.Event{
-		Time:       e.Time,
-		Model:      e.Model,
-		Account:    logfmt.Label(e.UID, e.Nick),
-		Mode:       e.Mode,
-		Status:     e.Status,
-		OK:         e.Status >= 200 && e.Status < 400, // 3xx 视为成功（网关无重定向语义，防御性口径）
-		Tokens:     e.Tokens,
-		TTFBMS:     e.TTFBMS,
-		Credit:     e.Credit,
-		HasCredit:  e.HasCredit,
-		CacheHit:   e.CacheHit,
-		CacheMiss:  e.CacheMiss,
-		CacheWrite: e.CacheWrite,
-		Error:      e.Error,
-		ClientIP:   e.ClientIP,
-		UserAgent:  e.UserAgent,
+		Time:            e.Time,
+		Model:           e.Model,
+		Account:         logfmt.Label(e.UID, e.Nick),
+		Mode:            e.Mode,
+		Status:          e.Status,
+		OK:              e.Status >= 200 && e.Status < 400, // 3xx 视为成功（网关无重定向语义，防御性口径）
+		Tokens:          e.Tokens,
+		TTFBMS:          e.TTFBMS,
+		Credit:          e.Credit,
+		HasCredit:       e.HasCredit,
+		CacheHit:        e.CacheHit,
+		CacheMiss:       e.CacheMiss,
+		CacheWrite:      e.CacheWrite,
+		Error:           e.Error,
+		ClientIP:        e.ClientIP,
+		UserAgent:       e.UserAgent,
+		EffortIn:        e.EffortIn,
+		EffortOut:       e.EffortOut,
+		PromptTokens:    e.PromptTokens,
+		ReasoningTokens: e.ReasoningTokens,
+		DurationMS:      e.DurationMS,
+		Realm:           e.Realm,
 	}
 }
 
@@ -405,5 +421,21 @@ func requestLogPayloadFromStat(s *chatStat) requestLogEntry {
 		Error:       s.errSummary,
 		ClientIP:    s.clientIP,
 		UserAgent:   s.userAgent,
+		EffortIn:    s.effortIn,
+		EffortOut:   s.effortOut,
+		PromptTokens: func() int {
+			if s.hasUsage {
+				return s.prompt
+			}
+			return 0
+		}(),
+		ReasoningTokens: func() int {
+			if s.hasUsage {
+				return s.reason
+			}
+			return 0
+		}(),
+		DurationMS: s.totalMS,
+		Realm:      s.realmOf(),
 	}
 }

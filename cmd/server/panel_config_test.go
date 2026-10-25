@@ -36,7 +36,7 @@ func TestPanelSaveConfigMergePersist(t *testing.T) {
 
 	// 面板提交：只带它管理的键（api_key + soft_rate + schedule 开关）。
 	submit := []byte(`{"api_key":"k2","cooldown":{"soft_rate":"300s"},"schedule":{"checkin_enabled":true}}`)
-	restart, err := saveConfig(submit, fp, live, p, up, sch)
+	restart, err := saveConfig(submit, fp, live, p, up, sch, nil)
 	if err != nil {
 		t.Fatalf("saveConfig: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestPanelSaveConfigMergePersist(t *testing.T) {
 	}
 
 	// 校验失败不落盘：非法 soft_rate 被拒、文件保持上一版内容。
-	if _, err := saveConfig([]byte(`{"cooldown":{"soft_rate":"bogus"}}`), fp, live, p, up, sch); err == nil {
+	if _, err := saveConfig([]byte(`{"cooldown":{"soft_rate":"bogus"}}`), fp, live, p, up, sch, nil); err == nil {
 		t.Fatal("invalid soft_rate must be rejected")
 	}
 	raw2, _ := os.ReadFile(fp)
@@ -124,7 +124,7 @@ func TestPanelSaveConfigHoursHotApply(t *testing.T) {
 	up := upstream.New()
 	sch := scheduler.New(scheduler.Config{Pool: p, Upstream: up})
 
-	if _, err := saveConfig([]byte(`{"schedule":{"checkin_hours":[7,12,23]}}`), fp, live, p, up, sch); err != nil {
+	if _, err := saveConfig([]byte(`{"schedule":{"checkin_hours":[7,12,23]}}`), fp, live, p, up, sch, nil); err != nil {
 		t.Fatalf("saveConfig: %v", err)
 	}
 
@@ -180,7 +180,7 @@ func TestPanelSaveModelMapReplace(t *testing.T) {
 	// 面板提交：只保留 keep-me（等价于 UI 上删除 gpt-4o 条目 + 新增 new-map）。
 	if err := saveModelMap(
 		map[string]string{"keep-me": "cn:glm-5.3", "new-map": "cn:auto"},
-		fp, live, p, up, sch,
+		fp, live, p, up, sch, nil,
 	); err != nil {
 		t.Fatalf("saveModelMap: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestPanelSaveConfigCompensationHoursClear(t *testing.T) {
 	sch := scheduler.New(scheduler.Config{Pool: p, Upstream: up,
 		CompensationEnabled: true, CompensationHours: []int{3}})
 
-	if _, err := saveConfig([]byte(`{"schedule":{"compensation_enabled":true,"compensation_hours":[]}}`), fp, live, p, up, sch); err != nil {
+	if _, err := saveConfig([]byte(`{"schedule":{"compensation_enabled":true,"compensation_hours":[]}}`), fp, live, p, up, sch, nil); err != nil {
 		t.Fatalf("saveConfig: %v", err)
 	}
 
@@ -267,7 +267,7 @@ func TestPanelSaveConfigCompensationHoursClear(t *testing.T) {
 	}
 
 	// 对称方向：再配回整点 → SetHours 路径热生效（if/else 两支都被覆盖）。
-	if _, err := saveConfig([]byte(`{"schedule":{"compensation_hours":[5]}}`), fp, live, p, up, sch); err != nil {
+	if _, err := saveConfig([]byte(`{"schedule":{"compensation_hours":[5]}}`), fp, live, p, up, sch, nil); err != nil {
 		t.Fatalf("saveConfig(non-empty): %v", err)
 	}
 	for _, ts := range sch.SnapshotAll() {
@@ -299,7 +299,7 @@ func TestPanelSaveConfigReasoningAsContentRequiresRestart(t *testing.T) {
 	up := upstream.New()
 	sch := scheduler.New(scheduler.Config{Pool: p, Upstream: up})
 
-	restart, err := saveConfig([]byte(`{"reasoning_as_content":true}`), fp, live, p, up, sch)
+	restart, err := saveConfig([]byte(`{"reasoning_as_content":true}`), fp, live, p, up, sch, nil)
 	if err != nil {
 		t.Fatalf("saveConfig: %v", err)
 	}

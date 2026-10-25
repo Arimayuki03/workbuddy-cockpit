@@ -487,7 +487,7 @@ func (h *Handler) searchMessages(w http.ResponseWriter, r *http.Request) {
 	// metrics/usage 分桶记录（模型列用 searchToolLabel 标识）。只有通过 withAuth 的
 	// 请求会进到这里，401 在鉴权层直接返回。
 	st := newChatStat(time.Now(), session.Parsed{Model: searchToolLabel}, "")
-	st.noteClientInfo(r, h.cfg.RequestClientInfo)
+	st.noteClientInfo(r, h.requestClientInfo())
 	defer st.done()
 
 	// wbk_ 分发密钥：在读取 body/选号之前拒绝，不消耗账号池配额，也不产生任何

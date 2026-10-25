@@ -146,6 +146,34 @@ export function ConfigTab() {
                   // 它需要整组表单才能判断，所以两个都跑、任一报错即提示
                   const err = fieldError(f, s.form[g.id][f.key]) ?? pairError(f, s.form[g.id]);
                   const caution = 'caution' in f ? f.caution : undefined;
+                  // 列表字段（一行一条）单独占整行：textarea 需要横向空间，
+                  // 与开关/数字段的半行卡片不混排。
+                  if (f.kind === 'list') {
+                    return (
+                      <div
+                        key={f.key}
+                        className="col-span-full flex flex-col gap-1.5 rounded-2xl bg-background/60 px-3 py-2"
+                      >
+                        <div className="text-xs font-medium">{tp(f.label)}</div>
+                        <RichText
+                          className="block text-[11px] leading-4 text-muted-foreground"
+                          text={tp(f.desc)}
+                        />
+                        <Textarea
+                          rows={3}
+                          spellCheck={false}
+                          disabled={!isAdmin || !cfgReady}
+                          value={String(s.form[g.id][f.key] ?? '')}
+                          placeholder={f.placeholder ?? ''}
+                          onChange={(e) => s.setField(g.id, f.key, e.target.value)}
+                          className={
+                            'bg-background font-mono text-xs ' + (err ? ' border-destructive' : '')
+                          }
+                        />
+                        {err && <div className="text-[10px] leading-3 text-destructive">{err}</div>}
+                      </div>
+                    );
+                  }
                   return (
                     <div
                       key={f.key}

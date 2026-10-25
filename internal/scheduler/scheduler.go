@@ -724,6 +724,56 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 	return s.checkinAll(context.Background())
 }
 
+// checkinAccountDelay 相邻账号之间的最小间隔（manager patch 0029 吸收，issue #256）。
+//
+// 12 个账号一轮里，3 个国内版的签到请求落在 3 秒窗口内，上游直接回
+// `http 500 {"code":10001,"msg":"签到失败，请稍后重试"}`；同一批账号当天稍后
+// 手动单独点击全部成功，因此不是账号问题而是短时并发被限流。串行 + 固定间隔
+// 把一轮摊开，远低于上游限流窗口。配置了 account-delay-min/max 的定时遍历会
+// 在此基础上再叠加随机抖动（accountGap）。测试可置 0。
+var checkinAccountDelay = 3 * time.Second
+
+// checkinRetryDelays 签到遇到上游瞬时拒绝时的退避序列（manager patch 0029 吸收）。
+//
+// 只对 HTTP 5xx 与业务码 10001 生效；"今天已签到"（同样是 10001）在判定前已按
+// 幂等成功处理，不会走到这里。重试次数 = len(checkinRetryDelays)，全部失败才
+// 记 CheckinFail。测试可置空。
+var checkinRetryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 60 * time.Second}
+
+// checkinRetryable 报告签到错误是否属于上游瞬时拒绝（值得退避重试）。
+// 单号手动签到都能成功而批量偶发失败，说明 10001 在这里表达的是"稍后重试"，
+// 而不是账号或参数问题——这类错误直接记失败只能等下一轮定时，白白错过当天。
+func checkinRetryable(err error) bool {
+	var ue *upstream.Error
+	if !errors.As(err, &ue) {
+		return false
+	}
+	if ue.Status >= 500 && ue.Status <= 599 {
+		return true
+	}
+	return upstream.CodeOf(ue.Msg) == "10001"
+}
+
+// dailyCheckinWithRetry 执行签到，遇到上游瞬时失败（HTTP 5xx / code 10001）
+// 按 checkinRetryDelays 退避重试；ctx 取消立即返回最后一次错误。
+func (s *Scheduler) dailyCheckinWithRetry(ctx context.Context, a *auth.Auth, label string) error {
+	err := s.cfg.Upstream.DailyCheckin(a)
+	for i, delay := range checkinRetryDelays {
+		if err == nil || upstream.IsAlreadyCheckin(err) || !checkinRetryable(err) {
+			return err
+		}
+		log.Printf("checkin %s: %v — %s 后重试(%d/%d)", label, err, delay, i+1, len(checkinRetryDelays))
+		if !sleepCtx(ctx, delay) {
+			return err
+		}
+		if ctx.Err() != nil {
+			return err
+		}
+		err = s.cfg.Upstream.DailyCheckin(a)
+	}
+	return err
+}
+
 func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 	if !s.checkinMu.TryLock() {
 		return nil, ErrBusy
@@ -755,7 +805,9 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 		// 账号错峰（仅定时路径生效，见 accountGap）：等不满 = ctx 取消，放弃剩余账号，
 		// 已完成的回执照常返回（与 runActivity 的取消口径一致）。
 		if !first {
-			if !sleepCtx(ctx, s.accountGap(ctx, 0)) {
+			// 账号间最小间隔 checkinAccountDelay（manager 0029：批量签到短时并发会
+			// 撞 10001「稍后重试」限流）；定时路径再叠加 accountGap 随机错峰。
+			if !sleepCtx(ctx, s.accountGap(ctx, checkinAccountDelay)) {
 				return out, ctx.Err()
 			}
 			if ctx.Err() != nil {
@@ -837,7 +889,8 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 			creditBefore, creditBeforeOK = v, true
 		}
 		// 签到返回错误（含"今天已签到"）也继续查余额：余额恢复即可解冻账号。
-		if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
+		// 瞬时失败（HTTP 5xx / 10001 非幂等形态）先原地退避重试，避免错过当天（0029）。
+		if err := s.dailyCheckinWithRetry(ctx, a, logfmt.Label(st.UID, st.Nickname)); err != nil {
 			if upstream.IsAlreadyCheckin(err) {
 				// "今天已签到"是幂等成功，不是错误：不填 detail，免得回执里
 				// 出现一整段 400 报文、被误读成签到失败。

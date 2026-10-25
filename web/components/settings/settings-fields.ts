@@ -93,13 +93,24 @@ export interface TextField {
   def: string;
 }
 
+export interface ListField {
+  key: string;
+  /** 字符串数组（一行一条，保存时拆分；后端是 []string） */
+  kind: 'list';
+  label: string;
+  desc: string;
+  placeholder?: string;
+  def: string[];
+}
+
 export type Field =
   | BoolField
   | NumField
   | HoursField
   | DurationField
   | SelectField
-  | TextField;
+  | TextField
+  | ListField;
 
 /** 时长格式校验：数字 + 单位（s/m/h/d） */
 const DURATION_RE = /^\d+\s*(s|m|h|d)$/i;
@@ -453,6 +464,138 @@ export const FEATURES_FIELDS: Field[] = [
   },
 ];
 
+/**
+ * 渠道校验守卫（features.channel_check_guard，channel_guard.go）：上游 11-128
+ * 「没通过渠道校验」的抓包留证 + 本地拦截。全部字段保存即热生效（saveConfig
+ * 重建守卫整体换入，无需重启）。
+ */
+export const CHANNEL_GUARD_FIELDS: Field[] = [
+  {
+    key: 'enabled',
+    kind: 'bool',
+    label: '启用渠道校验守卫',
+    desc: '上游以 11-128 拒绝请求时：抓取请求体留证，并把同 body / 同模板的后续请求在网关本地直接拒绝，不再消耗账号',
+    def: true,
+  },
+  {
+    key: 'mode',
+    kind: 'select',
+    label: '拦截模式',
+    desc: 'block = 命中即本地 400；warn = 只记日志照常出站（观察模式）；off = 等价关闭',
+    options: [
+      {value: 'block', label: 'block（本地 400，默认）'},
+      {value: 'warn', label: 'warn（只记日志）'},
+      {value: 'off', label: 'off（关闭）'},
+    ],
+    def: 'block',
+  },
+  {
+    key: 'fail_fast',
+    kind: 'bool',
+    label: '首个号被拒即终止',
+    desc: '开启时一次 11-128 就停止换号并回 400，最大限度保护账号池；关闭则保留「换号可能成功」的旧行为',
+    def: false,
+  },
+  {
+    key: 'block_ttl',
+    kind: 'duration',
+    label: '同请求拦截时长',
+    desc: '同一份请求体（逐字节相同）被拒后，多久内直接本地拒绝。下游重试同一请求的场景靠它止损',
+    def: '10m',
+    noZero: true,
+  },
+  {
+    key: 'template_ttl',
+    kind: 'duration',
+    label: '同模板拦截时长',
+    desc: '同一模板（system/developer + tools 定义）被拒后，多久内同模板的新请求也本地拒绝。窗口过长可能误伤偶发成功的模板，默认与上项同量级',
+    def: '10m',
+    noZero: true,
+  },
+  {
+    key: 'channel_check_cooldown',
+    kind: 'duration',
+    label: '渠道校验账号冷却',
+    desc: '命中 11-128 时该账号的软冷却时长（渠道校验是请求问题不是账号故障，默认远小于限流冷却）。填 0 = 沿用「限流与冷却」分组的 soft_rate',
+    offWhenZero: true,
+    def: '60s',
+  },
+  {
+    key: 'scan_messages',
+    kind: 'bool',
+    label: '拦截短语扫描全部消息',
+    desc: '开启时拦截短语也扫用户/助手消息；关闭只扫 system 与工具定义（避免用户内容误伤）',
+    def: true,
+  },
+  {
+    key: 'capture_dir',
+    kind: 'text',
+    label: '抓包目录',
+    desc: '命中时请求体落盘位置（容器内路径）。留空 = data/channel_check',
+    placeholder: '留空 = data/channel_check',
+    def: '',
+  },
+  {
+    key: 'capture_max_mb',
+    kind: 'num',
+    label: '抓包容量上限',
+    desc: '抓包目录总容量，超出后自动删除最旧的文件',
+    unit: 'MB',
+    min: 1,
+    max: 4096,
+    def: 256,
+  },
+  {
+    key: 'block_patterns',
+    kind: 'list',
+    label: '拦截短语',
+    desc: '一行一条（大小写不敏感子串）。命中的请求在出站前直接本地拒绝——先用抓包看清触发指纹再填，留空 = 不猜',
+    placeholder: '例如：You are Claude Code',
+    def: [],
+  },
+];
+
+/**
+ * 日志观测（logging 段）：请求日志归档（JSONL 持久化）与调用来源采集。
+ * request_client_info 保存即热生效；归档三件套需重启（装配期创建 recorder）。
+ */
+export const LOGGING_FIELDS: Field[] = [
+  {
+    key: 'request_archive',
+    kind: 'bool',
+    label: '请求日志持久化',
+    desc: '按日轮转写 data/requests/requests-YYYYMMDD.jsonl（只记元数据：模型/状态/token/思考档位/思考 token/耗时/错误摘要，不含提示词与响应正文），重启后可查历史',
+    def: false,
+  },
+  {
+    key: 'request_retention_days',
+    kind: 'num',
+    label: '归档保留天数',
+    desc: '超过天数的归档文件自动删除',
+    unit: '天',
+    min: 1,
+    max: 365,
+    def: 7,
+  },
+  {
+    key: 'request_archive_max_mb',
+    kind: 'num',
+    label: '归档容量上限',
+    desc: '全部归档文件的总容量，超出后删最旧',
+    unit: 'MB',
+    min: 1,
+    max: 4096,
+    def: 200,
+  },
+  {
+    key: 'request_client_info',
+    kind: 'bool',
+    label: '记录调用来源',
+    desc: '把客户端 IP 与 User-Agent 记进请求日志（排查「哪个下游触发了风控」时打开；默认关闭不采集）',
+    def: false,
+  },
+];
+
 export const SESSION_FIELDS: Field[] = [
   {
     key: 'enabled',
@@ -586,15 +729,40 @@ export const GLOBAL_FIELDS: Field[] = [
 ];
 
 /** 表单分组 id（前端 state 键名） */
-export type Section = 'schedule' | 'cooldown' | 'pool' | 'features' | 'session' | 'prompt' | 'upstream' | 'global';
+export type Section =
+  | 'schedule'
+  | 'cooldown'
+  | 'pool'
+  | 'features'
+  | 'session'
+  | 'prompt'
+  | 'upstream'
+  | 'global'
+  | 'channelGuard'
+  | 'logging';
 
 /** config.json 段名（保存目标；与 id 不同时由此映射） */
-export type SectionWire = 'schedule' | 'cooldown' | 'pool' | 'features' | 'session_sticky' | 'prompt' | 'upstream' | 'global';
+export type SectionWire =
+  | 'schedule'
+  | 'cooldown'
+  | 'pool'
+  | 'features'
+  | 'session_sticky'
+  | 'prompt'
+  | 'upstream'
+  | 'global'
+  | 'logging';
 
 export interface GroupDef {
   id: Section;
   /** 对应的 config.json 段名（UI 名与段名不一致时由此映射） */
   section: SectionWire;
+  /**
+   * 配置 JSON 里的完整路径（从根开始）。缺省 [section]；嵌套段（如
+   * features.channel_check_guard）用它定位取值与写回——saveGroup 据此构造
+   * 嵌套 patch，深合并语义与平铺段一致。
+   */
+  path?: string[];
   title: string;
   desc: string;
   fields: Field[];
@@ -659,13 +827,65 @@ export const GROUPS: GroupDef[] = [
     desc: '国际版（workbuddy.ai）路由开关与基址。关闭即锁死纯 CN',
     fields: GLOBAL_FIELDS,
   },
+  {
+    id: 'channelGuard',
+    section: 'features',
+    path: ['features', 'channel_check_guard'],
+    title: '渠道校验守卫（防风控）',
+    desc: '上游以 11-128「没通过渠道校验」拒绝请求时的自保：**抓包留证 + 本地拦截 + 账号短冷却**。'
+      + '保存即热生效；拦截短语建议先看抓包（data/channel_check/ 目录，.meta.json 带模型/账号/上游原文）再填',
+    fields: CHANNEL_GUARD_FIELDS,
+  },
+  {
+    id: 'logging',
+    section: 'logging',
+    title: '日志观测',
+    desc: '请求日志的持久化归档与调用来源采集。「请求日志持久化」开启后按日落盘 data/requests/'
+      + '（含模型/状态/token/思考档位（入站>出站）/思考 token/耗时/错误摘要）；改归档参数需重启，来源采集保存即生效',
+    fields: LOGGING_FIELDS,
+  },
 ];
 
 export type FieldValue = boolean | number | string;
 
+/** 沿 path 逐层取配置里的嵌套对象（任一层缺失/非对象返回 undefined）。 */
+export function configAtPath(
+  root: Record<string, unknown> | undefined,
+  path: string[],
+): Record<string, unknown> | undefined {
+  let cur: unknown = root;
+  for (const seg of path) {
+    if (typeof cur !== 'object' || cur === null || Array.isArray(cur)) return undefined;
+    cur = (cur as Record<string, unknown>)[seg];
+  }
+  return typeof cur === 'object' && cur !== null && !Array.isArray(cur)
+    ? (cur as Record<string, unknown>)
+    : undefined;
+}
+
+/** 把 {key: value} 平铺 patch 包装成 path 指向的嵌套对象（单键链，深合并友好）。 */
+export function nestPatch(
+  path: string[],
+  patch: Record<string, boolean | number | number[] | string | string[]>,
+): Record<string, unknown> {
+  if (!path.length) return {...patch};
+  const out: Record<string, unknown> = {};
+  let cur = out;
+  for (let i = 0; i < path.length - 1; i++) {
+    const next: Record<string, unknown> = {};
+    cur[path[i]] = next;
+    cur = next;
+  }
+  cur[path[path.length - 1]] = {...patch};
+  return out;
+}
+
 export function defaultValues(fields: Field[]): Record<string, FieldValue> {
   const out: Record<string, FieldValue> = {};
-  for (const f of fields) out[f.key] = f.kind === 'hours' ? hoursToText(f.def) : f.def;
+  for (const f of fields) {
+    out[f.key] =
+      f.kind === 'hours' ? hoursToText(f.def) : f.kind === 'list' ? f.def.join('\n') : f.def;
+  }
   return out;
 }
 
@@ -698,6 +918,12 @@ export function pickValues(fields: Field[], source: Record<string, unknown> | un
         break;
       case 'text':
         out[f.key] = typeof raw === 'string' ? raw : f.def;
+        break;
+      case 'list':
+        // 后端 []string；表单里一行一条承载，保存时拆回数组
+        out[f.key] = Array.isArray(raw)
+          ? raw.filter((x): x is string => typeof x === 'string').join('\n')
+          : f.def.join('\n');
         break;
     }
   }
@@ -733,6 +959,14 @@ export function fieldError(f: Field, raw: FieldValue): string | undefined {
   }
   if (f.kind === 'text' && /[\r\n\u0000-\u001f]/.test(String(raw))) {
     return tGlobal('settings.errNoNewline');
+  }
+  if (f.kind === 'list') {
+    // 一行一条；单条里的控制字符（换行除外）与超长行后端会拒，前端先拦
+    for (const line of String(raw ?? '').split('\n')) {
+      if (/[\u0000-\u0009\u000b-\u001f]/.test(line) || line.length > 512) {
+        return tGlobal('settings.errListLine');
+      }
+    }
   }
   return undefined;
 }
@@ -780,7 +1014,7 @@ export function pairError(f: Field, group: Record<string, FieldValue>): string |
 export function toWire(
   f: Field,
   raw: FieldValue,
-): {ok: true; value: boolean | number | number[] | string} | {ok: false; error: string} {
+): {ok: true; value: boolean | number | number[] | string | string[]} | {ok: false; error: string} {
   if (f.kind === 'hours') {
     const r = parseHours(String(raw), !!f.allowEmpty);
     return r.ok ? {ok: true, value: r.hours} : {ok: false, error: r.error ?? tGlobal('settings.errHourFormat')};
@@ -822,11 +1056,50 @@ export function toWire(
     if (/[\r\n\u0000-\u001f]/.test(t)) return {ok: false, error: tGlobal('settings.errNoNewline')};
     return {ok: true, value: t};
   }
+  if (f.kind === 'list') {
+    const arr = String(raw ?? '')
+      .split('\n')
+      .map((x) => x.trim())
+      .filter(Boolean);
+    for (const line of arr) {
+      if (line.length > 512) return {ok: false, error: tGlobal('settings.errListLine')};
+    }
+    return {ok: true, value: arr};
+  }
   return {ok: true, value: raw};
 }
 
-export const FIELD_BY_KEY: Record<string, Field> = {};
-for (const g of GROUPS) for (const f of g.fields) FIELD_BY_KEY[f.key] = f;
+/**
+ * 按分组解析字段定义（保存/校验入口统一走这里）。
+ *
+ * **必须**走本函数做分组内查找，禁止「按字段名全局映射」：分组间存在同名字段——
+ * `mode` 同时在系统提示词与渠道校验守卫、`enabled` 同时在国际版/会话粘性/渠道校验
+ * 守卫——全局键名映射会被 GROUPS 里靠后的分组覆盖。历史 bug：FIELD_BY_KEY['mode']
+ * 被守卫分组的枚举（block/warn/off）接管，切换提示词模式提交 'custom' 恒报
+ * 「取值不在允许范围内」，保存永远失败。
+ */
+export function fieldOf(def: GroupDef, key: string): Field | undefined {
+  return def.fields.find((f) => f.key === key);
+}
+
+// 开发期防回归：字段名跨分组重复时控制台告警。运行期无害（字段解析已全部走
+// fieldOf 分组内查找，重名只影响可读性），但新分组加字段时应优先起不冲突的名。
+if (process.env.NODE_ENV !== 'production') {
+  const seen = new Map<string, string>();
+  for (const g of GROUPS) {
+    for (const f of g.fields) {
+      const prev = seen.get(f.key);
+      if (prev) {
+        console.error(
+          `[settings] 字段名跨分组重复: "${f.key}" 同时存在于 ${prev} 与 ${g.id}`
+            + '（字段解析必须走 fieldOf 分组内查找，勿按字段名建全局映射）',
+        );
+      } else {
+        seen.set(f.key, g.id);
+      }
+    }
+  }
+}
 
 /** 默认的空表单（所有分组） */
 export function emptyForm(): Record<Section, Record<string, FieldValue>> {
@@ -839,6 +1112,8 @@ export function emptyForm(): Record<Section, Record<string, FieldValue>> {
     session: defaultValues(SESSION_FIELDS),
     upstream: defaultValues(UPSTREAM_FIELDS),
     global: defaultValues(GLOBAL_FIELDS),
+    channelGuard: defaultValues(CHANNEL_GUARD_FIELDS),
+    logging: defaultValues(LOGGING_FIELDS),
   };
 }
 

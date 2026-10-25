@@ -26,7 +26,10 @@ ARG VERSION=dev
 # 目标平台（buildx 注入）：Go 交叉编译到 TARGETOS/TARGETARCH
 ARG TARGETOS
 ARG TARGETARCH
-ENV CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH}
+# GOPROXY 默认走 goproxy.cn（manager ec6f01a1 吸收）：国内网络拉 proxy.golang.org
+# 常超时导致 go mod download 失败；可用 --build-arg GOPROXY=... 覆盖（如直连）。
+ARG GOPROXY=https://goproxy.cn,direct
+ENV CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOPROXY=${GOPROXY}
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

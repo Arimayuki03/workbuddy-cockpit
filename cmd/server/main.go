@@ -221,6 +221,9 @@ func main() {
 			// 策略感知首次分配：credits_desc 时新会话绑余额最高号（而非哈希打散），
 			// weighted 返回 nil 保持现状（见 wiring.go / session.Config 注释）。
 			PreferredForModel: realmAwareStickyPreferred(p),
+			// 首绑加权（manager bbbf40c1 吸收）：weighted 策略下新会话在空闲候选段
+			// 内按三因子抽签，快过期积分优先消耗对粘性流量生效（issue #265）。
+			PickForModel: realmAwareWeightedPick(p),
 		})
 		sessRouter.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
 		sessRouter.StartGC()
@@ -254,7 +257,11 @@ func main() {
 		APIKey:               cfg.APIKey,
 		SoftCooldown:         cfg.SoftRateDur,
 		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
+		RequestClientInfo:    cfg.Logging.RequestClientInfo,
 	})
+	// 渠道校验守卫热替换锚点：面板在 handler 装配之前创建，这里先声明引用，
+	// saveConfig 闭包运行时读取（handler 就绪后保存即热生效）。
+	var handlerRef *server.Handler
 
 	// 请求日志 JSONL 归档（logging.request_archive，panel 吸收件）：默认 false
 	// 与 v1.15.1 行为一致（只有内存环形缓冲，无磁盘写）。true 时按日轮转归档到
@@ -538,7 +545,7 @@ func main() {
 				return Load(*cfgPath)
 			},
 			SaveConfig: func(raw []byte) ([]string, error) {
-				return saveConfig(raw, *cfgPath, live, p, up, sch)
+				return saveConfig(raw, *cfgPath, live, p, up, sch, handlerRef)
 			},
 			UpstashSavedToken: func() string {
 				// 面板"测试 Upstash 连通性"token 留空时回落 config.json 已存值
@@ -621,6 +628,20 @@ func main() {
 		// handler 恒为默认 64MB。<=0 时传 0 走 handler 兜底回落默认（handler.go
 		// maxBodyBytes 对非正值回落 64MB，口径一致）。
 		MaxBodyBytes: int64(cfg.MaxBodyMB) << 20,
+		// 渠道校验（11-128）守卫：抓取被拒请求体 + body/模板短 TTL 负缓存。
+		// 默认启用（features.channel_check_guard.enabled）；零值 = 关闭。
+		ChannelGuard: server.ChannelGuardConfig{
+			Enabled:         cfg.Features.ChannelCheckGuard.Enabled,
+			Mode:            cfg.Features.ChannelCheckGuard.Mode,
+			CaptureDir:      cfg.Features.ChannelCheckGuard.CaptureDir,
+			CaptureMaxBytes: int64(cfg.Features.ChannelCheckGuard.CaptureMaxMB) << 20,
+			BlockTTL:        cfg.ChannelGuardBlockTTL,
+			TemplateTTL:     cfg.ChannelGuardTemplateTTL,
+			ChannelCooldown: cfg.ChannelGuardCooldown,
+			ScanMessages:    cfg.Features.ChannelCheckGuard.ScanMessages,
+			BlockPatterns:   cfg.Features.ChannelCheckGuard.BlockPatterns,
+			FailFast:        cfg.Features.ChannelCheckGuard.FailFast,
+		},
 		// 入站 IP 规则 + 可信代理解析参数（security 段）：ipRules 非 nil 时 withAuth
 		// 在鉴权前判定黑白名单；TrustedProxyCIDRs 空 = 不信任转发头（零配置安全默认）。
 		IPRules:           ipRules,
@@ -654,6 +675,7 @@ func main() {
 		// panel.enabled=false 时保持 nil——不认任何 wb_session，行为与引入前一致。
 		SessionKey: sessionKeySupplier(panelHandler != nil, live),
 	})
+	handlerRef = h
 	// OpenAI Responses API（/v1/responses、/responses，v1.15.1）：挂载走
 	// responses.go 的 MountResponses（不改 handler.go 的约定——anthropic 层同理）。
 	h.MountResponses()
@@ -693,6 +715,14 @@ func main() {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
+	if cfg.Features.ChannelCheckGuard.Enabled && cfg.Features.ChannelCheckGuard.Mode != "off" {
+		log.Printf("[channel-guard] 渠道校验守卫已启用: mode=%s capture=%s block_ttl=%s template_ttl=%s check_cooldown=%s fail_fast=%v patterns=%d",
+			cfg.Features.ChannelCheckGuard.Mode, cfg.Features.ChannelCheckGuard.CaptureDir,
+			cfg.ChannelGuardBlockTTL, cfg.ChannelGuardTemplateTTL, cfg.ChannelGuardCooldown,
+			cfg.Features.ChannelCheckGuard.FailFast, len(cfg.Features.ChannelCheckGuard.BlockPatterns))
+	} else {
+		log.Printf("[channel-guard] 渠道校验守卫已关闭（features.channel_check_guard.enabled=false / mode=off）")
+	}
 	if cfg.Global.Enabled {
 		log.Printf("global realm 已启用（chat_base=%q billing_base=%q，空=默认 workbuddy.ai）",
 			cfg.Global.ChatBase, cfg.Global.BillingBase)

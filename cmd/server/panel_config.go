@@ -50,7 +50,7 @@ func parseConfigInto(raw []byte, c *Config) (*Config, error) {
 // 与 admin PATCH 的写路径互斥（C-config 双写路径修复）：admin patchConfigScalar
 // 的 splice 落盘与本函数的整文件重写并发时互相丢补丁（各基于旧字节），两条
 // 路径经 server.ConfigMu() 收敛到同一临界区。
-func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, h *server.Handler) ([]string, error) {
 	server.ConfigMu().Lock()
 	defer server.ConfigMu().Unlock()
 	// 1) 解析现有文件为 map（保留用户手写的未知键），再深合并面板提交的键。
@@ -98,7 +98,25 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		APIKey:               newCfg.APIKey,
 		SoftCooldown:         newCfg.SoftRateDur,
 		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
+		RequestClientInfo:    newCfg.Logging.RequestClientInfo,
 	})
+	// 渠道校验守卫热替换（features.channel_check_guard 整段）：重建实例整体换入，
+	// pattern/TTL/冷却/抓取目录保存即生效。h 为 nil 只发生在面板先于 handler 装配
+	// 的窗口（实际不可能：保存是人工动作），防御性跳过不报错。
+	if h != nil {
+		h.SetChannelGuard(server.NewChannelGuard(server.ChannelGuardConfig{
+			Enabled:         newCfg.Features.ChannelCheckGuard.Enabled,
+			Mode:            newCfg.Features.ChannelCheckGuard.Mode,
+			CaptureDir:      newCfg.Features.ChannelCheckGuard.CaptureDir,
+			CaptureMaxBytes: int64(newCfg.Features.ChannelCheckGuard.CaptureMaxMB) << 20,
+			BlockTTL:        newCfg.ChannelGuardBlockTTL,
+			TemplateTTL:     newCfg.ChannelGuardTemplateTTL,
+			ChannelCooldown: newCfg.ChannelGuardCooldown,
+			ScanMessages:    newCfg.Features.ChannelCheckGuard.ScanMessages,
+			BlockPatterns:   newCfg.Features.ChannelCheckGuard.BlockPatterns,
+			FailFast:        newCfg.Features.ChannelCheckGuard.FailFast,
+		}))
+	}
 	// upstream.Client 热改普通字段（UA/版本段/归属名/脱敏/IP 透传）经 SetHotFields
 	// 整体替换快照：headers.go 读侧走 HotFields() 同步读——直接写普通字段与出站
 	// 路径的并发读构成数据竞争（audit P0），快照整体替换无半新半旧窗口。
@@ -208,6 +226,9 @@ func restartRequiredFields(c *Config) []string {
 	// 进程级开关；saveConfig 不做热更新（避免运行中突然改变所有存量流的渲染语义），
 	// 保存后必须提示重启。
 	out = append(out, "reasoning_as_content")
+	// 请求日志 JSONL 归档在装配期创建 recorder（main 启动期 reqlog.New），开关与
+	// 容量/保留参数只能重启生效；request_client_info 已走 live 热改不在此列。
+	out = append(out, "logging.request_archive", "logging.request_archive_max_mb", "logging.request_retention_days")
 	// global.enabled 在 auth.SetGlobalEnabled / handler GlobalEnabled / upstream.GlobalEnabled
 	// 三处装配期注入；prompt 文本与 global base 同理。
 	out = append(out, "global.enabled", "global.chat_base", "global.billing_base",
@@ -264,11 +285,11 @@ func mergedJSON(m map[string]any) []byte {
 // 的合并/校验/落盘链路，只携带 model_map 一个键——model_map 为整段替换语义，
 // 传入的表即最终落盘的表，深合并不会把已删条目合回来）。
 // 热生效（server.SetModelMap）由端点先行调用，此处仅负责持久化。
-func saveModelMap(m map[string]string, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) error {
+func saveModelMap(m map[string]string, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, h *server.Handler) error {
 	raw, err := json.Marshal(map[string]any{modelMapKey: m})
 	if err != nil {
 		return fmt.Errorf("marshal model_map: %w", err)
 	}
-	_, err = saveConfig(raw, path, live, p, up, sch)
+	_, err = saveConfig(raw, path, live, p, up, sch, h)
 	return err
 }

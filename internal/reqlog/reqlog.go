@@ -86,6 +86,16 @@ type Event struct {
 	// ClientIP / UserAgent 调用来源（可选，脱敏开关控制是否采集）。
 	ClientIP  string `json:"client_ip,omitempty"`
 	UserAgent string `json:"user_agent,omitempty"`
+
+	// EffortIn / EffortOut 思考档位观测（下游入站值 / 出站最终值；空 = 无档位，
+	// omitempty 不落档）。
+	EffortIn  string `json:"effort_in,omitempty"`
+	EffortOut string `json:"effort_out,omitempty"`
+	// PromptTokens / ReasoningTokens usage 观测（输入侧 / 思考侧 token；0 不落）。
+	PromptTokens    int `json:"prompt_tokens,omitempty"`
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+	// Realm 账号归属域（cn/global；空不落）。
+	Realm string `json:"realm,omitempty"`
 }
 
 // Filter ReadArchive 回读过滤器。字符串字段一律「包含」匹配（大小写不敏感），

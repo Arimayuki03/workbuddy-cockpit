@@ -116,6 +116,34 @@ type Config struct {
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
+		// ChannelCheckGuard 上游渠道校验（11-128）守卫（internal/server/channel_guard.go）。
+		// 默认启用：命中时抓取请求体，并按 body/模板短 TTL 负缓存，重复请求本地 400，
+		// 不再消耗账号、不再把确定性拒绝包装成 503。
+		ChannelCheckGuard struct {
+			Enabled bool `json:"enabled"`
+			// Mode "block"（默认，本地 400）/ "warn"（只记日志继续出站）/ "off"。
+			Mode string `json:"mode"`
+			// CaptureDir 抓取目录（默认 data/channel_check；容器内相对 /app）。
+			CaptureDir string `json:"capture_dir"`
+			// CaptureMaxMB 抓取目录总容量上限（MB，默认 256；超限删最旧）。
+			CaptureMaxMB int `json:"capture_max_mb"`
+			// BlockTTL 完整 body 负缓存 TTL（默认 10m，必须是正时长）。
+			BlockTTL string `json:"block_ttl"`
+			// TemplateTTL 模板（system/tools）负缓存 TTL（默认 10m，必须是正时长）。
+			TemplateTTL string `json:"template_ttl"`
+			// ChannelCooldown 渠道校验命中时账号软冷却时长（默认 60s；"0" = 回落
+			// cooldown.soft_rate 旧口径）。渠道校验是请求/渠道问题，不是账号故障。
+			ChannelCooldown string `json:"channel_check_cooldown"`
+			// ScanMessages block_patterns 是否扫描全部消息（默认 true）；false 时只扫
+			// system/developer 与 tools/functions。
+			ScanMessages bool `json:"scan_messages"`
+			// BlockPatterns 预置拦截短语（大小写不敏感子串；默认空 = 不猜，抓到指纹后
+			// 再由运维显式加入）。
+			BlockPatterns []string `json:"block_patterns"`
+			// FailFast 首次 ChannelCheck 即终止轮转并回 400（默认 false：保留换号可能
+			// 成功的旧语义；true = 一次都不多撞，牺牲账号差异带来的偶发成功）。
+			FailFast bool `json:"fail_fast"`
+		} `json:"channel_check_guard"`
 	} `json:"features"`
 
 	Prompt struct {
@@ -286,6 +314,11 @@ type Config struct {
 	ExpiringSoonDur     time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
+	// ChannelGuardBlockTTL / ChannelGuardTemplateTTL / ChannelGuardCooldown
+	// features.channel_check_guard 的时长解析结果（main 注入 server.ChannelGuardConfig）。
+	ChannelGuardBlockTTL    time.Duration `json:"-"`
+	ChannelGuardTemplateTTL time.Duration `json:"-"`
+	ChannelGuardCooldown    time.Duration `json:"-"`
 	// SecurityTrustedCIDRs 解析后的可信代理网段（normalize 阶段 iputil.ParseTrustedCIDRs
 	// fail-fast 产物，main 直接注入 handler）。nil = 不信任任何转发头（零配置安全默认）。
 	SecurityTrustedCIDRs []netip.Prefix `json:"-"`
@@ -320,6 +353,18 @@ func Default() *Config {
 	// 显式 client_name="SaaS" 还原旧行为。
 	c.Upstream.ClientName = "WorkBuddy"
 	c.Features.SanitizeBlacklistFingerprints = true
+	// 渠道校验守卫默认开：命中 11-128 时抓取请求体并按 body/模板短 TTL 负缓存，
+	// 重复请求本地 400（不再烧账号、不再 503）。关闭用 enabled=false 或 mode=off。
+	cg := &c.Features.ChannelCheckGuard
+	cg.Enabled = true
+	cg.Mode = "block"
+	cg.CaptureDir = "data/channel_check"
+	cg.CaptureMaxMB = 256
+	cg.BlockTTL = "10m"
+	cg.TemplateTTL = "10m"
+	cg.ChannelCooldown = "60s"
+	cg.ScanMessages = true
+	cg.FailFast = false
 	reasoningAsContent := false
 	c.ReasoningAsContent = &reasoningAsContent
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：默认透传客户端原始 system；显式配置 custom 仍可覆盖回替换
@@ -465,6 +510,14 @@ func applyEnv(c *Config) {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Features.SanitizeBlacklistFingerprints = b
 		}
+	}
+	if v := strings.TrimSpace(os.Getenv("WB2A_CHANNEL_CHECK_GUARD")); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Features.ChannelCheckGuard.Enabled = b
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("WB2A_CHANNEL_CHECK_GUARD_MODE")); v != "" {
+		c.Features.ChannelCheckGuard.Mode = v
 	}
 	if v := os.Getenv("WB2A_PROMPT_MODE"); v != "" {
 		c.Prompt.Mode = v
@@ -730,7 +783,76 @@ func (c *Config) normalize() error {
 	if err := c.Schedule.Normalize(); err != nil {
 		return err
 	}
+	if err := c.normalizeChannelCheckGuard(); err != nil {
+		return err
+	}
 	return c.normalizePrompt()
+}
+
+// normalizeChannelCheckGuard 归一 features.channel_check_guard：mode 白名单、
+// 目录/容量默认、三个时长解析（block_ttl/template_ttl/check_cooldown）。配错
+// fail-fast（与 prompt.mode / cooldown.soft_rate 同风格），避免静默按默认跑。
+func (c *Config) normalizeChannelCheckGuard() error {
+	cg := &c.Features.ChannelCheckGuard
+	switch strings.ToLower(strings.TrimSpace(cg.Mode)) {
+	case "", "block":
+		cg.Mode = "block"
+	case "warn":
+		cg.Mode = "warn"
+	case "off":
+		cg.Mode = "off"
+	default:
+		return fmt.Errorf("features.channel_check_guard.mode: %q 不是合法值（block / warn / off）", cg.Mode)
+	}
+	if strings.TrimSpace(cg.CaptureDir) == "" {
+		cg.CaptureDir = "data/channel_check"
+	}
+	if cg.CaptureMaxMB <= 0 {
+		cg.CaptureMaxMB = 256
+	}
+	if cg.BlockTTL == "" {
+		cg.BlockTTL = "10m"
+	}
+	if cg.TemplateTTL == "" {
+		cg.TemplateTTL = "10m"
+	}
+	if cg.ChannelCooldown == "" {
+		cg.ChannelCooldown = "60s"
+	}
+	var err error
+	if c.ChannelGuardBlockTTL, err = time.ParseDuration(cg.BlockTTL); err != nil {
+		return fmt.Errorf("features.channel_check_guard.block_ttl: %w", err)
+	}
+	if c.ChannelGuardBlockTTL <= 0 {
+		return fmt.Errorf("features.channel_check_guard.block_ttl: 必须是正时长，got %q", cg.BlockTTL)
+	}
+	if c.ChannelGuardTemplateTTL, err = time.ParseDuration(cg.TemplateTTL); err != nil {
+		return fmt.Errorf("features.channel_check_guard.template_ttl: %w", err)
+	}
+	if c.ChannelGuardTemplateTTL <= 0 {
+		return fmt.Errorf("features.channel_check_guard.template_ttl: 必须是正时长，got %q", cg.TemplateTTL)
+	}
+	// channel_check_cooldown 允许 0（= 回落 cooldown.soft_rate 旧口径），负值非法。
+	if c.ChannelGuardCooldown, err = time.ParseDuration(cg.ChannelCooldown); err != nil {
+		return fmt.Errorf("features.channel_check_guard.channel_check_cooldown: %w", err)
+	}
+	if c.ChannelGuardCooldown < 0 {
+		return fmt.Errorf("features.channel_check_guard.channel_check_cooldown: 不能为负，got %q", cg.ChannelCooldown)
+	}
+	// 短语归一：去空白/丢空段；超长条目丢弃（不因手写笔误把整段请求拦掉）。
+	patterns := make([]string, 0, len(cg.BlockPatterns))
+	for _, p := range cg.BlockPatterns {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if len(p) > 512 {
+			return fmt.Errorf("features.channel_check_guard.block_patterns: 条目过长（%d > 512）: %.32q…", len(p), p)
+		}
+		patterns = append(patterns, p)
+	}
+	cg.BlockPatterns = patterns
+	return nil
 }
 
 // normalizePrompt 校验 prompt.mode 并按 file 加载提示词文本（custom/append 模式）。

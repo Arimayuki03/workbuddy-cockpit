@@ -24,12 +24,12 @@ import {peekCache, putCache, useCachedAsync} from '@/lib/data-cache';
 import type {ConfigGetResponse, ModelMapResponse, UpdateCheck} from '@/lib/types';
 import {useRealm} from '@/lib/realm-context';
 import {
-  FIELD_BY_KEY,
   GROUPS,
   needsRestartBySection,
   pickValues,
   emptyForm,
   toWire,
+  fieldOf,
   pairError,
   SCHEDULE_FIELDS,
   PROMPT_FIELDS,
@@ -39,6 +39,10 @@ import {
   SESSION_FIELDS,
   UPSTREAM_FIELDS,
   GLOBAL_FIELDS,
+  CHANNEL_GUARD_FIELDS,
+  LOGGING_FIELDS,
+  configAtPath,
+  nestPatch,
   type FieldValue,
   type Section,
 } from './settings-fields';
@@ -160,6 +164,10 @@ export function SettingsProvider({children}: {children: ReactNode}) {
       session: pickValues(SESSION_FIELDS, root.session_sticky),
       upstream: pickValues(UPSTREAM_FIELDS, root.upstream),
       global: pickValues(GLOBAL_FIELDS, root.global),
+      // 嵌套段（features.channel_check_guard / logging）走 path 定位取值，
+      // 与上面平铺段同一条 pickValues 口径。
+      channelGuard: pickValues(CHANNEL_GUARD_FIELDS, configAtPath(root, ['features', 'channel_check_guard'])),
+      logging: pickValues(LOGGING_FIELDS, root.logging),
     };
     // 保存一个分组成功后 load() 会整表 applyConfig。若直接全量覆盖，
     // 其他分组里未保存的编辑会被无提示清空——这里在 setState 前先算出
@@ -320,10 +328,17 @@ export function SettingsProvider({children}: {children: ReactNode}) {
   async function saveGroup(group: Section) {
     const cur = form[group];
     const org = original.current[group];
-    const patch: Record<string, boolean | number | number[] | string> = {};
+    // 字段必须从**本分组**解析（fieldOf），不能用「按字段名全局映射」：
+    // 分组间存在同名字段——`mode` 同时在系统提示词与渠道校验守卫、`enabled` 同时
+    // 在国际版/会话粘性/渠道校验守卫——全局映射会被 GROUPS 里靠后的分组覆盖。
+    // 历史 bug：切换提示词模式时按守卫分组的枚举（block/warn/off）校验 'custom'，
+    // 恒报「取值不在允许范围内」，保存永远失败。
+    const def = GROUPS.find((g) => g.id === group);
+    if (!def) return;
+    const patch: Record<string, boolean | number | number[] | string | string[]> = {};
     for (const k of Object.keys(cur)) {
       if (cur[k] === org[k]) continue;
-      const f = FIELD_BY_KEY[k];
+      const f = fieldOf(def, k);
       if (!f) continue;
       const w = toWire(f, cur[k]);
       if (!w.ok) {
@@ -345,9 +360,9 @@ export function SettingsProvider({children}: {children: ReactNode}) {
     }
     setBusy(true);
     try {
-      const def = GROUPS.find((g) => g.id === group);
-      if (!def) return;
-      const saved = await settingsApi.saveConfig({[def.section]: patch});
+      // 嵌套段（path）构造成嵌套 patch；平铺段维持 {section: patch} 旧形态，
+      // 后端深合并两者同语义。
+      const saved = await settingsApi.saveConfig(nestPatch(def.path ?? [def.section], patch));
       const needRestart = needsRestartBySection(saved?.restart_required);
       if (needRestart) {
         notify.warn(t('settings.savedRestart'), t('settings.restartHint'));

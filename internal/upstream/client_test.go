@@ -107,10 +107,16 @@ func TestClassify(t *testing.T) {
 		// 禁用，否则落 ErrClient 只换号不罚，死号永远留在池里反复 401。
 		{401, `<html> <head><title>401 Authorization Required</title></head> <body> <center><h1>401 Authorization Required</h1></center> <hr><center>openresty</center> <p><em>Powered by <a href="https://apisix.apache.org/">APISIX</a></p> </body></html>`, ErrSessionDead},
 		{401, `<!DOCTYPE html><html><body><h1>401 Authorization Required</h1></body></html>`, ErrSessionDead},
-		// 纯文本/空体 401 不判 session dead：可能是代理/传输层异常，不能凭状态码
-		// 永久禁号（与 12153 的「宁缺毋滥」同一条纪律）。
-		{401, `unauthorized`, ErrClient},
-		{401, ``, ErrClient},
+		// 纯 401（无 12153、非网关鉴权页 HTML）：归 auth_rejected（manager 87a4e092
+		// 吸收）——ErrClient 只换号不罚号（降权 10 分钟自动回池），坏号会反复被
+		// 选中；auth_rejected 由 handler 走连续计数，达阈值（3）才禁用。空体、
+		// 纯文本、无信封 JSON、普通 HTML 都是 APISIX 401 的真实形态。
+		{401, `unauthorized`, ErrAuthRejected},
+		{401, ``, ErrAuthRejected},
+		// 普通 HTML 401 在本 fork 归 ErrSessionDead（IsGatewayAuthPage 对 401+HTML
+		// 从宽：db6fbfa2 的「401 网关页自动禁用」语义，与上游 manager 从严判定有意
+		// 分叉——网关页形态实测即吊销，立即禁用比连续计数更止损）。
+		{401, `<html><body>401 Unauthorized</body></html>`, ErrSessionDead},
 		// 12153 结构化判定（audit 修复）：code 字段各形态仍命中；裸 "12153" 数字串
 		// 撞在 requestId/时间戳等任意字段上不再触发禁号判据（chat 路径单次即 Disable，
 		// 误判代价是永久禁号）。
@@ -118,11 +124,12 @@ func TestClassify(t *testing.T) {
 		{401, `{"code":"12153","msg":"Offline user session not found"}`, ErrSessionDead}, // 字符串形态
 		{401, `{"error":{"code":12153,"message":"x"}}`, ErrSessionDead},                  // error 子对象两层
 		{401, `upstream error: "code":12153`, ErrSessionDead},                            // 非标准 JSON 退化子串
-		// requestId/时间戳撞数字串：code 字段不是 12153 → 不归 session dead。
-		{401, `{"code":0,"msg":"ok","requestId":"req-1712121531234","trace":121531}`, ErrClient},
+		// requestId/时间戳撞数字串：code 字段不是 12153 → 不归 session dead（纯 401
+		// 兜底归 auth_rejected）。
+		{401, `{"code":0,"msg":"ok","requestId":"req-1712121531234","trace":121531}`, ErrAuthRejected},
+		{401, `{"code":9999,"msg":"bad token"}`, ErrAuthRejected},
 		// 429 + requestId 撞数字串 → 限流语义（修复前裸子串会误归 session dead 禁号）。
 		{429, `{"code":6004,"msg":"将在 2026-09-19 12:00:00 重置","requestId":"r12153"}`, ErrSoftRate},
-		{401, `{"code":9999,"msg":"bad token"}`, ErrClient},
 		{500, `boom`, ErrServer},
 		{503, `unavailable`, ErrServer},
 		{200, ``, ErrNone},

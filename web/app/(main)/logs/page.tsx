@@ -475,20 +475,27 @@ export default function LogsPage() {
           </section>
 
           <section className="overflow-hidden rounded-[20px] bg-muted">
-            <Table>
+            {/* 桌面表格改为固定列宽（table-fixed，manager 4f286743 同款方案）：
+                此前 auto 布局下列宽由内容撑开——账号列是 36 字符完整 UUID、UA 动辄
+                上百字符，两者把表格推宽，容器出现横向滚动，最右侧的思考强度/扣费列
+                要拖动才能看到。固定布局把「列宽」从内容手里拿走：超宽内容在列内
+                省略（悬停 title 看全文，点行进详情有完整字段），表格永远等于容器宽。 */}
+            <Table className="table-fixed [&_td]:overflow-hidden">
               <TableHeader>
                 <TableRow className="border-b border-border/60 hover:bg-transparent">
-                  <TableHead className="pl-4 text-[11px] text-muted-foreground">{t('logs.colTime')}</TableHead>
-                  <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colNickname')}</TableHead>
-                  <TableHead className="text-[11px] text-muted-foreground">{t('tasks.colAccount')}</TableHead>
+                  <TableHead className="w-[11%] pl-4 text-[11px] text-muted-foreground">{t('logs.colTime')}</TableHead>
+                  <TableHead className="w-[9%] text-[11px] text-muted-foreground">{t('accounts.colNickname')}</TableHead>
+                  <TableHead className="w-[7%] text-[11px] text-muted-foreground">{t('tasks.colAccount')}</TableHead>
                   {/* 客户端 IP / UA：定位「是谁在调」——多密钥、多设备排查时最直接的两列 */}
-                  <TableHead className="text-[11px] text-muted-foreground">{t('logs.rowIp')}</TableHead>
-                  <TableHead className="text-[11px] text-muted-foreground">{t('nav.models')}</TableHead>
-                  <TableHead className="text-[11px] text-muted-foreground">{t('logs.rowUa')}</TableHead>
-                  <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colStatus')}</TableHead>
-                  <TableHead className="text-[11px] text-muted-foreground">{t('logs.colFirstToken')}</TableHead>
-                  <TableHead className="text-[11px] text-muted-foreground">Token</TableHead>
-                  <TableHead className="pr-4 text-[11px] text-muted-foreground">{t('metric.paid')}</TableHead>
+                  <TableHead className="w-[9%] text-[11px] text-muted-foreground">{t('logs.rowIp')}</TableHead>
+                  <TableHead className="w-[13%] text-[11px] text-muted-foreground">{t('nav.models')}</TableHead>
+                  <TableHead className="w-[12%] text-[11px] text-muted-foreground">{t('logs.rowUa')}</TableHead>
+                  <TableHead className="w-[6%] text-[11px] text-muted-foreground">{t('accounts.colStatus')}</TableHead>
+                  <TableHead className="w-[7%] text-[11px] text-muted-foreground">{t('logs.colFirstToken')}</TableHead>
+                  <TableHead className="w-[9%] text-[11px] text-muted-foreground">Token</TableHead>
+                  {/* 思考强度：下游传入 > 出站最终值（网关补默认档/降级后）；无档位显示 — */}
+                  <TableHead className="w-[10%] text-[11px] text-muted-foreground">{t('logs.colEffort')}</TableHead>
+                  <TableHead className="w-[7%] pr-4 text-[11px] text-muted-foreground">{t('metric.paid')}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -498,18 +505,25 @@ export default function LogsPage() {
                     className="cursor-pointer border-b border-border/40"
                     onClick={() => setDetail(l)}
                   >
-                    <TableCell className="pl-4 text-xs text-muted-foreground">{fmtLogTime(l.time)}</TableCell>
-                    <TableCell className="max-w-[10rem] truncate text-xs" title={l.nick || undefined}>{l.nick || '—'}</TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground">{l.uid || '—'}</TableCell>
+                    <TableCell className="whitespace-nowrap pl-4 text-xs text-muted-foreground">{fmtLogTime(l.time)}</TableCell>
+                    <TableCell className="text-xs">
+                      <div className="truncate" title={l.nick || undefined}>{l.nick || '—'}</div>
+                    </TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground">
+                      {/* 固定列宽下 36 字符 UUID 放不下：列内只显示 uid8（与网关流水行
+                          同一口径），悬停 title 看全量，点行进详情也有完整值。 */}
+                      <div className="truncate" title={l.uid || undefined}>{l.uid ? l.uid.slice(0, 8) : '—'}</div>
+                    </TableCell>
                     {/* 老记录 / 未采集时为缺字段：显示 —，不伪装成空串。
                         字段名照后端 json tag：client_ip（不是 ip，ip 是查询参数名） */}
-                    <TableCell className="font-mono text-xs text-muted-foreground">{l.client_ip || '—'}</TableCell>
-                    <TableCell className="text-xs">{l.model || '—'}</TableCell>
-                    <TableCell
-                      className="max-w-[14rem] truncate text-xs text-muted-foreground"
-                      title={l.user_agent || undefined}
-                    >
-                      {l.user_agent || '—'}
+                    <TableCell className="font-mono text-xs text-muted-foreground">
+                      <div className="truncate" title={l.client_ip || undefined}>{l.client_ip || '—'}</div>
+                    </TableCell>
+                    <TableCell className="text-xs">
+                      <div className="truncate" title={l.model || undefined}>{l.model || '—'}</div>
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground">
+                      <div className="truncate" title={l.user_agent || undefined}>{l.user_agent || '—'}</div>
                     </TableCell>
                     <TableCell>
                       {l.status >= 200 && l.status < 300 ? (
@@ -542,6 +556,19 @@ export default function LogsPage() {
                         </>
                       ) : (
                         <span className="text-muted-foreground/70">—</span>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-xs">
+                      {l.effort_in || l.effort_out ? (
+                        <Badge
+                          variant="secondary"
+                          className="max-w-full truncate rounded-full font-mono text-[10px] text-sky-700 dark:text-sky-300"
+                          title={t('logs.effortTitle')}
+                        >
+                          {(l.effort_in || '-') + '>' + (l.effort_out || '-')}
+                        </Badge>
+                      ) : (
+                        <span className="text-muted-foreground/50">—</span>
                       )}
                     </TableCell>
                     <TableCell className="pr-4 text-xs tabular-nums">
@@ -712,6 +739,14 @@ export default function LogsPage() {
                 ['status', t('logs.rowStatus'), String(detail.status)],
                 ['ttfb', t('logs.rowFirstToken'), detail.ttfb_ms ? fmtLatency(detail.ttfb_ms) : t('logs.notCollected')],
                 ['tokens', 'Token', detail.tokens < 0 ? t('logs.notCollected') : fmtNumber(detail.tokens)],
+                [
+                  'effort',
+                  t('logs.rowEffort'),
+                  detail.effort_in || detail.effort_out
+                    ? `${detail.effort_in || '—'} > ${detail.effort_out || '—'}`
+                    : t('logs.notCollected'),
+                ],
+                ['reasoning', t('logs.rowReasoning'), detail.reasoning_tokens ? fmtNumber(detail.reasoning_tokens) : t('logs.notCollected')],
                 [
                   'credit',
                   t('logs.rowCredit'),

@@ -343,11 +343,25 @@ func fillStatFromUsage(st *chatStat, resp map[string]any) {
 	st.prompt = intFromUsage(u, "prompt_tokens")
 	st.cacheHit = intFromUsage(u, "prompt_cache_hit_tokens")
 	st.cacheMiss = intFromUsage(u, "prompt_cache_miss_tokens")
-	st.cacheWr = intFromUsage(u, "prompt_cache_write_tokens")
+	// 写入同流式口径推导（deriveCacheWrite：上游不下发 write，miss 即被写入的前缀）。
+	st.cacheWr = deriveCacheWrite(intFromUsage(u, "prompt_cache_write_tokens"), intFromUsage(u, "prompt_cache_miss_tokens"))
+	st.reason = reasoningTokensFromUsage(u)
 	if c, ok := u["credit"].(float64); ok {
 		st.credit = c
 		st.hasCredit = true
 	}
+}
+
+// reasoningTokensFromUsage 从 usage 提取思考 token：completion_tokens_details.
+// reasoning_tokens 优先，上游扁平别名 completion_thinking_tokens 兜底（两种
+// 形态实测都下发过）。缺失/为 0 返回 0（omitempty 不落观测字段）。
+func reasoningTokensFromUsage(u map[string]any) int {
+	if d, ok := u["completion_tokens_details"].(map[string]any); ok {
+		if v := intFromUsage(d, "reasoning_tokens"); v > 0 {
+			return v
+		}
+	}
+	return intFromUsage(u, "completion_thinking_tokens")
 }
 
 // intFromUsage 从 usage map 取整数字段；缺失或类型不符返回 0。

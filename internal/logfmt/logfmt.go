@@ -91,6 +91,31 @@ func Pad(s string, width int) string {
 	return s
 }
 
+// TruncateWidth 按**显示列宽**截断 s 到 width（rune 不切断、无省略号）。
+// width<=0 返回空串；已不超宽原样返回。
+//
+// 与 Truncate（字节口径）的差异：CJK/全角/emoji 一个 rune 占 2 列，按字节截到
+// rune 边界仍无法保证结果不超显示宽——定宽表格列（如 chat 流水行的账号列）需要
+// 按 DisplayWidth 截才能保证「截完必 ≤ width」，行对齐不破。省略号刻意不加：
+// U+2026 是 East Asian Width Ambiguous，终端按 1 或 2 列渲染都有，会破坏定宽承诺。
+func TruncateWidth(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if DisplayWidth(s) <= width {
+		return s
+	}
+	w := 0
+	for i, r := range s {
+		rw := runeWidth(r)
+		if w+rw > width {
+			return s[:i]
+		}
+		w += rw
+	}
+	return s
+}
+
 // runeWidth 单个 rune 的显示列宽。区段判定取自 Unicode East Asian Width 的
 // Wide/Fullwidth 集合（与 go-runewidth 的默认表口径一致），只保留实际会用到的段。
 func runeWidth(r rune) int {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/logfmt"
 )
 
 // captureStdout 重定向 os.Stdout 并捕获 fn 期间的全部输出。
@@ -45,8 +46,68 @@ func withChatLog(t *testing.T) {
 	t.Cleanup(func() { chatLogEnabled = old })
 }
 
-func TestChatStatsReaderTokensFromUsage(t *testing.T) {
-	// 起点回拨 1ms：内存流（strings.Reader）瞬时返回，用 time.Now() 作起点会让
+// TestDeriveCacheWrite 缓存写入推导口径（上游不下发 write）：
+//   - raw>0：上游真值优先（未来开始下发时零改动）；
+//   - raw=0 且 miss≥64（最小缓存块）：write=miss（未命中前缀即被写入部分，
+//     双轮探针 2858 miss → 次轮 2688 hit 佐证，精度 ~94%）；
+//   - miss<64：实测不写缓存（50 token 前缀次轮 hit=0），保持 0。
+func TestDeriveCacheWrite(t *testing.T) {
+	cases := []struct {
+		name      string
+		raw, miss int
+		want      int
+	}{
+		{"raw wins", 123, 2858, 123},
+		{"derive from miss", 0, 2858, 2858},
+		{"below cache block", 0, 50, 0},
+		{"zero miss", 0, 0, 0},
+	}
+	for _, c := range cases {
+		if got := deriveCacheWrite(c.raw, c.miss); got != c.want {
+			t.Errorf("%s: deriveCacheWrite(%d,%d)=%d want %d", c.name, c.raw, c.miss, got, c.want)
+		}
+	}
+}
+
+// TestChatStatsReaderCacheWriteDerived 流式末帧 usage 的写入推导：
+// 上游 write=0、miss=2858 → 观测 write=2858（hit/miss 原样）。
+func TestChatStatsReaderCacheWriteDerived(t *testing.T) {
+	sse := "data: {\"usage\":{\"prompt_tokens\":2858," +
+		"\"prompt_cache_hit_tokens\":0,\"prompt_cache_miss_tokens\":2858,\"prompt_cache_write_tokens\":0}}\n\n" +
+		"data: [DONE]\n\n"
+	r := newChatStatsReaderSince(strings.NewReader(sse), time.Now())
+	if _, err := io.Copy(io.Discard, r); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	hit, miss, write := r.CacheTokens()
+	if hit != 0 || miss != 2858 {
+		t.Fatalf("hit/miss=%d/%d want 0/2858", hit, miss)
+	}
+	if write != 2858 {
+		t.Fatalf("write=%d want 2858（推导：上游不下发 write）", write)
+	}
+}
+
+// TestFillStatFromUsageCacheWriteDerived 非流式聚合 usage 同口径推导。
+func TestFillStatFromUsageCacheWriteDerived(t *testing.T) {
+	st := &chatStat{}
+	fillStatFromUsage(st, map[string]any{
+		"usage": map[string]any{
+			"prompt_tokens":             float64(2867),
+			"prompt_cache_hit_tokens":   float64(2688),
+			"prompt_cache_miss_tokens":  float64(179),
+			"prompt_cache_write_tokens": float64(0),
+		},
+	})
+	if st.cacheHit != 2688 || st.cacheMiss != 179 {
+		t.Fatalf("hit/miss=%d/%d want 2688/179", st.cacheHit, st.cacheMiss)
+	}
+	if st.cacheWr != 179 {
+		t.Fatalf("write=%d want 179（次轮新前缀同样在写入）", st.cacheWr)
+	}
+}
+
+func TestChatStatsReaderTokensFromUsage(t *testing.T) { // 起点回拨 1ms：内存流（strings.Reader）瞬时返回，用 time.Now() 作起点会让
 	// ttfb=time.Since(start) 在同一时钟滴答内测得 0（Windows 精度 ~0.5ms 尤甚）。
 	// 生产 SSE 是网络流 ttfb 必然 >0；此处回拨起点模拟"已过一段时间"的可分辨测量。
 	r := newChatStatsReaderSince(strings.NewReader(sseOK), time.Now().Add(-time.Millisecond))
@@ -206,7 +267,7 @@ func TestUIDPrefix(t *testing.T) {
 func TestLogChatRowFormat(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(412*time.Millisecond, 27100*time.Millisecond, "deepseek-v4.1-flash", "stream", "00e26541abcdef", "sample", http.StatusOK, 1234)
+		logChatRow(412*time.Millisecond, 27100*time.Millisecond, "deepseek-v4.1-flash", "stream", "00e26541abcdef", "sample", http.StatusOK, 1234, "xhigh", "high")
 	})
 	for _, want := range []string{
 		"| #", "deepseek-v4.1-flash", "| stream |", "| 200 |", "sample(00e26541)", "TTFB=412ms", "tok=1234", "tok/s", "total=",
@@ -220,6 +281,61 @@ func TestLogChatRowFormat(t *testing.T) {
 	}
 }
 
+// rowAcctSegment 取流水行的账号列原始片段（含两侧空格），供定宽断言。
+func rowAcctSegment(row string) (string, bool) {
+	parts := strings.Split(row, "|")
+	// "", seq, time, model, mode, status, acct, TTFB, tok, rate, eff, total, ""
+	if len(parts) < 8 {
+		return "", false
+	}
+	return parts[6], true
+}
+
+// TestLogChatRowAccountFixedWidth 账号列严格定宽（chatAcctWidth）：昵称超宽时按
+// 显示列宽截断、uid8 后缀完整保留；4 字中文昵称（18 列）原样放下不截。
+// 旧实现「只补不截」会让掩码手机号昵称（21 列）把整行撑宽，尾部列被顶出可视区。
+func TestLogChatRowAccountFixedWidth(t *testing.T) {
+	withChatLog(t)
+	out := captureStdout(t, func() {
+		logChatRow(0, time.Second, "m", "stream", "a1b2c3d4e5", "173****6289", http.StatusOK, 1, "", "")
+		logChatRow(0, time.Second, "m", "stream", "c5f12af0e6", "蝶舞飞扬", http.StatusOK, 1, "", "")
+	})
+	rows := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows, got %d: %q", len(rows), out)
+	}
+	// 掩码手机号：昵称截到 8 列 + "(a1b2c3d4)" 后缀 = 18，uid8 完整保留。
+	if !strings.Contains(rows[0], "173****6(a1b2c3d4)") {
+		t.Errorf("long nick should truncate with uid8 suffix intact:\n%s", rows[0])
+	}
+	// 4 字中文昵称（8 列 + 10 = 18）恰好放满，不截。
+	if !strings.Contains(rows[1], "蝶舞飞扬(c5f12af0)") {
+		t.Errorf("4-char CJK nick should fit untruncated:\n%s", rows[1])
+	}
+	// 两行账号列均严格等于 chatAcctWidth 显示列宽（定宽承诺）。
+	for i, row := range rows {
+		seg, ok := rowAcctSegment(row)
+		if !ok {
+			t.Fatalf("row %d: acct segment not found: %q", i, row)
+		}
+		if w := logfmt.DisplayWidth(seg) - 2; w != chatAcctWidth { // 去掉两侧空格
+			t.Errorf("row %d: acct column width=%d want %d (segment %q)", i, w, chatAcctWidth, seg)
+		}
+	}
+}
+
+// TestLogChatRowEffortColumnFullWidth 思考档位列按最宽组合（minimal×2 = 15 列）
+// 完整展示：旧的 11 列会把 "minimal>minimal" 截成 "minimal>mini"。
+func TestLogChatRowEffortColumnFullWidth(t *testing.T) {
+	withChatLog(t)
+	out := captureStdout(t, func() {
+		logChatRow(0, time.Second, "m", "stream", "u1", "nick", http.StatusOK, 1, "minimal", "minimal")
+	})
+	if !strings.Contains(out, "eff=minimal>minimal") {
+		t.Errorf("widest effort pair must render untruncated:\n%s", out)
+	}
+}
+
 // TestLogChatRowModelNotTruncated 守护模型名不再被截断。
 // 旧实现硬截 11 字节，把 "cn:deepseek-v4.1-flash" 切成 "cn:deepseek"，
 // 运维会误以为是另一个模型（真实踩坑点）。26 列宽覆盖 realm 前缀 + 最长模型名。
@@ -227,7 +343,7 @@ func TestLogChatRowModelNotTruncated(t *testing.T) {
 	withChatLog(t)
 	for _, model := range []string{"cn:deepseek-v4.1-flash", "global:deepseek-v4.1-flash"} {
 		out := captureStdout(t, func() {
-			logChatRow(0, time.Second, model, "stream", "00e26541abcdef", "sample", http.StatusOK, 1)
+			logChatRow(0, time.Second, model, "stream", "00e26541abcdef", "sample", http.StatusOK, 1, "", "")
 		})
 		if !strings.Contains(out, model) {
 			t.Errorf("model %q truncated to something else:\n%s", model, out)
@@ -239,7 +355,7 @@ func TestLogChatRowModelNotTruncated(t *testing.T) {
 func TestLogChatRowNicknameFallback(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(0, time.Second, "glm-5.2", "sync", "00e26541abcdef", "", http.StatusOK, 1)
+		logChatRow(0, time.Second, "glm-5.2", "sync", "00e26541abcdef", "", http.StatusOK, 1, "", "")
 	})
 	if !strings.Contains(out, "00e26541 ") && !strings.Contains(out, "00e26541|") {
 		t.Errorf("want bare uid8 label without nickname:\n%s", out)
@@ -252,7 +368,7 @@ func TestLogChatRowNicknameFallback(t *testing.T) {
 func TestLogChatRowNoUsageShowsDash(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(0, time.Second, "glm-5.2", "sync", "s1", "", http.StatusServiceUnavailable, -1)
+		logChatRow(0, time.Second, "glm-5.2", "sync", "s1", "", http.StatusServiceUnavailable, -1, "", "")
 	})
 	for _, want := range []string{"TTFB=-", "tok=-", "| 503 |"} {
 		if !strings.Contains(out, want) {
@@ -268,8 +384,8 @@ func TestLogChatRowNoUsageShowsDash(t *testing.T) {
 func TestLogChatRowSeqIncrements(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(0, time.Second, "m", "sync", "u", "", 200, 1)
-		logChatRow(0, time.Second, "m", "sync", "u", "", 200, 1)
+		logChatRow(0, time.Second, "m", "sync", "u", "", 200, 1, "", "")
+		logChatRow(0, time.Second, "m", "sync", "u", "", 200, 1, "", "")
 	})
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) != 2 {

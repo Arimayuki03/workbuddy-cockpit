@@ -18,6 +18,7 @@ type Snapshot struct {
 	APIKey               string        // 网关/面板共同鉴权密钥；空 = 不鉴权
 	SoftCooldown         time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
 	SanitizeFingerprints bool          // 出站请求体指纹脱敏
+	RequestClientInfo    bool          // 采集 client_ip/user_agent 进请求日志（logging.request_client_info）
 }
 
 // Holder 原子持有当前快照。

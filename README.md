@@ -80,7 +80,7 @@ WorkBuddy Cockpit 是一个自托管的一体化项目：**后端**是多账号 
 ### 🐝 账号池治理
 
 - **OAuth 设备授权登录** — `login.sh` / 面板内扫码加号，token 自动刷新、凭证落盘、热加载
-- **三因子加权随机选号** — 积分比例 ×10 + 快过期积分占比 ×8 + 闲置补偿，Top-5 候选短名单内抽签，防惊群；`pool.pick_strategy` 可切换 `credits_desc` 余额从大到小严格选号（面板热生效；粘性会话的首次分配同样遵循策略，credits_desc 下新会话绑余额最高号）
+- **三因子加权随机选号** — 积分比例 ×10 + 快过期积分占比 ×8 + 闲置补偿，Top-5 候选短名单内抽签，防惊群；`pool.pick_strategy` 可切换 `credits_desc` 余额从大到小严格选号（面板热生效；粘性会话的首次分配同样遵循策略——credits_desc 下新会话绑余额最高号，weighted 下在空闲候选段内按三因子抽签，快过期积分优先消耗对粘性流量生效）
 - **在途租约** — 单号最大并发占用限制；`/status` 透出 `in_flight_by_model` 每模型在途台账
 - **账本择优** — 按 `usage.credit` 折算每千 token 单价记入 (账号， 模型) 账本，免费 / 便宜的号优先，观测 EMA 平滑、6h 失效
 - **成本分层条件探索** — tier 0 垄断时搭车改道探索未知号，承接真实请求零新增上游调用，成功即毕业
@@ -96,7 +96,7 @@ WorkBuddy Cockpit 是一个自托管的一体化项目：**后端**是多账号 
 ### 🔌 OpenAI 兼容接口
 
 - `/v1/chat/completions` 流式 + 非流式（出站强制 stream，SSE 白名单重建，非流式本地聚合）、**`/v1/messages` + `/v1/messages/count_tokens`（Anthropic Messages 协议，Claude Code 直连）**、**`/v1/responses`（OpenAI Responses 协议，Codex 直连）**、**`/v1/search/messages`（DSH 联网搜索协议壳，Anthropic web_search_tool_result 兼容）**、`/v1/models`（effort 档位 / 积分倍率 / 上下文全字段）、`/v1/stats`、`/status`、`/healthz`——同一套鉴权
-- 出站改写管线：强制 `stream:true`、`developer` 角色归一、tool_choice 归一、`image_url` 字符串兼容、DeepSeek 思维链注入、`reasoning_effort` 档位降级、`reasoning_content` 回填、指纹脱敏、**prompt 缓存命中别名归一**（部分上游 `details.cached_tokens` 有真值而扁平别名留 0 时取全部别名最大正值回写，下游不再误判未命中）；`reasoning_as_content`（默认 false，需重启生效）仅对「整轮无正文且无工具调用」的 reasoning-only 回合把思考文本同时作为 content 下发，content-only 客户端显式开启，双字段客户端保持默认避免重复显示
+- 出站改写管线：强制 `stream:true`、`developer` 角色归一、tool_choice 归一、`image_url` 字符串兼容、DeepSeek 思维链注入、`reasoning_effort` 档位降级、工具 schema `enum` 缺 `type` 补推断（Kimi 系 11133）、`reasoning_content` 回填、指纹脱敏、**prompt 缓存命中别名归一**（部分上游 `details.cached_tokens` 有真值而扁平别名留 0 时取全部别名最大正值回写，下游不再误判未命中）；`reasoning_as_content`（默认 false，需重启生效）仅对「整轮无正文且无工具调用」的 reasoning-only 回合把思考文本同时作为 content 下发，content-only 客户端显式开启，双字段客户端保持默认避免重复显示
 - **出站修复一批**（吸收两上游实案）：GPT 系 `max_tokens<16` 钳制（防 11133 触发全号轮转）；工具 schema pattern `\_` 转义归一（防 11129 整体拒收）；背靠背 tool_calls 消息合并（防 11148 tool_call_sequence_broken 顶死会话）；11101 bad_params 立即 400 直通不再轮转（确定性失败不伪装成「账号不可用」）；上游超时止损（不换号、不罚号、不喂连败计数）；流式成功判定延后到真成功（上游「200 开流 + 一帧 error」不再把限流号记成健康号、粘性不再被钉死在它身上）
 - 系统提示词三模式（passthrough / custom / append）+ 内容拦截降级重试
 - 模型映射、错误分类轮转退避；国际版模型目录**多 UA 并发探测取并集**（桌面 / IDE / CLI 三路 UA——桌面 UA 补齐、IDE UA 字段权威、CLI UA 补 deepseek 系缺失 id），试用横幅模型自动补入目录；上下文窗口按「远端权威 → 静态知识表 → model.json 缓存 → models.dev 按需拉取」四级回退
@@ -316,6 +316,8 @@ workbuddy-cockpit/
 | v1.19.2 | 2026-10-16 | **审查修复轮**（OCR 全量审查 51 文件 → 23 条评论逐条验证后全修）——**跨层字段错位（high）**：日志页新列与详情读 `ip`/`ua` 而后端序列化的是 `client_ip`/`user_agent`，来源列恒显示「—」（服务端过滤仍生效、故不易发现）→ 前端 4 处读点与类型声明统一对齐后端 json tag；**补偿「小时清空」清不掉**：`SetHours` 拒空表、`hoursOf` 又优先运行态表，面板/`PATCH /admin/tasks` 提交 `[]`（留空 = 只手动）后仍按旧整点自动领直到重启 → 新增 `scheduler.ClearHours`（写非 nil 空表 + 唤醒重排）并接通面板保存与 admin PATCH 两条路径；**越界钳制的 float64 溢出**：`int64(n)` 在 `1e19` 量级溢出为 MinInt64 致上限钳制静默失效，下限钳制同款溢出还会把「要长输出」的请求压成 16 → 两处均改浮点比较；**界面口径三修**：补偿卡片「保存开关不再吞掉未提交的时刻」+ 禁用口径统一 `canEdit`、统计页「今日请求」改独立今日快照（自定义区间不含今天时不再误显示 0）且 `pickWindow` 不再反复覆盖已填区间、日志页补区间合法性校验 +「归档未开启」空态提示 + 筛选期暂停实时刷新；**其他**：`/api/request_logs` 响应补 `source`/`archive_enabled`、归档读取失败的 500 不再回显绝对路径、`/admin/tasks` 的 `next_fire` 零时点输出空串、补偿末号取消不再误报「半程中断」、账号间隔空串校验与 `toWire` 同口径（不再依赖后端拒绝）、`session_sticky` 进重启段清单 + 五语言重启提示文案补全、`localInputToSec` 抽公共 helper；定格：全仓 24 包测试绿 + 面板 tsc/lint/静态导出三绿 + dist 清空重放（206 文件） |
 | v1.19.3 | 2026-10-20 | **401 网关页自动禁用 + R28S 部署手册**——上游鉴权层对已吊销会话直接返回 **401 HTML**（APISIX / openresty），body 没有业务信封，旧分类落入 `ErrClient` 只换号不罚号，死号会留在池里反复 401。新增形态判定 `IsGatewayAuthPage`（只认 **401 + HTML 文档**；纯文本 / 空体 / JSON 信封一律不判，避免凭状态码误杀），聊天、签到、余额、续期、保活、余额刷新六条链路统一自动禁用并写入 `disabled_reason = upstream 401 gateway page (session revoked), re-login required`；面板徽章显示「需重新登录」，`gateway_hint` 与 12153 会话过期分开提示；签到/余额回执不再透传整段 HTML。新增 [docs/DEPLOY-R28S.md](docs/DEPLOY-R28S.md)：NanoPi R28S（FriendlyWrt / OpenWrt ARM64）单容器、host 网络、`/opt/wb2api` 目录布局、17863 管理桥、低写入与 SD 卡注意事项、升级/备份/安全边界 |
 | v1.20.0 | 2026-10-22 | **吸收 panel / manager 2026-10-21 可适用更新**——DSH system prompt 指纹重写；11-128 渠道校验软冷却；11151 空消息确定性 400（不轮转/不罚号）；reasoning-only 回合 `reasoning_as_content`（默认 false）+ finish/usage 帧序修复；上游流截断/读中断在 `[DONE]` 前发 `upstream_truncated` / `upstream_read_error`，日志/指标收敛 502 且不记成功；国际版只读余额刷新 + credit ledger，保留强制冷却；global DeepSeek-V4.1-Flash 补 `max`；账号手写权重（`0.1..100`，默认 1，凭据持久化/导入导出/token 刷新保留）；`POST /v1/search/messages`（共用鉴权/IP/账号池，拒绝 wbk_）；任务奖励只领取补扫（默认关、最小 15m、退出取消、任务锁/队列互斥）。迁移与验证限制见 [发行说明](docs/RELEASE-v1.20.0.md) |
+
+| v1.21.0 | 2026-10-26 | **渠道校验守卫 + 思考强度观测 + 吸收 manager v2.10.0**——**11-128 防风控守卫**（命中即抓包留证 `data/channel_check/`、body/模板短 TTL 负缓存本地 400、专用 60s 冷却不占 soft_rate、fail_fast 可选、预置拦截短语；面板「渠道校验守卫」分组**全字段热生效**）；**思考强度全链路**（请求日志 `effort_in/effort_out` + `reasoning_tokens`/`duration_ms`/`realm`，流水行 `eff=` 列，面板「思考强度」列，三协议覆盖）；**缓存写入推导**（上游不下发 write，`write=miss` ≥64 块推导，流式/非流式/统计同口径，精度 ~94%）；**manager v2.10.0 吸收 8 项**（DSH Web GUI 跨句指纹净化、纯 401 连续计数禁用 `ErrAuthRejected`、Kimi 工具 enum 补 type + 11133 快速失败、空流可重试文案、签到限速 3s/号 + 10001/5xx 退避重试、粘性首绑三因子加权、日志思考强度列、Dockerfile GOPROXY）；**面板修复**（提示词模式切换报错——字段全局映射被同名分组覆盖改分组内解析；请求日志页 `table-fixed` 定宽 11 列一屏、账号列显示 uid8）；**流水行定宽**（账号列 18 uid8 后缀保留、eff 列 15、`logfmt.TruncateWidth`）；请求日志持久化与来源采集入面板（采集热改）。迁移与验证限制见 [发行说明](docs/RELEASE-v1.21.0.md) |
 
 完整变更见 [Releases](https://github.com/Arimayuki03/workbuddy-cockpit/releases)。
 

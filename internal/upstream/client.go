@@ -54,6 +54,16 @@ const (
 	// body 换任何账号都是同一结果，轮转只会白扔健康号配额并最终把确定性 400
 	// 包装成 503。与 ErrClient 分开，由 handler 立即 400 透传原文。
 	ErrEmptyMessage
+	// ErrAuthRejected 401 但**不带 12153**（manager 87a4e092 吸收）：上游网关的
+	// 拦截页 / 空体 / 纯 HTML 401（APISIX 常见形态，body 里没有任何业务信封）。
+	//
+	// 为什么不能落 ErrClient：那条路只换号 + 连败降权（10 分钟后自动回池），坏号
+	// 会一直留在池里被反复选中，表现为「面板显示健康、每次命中都 503」。
+	// 为什么不能直接判 ErrSessionDead：chat 路径上的 ErrSessionDead 一次即
+	// Disable（applyErrorPolicy），而纯 401 可能是网关抖动或 token 轮换竞态，
+	// 一次误判就是永久杀号。故单列一类，由 handler 走「连续 N 次才禁用」的计数
+	// 路径（与 12153 的 NoteSessionDead 同口径、共用计数器）。
+	ErrAuthRejected
 )
 
 func (k ErrKind) String() string {
@@ -86,6 +96,8 @@ func (k ErrKind) String() string {
 		return "tool_call_mismatch"
 	case ErrEmptyMessage:
 		return "empty_message"
+	case ErrAuthRejected:
+		return "auth_rejected"
 	case ErrClient:
 		return "client"
 	default:
@@ -502,6 +514,67 @@ func hasBusinessCode(body, want string) bool {
 	return walk(root)
 }
 
+// HasBusinessCode 报告错误 body 的任意层级是否携带 code 字段等于 want（数字/
+// 字符串/带空格三形态容差，与 Classify 的 14018/11133 判定同源）。导出供
+// handler 对「请求级确定性错误」做快速失败判据（如 11133 Invalid request
+// parameters）——比裸子串匹配严谨：requestId/时间戳撞数字串不会误命中。
+func HasBusinessCode(body, want string) bool {
+	return hasBusinessCode(body, want)
+}
+
+// CodeOf 从错误 Msg 里提取业务码（scheduler 签到重试等调用方用）。
+// 两种形态都认：
+//   - JSON 信封原文（≥400 路径的 Msg 是 body 原文）：任意层级的 code 字段；
+//   - 组装文案 "code=10001 msg=..."（200 信封 code!=0 路径）。
+// 无码/不可解析返回空串。
+func CodeOf(msg string) string {
+	if code := codeOfJSON(msg); code != "" {
+		return code
+	}
+	i := strings.Index(msg, "code=")
+	if i < 0 {
+		return ""
+	}
+	rest := msg[i+len("code="):]
+	if end := strings.IndexAny(rest, " \t\n"); end >= 0 {
+		rest = rest[:end]
+	}
+	return strings.TrimSpace(rest)
+}
+
+// codeOfJSON 尝试按 JSON 解析并返回首个 code 字段的字符串形态；失败返回空串。
+func codeOfJSON(body string) string {
+	var root any
+	if err := json.Unmarshal([]byte(body), &root); err != nil {
+		return ""
+	}
+	var found string
+	var walk func(any) bool
+	walk = func(value any) bool {
+		switch node := value.(type) {
+		case map[string]any:
+			if code, ok := node["code"]; ok {
+				found = strings.TrimSpace(fmt.Sprint(code))
+				return true
+			}
+			for _, child := range node {
+				if walk(child) {
+					return true
+				}
+			}
+		case []any:
+			for _, child := range node {
+				if walk(child) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	walk(root)
+	return found
+}
+
 // hasBusinessEnvelope 报告错误 body 是否携带上游业务信封形态（JSON 且含
 // `"code":` 或 `"msg":` 字段）。WAF 403 判定（IsWafBlocked）用「无业务信封」
 // 区分 APISIX WAF 拦截页（HTML/空体/纯文本）与上游业务层 403（带 code/msg
@@ -747,6 +820,14 @@ func Classify(status int, body string) ErrKind {
 	// 反复被选中，且不会触发自动禁用。
 	if IsGatewayAuthPage(status, body) {
 		return ErrSessionDead
+	}
+	// 401 兜底（**无 12153** 的纯 401，manager 87a4e092 吸收）：上游网关拦截页、
+	// 空体、纯 HTML 都落到这里（12153 与 401+HTML 鉴权页已在上方更具体的层命中）。
+	// 单列 ErrAuthRejected 而不是 ErrClient——见该 errkind 的注释：ErrClient 只换号
+	// 不罚号，坏号会在池里反复被选中；这一类的正确处置是「连续 N 次后禁用」
+	// （handler.applyErrorPolicy 走 NoteAuthFailure）。
+	if status == http.StatusUnauthorized {
+		return ErrAuthRejected
 	}
 	// 渠道校验（/v2 上的强校验，2026-10-17）：归账号级分类，但 handler 对
 	// ErrAccountFault 会先判 IsChannelCheck、只做软冷却——绝不能把健康账号

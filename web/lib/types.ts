@@ -661,6 +661,18 @@ export interface RequestLog {
   client_ip?: string;
   /** 客户端 User-Agent 原文；缺失 = 未采集 */
   user_agent?: string;
+  /** 下游请求的思考档位（reasoning_effort，snake/camel 双键）；缺失 = 未传或旧记录 */
+  effort_in?: string;
+  /** 出站最终思考档位（网关补默认档并按模型支持档降级后）；缺失 = 无档位或旧记录 */
+  effort_out?: string;
+  /** 思考 token（usage 的 reasoning_tokens / 扁平别名）；缺失 = 未观测 */
+  reasoning_tokens?: number;
+  /** 输入侧 token（usage.prompt_tokens）；缺失 = 未观测 */
+  prompt_tokens?: number;
+  /** 端到端耗时毫秒；缺失 = 未观测 */
+  duration_ms?: number;
+  /** 账号归属域（cn/global）；缺失 = 旧记录 */
+  realm?: string;
   /** 非 200 的原因摘要；缺失 = 无错误 */
   error?: string;
 }

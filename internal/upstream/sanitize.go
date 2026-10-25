@@ -96,6 +96,25 @@ var sanitizeDshRe = regexp.MustCompile(
 // sanitizeDshRepl 中性、无品牌的替身（自身不含 sanitizeFeatures 的任何片段）。
 const sanitizeDshRepl = "You are a helpful AI assistant.${1}"
 
+// sanitizeDshGuiRe 通配层：DSH 运行时上下文里的 Web GUI 段落（issue #250，上游
+// manager 0439d68a 吸收）。
+//
+// 上游的匹配**不是单句**：单独一句
+//
+//	You are interacting with the user through the DeepSeek Harness Web GUI whose
+//	URL the runtime context names.
+//
+// 会放行；但连同下一句 "When the user refers to … they mean this GUI." 组成
+// 221 字符的**连续文本**就返回 400 code=11-128。二分实测：前缀 220 字符成功、
+// 221 字符失败，说明匹配窗口横跨两句，单句改写无效（两句各自单独测都放行）。
+//
+// 因此对段落里的品牌短语做最小改写（插入连字符）：破坏逐字匹配、语义不变，
+// 且该短语只出现在被拦段落内，不会误伤正常对话。实测改写后上游放行。
+var sanitizeDshGuiRe = regexp.MustCompile(`(?i)DeepSeek Harness Web GUI`)
+
+// sanitizeDshGuiRepl 替换串：保留品牌可读性，仅插入一个连字符。
+const sanitizeDshGuiRepl = "DeepSeek-Harness Web GUI"
+
 // sanitizeText 单段文本净化：预检不中 → 返回原串（零分配）。
 func sanitizeText(text string) string {
 	if !hasFingerprint(text) {
@@ -105,6 +124,8 @@ func sanitizeText(text string) string {
 		text = strings.ReplaceAll(text, rw[0], rw[1])
 	}
 	text = sanitizeDshRe.ReplaceAllString(text, sanitizeDshRepl)
+	// DSH Web GUI 段落：上游按「跨两句的连续文本」拦截，必须动品牌短语才拆得开。
+	text = sanitizeDshGuiRe.ReplaceAllString(text, sanitizeDshGuiRepl)
 	if sanitizeHdrRe.MatchString(text) {
 		text = sanitizeHdrRe.ReplaceAllString(text, "")
 	}
@@ -134,6 +155,11 @@ func hasFingerprint(text string) bool {
 	// DSH 句式指纹必须在这里也命中，否则预检直接返回、改写层根本执行不到。
 	// 正则自带 (?i)：原文是 "AI agent" 大写，不能靠大小写敏感的 Contains 特征串。
 	if sanitizeDshRe.MatchString(text) {
+		return true
+	}
+	// DSH Web GUI 段落指纹（见 sanitizeDshGuiRe）：跨两句匹配，单句放行，
+	// 所以特征表里补的是段落内的品牌短语；(?i) 覆盖大小写变体。
+	if sanitizeDshGuiRe.MatchString(text) {
 		return true
 	}
 	return sanitizeBareHdrRe.MatchString(text)
