@@ -136,11 +136,17 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 //
 // 语义与 6004 正交：6004 是「模型被限流、对齐重置墙钟」，本入口是「官方确定该后端无此模型、
 // 重试无意义，只能换模型/换账号」。退避按 reference model_blocks.py 口径（吸收语义、不抄实现）：
-//   - 首次命中 TTL = modelBlockBaseTTL（6h）；
+//   - 首次命中 TTL = modelBlockBaseTTL（2m，2026-10-28 从 6h 缩短）；
 //   - 半开到期后允许放行重试；再次命中 Hits++ → TTL = base × 2^min(hits-1, modelBlockShift)；
-//   - 封顶 modelBlockMaxTTL（24h，最多一天再试一次）；
+//   - 封顶 modelBlockMaxTTL（10m，2026-10-28 从 24h 缩短）；
 //   - 该模型请求成功即由 BlockModelClear 清除（注意：6004 的 NoteSuccess 不清 modelCooldowns，
 //     故清理必须由 handler 在成功且 model 命中 11102 条目时显式调用，见 BlockModelClear）。
+//
+// Hits 的延续（manager 0041 审查修复）：11102 条目 Until 到期后**不立即删除**，
+// pruneExpiredModelCooldowns 会再保留 modelBlockMaxTTL 宽限期——低 QPS 下 2m 到期与
+// 下一次命中之间可能隔着很久，若过期即删，Hits 永远从 1 重来，指数退避/10m 封顶不可达。
+// 宽限期内 healthyForModel 仍按「Until 已过 = 可用」放行（半开探测语义不变），
+// status/ModelBlockedNow 只统计 active 条目（过期条目不可见）。6004 过期即删（无 Hits 概念）。
 //
 // resetAt 无需传（11102 无重置文案），ResetAt 保持零值，与 6004 台账（rateLimitedModelsLocked）
 // 共用 Until 判定——11102 条目会以 11102 reason 出现在 /status 台账，运维可见。
@@ -221,6 +227,62 @@ func (p *Pool) BlockModelClear(uid, model string) {
 		e.modelCooldowns = nil
 	}
 	p.dirty.Store(true)
+}
+
+// ClearModelBlocksForRealm 清掉指定 realm 内该模型的 11102 负缓存，返回清理条数。
+//
+// 背景（manager 0034）：上游 11102 有时是瞬时故障（模型注册表抖动 / 灰度切换）。
+// 一次抖动会让每个被选中的账号各写一条指数退避负缓存；全池写满后对外就是
+// 「一整天 503 no_healthy_account」，而模型其实早已恢复（实测 20/20 账号直连 200）。
+// 选号侧发现「该模型在当前 realm 0 个可用账号」时调用本方法自愈：清一次、重试一次。
+//
+// 语义（manager 0041 审查补齐）：
+//   - realm 非空时只清 Realm()==realm 的账号，跨 realm 条目原样保留——双 realm
+//     部署下 A 域的自愈不得越界清掉 B 域的负缓存（与选号/自愈判据同一个域维度）。
+//   - realm 为空退化为全池（ClearModelBlocks 的兼容形态，旧调用方零改动）。
+//   - 只清 reason 以 "11102" 开头且**仍有效**（Until 未到期）的条目。过期条目已不拦
+//     路由，且是 Hits 指数退避的承载体（见 pruneExpiredModelCooldowns）：删掉会把
+//     下一次命中的退避重置回 hits=1，低 QPS 下 10m 封顶永远不可达。
+//   - 不碰 6004 的独立冷却表（真实配额语义）。
+func (p *Pool) ClearModelBlocksForRealm(model, realm string) int {
+	if model == "" {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	n := 0
+	for _, e := range p.byUID {
+		if realm != "" && e.a.Realm() != realm {
+			continue // 跨 realm：保留（自愈只作用于当前 realm）
+		}
+		if len(e.modelCooldowns) == 0 {
+			continue
+		}
+		mc, ok := e.modelCooldowns[model]
+		if !ok || !strings.HasPrefix(mc.Reason, "11102") {
+			continue
+		}
+		if !now.Before(mc.Until) {
+			continue // 已过期：不拦路由，保留 Hits 供下一次命中继续指数退避
+		}
+		delete(e.modelCooldowns, model)
+		if len(e.modelCooldowns) == 0 {
+			e.modelCooldowns = nil
+		}
+		n++
+	}
+	if n > 0 {
+		p.dirty.Store(true)
+	}
+	return n
+}
+
+// ClearModelBlocks 清掉**所有账号**上该模型的 11102 负缓存（realm="" 的全池包装）。
+// 行为与 ClearModelBlocksForRealm(model, "") 逐字一致：只清仍有效的 11102 条目、
+// 不碰 6004、过期条目保留以承接 Hits。双 realm 部署建议改用 ForRealm 版本。
+func (p *Pool) ClearModelBlocks(model string) int {
+	return p.ClearModelBlocksForRealm(model, "")
 }
 
 // CooldownSoftRate 429/限流文案的**账号级**软冷却入口（handler.applyErrorPolicy 调用）。

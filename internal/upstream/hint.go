@@ -64,10 +64,12 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 	case ErrSoftRate:
 		return "rate limited by upstream; retry after reset"
 	case ErrAccountFault:
-		if IsChannelCheck(msg) {
-			// Channel checks are request/path rejections, not proof that the
-			// credential is dead. Do not tell clients the account was disabled.
-			return "upstream channel verification rejected this request; the gateway soft-cools the account and retries can succeed later (not a credential failure)"
+		if ctx.ChannelCheck || IsChannelCheck(msg) {
+			// Channel checks are request/content rejections, not proof that the
+			// credential is dead. 2026-10-28（manager 0039）：请求级处理——不冷却、
+			// 不轮转、不禁用；hint 必须与这个事实一致（旧文案「will rotate or
+			// disable」会误导排障）。
+			return "upstream channel verification rejected this request; account availability is unchanged (request-scoped, not a credential failure)"
 		}
 		return "account-level fault at upstream (auth/quota state); the gateway will rotate or disable this account"
 	case ErrSessionDead:
@@ -101,6 +103,10 @@ type HintContext struct {
 	HasImage            bool   // 请求体是否携带 image_url part
 	ModelSupportsImages bool   // 模型目录 supports_images 声明（仅 ModelInCatalog 时有意义）
 	ModelInCatalog      bool   // 模型目录是否收录该模型（「不支持」判定的前提）
+	// ChannelCheck 上游错误信封的权威渠道校验标记（*Error.ChannelCheck）。
+	// Error.Msg 只保留前 200 字符，渠道校验文案可能在截断点之后；调用方必须
+	// 优先传这个标记，不要指望 GatewayHint 重新解析截断后的 Msg。
+	ChannelCheck bool
 }
 
 // noHealthyHint 本地调度类错误（池中无健康号可用/传输层抖动，无上游原文可透传）

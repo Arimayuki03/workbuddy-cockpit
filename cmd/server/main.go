@@ -330,6 +330,12 @@ func main() {
 	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
 	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
 	up.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
+	// 运行期追加的黑名单词表（features.sanitize_extra_features / _rewrites）：
+	// 上游逐词扩充时改 config.json 重启即可，不必重编译镜像。空表 = 只用内置静态表。
+	upstream.ConfigureSanitize(cfg.Features.SanitizeExtraFeatures, cfg.Features.SanitizeExtraRewrites)
+	if n := len(cfg.Features.SanitizeExtraFeatures); n > 0 {
+		log.Printf("净化额外特征词表已加载：%d 条（features.sanitize_extra_features）", n)
+	}
 	// 出站 UA（A 段）：非空才做显式覆盖，空 = 默认 WorkBuddy 三段式
 	// `WorkBuddy/<client_version> WorkBuddy/<client_version> CLI/<cli_version>`。
 	up.UserAgent = cfg.Upstream.UserAgent
@@ -342,6 +348,9 @@ func main() {
 	// 用量归属头（X-Product/X-IDE-*）+ 客户端 IP 透传开关（见 ChatHeaders / handler）。
 	up.ClientName = cfg.Upstream.ClientName
 	up.PassthroughIP = cfg.Upstream.PassthroughIP
+	// 大请求体 gzip（issue #297）：>64KB 才压，短请求零开销；上游不接受压缩时
+	// client 会自动去压缩重发一次。
+	up.GzipBody = cfg.Upstream.GzipBody
 	// global realm 双域路由（config global 段）：base 空回落内置默认 https://www.workbuddy.ai；
 	// GlobalEnabled 与 auth 包开关一致（双保险第二道闸在 upstream.globalOn）。
 	up.ChatBaseGlobal = cfg.Global.ChatBase
@@ -716,10 +725,7 @@ func main() {
 	}()
 
 	if cfg.Features.ChannelCheckGuard.Enabled && cfg.Features.ChannelCheckGuard.Mode != "off" {
-		log.Printf("[channel-guard] 渠道校验守卫已启用: mode=%s capture=%s block_ttl=%s template_ttl=%s check_cooldown=%s fail_fast=%v patterns=%d",
-			cfg.Features.ChannelCheckGuard.Mode, cfg.Features.ChannelCheckGuard.CaptureDir,
-			cfg.ChannelGuardBlockTTL, cfg.ChannelGuardTemplateTTL, cfg.ChannelGuardCooldown,
-			cfg.Features.ChannelCheckGuard.FailFast, len(cfg.Features.ChannelCheckGuard.BlockPatterns))
+		log.Printf("[channel-guard] 渠道校验守卫已启用: mode=%s capture=%s block_ttl=%s template_ttl=%s handling=request-level（命中按请求级处理，不冷却账号、不轮转） patterns=%d", cfg.Features.ChannelCheckGuard.Mode, cfg.Features.ChannelCheckGuard.CaptureDir, cfg.ChannelGuardBlockTTL, cfg.ChannelGuardTemplateTTL, len(cfg.Features.ChannelCheckGuard.BlockPatterns))
 	} else {
 		log.Printf("[channel-guard] 渠道校验守卫已关闭（features.channel_check_guard.enabled=false / mode=off）")
 	}

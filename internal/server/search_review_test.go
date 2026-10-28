@@ -66,9 +66,10 @@ func TestSearchBusinessSessionDeadOnHTTP200Disables(t *testing.T) {
 
 // The channel-check marker may sit after the first 200 bytes while
 // `request illegal` appears early. Search errors carry only ue.Msg (truncated to
-// 200 chars), so applyErrorPolicy must rely on the stable Error.ChannelCheck
-// flag captured from the full body — otherwise it would hard-disable a healthy
-// account even though the upstream only rejected the channel.
+// 200 chars), so the channel-check verdict must rely on the stable
+// Error.ChannelCheck flag captured from the full body. The review fix also makes
+// this a request-level 400 that stops rotation immediately (no account penalty,
+// no wasted healthy accounts).
 func TestSearchChannelCheckLateMarkerDoesNotDisable(t *testing.T) {
 	late := `{"code":"11-128","msg":"request illegal","displayTips":{"en":"` +
 		strings.Repeat("x", 300) +
@@ -79,20 +80,26 @@ func TestSearchChannelCheckLateMarkerDoesNotDisable(t *testing.T) {
 	if upstream.IsChannelCheck(late[:200]) {
 		t.Fatal("fixture must keep the channel marker beyond the 200-byte truncation point")
 	}
-	up, _ := newSearchTestUpstream(t, search200Body(late))
-	p := searchTestPool(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	up, state := newSearchTestUpstream(t, search200Body(late))
+	p := searchTestPool(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "u2", AccessToken: "at2", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up, APIKey: "test-key"})
 	h.MountSearch()
 
 	rec := postSearchWithKey(h, "test-key", searchTestBody("golang"))
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("code=%d want 403 (account fault after rotation) body=%s", rec.Code, rec.Body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d want 400 (request-level channel check) body=%s", rec.Code, rec.Body)
 	}
-	st := searchStatusOf(t, p, "u1")
-	if st.Disabled {
-		t.Fatalf("late channel-check marker must not hard-disable: %+v", st)
+	if calls, _ := state.counts(); calls != 1 {
+		t.Fatalf("channel check must stop rotation after 1 upstream call, got %d", calls)
 	}
-	if !st.Cooling || !strings.Contains(st.Reason, "channel check") {
-		t.Fatalf("channel check must be a soft cooldown, got %+v", st)
+	for _, uid := range []string{"u1", "u2"} {
+		st := searchStatusOf(t, p, uid)
+		if st.Disabled {
+			t.Fatalf("%s: late channel-check marker must not hard-disable: %+v", uid, st)
+		}
+		if st.Cooling || st.ConsecutiveFails != 0 {
+			t.Fatalf("%s: channel check must be request-scoped (no cooldown/fail count), got %+v", uid, st)
+		}
 	}
 }

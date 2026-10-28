@@ -2,15 +2,15 @@
 //
 // 背景：上游对 /v2/chat/completions 做渠道校验，判定请求不是官方客户端渠道发出时
 // 返回 400 code=11-128（文案 "Illegal API invocation from an unapproved channel"
-// 或中文「没通过渠道校验」）。该拒绝与**请求体**强相关，但网关此前把每个失败尝试
-// 都记成账号级软冷却：同一份 body 轮转 MaxRotate（默认 3）个账号、每个号按
-// cooldown.soft_rate 冷却，最后给客户端 503，客户端一重试就把伤害放大一遍。
+// 或中文「没通过渠道校验」）。该拒绝与**请求体**强相关，不是账号故障。
 //
-// 本守卫做三件事：
+// 2026-10-28（manager 0039 吸收）起，11-128 按**请求级**处理：首次被拒先做一次
+// system→user 内容通道抢救；仍被拒就透传上游原文回 400，**不冷却、不禁用、不换号**。
+// 本守卫保留两项本地保护（都不涉及账号处罚）：
 //  1. 抓取：ChannelCheck 发生时把当前出站 body 原样落盘（按 body 去重、总量封顶），
 //     供离线定位触发指纹（system prompt / tools / 用户消息）；
 //  2. 负缓存：按完整 body 哈希与模板哈希（system/developer 文本 + tools/functions）
-//     记住被上游拒绝过的请求，短 TTL 内同 body/同模板直接本地 400——不选号、不冷却、
+//     记住**最终失败**的请求，短 TTL 内同 body/同模板直接本地 400——不选号、不冷却、
 //     不再 503；
 //  3. 预置短语：block_patterns 命中时在第一次出站前就本地拦截（默认空 = 不猜，
 //     避免把正常请求误杀；抓到指纹后由运维显式加入）。
@@ -63,12 +63,11 @@ type ChannelGuardConfig struct {
 	TemplateTTL     time.Duration // 模板负缓存 TTL（<=0 回落默认 10m）
 	ScanMessages    bool          // block_patterns 是否扫描全部消息（true）还是只扫 system/tools
 	BlockPatterns   []string      // 预置拦截短语（大小写不敏感子串）
-	// ChannelCooldown 渠道校验命中时账号的软冷却时长（0 = 回落到 cooldown.soft_rate
-	// 旧口径）。渠道校验是请求/渠道问题，不是账号故障；6h 级别的 soft_rate 会把
-	// 健康号停半天，默认 60s 足够避让同一波请求。
+	// ChannelCooldown 已废弃（manager 0039）：11-128 改为请求级处理，不冷却账号。
+	// 保留字段仅为兼容旧配置，取值被忽略。
 	ChannelCooldown time.Duration
-	// FailFast 首次 ChannelCheck 即终止轮转并回 400（默认 false：保留「换号可能成功」
-	// 的旧语义；置 true 时一次都不多撞，代价是放弃账号差异带来的偶发成功）。
+	// FailFast 已废弃（manager 0039）：11-128 始终请求级处理（一次 system→user
+	// 抢救后仍拒即透传 400），不再换号。保留字段仅为兼容旧配置，取值被忽略。
 	FailFast bool
 }
 
@@ -180,10 +179,12 @@ func (g *ChannelGuard) Mode() string {
 	return g.cfg.Mode
 }
 
-// FailFast 首次 ChannelCheck 是否立即终止轮转。
+// FailFast 已废弃（manager 0039）：11-128 始终请求级处理。保留方法仅为兼容
+// 既有调用方/测试，生产路径不再读取。
 func (g *ChannelGuard) FailFast() bool { return g != nil && g.cfg.FailFast }
 
-// ChannelCooldown 渠道校验命中时账号的软冷却时长；0 = 回落 cooldown.soft_rate。
+// ChannelCooldown 已废弃（manager 0039）：11-128 不冷却账号。保留方法仅为兼容
+// 既有调用方/测试，生产路径不再读取。
 func (g *ChannelGuard) ChannelCooldown() time.Duration {
 	if g == nil {
 		return 0

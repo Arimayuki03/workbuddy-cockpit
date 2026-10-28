@@ -97,6 +97,8 @@ SPEC.md
 !docs/DESIGN-v1.2.0-panel-manager.md
 !docs/DEPLOY-R28S.md
 !docs/RELEASE-v1.20.0.md
+!docs/RELEASE-v1.21.0.md
+!docs/RELEASE-v1.22.0.md
 
 web/node_modules/
 web/.next/

@@ -5,6 +5,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"workbuddy2api/internal/livecfg"
+	"workbuddy2api/internal/pool"
+	"workbuddy2api/internal/scheduler"
+	"workbuddy2api/internal/upstream"
 )
 
 func TestDefault(t *testing.T) {
@@ -18,6 +23,9 @@ func TestDefault(t *testing.T) {
 	}
 	if c.SoftRateDur.Seconds() != 600 {
 		t.Errorf("soft=%v want 600s", c.SoftRateDur)
+	}
+	if !c.Upstream.GzipBody {
+		t.Error("upstream.gzip_body default must be true (manager 0030)")
 	}
 }
 
@@ -37,12 +45,16 @@ func TestLoadFile(t *testing.T) {
 func TestEnvOverride(t *testing.T) {
 	t.Setenv("WB2A_LISTEN", ":7777")
 	t.Setenv("WB2A_API_KEY", "envkey")
+	t.Setenv("WB2A_GZIP_BODY", "false")
 	c, err := Load("")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.Listen != ":7777" || c.APIKey != "envkey" {
 		t.Errorf("c=%+v", c)
+	}
+	if c.Upstream.GzipBody {
+		t.Error("WB2A_GZIP_BODY=false must disable gzip")
 	}
 }
 
@@ -824,5 +836,49 @@ func TestMaxBodyMBConfigured(t *testing.T) {
 	}
 	if c.MaxBodyMB != 8 {
 		t.Errorf("MaxBodyMB=%d want 8 (invalid env ignored; file set 8)", c.MaxBodyMB)
+	}
+}
+
+// TestSaveConfigReappliesGzipBodyEnv WB2A_GZIP_BODY=false 启动后，面板保存不得把
+// gzip 静默重新打开：saveConfig 解析出 newCfg 后按 env 重新应用该字段（运行期
+// 热改快照必须仍是关闭态）。parseConfigInto 本身刻意不应用 env。
+func TestSaveConfigReappliesGzipBodyEnv(t *testing.T) {
+	t.Setenv("WB2A_GZIP_BODY", "false")
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(fp, []byte(`{"api_key":"k1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	live := livecfg.New(livecfg.Snapshot{APIKey: "k1"})
+	p := pool.New("")
+	up := upstream.New()
+	sch := scheduler.New(scheduler.Config{Pool: p, Upstream: up})
+
+	if _, err := saveConfig([]byte(`{"api_key":"k1"}`), fp, live, p, up, sch, nil); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+	if up.HotFields().GzipBody {
+		t.Fatal("WB2A_GZIP_BODY=false must survive panel save (gzip silently re-enabled)")
+	}
+}
+
+// TestRestartRequiredIncludesSanitizeExtra features.sanitize_extra_features /
+// _rewrites 是启动期字段（main 经 upstream.ConfigureSanitize 一次性注入），
+// 面板保存不热改，必须出现在重启清单里——否则面板显示「已保存」而运行期不生效。
+func TestRestartRequiredIncludesSanitizeExtra(t *testing.T) {
+	c := Default()
+	c.APIKey = "k" // api_key 无条件必填：normalize 校验需要非空 key
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	fields := restartRequiredFields(c)
+	found := map[string]bool{}
+	for _, f := range fields {
+		found[f] = true
+	}
+	for _, want := range []string{"features.sanitize_extra_features", "features.sanitize_extra_rewrites"} {
+		if !found[want] {
+			t.Errorf("restartRequiredFields missing %q; got %v", want, fields)
+		}
 	}
 }

@@ -132,9 +132,10 @@ func TestKeyStoreResolveAndGlobalKeyCompat(t *testing.T) {
 	plain := mustCreateKey(t, ks, keystore.CreateParams{Name: "分发"})
 	h := newKeyTestHandler(t, ks)
 
-	// wbk_ 通行（/status 无 model 维度校验，段1 即全链）。
+	// wbk_ 通行（/v1/models 无 model 维度校验，段1 即全链；/status 等管理面
+	// 已对 wbk_ 隔离，见 admin_auth_test.go）。
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/status", nil)
+	req := httptest.NewRequest("GET", "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer "+plain)
 	h.ServeHTTP(rec, req)
 	if rec.Code != 200 {

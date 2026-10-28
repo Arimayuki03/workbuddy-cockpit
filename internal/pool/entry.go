@@ -3,6 +3,7 @@ package pool
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -464,15 +465,33 @@ func (e *entry) pruneExpiredModelCosts(now time.Time) {
 	}
 }
 
-// pruneExpiredModelCooldowns 删除 modelCooldowns 中已过期的条目（惰性清理）。
-// pick 写锁路径与 revive 调用，防止 map 无限膨胀；status 只读遍历天然跳过过期项，
-// 无需清理。调用方必须已持有 p.mu 写锁。
+// pruneExpiredModelCooldowns 惰性清理 modelCooldowns 中已失效的条目。
+// pick 写锁路径调用，防止 map 无限膨胀；status 只读遍历天然跳过过期项，无需清理。
+//
+// 两类条目口径不同（manager 0041 审查修复）：
+//   - 6004 条目：Until 一过即删（限流窗口结束，条目没有剩余价值）；
+//   - 11102 条目：Until 过后再保留 modelBlockMaxTTL 宽限期，只删更陈旧的。
+//     11102 的 Hits 是跨「多次命中」的指数退避状态（2m 起、封顶 10m），低 QPS 下
+//     2m 到期与下一次命中之间可能隔很久；若过期即删，Hits 每次从 1 重来，
+//     指数退避与封顶在真实流量下永远不可达。保留宽限期内 healthyForModel 仍按
+//     「Until 已过 = 可用」放行（半开探测），status/ModelLockView/ModelBlockedNow
+//     只统计 Until 未到期的 active 条目，过期条目不对外可见。
+//
+// 调用方必须已持有 p.mu 写锁。
 func (e *entry) pruneExpiredModelCooldowns(now time.Time) {
 	if len(e.modelCooldowns) == 0 {
 		return
 	}
 	for m, mc := range e.modelCooldowns {
-		if mc.Until.IsZero() || !now.Before(mc.Until) {
+		switch {
+		case mc.Until.IsZero():
+			delete(e.modelCooldowns, m) // 无截止时间的破损条目：无价值，直接删
+		case now.Before(mc.Until):
+			// 仍生效：保留
+		case strings.HasPrefix(mc.Reason, "11102") && now.Sub(mc.Until) <= modelBlockMaxTTL:
+			// 11102 过期宽限期内：保留 Hits 供下一次命中继续指数退避
+		default:
+			// 6004 过期 / 11102 超出宽限期：删除
 			delete(e.modelCooldowns, m)
 		}
 	}
@@ -629,8 +648,9 @@ type modelCostEntry struct {
 // 在 2f4c77b 加上持久化后未同步更新，与上方 stateModelCooldown 的「落盘/恢复往返无损」自相矛盾。
 // 承载两种「该模型在此账号上不可用」语义：
 //   - 6004 模型级限流：Until 对齐上游重置墙钟；ResetAt 记录权威恢复时刻。
-//   - 11102 该后端无此模型：Until 为指数退避 TTL（6h 起、封顶 24h）；Hits 记录
-//     累计命中次数驱动退避（6004 无 hits 概念，Hits 恒 0）。
+//   - 11102 该后端无此模型：Until 为指数退避 TTL（2m 起、封顶 10m）；Hits 记录
+//     累计命中次数驱动退避（6004 无 hits 概念，Hits 恒 0）。11102 条目过期后
+//     还会保留 modelBlockMaxTTL 宽限期以承接 Hits（见 pruneExpiredModelCooldowns）。
 type modelCooldown struct {
 	// Until 该模型的冷却截止（6004：now+min(resetAt-now, soft_rate_max)；11102：now+退避 TTL）。
 	Until time.Time
@@ -641,7 +661,8 @@ type modelCooldown struct {
 	// Reason 触发原因（透出运维可读文案，同 Status.Reason）。
 	Reason string
 	// Hits 11102 负缓存的累计命中次数（驱动指数退避）。运行态不落盘（同 modelCost 口径：
-	// 重启后从 6h 基数重新学习）；6004 条目 Hits 恒 0。持久化来回不会写入该字段。
+	// 重启后从 2m 基数重新学习）；6004 条目 Hits 恒 0。持久化来回不会写入该字段。
+	// 内存条目过期后保留 modelBlockMaxTTL 宽限期，避免低 QPS 下 Hits 被惰性清理重置。
 	Hits int
 }
 
@@ -662,12 +683,15 @@ const (
 const defaultSoftRateMax = 2 * time.Hour
 
 // 11102「该后端无此模型」负缓存的退避参数（吸收 model_blocks.py 语义，复用 modelCooldowns
-// 机制承载）。首次命中冷却 6h，半开到期放行重试；再命中按 Hits 指数退避（×2^min(hits-1,6)），
-// 封顶 24h（最多一天再试一次）；该模型请求成功即清。6004 限流不参与本退避（各自独立语义）。
+// 机制承载）。首次命中冷却 2m，半开到期放行重试；再命中按 Hits 指数退避（×2^min(hits-1,6)），
+// 封顶 10m；该模型请求成功即清。6004 限流不参与本退避（各自独立语义）。
+//
+// 2026-10-28（manager 0033 吸收）：从 6h/24h 缩短到 2m/10m。原参数把一次偶发 11102
+// 放大成整池锁死；缩短后真无此模型时多试几次，全池自愈速度从小时级回到分钟级。
 const (
-	modelBlockBaseTTL = 6 * time.Hour
-	modelBlockMaxTTL  = 24 * time.Hour
-	modelBlockShift   = 6 // 2^6=64 倍后封顶：6h×64>24h，实际封顶锚定 24h
+	modelBlockBaseTTL = 2 * time.Minute
+	modelBlockMaxTTL  = 10 * time.Minute
+	modelBlockShift   = 6 // 2^6=64 倍后封顶：2m×64>10m，实际封顶锚定 10m
 )
 
 // sessionDeadThreshold 连续 ErrSessionDead（12153）达到该次数才永久禁用。

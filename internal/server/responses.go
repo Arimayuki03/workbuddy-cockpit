@@ -484,6 +484,13 @@ func responsesToChat(body map[string]any) (map[string]any, *rspErr) {
 		// 连续 function_call 合并进同一条 assistant 消息：OpenAI 要求一次 assistant
 		// 回合里的多个工具调用同属一条消息，拆成多条会让上游 400。
 		var pendingCalls []any
+		// openCallIDs 最近一组已发出、尚未被工具结果消费的 call id（manager 9bf9775
+		// 吸收）。只属于最近一组 tool calls：flushCalls 开启新组前清空、回合边界
+		// （追加 user/assistant 消息）清空，避免旧回合未消费的调用被后续无 call_id
+		// 的输出错配。客户端可能只下发 function_call_output 而没有对应 function_call
+		// （Codex 创建子会话就是这种形状）；原样写成 role=tool 会被上游 11148 拒绝
+		// 整段历史。
+		var openCallIDs []string
 		// 待挂推理：nil=没见到 reasoning item；""=见到了但没文本（畸形输入——上游
 		// 触发条件是字段存在，占位语义交给 rspAttachReasoning 的空格兜底）。
 		var pendingReasoning *string
@@ -499,6 +506,16 @@ func responsesToChat(body map[string]any) (map[string]any, *rspErr) {
 				pendingReasoning = nil
 			}
 			messages = append(messages, msg)
+			// 新一组 tool calls 开始：旧组未消费的 id 一律作废，其后续结果按
+			// 孤儿降级为 user（不能让旧 id 被新回合的无 call_id 输出错配）。
+			openCallIDs = nil
+			for _, call := range pendingCalls {
+				if cm, ok := call.(map[string]any); ok {
+					if id, _ := cm["id"].(string); id != "" {
+						openCallIDs = append(openCallIDs, id)
+					}
+				}
+			}
 			pendingCalls = nil
 		}
 		for _, rawItem := range in {
@@ -552,11 +569,45 @@ func responsesToChat(body map[string]any) (map[string]any, *rspErr) {
 			switch kind {
 			case "function_call_output", "custom_tool_call_output":
 				outText, outImages := rspSplitToolOutput(item["output"])
-				messages = append(messages, map[string]any{
-					"role":         "tool",
-					"tool_call_id": rspString(item["call_id"]),
-					"content":      outText,
-				})
+				rawCallID := rspString(item["call_id"])
+				// 只有确实命中已发出调用才写 tool 消息：带 call_id 但不在
+				// openCallIDs（Codex 子会话的孤儿输出）与无 call_id 且无可用调用
+				// 一样降级为 user——否则上游 cleanupOrphanToolCalls 找不到对应
+				// tool_call 会把整条消息删掉，内容静默丢失。
+				toolCallID := ""
+				if rawCallID != "" {
+					for i, id := range openCallIDs {
+						if id == rawCallID {
+							toolCallID = id
+							openCallIDs = append(openCallIDs[:i], openCallIDs[i+1:]...)
+							break
+						}
+					}
+				} else if len(openCallIDs) > 0 {
+					// 客户端未下发 call_id：按声明顺序配对到最近的未消费调用。
+					toolCallID = openCallIDs[0]
+					openCallIDs = openCallIDs[1:]
+				}
+				if toolCallID != "" {
+					messages = append(messages, map[string]any{
+						"role":         "tool",
+						"tool_call_id": toolCallID,
+						"content":      outText,
+					})
+				} else {
+					// 无对应 function_call 的孤儿结果。Codex 的 agent 创建会话就是
+					// 这种形状：只有 function_call_output，没有对应 function_call。
+					// 直接写 role=tool 会被上游 11148 拒绝整段历史，这里降级为 user
+					// 消息以保留内容（委派任务就在 output 里）。
+					toolName := rspString(item["name"])
+					if toolName == "" {
+						toolName = "tool"
+					}
+					messages = append(messages, map[string]any{
+						"role":    "user",
+						"content": "[tool output: " + toolName + "]\n" + outText,
+					})
+				}
 				// 图片必须紧跟其后（顺序即语义：它们属于这次工具调用）。
 				if len(outImages) > 0 {
 					blocks := make([]any, 0, len(outImages))
@@ -618,6 +669,9 @@ func responsesToChat(body map[string]any) (map[string]any, *rspErr) {
 						pendingReasoning = nil
 					}
 					messages = append(messages, msg)
+					// 回合边界：任何普通消息都终结 openCallIDs 的配对窗口——
+					// 隔着消息的工具结果已不「紧邻」其调用，只能按孤儿降级。
+					openCallIDs = nil
 				}
 			}
 		}
@@ -942,13 +996,13 @@ type rspStreamTranslator struct {
 	nextIdx  int
 	items    []any
 
-	reasonIdx int             // -1 = 未开
+	reasonIdx int // -1 = 未开
 	reasonID  string
 	reasonBuf strings.Builder
 
-	textIdx   int // -1 = 未开
-	textID    string
-	textBuf   strings.Builder
+	textIdx int // -1 = 未开
+	textID  string
+	textBuf strings.Builder
 
 	// toolSeq → 工具状态（上游可能并发给多个工具，各自编号；toolOrder 保序收尾）。
 	tools     map[int]*rspToolState
@@ -1233,50 +1287,50 @@ func (t *rspStreamTranslator) feed(obj map[string]any) []byte {
 		if fn != nil {
 			name = rspString(fn["name"])
 		}
-			state, exists := t.tools[seq]
-			if !exists {
-				if len(t.tools) >= 256 {
-					// 正常一次回答只有几个 item；上游畸形数据不无限追加对象。
-					log.Printf("WARN: [server] responses: 工具调用数量超过 256，忽略后续项")
-					continue
-				}
-				if t.textIdx >= 0 {
-					out = append(out, t.closeText()...)
-				}
-				if t.reasonIdx >= 0 {
-					out = append(out, t.closeReason()...)
-				}
-				callID := rspString(call["id"])
-				if callID == "" {
-					callID = "call_" + session.NewMessageID()[:12]
-				}
-				t.openTool(seq, callID, name)
-				state = t.tools[seq]
+		state, exists := t.tools[seq]
+		if !exists {
+			if len(t.tools) >= 256 {
+				// 正常一次回答只有几个 item；上游畸形数据不无限追加对象。
+				log.Printf("WARN: [server] responses: 工具调用数量超过 256，忽略后续项")
+				continue
+			}
+			if t.textIdx >= 0 {
+				out = append(out, t.closeText()...)
+			}
+			if t.reasonIdx >= 0 {
+				out = append(out, t.closeReason()...)
+			}
+			callID := rspString(call["id"])
+			if callID == "" {
+				callID = "call_" + session.NewMessageID()[:12]
+			}
+			t.openTool(seq, callID, name)
+			state = t.tools[seq]
+			if !t.bufferToolAdded {
+				out = append(out, t.toolAddedEvent(state, state.name)...)
+			}
+		} else if name != "" && name != state.name {
+			// 名字分片：首片可能为空（后续补名）或重名分片（续拼）。
+			if state.name == "" || len(name) > len(state.name) && strings.HasPrefix(name, state.name) {
+				state.name = name
+			} else {
+				state.name += name
+			}
+		}
+		if fn != nil {
+			if args := rspString(fn["arguments"]); args != "" {
+				state.args.WriteString(args)
+				// 非 custom 桥接：参数分片原样透传（拼接交给客户端），与 Chat
+				// 流式语义对齐。custom 桥接缓冲到收尾（完整包装要等全文才能
+				// 校验解码，见 closeTools）。
 				if !t.bufferToolAdded {
-					out = append(out, t.toolAddedEvent(state, state.name)...)
-				}
-			} else if name != "" && name != state.name {
-				// 名字分片：首片可能为空（后续补名）或重名分片（续拼）。
-				if state.name == "" || len(name) > len(state.name) && strings.HasPrefix(name, state.name) {
-					state.name = name
-				} else {
-					state.name += name
+					out = append(out, rspEventFrame("response.function_call_arguments.delta", map[string]any{
+						"type":         "response.function_call_arguments.delta",
+						"output_index": state.index, "item_id": state.id, "delta": args,
+					})...)
 				}
 			}
-			if fn != nil {
-				if args := rspString(fn["arguments"]); args != "" {
-					state.args.WriteString(args)
-					// 非 custom 桥接：参数分片原样透传（拼接交给客户端），与 Chat
-					// 流式语义对齐。custom 桥接缓冲到收尾（完整包装要等全文才能
-					// 校验解码，见 closeTools）。
-					if !t.bufferToolAdded {
-						out = append(out, rspEventFrame("response.function_call_arguments.delta", map[string]any{
-							"type": "response.function_call_arguments.delta",
-							"output_index": state.index, "item_id": state.id, "delta": args,
-						})...)
-					}
-				}
-			}
+		}
 	}
 
 	if fr := rspString(choice["finish_reason"]); fr != "" {
@@ -1417,11 +1471,11 @@ func rspStream(w http.ResponseWriter, r io.Reader, translator *rspStreamTranslat
 // 与响应头，body 字节经 io.Pipe 同步交给主 goroutine（io.Pipe 无缓冲——写端阻塞
 // 到读端消费，天然背压，流式翻译零额外缓冲）。
 type rspInnerWriter struct {
-	header   http.Header
-	status   int
-	pw       *io.PipeWriter
-	sig      chan struct{}
-	sigOnce  sync.Once
+	header  http.Header
+	status  int
+	pw      *io.PipeWriter
+	sig     chan struct{}
+	sigOnce sync.Once
 }
 
 func newRspInnerWriter(pw *io.PipeWriter) *rspInnerWriter {

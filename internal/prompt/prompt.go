@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 //go:embed defaultprompt.md
@@ -220,4 +221,104 @@ func Rewrite(body []byte, systemPrompt string) []byte {
 		return out
 	}
 	return body
+}
+
+// MoveSystemToUser 把 system/developer 消息的文本搬进首条 user 消息，system 换成
+// 最小中性提示词（Degraded）。用于 11-128 渠道校验的一次**请求级**抢救：
+// 上游按 system 通道内容做校验，同一段文本放进 user 通道常能通过；文本一字不改，
+// 只换承载通道（manager 0035 吸收）。
+//
+// 保守返回 (nil,false)：无 system/developer 文本、任一 system/developer 的 content
+// 存在且不是字符串（数组/对象等非文本承载，无法原样搬迁）、没有 user 消息、
+// 或首条 user 的 content 不是纯文本（数组/多模态）时，调用方按原错误处理。
+// content 缺失或为空字符串/null 的 system/developer 可安全跳过（无文本可搬）。
+//
+// 与 Rewrite/Append 同口径：顶层未知字段与非目标消息按 RawMessage 原样透传，
+// 大整数不被 float64 往返改写。
+func MoveSystemToUser(body []byte) ([]byte, bool) {
+	if len(body) == 0 {
+		return nil, false
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return nil, false
+	}
+	msgsRaw, present := obj["messages"]
+	if !present {
+		return nil, false
+	}
+	msgs, ok := decodeMessageElems(msgsRaw)
+	if !ok || len(msgs) == 0 {
+		return nil, false
+	}
+	var sysTexts []string
+	firstUser := -1
+	for i, m := range msgs {
+		switch msgRole(m) {
+		case "system", "developer":
+			var mm map[string]json.RawMessage
+			if err := json.Unmarshal(m, &mm); err != nil {
+				continue
+			}
+			raw, hasContent := mm["content"]
+			if !hasContent {
+				continue
+			}
+			var content string
+			if err := json.Unmarshal(raw, &content); err != nil {
+				// content 不是字符串（数组/对象/数字/布尔等）：重写阶段会整条删除
+				// 该 system/developer 消息，而这里无法把它的文本搬进 user，会违反
+				// "文本一字不改、只换承载通道"的契约——保守放弃整个搬迁。
+				// content 为 null 时 unmarshal 到 string 无错且得空串，按空内容跳过。
+				return nil, false
+			}
+			if content != "" {
+				sysTexts = append(sysTexts, content)
+			}
+		case "user":
+			if firstUser < 0 {
+				firstUser = i
+			}
+		}
+	}
+	if len(sysTexts) == 0 || firstUser < 0 {
+		return nil, false
+	}
+	var um map[string]json.RawMessage
+	if err := json.Unmarshal(msgs[firstUser], &um); err != nil {
+		return nil, false
+	}
+	var userText string
+	if raw, ok := um["content"]; !ok || json.Unmarshal(raw, &userText) != nil {
+		return nil, false
+	}
+	// 系统文本放前、user 原有内容放后：语义顺序不变（设定先于用户输入）。
+	moved := strings.Join(sysTexts, "\n\n") + "\n\n" + userText
+	newContent, err := json.Marshal(moved)
+	if err != nil {
+		return nil, false
+	}
+	um["content"] = newContent
+	newUser, err := json.Marshal(um)
+	if err != nil {
+		return nil, false
+	}
+	rewritten := make([]json.RawMessage, 0, len(msgs)-len(sysTexts)+1)
+	rewritten = append(rewritten, gwMessage(Degraded))
+	for i, m := range msgs {
+		switch msgRole(m) {
+		case "system", "developer":
+			continue
+		}
+		if i == firstUser {
+			rewritten = append(rewritten, newUser)
+			continue
+		}
+		rewritten = append(rewritten, m)
+	}
+	out, ok := remarshalWithMessages(obj, rewritten)
+	if !ok {
+		return nil, false
+	}
+	return out, true
 }

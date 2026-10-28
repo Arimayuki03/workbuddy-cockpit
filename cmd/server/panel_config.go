@@ -77,6 +77,10 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	if err != nil {
 		return nil, err
 	}
+	// parseConfigInto 刻意不应用 env（见其注释）；WB2A_GZIP_BODY 是启动期可覆盖
+	// 文件值的开关，面板保存必须按 env 重新应用，否则 false 启动后任意保存都会
+	// 用默认/文件值把 gzip 静默重新打开（热改快照与运行态随之被覆盖）。
+	applyGzipBodyEnv(newCfg)
 
 	// 3) 落盘（原子替换：tmp + rename；单文件 bind mount 下 rename 报 EBUSY 时
 	// 回退原地写，见 server.writeFileEBUSYFallback——panel 5e1422c9/ab9a162b 移植）。
@@ -122,6 +126,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	// 路径的并发读构成数据竞争（audit P0），快照整体替换无半新半旧窗口。
 	up.SetHotFields(upstream.HotFields{
 		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
+		GzipBody:             newCfg.Upstream.GzipBody,
 		UserAgent:            newCfg.Upstream.UserAgent,
 		ClientName:           newCfg.Upstream.ClientName,
 		ClientVersion:        newCfg.Upstream.ClientVersion,
@@ -229,6 +234,10 @@ func restartRequiredFields(c *Config) []string {
 	// 请求日志 JSONL 归档在装配期创建 recorder（main 启动期 reqlog.New），开关与
 	// 容量/保留参数只能重启生效；request_client_info 已走 live 热改不在此列。
 	out = append(out, "logging.request_archive", "logging.request_archive_max_mb", "logging.request_retention_days")
+	// features.sanitize_extra_features / _rewrites 在 main 启动期经
+	// upstream.ConfigureSanitize 一次性写入净化词表（进程级），saveConfig 不做热更新；
+	// 不列入会让面板显示「已保存」而运行期仍用旧词表，必须提示重启。
+	out = append(out, "features.sanitize_extra_features", "features.sanitize_extra_rewrites")
 	// global.enabled 在 auth.SetGlobalEnabled / handler GlobalEnabled / upstream.GlobalEnabled
 	// 三处装配期注入；prompt 文本与 global base 同理。
 	out = append(out, "global.enabled", "global.chat_base", "global.billing_base",

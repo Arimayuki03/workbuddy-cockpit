@@ -319,6 +319,8 @@ workbuddy-cockpit/
 
 | v1.21.0 | 2026-10-26 | **渠道校验守卫 + 思考强度观测 + 吸收 manager v2.10.0**——**11-128 防风控守卫**（命中即抓包留证 `data/channel_check/`、body/模板短 TTL 负缓存本地 400、专用 60s 冷却不占 soft_rate、fail_fast 可选、预置拦截短语；面板「渠道校验守卫」分组**全字段热生效**）；**思考强度全链路**（请求日志 `effort_in/effort_out` + `reasoning_tokens`/`duration_ms`/`realm`，流水行 `eff=` 列，面板「思考强度」列，三协议覆盖）；**缓存写入推导**（上游不下发 write，`write=miss` ≥64 块推导，流式/非流式/统计同口径，精度 ~94%）；**manager v2.10.0 吸收 8 项**（DSH Web GUI 跨句指纹净化、纯 401 连续计数禁用 `ErrAuthRejected`、Kimi 工具 enum 补 type + 11133 快速失败、空流可重试文案、签到限速 3s/号 + 10001/5xx 退避重试、粘性首绑三因子加权、日志思考强度列、Dockerfile GOPROXY）；**面板修复**（提示词模式切换报错——字段全局映射被同名分组覆盖改分组内解析；请求日志页 `table-fixed` 定宽 11 列一屏、账号列显示 uid8）；**流水行定宽**（账号列 18 uid8 后缀保留、eff 列 15、`logfmt.TruncateWidth`）；请求日志持久化与来源采集入面板（采集热改）。迁移与验证限制见 [发行说明](docs/RELEASE-v1.21.0.md) |
 
+| v1.22.0 | 2026-10-28 | **吸收 manager v2.11.4（v2.10.0..v2.11.4）**——**11-128 改请求级**（system→user 抢救一次，仍拒即透传 400；不冷却/不换号/不禁用；守卫只缓存最终失败模板；`gateway_hint` 用 `ChannelCheck` 权威标记修正截断误判）；**DSH 脱敏扩展**（`workspace root`→`base`、7 动词句式、DSH/extra 大小写不敏感预检、可配置 `sanitize_extra_features/_rewrites`、修正 Web GUI 替换空操作）；**11102 自愈**（TTL 6h/24h→2m/10m、realm 维度自愈（只清当前 realm）、管理端探测回执端点）；**Responses 孤儿 `function_call_output` 降级为 user**；**大请求体 gzip**（>64KB，415/解析失败/任意 4xx/渠道校验自动去压缩重试）；新增 `upstream.gzip_body`，废弃 `channel_check_cooldown`/`fail_fast`；**复审修复**（Responses 带 call_id 孤儿保留、11102 自愈 realm/跨请求节流、搜索 11-128 直接 400、`wbk_` 管理/观测面 403（`/admin/*`、`/status`、`/v1/stats` 含 reset、`/api/request_logs`）、MoveSystemToUser 混合 content 保守放弃、workspace root 收窄到 DSH 完整句、gzip 4xx 安全重试与 10 分钟闩锁、面板移除废弃 `fail_fast`/`channel_check_cooldown` 字段并重建 dist）。未吸收的 console 路径切换与 manager UI/部署类见 [发行说明](docs/RELEASE-v1.22.0.md) |
+
 完整变更见 [Releases](https://github.com/Arimayuki03/workbuddy-cockpit/releases)。
 
 ## 🙏 致谢

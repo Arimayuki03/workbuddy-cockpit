@@ -4,6 +4,7 @@ package upstream
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -166,6 +167,10 @@ type Error struct {
 	// applyErrorPolicy 再解析 Msg 会漏判并把封套里的 request illegal 当账号
 	// 封禁硬禁用。调用方应优先读本字段，不要把分类降级成「重新解析 Msg」。
 	ChannelCheck bool
+	// WeakChannelCheck 分类时依据完整 body 得出的「弱 11-128」标记：含 11-128
+	// 业务码但没有强渠道文案。该码可能属于渠道/内容拦截，不能按 request illegal
+	// 硬禁用；handler 的 SSE error 帧/Aggregate 路径用它做请求级分流。
+	WeakChannelCheck bool
 }
 
 func (e *Error) Error() string {
@@ -373,12 +378,12 @@ const (
 
 // IsChannelCheck 判上游的「渠道校验」拒绝（11-128 家族，含无横线写法）。
 //
-// 判据以**渠道校验文案**为主：中文「渠道校验」或英文 channel verification
-// 足以定性，即使封套省略了业务码也要识别（漏判会让 handler 按
-// request illegal 永久禁用健康账号）。"official client" 单独出现较宽泛，
-// 只在同时带渠道校验业务码时才采纳。同一个业务码也承载内容审核拦截，
-// 因此绝不只认码；历史遗留的 request illegal 也不能单独作为判据（正常
-// 账号级 11140 同样带这句）。
+// 判据以**强渠道校验文案**为主：中文「渠道校验」、英文 channel verification，
+// 或业务码 + official client。`unapproved channel` 单独出现时与内容审核文案
+// 重叠（Classify 归 ErrContentBlocked），不能作为强渠道判据——否则会把内容
+// 拦截降级路径误改成渠道抢救路径；gzip 探针另用 isUnapprovedChannel 识别它。
+// 同一个业务码也承载内容审核拦截，因此绝不只认码；历史遗留的 request
+// illegal 也不能单独作为判据（正常账号级 11140 同样带这句）。
 func IsChannelCheck(body string) bool {
 	lower := strings.ToLower(body)
 	if strings.Contains(body, "渠道校验") || strings.Contains(lower, "channel verification") {
@@ -388,6 +393,22 @@ func IsChannelCheck(body string) bool {
 		return false
 	}
 	return strings.Contains(lower, "official client")
+}
+
+// isUnapprovedChannel 判上游的 "Illegal API invocation from an unapproved channel"
+// 文案（大小写不敏感）。该文案与内容审核文案重叠，不能并入 IsChannelCheck 的
+// 强判据；仅用于 gzip 探针判断「压缩体被渠道类拒绝」，不改变 Classify 分类。
+func isUnapprovedChannel(body string) bool {
+	return strings.Contains(strings.ToLower(body), "unapproved channel")
+}
+
+// IsWeakChannelCode 报告 body 是否含 11-128 业务码（带/不带横线，数字或字符串
+// 形态）。该码本身可能属于渠道/内容拦截，不能据它硬禁用账号；Classify 将其
+// 归请求级 ErrContentBlocked。SSE error 帧路径（FrameKind 只取 message）也必须
+// 用它兜底，避免弱封套落到 request illegal 的禁用分支。
+func IsWeakChannelCode(body string) bool {
+	lower := strings.ToLower(body)
+	return codeMarker(lower, channelCheckHyphenCode) || codeMarker(lower, channelCheckPlainCode)
 }
 
 // softRateResetLoc 上游 429 6004 文案中的重置时间固定按 UTC+8 解释（上游文案如此，
@@ -526,6 +547,7 @@ func HasBusinessCode(body, want string) bool {
 // 两种形态都认：
 //   - JSON 信封原文（≥400 路径的 Msg 是 body 原文）：任意层级的 code 字段；
 //   - 组装文案 "code=10001 msg=..."（200 信封 code!=0 路径）。
+//
 // 无码/不可解析返回空串。
 func CodeOf(msg string) string {
 	if code := codeOfJSON(msg); code != "" {
@@ -830,11 +852,24 @@ func Classify(status int, body string) ErrKind {
 		return ErrAuthRejected
 	}
 	// 渠道校验（/v2 上的强校验，2026-10-17）：归账号级分类，但 handler 对
-	// ErrAccountFault 会先判 IsChannelCheck、只做软冷却——绝不能把健康账号
+	// ErrAccountFault 会先判 IsChannelCheck、只做请求级处理——绝不能把健康账号
 	// 按 request illegal 永久禁用。判在 accountFaultRule 之前，因为封套里
 	// 往往同时带 request illegal。
+	//
+	// IsChannelCheck 只认强渠道文案（channel verification / 渠道校验 / 业务码 +
+	// official client）；"Illegal API invocation from an unapproved channel" 与
+	// 内容审核文案重叠，按既有语义归 ErrContentBlocked（请求级、不罚号，由降级
+	// 重试处理），不在这里抢成 ErrAccountFault。gzip 探针用 isUnapprovedChannel
+	// 单独识别该文案，不影响本分类。
 	if IsChannelCheck(body) {
 		return ErrAccountFault
+	}
+	// 弱 11-128 封套（只有业务码 + "request illegal"，没有 channel verification /
+	// 渠道校验）：该业务码也承载渠道/内容拦截，绝不能落到下面 accountFaultRule
+	// 的 request illegal 分支被硬禁用账号。归请求级 ErrContentBlocked（不罚号，
+	// 走内容拦截降级/400），与既有内容审核口径一致。
+	if IsWeakChannelCode(body) {
+		return ErrContentBlocked
 	}
 	if accountFaultRule.hit(body, lower) {
 		return ErrAccountFault
@@ -998,6 +1033,19 @@ type Client struct {
 	// 面板热改字段：运行期读侧一律走 HotFields 快照（见 hotMu），直读仅限启动期装配。
 	SanitizeFingerprints bool
 
+	// GzipBody chat 请求体超过 gzipBodyThreshold 时用 gzip 压缩后再发上游
+	// （issue #297，manager 0030 吸收）。false 完全还原为不压缩（排障开关）。
+	// 只压 chat：refresh/checkin/billing 的请求体都在几 KB 量级，压了纯耗 CPU。
+	// 热改字段：读侧走 HotFields 快照（与 SanitizeFingerprints 同口径）。
+	GzipBody bool
+
+	// gzipMu 保护 gzipDisabledUntil（gzip 停用闩锁）。闩锁是「上游刚拒绝过压缩体」
+	// 的短 TTL 记忆：期间所有长上下文请求直接发未压缩，不再每次先双发一遍压缩版。
+	gzipMu sync.Mutex
+	// gzipDisabledUntil 闩锁到期时刻；零值/已过期 = 正常压缩。写入走 disableGzipBody，
+	// 读取走 gzipLatchActive（均持 gzipMu，见 outboundBody）。
+	gzipDisabledUntil time.Time
+
 	// UserAgent 出站 User-Agent 显式覆盖（非空时全路径生效，优先于默认 WorkBuddy
 	// 三段式与 billingUA 单段式）。空 = 默认官方形态：chat/refresh/FetchModels 走
 	// `WorkBuddy/<ver> WorkBuddy/<ver> CLI/<cliVer>`；billing/checkin 走 `WorkBuddy/<ver>`
@@ -1060,6 +1108,7 @@ type Client struct {
 // HotFields 面板可热改的普通字段集合（整体替换快照，读方拿到一致视图）。
 type HotFields struct {
 	SanitizeFingerprints bool
+	GzipBody             bool
 	UserAgent            string
 	ClientName           string
 	ClientVersion        string
@@ -1096,13 +1145,14 @@ func New() *Client {
 		HTTP:                 &http.Client{Timeout: 120 * time.Second, Transport: tr},
 		ChatHTTP:             &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
 		SanitizeFingerprints: true,
+		GzipBody:             true,
 		GlobalEnabled:        true,
 		ChatBaseCN:           "https://copilot.tencent.com",
 		BillingBaseCN:        "https://www.codebuddy.cn",
 	}
 	// 热改快照与字段同值初始化：运行期读侧恒走快照（headers.go），快照必须从
 	// 零值起就与字段同步，否则看不到 New 预置的默认值。
-	c.hot = HotFields{SanitizeFingerprints: true}
+	c.hot = HotFields{SanitizeFingerprints: true, GzipBody: true}
 	// 代理线路表：零值 = 空表（所有账号未绑定线路 → 直连，零配置零回归）。
 	c.proxyClients = newProxyClientCache()
 	return c
@@ -1114,6 +1164,7 @@ func (c *Client) SyncHot() {
 	c.hotMu.Lock()
 	c.hot = HotFields{
 		SanitizeFingerprints: c.SanitizeFingerprints,
+		GzipBody:             c.GzipBody,
 		UserAgent:            c.UserAgent,
 		ClientName:           c.ClientName,
 		ClientVersion:        c.ClientVersion,
@@ -1494,16 +1545,31 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	// prepareBody 末参 globalConsole=true 时在管线内完成 ensureConsoleSystem 语义
 	// （防 console 域上游 code 11-128；#119 后 global 出站固定 /v2，该兜底保留）。
 	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
+	// 大请求体 gzip（issue #297，manager 0030 吸收）：>64KB 才压；短对话零开销。
+	// gzipRetried 保证「压缩版失败 → 未压缩重试」只发生一次。若闩锁已生效
+	// （上游刚拒绝过压缩体，见 disableGzipBody）则 outboundBody 直接跳过压缩。
+	outBody, contentEncoding := c.outboundBody(prepared)
+	gzipRetried := false
+	// 压缩体探针结论：压缩版收到 4xx 时记录响应是否明确指向 gzip/渠道问题，
+	// 仅在**未压缩重试成功**后置闩锁（见成功分支）——未压缩仍 4xx 说明是真实
+	// 请求错误，置闩锁会把「请求本身不合法」误判成「上游不兼容 gzip」。
+	gzipProbeStatus := 0
+	gzipProbeSpecific := false
+	paths := c.chatPaths(a)
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 + 尾部
 	// 不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。
-	for _, path := range c.chatPaths(a) {
+	for i := 0; i < len(paths); i++ {
+		path := paths[i]
 		url := c.chatBase(a) + path
-		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(prepared))
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(outBody))
 		if err != nil {
 			return nil, 0, nil, err
 		}
 		c.ChatHeaders(req, a, clientIP, meta)
+		if contentEncoding != "" {
+			req.Header.Set("Content-Encoding", contentEncoding)
+		}
 		// 从调用方 ctx 派生：保留取消传播（父 ctx 取消 → 本 ctx 取消），
 		// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
 		reqCtx, cancel := context.WithCancel(ctx)
@@ -1536,6 +1602,30 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 				log.Printf("ERR: [upstream] chat_stream acct=%s: read body: %v", logfmt.Label(a.UID, a.NicknameValue()), rerr)
 				return nil, 0, nil, fmt.Errorf("read body: %w", rerr)
 			}
+			// 上游对压缩请求体的拒绝面不可枚举（415、解析失败类 400、11140
+			// request illegal、11101 等）。压缩版收到**任意 4xx**都先去掉
+			// Content-Encoding 重发**同一条路径**（gzipRetried 只允许一次），再按
+			// 未压缩结果分类/处罚——否则 handler 会把请求级错误当账号故障 Disable，
+			// 且轮转下一个号仍发同一份压缩体，逐个账号被永久禁用。
+			// 5xx 不强制重试（服务端故障与压缩体无关）；渠道校验文案例外，保持原行为。
+			if contentEncoding != "" && !gzipRetried &&
+				(resp.StatusCode <= 499 || IsChannelCheck(string(raw))) {
+				gzipRetried = true
+				gzipProbeStatus = resp.StatusCode
+				// 只有响应明确指向 gzip/渠道问题（415/解析失败/11101/11140/
+				// 渠道校验/unapproved channel）时才允许后续置闩锁；普通 4xx
+				// （model is required 等）即使去掉压缩后成功，也不是 gzip 不兼容。
+				gzipProbeSpecific = gzipUnsupported(resp.StatusCode, string(raw)) ||
+					IsChannelCheck(string(raw)) ||
+					isUnapprovedChannel(string(raw)) ||
+					codeMarker(strings.ToLower(string(raw)), "11140")
+				contentEncoding = ""
+				outBody = prepared
+				log.Printf("INFO: [upstream] chat_stream acct=%s: upstream rejected gzip body (%d)，改用未压缩重试",
+					logfmt.Label(a.UID, a.NicknameValue()), resp.StatusCode)
+				i-- // 同一路径再来一次
+				continue
+			}
 			kind := Classify(resp.StatusCode, string(raw))
 			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
 				logfmt.Label(a.UID, a.NicknameValue()), resp.StatusCode, kind, truncate(string(raw), 200))
@@ -1553,12 +1643,121 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			}
 			return nil, resp.StatusCode, raw, ue
 		}
+		// 未压缩重试成功，且压缩版的拒绝明确指向 gzip 不兼容/渠道校验 → 置短 TTL
+		// 闩锁：后续长上下文请求直接发未压缩，不再每次先双发一遍压缩版。
+		// 普通 4xx 重试成功不置闩锁（真实请求错误与压缩无关，见 gzipProbeSpecific）。
+		if gzipRetried && gzipProbeSpecific {
+			c.disableGzipBody(gzipProbeStatus)
+		}
 		// 成功分支：cancel 所有权交给 monitorBody（其 Close 会 cancel）；
 		// IdleTimeout<=0 时 monitorBody 原样返回底流、无人调 cancel——可接受：
 		// 取消传播由 http.Transport 在 body Close / 父 ctx 取消时处理，连接正常清理。
 		return monitorBody(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
 	}
 	panic("unreachable: chatPaths is never empty") // for range 空集时编译器仍要求兜底 return；chatPaths 恒非空（构造保证），永不触达
+}
+
+// gzipBodyThreshold chat 请求体超过这个大小才压缩（issue #297）。
+//
+// 64KB 的依据：小请求压了只多一次分配与 CPU，省下的带宽可以忽略；而长上下文
+// 请求体在 1MB 以上（实测 4.2 字节/token，78 万 token ≈ 3.3MB），服务器出口
+// 带宽窄时首字节要等 20-30 秒——压到 1/4.5 就是实打实的提速。
+const gzipBodyThreshold = 64 << 10
+
+// gzipDisableLatchTTL gzip 停用闩锁的时长。
+//
+// 压缩体被上游拒绝、且**未压缩重试成功**（拒绝明确指向 gzip/渠道问题：415 /
+// 解析失败 11101 / 11140 request illegal / 渠道校验 11-128 / unapproved
+// channel）后，同一客户端在 TTL 内直接发未压缩 body：避免每个长上下文请求
+// 都先发压缩版、被拒后再发未压缩版，稳定多耗一次 DSH 流量（11-128 场景尤甚）。
+// TTL 取 10m——足以覆盖一次连续排障/长会话，又能在上游修复/换渠道后较快
+// 自愈恢复压缩。
+const gzipDisableLatchTTL = 10 * time.Minute
+
+// gzipLatchActive 报告 gzip 停用闩锁是否仍在生效期内。
+func (c *Client) gzipLatchActive() bool {
+	if c == nil {
+		return false
+	}
+	c.gzipMu.Lock()
+	defer c.gzipMu.Unlock()
+	return time.Now().Before(c.gzipDisabledUntil)
+}
+
+// disableGzipBody 置 gzip 停用闩锁（status 仅用于日志；调用方已判定上游拒绝压缩）。
+// 重复命中只续期不重复刷日志，避免错误风暴时日志放大。
+func (c *Client) disableGzipBody(status int) {
+	if c == nil {
+		return
+	}
+	now := time.Now()
+	c.gzipMu.Lock()
+	already := now.Before(c.gzipDisabledUntil)
+	c.gzipDisabledUntil = now.Add(gzipDisableLatchTTL)
+	c.gzipMu.Unlock()
+	if !already {
+		log.Printf("INFO: [upstream] gzip body rejected by upstream (http %d)，%s 内停用 gzip（后续请求直接发未压缩）",
+			status, gzipDisableLatchTTL)
+	}
+}
+
+// outboundBody 按配置决定 chat 请求体是否压缩，返回最终 body 与 Content-Encoding。
+// gzip 失败（理论上只有内存不足）时原样返回未压缩 body，不阻断请求。
+func (c *Client) outboundBody(body []byte) ([]byte, string) {
+	if c == nil || !c.HotFields().GzipBody || len(body) < gzipBodyThreshold {
+		return body, ""
+	}
+	// 闩锁期内跳过压缩：上游刚拒绝过压缩体，直接发未压缩，避免每次请求双发。
+	// 放在阈值判断之后，短请求不付锁开销。
+	if c.gzipLatchActive() {
+		return body, ""
+	}
+	var buf bytes.Buffer
+	zw, err := gzip.NewWriterLevel(&buf, gzip.DefaultCompression)
+	if err != nil {
+		return body, ""
+	}
+	if _, err := zw.Write(body); err != nil {
+		_ = zw.Close()
+		return body, ""
+	}
+	if err := zw.Close(); err != nil {
+		return body, ""
+	}
+	// 压缩后反而更大（已压缩过的二进制内容）→ 不压，省得上游多解一次。
+	if buf.Len() >= len(body) {
+		return body, ""
+	}
+	return buf.Bytes(), "gzip"
+}
+
+// gzipUnsupported 判「上游不接受压缩请求体」的响应（issue #297 的兜底）。
+//
+// 触发面：HTTP 415（Unsupported Media Type），以及 400 且文案/业务码像
+// 「请求体解析失败」（11101 / Unmarshal chat params failed / JSON 解析错误 /
+// gzip 相关文案）。该判定只用于「未压缩重试成功后是否置闩锁」：是否重试由
+// ChatStreamContext 的「压缩体 + 任意 4xx」规则决定，不依赖本白名单。
+func gzipUnsupported(status int, raw string) bool {
+	if status == http.StatusUnsupportedMediaType {
+		return true
+	}
+	if status != http.StatusBadRequest {
+		return false
+	}
+	lower := strings.ToLower(raw)
+	if codeMarker(lower, "11101") {
+		return true
+	}
+	for _, marker := range []string{
+		"unmarshal chat params failed", "invalid character", "cannot unmarshal",
+		"unexpected end of json", "unexpected eof", "invalid json", "failed to decode",
+		"content-encoding", "content encoding", "gzip",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // chatPaths 返回按 realm 的 chat 路径候选序列：

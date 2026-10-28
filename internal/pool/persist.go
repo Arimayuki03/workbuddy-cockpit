@@ -327,14 +327,28 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 		}
 		// 恢复 modelCooldowns，惰性过滤已过期条目（Until 在未来才恢复）。
 		// 防止重启后残留已过期的模型级冷却条目（与 pick 路径的 pruneExpiredModelCooldowns 同口径）。
+		//
+		// 11102 旧数据钳制（manager 0041 审查修复）：升级前写入的 11102 负缓存
+		// TTL 是 6h/24h，若原样恢复，新参数（2m/10m）带来的自愈速度会被重启打回
+		// 小时级。对 reason 前缀 "11102" 且 Until 超过 now+modelBlockMaxTTL 的条目，
+		// 把 Until 钳到 now+modelBlockMaxTTL（只改本地运行态，不回写持久化语义）。
+		// 6004 不参与钳制：其 Until 是上游重置墙钟（写入侧已按 soft_rate_max 截断），
+		// 恢复侧不得改写上游权威语义。
+		// 注意：stateModelCooldown 无 Hits 字段（Hits 不落盘），恢复后 Hits=0，
+		// 指数退避从 2m 基数重新累计——这是既有持久化格式的已知边界。
 		if len(s.ModelCooldowns) > 0 {
 			e.modelCooldowns = make(map[string]modelCooldown, len(s.ModelCooldowns))
+			maxBlockUntil := now.Add(modelBlockMaxTTL)
 			for m, smc := range s.ModelCooldowns {
 				if smc.Until.IsZero() || !now.Before(smc.Until) {
 					continue // 过期/零值丢弃
 				}
+				until := smc.Until
+				if strings.HasPrefix(smc.Reason, "11102") && until.After(maxBlockUntil) {
+					until = maxBlockUntil // 旧 6h/24h 数据钳到新封顶
+				}
 				e.modelCooldowns[m] = modelCooldown{
-					Until:   smc.Until,
+					Until:   until,
 					ResetAt: smc.ResetAt,
 					Reason:  smc.Reason,
 				}
@@ -639,12 +653,12 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			// 续期观测（schedule.renew_enabled 巡检 + 保活/签到刷新路径共同维护）：
 			// lastRenewed 零值也写（运维口径，见 stateAccount.LastRenewed 注释）；
 			// renewLastErr 成功态为空串（omitempty 省略），失败态原样落盘。
-			LastRenewed:     e.lastRenewed,
-			RenewLastError:  e.renewLastErr,
+			LastRenewed:    e.lastRenewed,
+			RenewLastError: e.renewLastErr,
 			// 运维备注直通落盘（空串 omitempty 省略，同 RenewLastError 口径）。
-			Note:            e.note,
-			ModelCooldowns:   mcs,
-			ModelCosts:       mcosts,
+			Note:           e.note,
+			ModelCooldowns: mcs,
+			ModelCosts:     mcosts,
 		}
 	}
 	return sf

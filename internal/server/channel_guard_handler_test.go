@@ -57,13 +57,14 @@ func TestChannelGuardBlocksRepeatedChannelCheck(t *testing.T) {
 		return rec.Result()
 	}
 
-	// 第一次：上游渠道校验，fail_fast 立即 400；请求体被抓取。
+	// 第一次：上游渠道校验 → 一次 system→user 抢救（第 2 次上游调用）仍被拒，
+	// 回 400；抢救失败后才把**原始**出站 body/模板写进负缓存并抓取。
 	resp := do(body("template-A", "hi"))
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("first request code=%d want 400", resp.StatusCode)
 	}
-	if calls.Load() != 1 {
-		t.Fatalf("first request upstream calls=%d want 1 (fail_fast)", calls.Load())
+	if calls.Load() != 2 {
+		t.Fatalf("first request upstream calls=%d want 2 (original + system→user rescue)", calls.Load())
 	}
 	files, _ := filepath.Glob(filepath.Join(dir, channelGuardCapturePrefix+"*.json"))
 	if len(files) == 0 {
@@ -76,13 +77,16 @@ func TestChannelGuardBlocksRepeatedChannelCheck(t *testing.T) {
 	if !strings.Contains(string(captured), "template-A") {
 		t.Errorf("capture should contain the offending template: %s", captured)
 	}
+	if hit := h.guard().Check([]byte(body("template-A", "hi"))); hit == nil {
+		t.Fatalf("guard did not hit after first rejection")
+	}
 
 	// 同一 body 重试：本地拦截，不再打上游。
 	resp = do(body("template-A", "hi"))
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("repeat code=%d want 400", resp.StatusCode)
 	}
-	if calls.Load() != 1 {
+	if calls.Load() != 2 {
 		t.Fatalf("repeat must be blocked locally, upstream calls=%d", calls.Load())
 	}
 	// 同模板不同用户消息：模板命中，同样本地拦截。
@@ -90,15 +94,15 @@ func TestChannelGuardBlocksRepeatedChannelCheck(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("template repeat code=%d want 400", resp.StatusCode)
 	}
-	if calls.Load() != 1 {
+	if calls.Load() != 2 {
 		t.Fatalf("template repeat must be blocked locally, upstream calls=%d", calls.Load())
 	}
 
-	// 不同模板应放行到上游（清掉首号冷却，避免选号阶段提前 503）。
+	// 不同模板应放行到上游（新模板同样会做一次 system→user 抢救，共 2 次调用）。
 	p.ForceClearCooldown("u1")
 	resp = do(body("template-B", "hi"))
-	if calls.Load() != 2 {
-		t.Fatalf("different template should reach upstream, calls=%d want 2", calls.Load())
+	if calls.Load() != 4 {
+		t.Fatalf("different template should reach upstream, calls=%d want 4", calls.Load())
 	}
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("different template code=%d want 400 (upstream channel check)", resp.StatusCode)
@@ -132,14 +136,20 @@ func TestChannelCheckEndReturns400Not503(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"code":"channel_check_blocked"`) {
 		t.Errorf("want channel_check_blocked code: %s", rec.Body.String())
 	}
-	if calls.Load() != 3 {
-		t.Errorf("upstream calls=%d want 3 (MaxRotate)", calls.Load())
+	if calls.Load() != 1 {
+		t.Errorf("upstream calls=%d want 1 (request-scoped rejection stops rotation)", calls.Load())
+	}
+	for _, uid := range []string{"u1", "u2", "u3"} {
+		st, _ := p.Status(uid)
+		if st.Cooling || st.Disabled || st.ConsecutiveFails != 0 {
+			t.Errorf("%s was penalized by a request-level rejection: %+v", uid, st)
+		}
 	}
 }
 
-// TestChannelCheckUsesShortCooldown 渠道校验用 channel_check_cooldown，而不是
-// cooldown.soft_rate（示例配置 6h），避免一个坏模板把健康号停半天。
-func TestChannelCheckUsesShortCooldown(t *testing.T) {
+// TestChannelCheckDoesNotCooldown 渠道校验是请求级拒绝（manager 0039），即使
+// 配了 channel_check_cooldown 也不冷却账号——旧 45s/6h 语义已废弃。
+func TestChannelCheckDoesNotCooldown(t *testing.T) {
 	up := &upstream.Client{
 		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			return testSSEResponse(http.StatusBadRequest, channelCheckServerBody()), nil
@@ -171,13 +181,7 @@ func TestChannelCheckUsesShortCooldown(t *testing.T) {
 	if !ok {
 		t.Fatal("account missing")
 	}
-	if !st.Cooling || st.CoolKind != "soft_rate" {
-		t.Fatalf("channel check must soft-cool, got %+v", st)
-	}
-	if remain := time.Until(st.Until); remain > 90*time.Second {
-		t.Fatalf("channel-check cooldown too long: %s (want ~45s, not 6h)", remain)
-	}
-	if !strings.Contains(st.Reason, "channel check") {
-		t.Errorf("reason should identify channel check, got %q", st.Reason)
+	if st.Cooling || st.Disabled || st.ConsecutiveFails != 0 {
+		t.Fatalf("channel check must be request-scoped (no cooldown/disable/fail count), got %+v", st)
 	}
 }

@@ -201,6 +201,13 @@ type Handler struct {
 	// 的平移，requestClientIP 单一取值点用）。
 	trustedCIDRs []netip.Prefix
 	trustedHops  int
+	// modelBlockHealMu / modelBlockHealAt 11102 自愈的**跨请求**节流台账
+	// （review 修复）：key = realm + "\x00" + model，value = 上次自愈时刻。
+	// 同一键在 modelBlockSelfHealInterval 内最多自愈一次——否则持续无此模型的
+	// 请求每个都会清一次负缓存（上游抖动时刚写的负缓存被下一个请求抹掉，
+	// 既掩盖故障又放大上游压力）。请求内的 modelBlocksCleared 仍独立把关。
+	modelBlockHealMu sync.Mutex
+	modelBlockHealAt map[string]time.Time
 }
 
 // NewHandler 构建 handler。
@@ -220,7 +227,11 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.MaxBodyBytes <= 0 {
 		cfg.MaxBodyBytes = defaultMaxBodyBytes
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), trustedCIDRs: cfg.TrustedProxyCIDRs, trustedHops: cfg.TrustedProxyHops}
+	h := &Handler{
+		cfg: cfg, mux: http.NewServeMux(),
+		trustedCIDRs: cfg.TrustedProxyCIDRs, trustedHops: cfg.TrustedProxyHops,
+		modelBlockHealAt: make(map[string]time.Time),
+	}
 	h.channelGuard.Store(NewChannelGuard(cfg.ChannelGuard))
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
@@ -241,6 +252,8 @@ func NewHandler(cfg Config) *Handler {
 		h.mux.HandleFunc("POST /admin/accounts/{uid}/disable", h.withAuth(h.adminAccountDisable))
 		h.mux.HandleFunc("POST /admin/accounts/{uid}/enable", h.withAuth(h.adminAccountEnable))
 		h.mux.HandleFunc("POST /admin/accounts/{uid}/revive", h.withAuth(h.adminAccountRevive))
+		// 探测成功回执：只清该账号该模型的 11102 负缓存（manager 0039）。
+		h.mux.HandleFunc("POST /admin/accounts/{uid}/models/{model}/available", h.withAuth(h.adminModelAvailable))
 	}
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	// /admin 管理面：admin.enabled=false（缺省）时一条路由都不注册——
@@ -291,6 +304,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
+// isAdminSurfacePath 管理/运维面路径判定（review HIGH）：wbk_ 分发密钥只用于
+// 模型调用面，下列路径会暴露跨密钥/全账号的运营数据或直接改运行态，必须只认
+// 全局 api_key 或面板 session cookie：
+//   - /admin/*：账号停用/恢复/复活、模型负缓存清除；
+//   - /status：全量账号状态（账号清单、冷却、积分等）；
+//   - /api/request_logs：跨 key 的请求日志；
+//   - /v1/stats 与 POST /v1/stats/reset：全局统计读取与清零。
+//
+// /v1/stats 用前缀判定以覆盖 /v1/stats/reset（当前无其它同前缀路由，误拦面为零）。
+func isAdminSurfacePath(path string) bool {
+	return strings.HasPrefix(path, "/admin/") ||
+		path == "/status" ||
+		path == "/api/request_logs" ||
+		strings.HasPrefix(path, "/v1/stats")
+}
+
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 入站 IP 规则（security 段，鉴权链最前——iprules.go 执行顺序契约）：
@@ -332,6 +361,17 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 					if k, ok := h.resolveDistribKey(bearer); ok {
 						if rej := h.keyRejections(k); rej != nil {
 							writeKeyRejection(w, rej)
+							return
+						}
+						// 管理面鉴权隔离（review 修复）：wbk_ 分发密钥只用于
+						// 模型调用/列表，**不得**访问管理/运维面——/admin/accounts/*
+						// 会改账号运行态，/status、/api/request_logs、/v1/stats
+						// （含 reset）会泄露跨密钥/全账号数据或清零统计。管理面
+						// 只认全局 api_key 或面板 session cookie；此处提前 403，
+						// 不把请求交给对应 handler。
+						if isAdminSurfacePath(r.URL.Path) {
+							writeOpenAIError(w, http.StatusForbidden, "admin_requires_gateway_key",
+								"admin endpoints require the gateway api_key or a panel session")
 							return
 						}
 						next(w, withKeyState(r, &keyStoreState{key: k, ip: ip}))
@@ -756,6 +796,45 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 	return infos
 }
 
+// modelBlockSelfHealInterval 同一 (realm, 模型) 的 11102 自愈跨请求节流窗口
+// （review 修复）：窗口内只清一次负缓存，避免每个请求都抹掉上游刚写的条目。
+const modelBlockSelfHealInterval = 2 * time.Minute
+
+// modelBlockHealKey 自愈节流台账键：realm 与 model 之间用 NUL 分隔，避免
+// "cn"+"foo" 与 "cnx"+"oo" 之类的拼接碰撞（模型名/域都不含 NUL）。
+func modelBlockHealKey(realm, model string) string { return realm + "\x00" + model }
+
+// allowModelBlockSelfHeal 跨请求自愈闸门：同一 (realm, 模型) 每
+// modelBlockSelfHealInterval 最多放行一次。命中放行时同时记录本次时刻；
+// 被节流时返回 false（调用方不得清缓存，直接走 503 出口）。
+//
+// 台账惰性清理：map 达到 modelBlockSelfHealThreshold 条时顺手扫掉过期键，
+// 条目数由「窗口内出现过的 (realm, 模型) 数」上界约束，不会无界增长。
+func (h *Handler) allowModelBlockSelfHeal(realm, model string) bool {
+	now := time.Now()
+	key := modelBlockHealKey(realm, model)
+	h.modelBlockHealMu.Lock()
+	defer h.modelBlockHealMu.Unlock()
+	if h.modelBlockHealAt == nil {
+		h.modelBlockHealAt = make(map[string]time.Time)
+	}
+	if len(h.modelBlockHealAt) >= modelBlockSelfHealThreshold {
+		for k, at := range h.modelBlockHealAt {
+			if now.Sub(at) >= modelBlockSelfHealInterval {
+				delete(h.modelBlockHealAt, k)
+			}
+		}
+	}
+	if at, ok := h.modelBlockHealAt[key]; ok && now.Sub(at) < modelBlockSelfHealInterval {
+		return false
+	}
+	h.modelBlockHealAt[key] = now
+	return true
+}
+
+// modelBlockSelfHealThreshold 触发惰性清理的台账规模（远大于常见 realm×模型数）。
+const modelBlockSelfHealThreshold = 64
+
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 请求体上限（max_body_mb，audit HIGH）：http.MaxBytesReader 包裹后全量读入。
 	// 超限 → *http.MaxBytesError，就地 413（OpenAI 兼容错误信封，明确指向 body
@@ -916,6 +995,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 降级裁决：append 在降级期退化为 replace（Rewrite(Degraded)）——append 带
 	// 指纹原文重试是确定性再撞墙，replace 是一次性最小抢救（issue #129 设计 §4）。
 	degradedApplied := false
+	// 11-128 请求级抢救：把 system 文本搬进首条 user 只做一次（搬两次没有意义，
+	// 第二次仍被拦说明触发词在 user 侧或请求其它部分）。
+	systemMoved := false
+	// channelFailedBody 首次渠道校验时的出站 body：抢救后重试的 body 会变，
+	// 负缓存必须锚定**原始**模板，否则同请求的后续重试永远命中不到本地缓存。
+	var channelFailedBody []byte
 	// 出站思考档位观测（st.effortOut）：按账号 realm 缓存推算（upstream.
 	// EffectiveReasoningEffort 与 prepareBody 的 effort 管线同口径，只读副本不改写
 	// 出站）。降级重写换 body 后置 effortComputed=false 强制重算。
@@ -1042,6 +1127,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 重试前就退出循环，客户端收到 503 no_healthy_account 而非约定的 400
 	// content_blocked（MaxRotate 是换号预算，不是同号降级重试预算）。豁免天然
 	// 一次性：degradedApplied 置位后本分支不再进入，不会钉死循环。
+	modelBlocksCleared := false
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
@@ -1062,6 +1148,48 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
 		}
 		if acct == nil {
+			// 自愈（manager 0034/0040，review 修复）：该 (realm, 模型) 被模型级冷却
+			// **整体**挡死（servable==0 且 locked>=total）时，几乎都是上游**瞬时**
+			// 11102（模型注册表抖动 / 灰度切换），而不是所有账号真的缺这个模型。
+			// 判据用 ModelBlockedNow ——与选号同一个 realm 维度：旧的全池判据
+			// AvailableUIDsForModelRealm 在双 realm 下会被另一域的可选号挡住，
+			// 而清缓存又清全池（跨 realm 误清）。realm 为空时 ModelBlockedNow 恒
+			// false，不做自愈（避免全池语义）。
+			//
+			// 只对 11102 负缓存自愈（review MEDIUM）：ModelBlockedNow 的 reason 是
+			// 「最早解锁账号」的原因，可能是 6004 真实配额墙钟。6004-only 不进入
+			// 自愈——ClearModelBlocksForRealm 只清 11102 条目，清 0 条后仍然 blocked，
+			// 却已白占 2 分钟跨请求闸门，窗口内真实 11102 反而无法自愈。6004 直接走
+			// 下方 503 model_blocked 出口（不消耗闸门、不重试）。混合锁（11102+6004）
+			// 时 reason 若取到 6004 同样跳过：清掉 11102 也解不开 6004，重试无意义。
+			//
+			// 三道闸：
+			//   1. 请求内 modelBlocksCleared：一次请求最多清一次（模型真下线时
+			//      不死循环，届时仍返回 503 并透传上游原文）；
+			//   2. 跨请求节流 allowModelBlockSelfHeal：同一 (realm, 模型) 每 2 分钟
+			//      最多自愈一次，防止每个请求都抹掉上游刚写的负缓存；
+			//   3. 只有「确实解除阻塞」才重置 tried 并重试——清 0 条或清完仍
+			//      blocked（还有 6004/其他锁）时不重试、不重置 tried。
+			// 自愈重试用 i-- 抵消 for 的自增，不消耗轮转名额。
+			if !modelBlocksCleared && realm != "" && bareModel != "" {
+				if blocked, _, reason := h.cfg.Pool.ModelBlockedNow(realm, bareModel); blocked &&
+					strings.HasPrefix(reason, "11102") &&
+					h.allowModelBlockSelfHeal(realm, bareModel) {
+					n := h.cfg.Pool.ClearModelBlocksForRealm(bareModel, realm)
+					stillBlocked, _, stillReason := h.cfg.Pool.ModelBlockedNow(realm, bareModel)
+					if n > 0 && !stillBlocked {
+						modelBlocksCleared = true
+						tried = map[string]bool{}
+						log.Printf("WARN: [server] model=%s realm=%s: all accounts blocked by %q, cleared %d and retrying (suspect transient upstream)", bareModel, realm, reason, n)
+						i-- // 自愈重试不占轮转名额
+						continue
+					}
+					if stillReason == "" {
+						stillReason = reason
+					}
+					log.Printf("WARN: [server] model=%s realm=%s: negative cache clear did not unblock (reason=%q cleared=%d still_blocked=%v), not retrying", bareModel, realm, stillReason, n, stillBlocked)
+				}
+			}
 			st.status = http.StatusServiceUnavailable
 			st.setError("no healthy account available for model " + bareModel)
 			break
@@ -1198,10 +1326,34 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				uerr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
 			}
 			st.setError(fmt.Sprintf("http %d: %s", status, string(respBody)))
-			// 渠道校验（11-128）：抓取当前出站 body + 写入 body/模板负缓存。fail_fast
-			// 时首个号就终止轮转并回 400（不再烧第二个号、不再把确定性拒绝包装成 503）。
+			// 渠道校验（11-128）是**请求/内容级**拒绝，不是账号故障（manager 0039
+			// 吸收）。先做一次请求级抢救：把 system 文本原样搬进首条 user、system
+			// 换成中性提示词再试一次（只换承载通道，不改内容）。仍被拦就透传上游
+			// 原文并停止轮转——不冷却账号、不解绑粘性、不禁用、不换号。
+			//
+			// 守卫的负缓存只在请求**最终失败**后记录原始出站模板：抢救成功的请求
+			// 不能缓存，否则后续同请求会被本地拦住、永远拿不到这次抢救机会。
 			if kind == upstream.ErrAccountFault && upstream.IsChannelCheck(string(respBody)) {
-				note := h.guard().NoteRejected(body, ChannelGuardMeta{
+				// 只记首次被拒的出站 body：抢救后 body 会变成 system→user 版本，
+				// 负缓存必须锚定原始模板（见 channelFailedBody 的注释）。
+				if channelFailedBody == nil {
+					channelFailedBody = body
+				}
+				if !systemMoved && (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") {
+					if moved, ok := prompt.MoveSystemToUser(body); ok {
+						body = moved
+						systemMoved = true
+						effortComputed = false  // body 已换：出站档位需按新 body 重算
+						delete(tried, acct.UID) // 同号重试：从 tried 摘除，单账号池也能立即重试
+						releaseHeld()
+						log.Printf("WARN: [server] channel-check (content) -> moved system into user, retry acct=%s model=%s",
+							logfmt.Label(acct.UID, acct.Nickname), bareModel)
+						// 重试不消耗轮转名额（i-- 抵消循环自增）；仅首置位进入一次。
+						i--
+						continue
+					}
+				}
+				note := h.guard().NoteRejected(channelFailedBody, ChannelGuardMeta{
 					Model:        bareModel,
 					Realm:        realm,
 					Mode:         st.mode,
@@ -1217,22 +1369,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 						logfmt.Label(acct.UID, acct.Nickname), bareModel, shortHash(note.BodyHash),
 						shortHash(note.TemplateHash), note.MessageCount, note.ToolCount, note.CapturePath)
 				}
-				if h.guard().FailFast() {
-					h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
-					fail(acct.UID)
-					msg := string(respBody)
-					if strings.TrimSpace(msg) == "" {
-						msg = "upstream channel verification rejected this request"
-					}
-					hint := h.hintOf(kind, string(respBody), bareModel, reqHasImage, uerr)
-					if note != nil && note.CapturePath != "" {
-						hint += "; captured request body: " + note.CapturePath
-					}
-					st.status = http.StatusBadRequest
-					st.setError("channel check guard: fail-fast")
-					writeOpenAIErrorHint(w, http.StatusBadRequest, "channel_check_blocked", msg, hint)
-					return
+				// 只释放在途租约；不调用 fail()（它还会解绑粘性会话），更不罚账号。
+				releaseHeld()
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "upstream channel verification rejected this request"
 				}
+				hint := "upstream channel verification rejected this request; account availability is unchanged (request-scoped, not a credential failure)"
+				if note != nil && note.CapturePath != "" {
+					hint += "; captured request body: " + note.CapturePath
+				}
+				st.status = http.StatusBadRequest
+				st.setError("channel check rejected (request-scoped)")
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "channel_check_blocked", msg, hint)
+				return
 			}
 			// 内容拦截误报（passthrough/append 模式首遇）：判定为 system 指纹误报，
 			// 触发降级到次日 00:00 CST，换 Degraded 中性提示词同请求内重试（append
@@ -1460,10 +1610,23 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 粘性还会把整个会话钉在它身上，后续每轮都失败）。HTTP 头已发出只能
 				// 200（error 帧已透传），日志/状态收敛 503 观测失败。
 				kind := upstream.FrameKind(errFrame)
-				h.applyErrorPolicy(acct.UID, kind, errFrame, bareModel, nil)
-				fail(acct.UID)
-				st.status = http.StatusServiceUnavailable
-				st.setError("upstream error frame: " + logfmt.Truncate(errFrame, 200))
+				strongChannel := upstream.IsChannelCheck(errFrame)
+				if strongChannel || upstream.IsWeakChannelCode(errFrame) {
+					// 强渠道校验 / 弱 11-128 的流内 error 帧：请求级拒绝。HTTP 头
+					// 已发出只能 200（错误帧已透传），账号侧只释放在途租约——不冷却、
+					// 不解绑粘性、不禁用。弱 11-128 的日志分类归请求级内容拦截。
+					if !strongChannel {
+						kind = upstream.ErrContentBlocked
+					}
+					releaseHeld()
+					st.status = http.StatusBadRequest
+					st.setError("channel check rejected (request-scoped)")
+				} else {
+					h.applyErrorPolicy(acct.UID, kind, errFrame, bareModel, nil)
+					fail(acct.UID)
+					st.status = http.StatusServiceUnavailable
+					st.setError("upstream error frame: " + logfmt.Truncate(errFrame, 200))
+				}
 				log.Printf("WARN: [server] stream acct=%s model=%s: upstream error frame kind=%s payload=%s",
 					logfmt.Label(acct.UID, acct.Nickname), bareModel, kind, logfmt.Truncate(errFrame, 200))
 			case sErr != nil:
@@ -1533,6 +1696,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		resp, err := upstream.Aggregate(rc)
 		rc.Close()
 		if err != nil {
+			// 强渠道校验 / 弱 11-128 的流内 error 帧：请求级拒绝，不罚账号、
+			// 不解绑粘性。必须在写 502 之前分流——这是确定性 400，不是上游解析失败。
+			var aerr *upstream.Error
+			if errors.As(err, &aerr) {
+				strongChannel := aerr.ChannelCheck || upstream.IsChannelCheck(aerr.Msg)
+				weakChannel := aerr.WeakChannelCheck || upstream.IsWeakChannelCode(aerr.Msg)
+				if strongChannel || weakChannel {
+					releaseHeld()
+					code := "channel_check_blocked"
+					hint := "upstream channel verification rejected this request; account availability is unchanged (request-scoped, not a credential failure)"
+					if !strongChannel {
+						code = "content_blocked"
+						hint = "upstream rejected this request with a channel/content business code; account availability is unchanged; adjust the prompt and retry"
+					}
+					writeOpenAIErrorHint(w, http.StatusBadRequest, code, aerr.Msg, hint)
+					st.status = http.StatusBadRequest
+					st.setError("channel/content rejection (request-scoped)")
+					return
+				}
+			}
 			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
 			// 截断流给独立可诊断 code（与流式路径的 upstream_truncated 对齐）；
 			// 空流/解析失败保持既有 upstream_parse。
@@ -1549,7 +1732,6 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// （FrameKind 判 Kind、Msg 装 payload 原文）→ applyErrorPolicy 按帧内容
 			// 处置账号（6004 冷却等），粘性号解绑；空流哨兵（errEmptyStream）是上游
 			// 缺陷非账号问题，零动作。
-			var aerr *upstream.Error
 			if errors.As(err, &aerr) {
 				h.applyErrorPolicy(acct.UID, aerr.Kind, aerr.Msg, bareModel, aerr)
 				fail(acct.UID)
@@ -1622,7 +1804,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		case upstream.ErrAccountFault:
 			// 渠道校验（11-128）落到末端：这是请求/渠道级拒绝，不是「账号池暂时
 			// 不可用」。回 400 + 上游原文（code/requestId 保留），客户端不应按 503
-			// 无限重试；账号已按 channel_check_cooldown 短冷却，不是死号。
+			// 无限重试；渠道校验按**请求级**终止（无账号冷却/禁用，不是死号）。
 			if ue.ChannelCheck || upstream.IsChannelCheck(ue.Msg) {
 				status = http.StatusBadRequest
 				code = "channel_check_blocked"
@@ -1686,8 +1868,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					bareModel, unlockAt.Format(time.RFC3339))
 			}
 			// Retry-After：距最早解锁的秒数。下限 1（同秒解锁也算 1，避免 0/负值
-			// 让客户端立刻重试撞回 503）；上限 600 封顶（11102 负缓存 TTL 长达数
-			// 小时，客户端不该按小时级退避挂连接，封顶后按既有节奏重试即可）。
+			// 让客户端立刻重试撞回 503）；上限 600 封顶（模型级冷却 TTL 有界：
+			// 11102 负缓存 2m 起指数退避、封顶 10m，6004 对齐上游重置墙钟；
+			// 客户端不该按更长退避挂连接，封顶后按既有节奏重试即可）。
 			retryAfterSec = int(time.Until(unlockAt).Seconds()) + 1
 			if retryAfterSec > 600 {
 				retryAfterSec = 600
@@ -1862,14 +2045,9 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 优先读错误信封上的稳定 ChannelCheck（由完整 body 分类时固化）：搜索
 		// 等路径只把 ue.Msg（前 200 字符）交给本函数，重新解析会被截断骗过。
 		if (uerr != nil && uerr.ChannelCheck) || upstream.IsChannelCheck(body) {
-			// 渠道校验是请求/渠道级问题，不是账号故障：默认用 channel_check_cooldown
-			// （60s）而不是 cooldown.soft_rate（可能 6h）软冷却，避免一个坏模板把
-			// 健康号停半天。显式配 0 = 回落旧口径（soft_rate）。
-			d := h.softCooldown()
-			if cd := h.guard().ChannelCooldown(); cd > 0 {
-				d = cd
-			}
-			h.cfg.Pool.Cooldown(uid, pool.CoolSoft, d, "channel check ("+kind.String()+")")
+			// 渠道校验是请求/内容级拒绝，不是账号故障（manager 0039）：零冷却、
+			// 零禁用、不喂连败。chatCompletions 已直接透传；这里是防御性调用口径，
+			// 避免任何未来调用方把请求错误记成账号处罚。
 			return
 		}
 		if strings.Contains(strings.ToLower(body), "request illegal") {
@@ -1919,8 +2097,8 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 原文终止，本分支只为文档完备，不指望走到换号路径。
 	case upstream.ErrModelBlocked:
 		// 11102「该后端无此模型」：(账号, 模型) 负缓存避让。复用 modelCooldowns 机制
-		// （与 6004 同域），写 modelCooldowns[model]，Until 为指数退避 TTL（6h 起、封顶
-		// 24h）。选号侧 healthyForModel 对该账号自动避开该模型；切模型/切账号即可用。
+		// （与 6004 同域），写 modelCooldowns[model]，Until 为指数退避 TTL（2m 起、封顶
+		// 10m）。选号侧 healthyForModel 对该账号自动避开该模型；切模型/切账号即可用。
 		// 立即换号（本轮 continue），该账号该模型冷却，下次选号避开。
 		h.cfg.Pool.BlockModelBackoff(uid, model, upstream.ModelBlockReason)
 	default:
@@ -2140,8 +2318,14 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 // 上游没回 body）→ 无 hint（不编造）。
 func (h *Handler) hintOf(kind upstream.ErrKind, body, bareModel string, hasImage bool, uerr *upstream.Error) string {
 	msg := body
-	if uerr != nil && uerr.Msg != "" {
-		msg = uerr.Msg
+	ctx := h.hintContext(bareModel, hasImage)
+	if uerr != nil {
+		if uerr.Msg != "" {
+			msg = uerr.Msg
+		}
+		// Error.Msg 只保留前 200 字符，渠道校验文案常在截断点之后；
+		// ChannelCheck 是基于完整 body 的权威标记，优先于重新解析 Msg。
+		ctx.ChannelCheck = uerr.ChannelCheck
 	}
-	return upstream.GatewayHint(kind, msg, h.hintContext(bareModel, hasImage))
+	return upstream.GatewayHint(kind, msg, ctx)
 }

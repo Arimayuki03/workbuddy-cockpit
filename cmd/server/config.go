@@ -111,11 +111,24 @@ type Config struct {
 		// PassthroughIP 是否透传客户端 IP（X-Forwarded-For/X-Real-IP 首段）给上游。
 		// 缺省 false（反代安全边界：不把内网/代理 IP 暴露给上游）；true 才透传。
 		PassthroughIP bool `json:"passthrough_ip"`
+		// GzipBody chat 请求体超过 64KB 时用 gzip 压缩后再发上游（issue #297，
+		// manager 0030 吸收）。缺省 true：窄出口带宽下 3MB 上下文可省 20s+ 首字节；
+		// 小于阈值（64KB）的请求不压缩，短对话零开销。排障可显式配 false。
+		GzipBody bool `json:"gzip_body"`
 	} `json:"upstream"`
 
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
+		// SanitizeExtraFeatures 运行期追加的特征预检串（任一命中即进入净化）。
+		// 上游黑名单逐词扩充（GUI 句 → workspace root → …），放配置里改完重启即可，
+		// 不必为每个新词重编译镜像。空 = 只用内置静态表。
+		SanitizeExtraFeatures []string `json:"sanitize_extra_features"`
+		// SanitizeExtraRewrites 运行期追加的逐字替换对，格式 [["原串","替换串"], …]。
+		// 替换按大小写不敏感的字面量匹配（replacement 不解释 $ 捕获组）；
+		// 通常与 sanitize_extra_features 配套，但 rewrite 源串会自动纳入预检，
+		// 只配 rewrites 也能生效。空源串/空 replacement 会被过滤。
+		SanitizeExtraRewrites [][2]string `json:"sanitize_extra_rewrites"`
 		// ChannelCheckGuard 上游渠道校验（11-128）守卫（internal/server/channel_guard.go）。
 		// 默认启用：命中时抓取请求体，并按 body/模板短 TTL 负缓存，重复请求本地 400，
 		// 不再消耗账号、不再把确定性拒绝包装成 503。
@@ -131,8 +144,8 @@ type Config struct {
 			BlockTTL string `json:"block_ttl"`
 			// TemplateTTL 模板（system/tools）负缓存 TTL（默认 10m，必须是正时长）。
 			TemplateTTL string `json:"template_ttl"`
-			// ChannelCooldown 渠道校验命中时账号软冷却时长（默认 60s；"0" = 回落
-			// cooldown.soft_rate 旧口径）。渠道校验是请求/渠道问题，不是账号故障。
+			// ChannelCooldown 已废弃（v1.21.x→manager 0039）：渠道校验改为请求级，
+			// 不冷却账号。保留字段仅为兼容旧配置，取值被忽略。
 			ChannelCooldown string `json:"channel_check_cooldown"`
 			// ScanMessages block_patterns 是否扫描全部消息（默认 true）；false 时只扫
 			// system/developer 与 tools/functions。
@@ -140,8 +153,9 @@ type Config struct {
 			// BlockPatterns 预置拦截短语（大小写不敏感子串；默认空 = 不猜，抓到指纹后
 			// 再由运维显式加入）。
 			BlockPatterns []string `json:"block_patterns"`
-			// FailFast 首次 ChannelCheck 即终止轮转并回 400（默认 false：保留换号可能
-			// 成功的旧语义；true = 一次都不多撞，牺牲账号差异带来的偶发成功）。
+			// FailFast 已废弃（v1.21.x→manager 0039）：渠道校验始终请求级处理
+			// （首个号被拒 → 一次 system→user 抢救 → 仍拒即透传 400），不再换号。
+			// 保留字段仅为兼容旧配置，取值被忽略。
 			FailFast bool `json:"fail_fast"`
 		} `json:"channel_check_guard"`
 	} `json:"features"`
@@ -345,6 +359,8 @@ func Default() *Config {
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
 	c.Upstream.IdleTimeoutSeconds = 0
+	// 大请求体压缩默认开：省的是本机出口带宽（issue #297 实测窄出口下 3MB 差 20s+）。
+	c.Upstream.GzipBody = true
 	// Global.Enabled 缺省 true（纯 CN 行为不变：CN 账号恒判 cn，global base 不被使用）；
 	// ChatBase/BillingBase 缺省空（回落内置默认）。
 	c.Global.Enabled = true
@@ -506,6 +522,7 @@ func applyEnv(c *Config) {
 			c.Upstream.PassthroughIP = b
 		}
 	}
+	applyGzipBodyEnv(c)
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Features.SanitizeBlacklistFingerprints = b
@@ -586,6 +603,21 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_LOGGING_REQUEST_CLIENT_INFO"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Logging.RequestClientInfo = b
+		}
+	}
+}
+
+// applyGzipBodyEnv 只把 WB2A_GZIP_BODY 重新应用到 c（非法值静默保留原值）。
+// applyEnv 的启动路径与面板 saveConfig 共用：parseConfigInto 刻意不碰 env，
+// 面板保存若只用文件/默认值回填 newCfg.Upstream.GzipBody，会静默覆盖启动时
+// 用 WB2A_GZIP_BODY=false 关掉的开关（下一次出站又变成压缩）。
+func applyGzipBodyEnv(c *Config) {
+	if c == nil {
+		return
+	}
+	if v := os.Getenv("WB2A_GZIP_BODY"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upstream.GzipBody = b
 		}
 	}
 }

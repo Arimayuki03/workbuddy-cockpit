@@ -30,8 +30,8 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"sync"
 	"strings"
+	"sync"
 	"time"
 
 	"workbuddy2api/internal/scheduler"
@@ -258,7 +258,7 @@ func (h *Handler) adminTaskPatch(w http.ResponseWriter, r *http.Request) {
 		// Hours 触发小时表（0-23，可多个）：存在即走"改小时"分支。用指针区分
 		//「未携带」与「携带空数组」——空数组语义=禁用（历史决定，config.Schedule），
 		// 端点侧直接拒绝并指向 *_enabled 开关。
-		Hours   *[]int `json:"hours"`
+		Hours *[]int `json:"hours"`
 	}
 	if !decodeAdminJSON(w, r, &req) {
 		return
@@ -1029,6 +1029,27 @@ func (h *Handler) adminAccountRevive(w http.ResponseWriter, r *http.Request) {
 		UID: uid, ManualDisabled: stopped, ManualReason: reason,
 		Disabled: h.accountAutoDisabled(uid), Changed: changed,
 	})
+}
+
+// adminModelAvailable 接受管理端的成功探测，只解除该账号该模型的 11102 负缓存
+// （manager 0039）。小请求成功不能证明真实 6004 token 配额已恢复，因此不清除
+// 6004 或账号级状态——只清 reason 以 "11102" 开头的条目（Pool.BlockModelClear）。
+func (h *Handler) adminModelAvailable(w http.ResponseWriter, r *http.Request) {
+	uid, ok := adminUID(w, r)
+	if !ok {
+		return
+	}
+	if _, _, found := h.cfg.Pool.ManualDisabledState(uid); !found {
+		writeOpenAIError(w, http.StatusNotFound, "not_found", "account not found")
+		return
+	}
+	model := strings.TrimSpace(r.PathValue("model"))
+	if model == "" || len(model) > 120 {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "model is required")
+		return
+	}
+	h.cfg.Pool.BlockModelClear(uid, model)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model": model})
 }
 
 // accountAutoDisabled 读某账号当前的自动禁用位（供响应回显）。

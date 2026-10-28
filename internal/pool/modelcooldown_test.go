@@ -741,7 +741,7 @@ func TestBlockModelBackoffCooledAndExempt(t *testing.T) {
 	}
 }
 
-// TestBlockModelBackoffExponentialTtl 11102 退避：首次 6h、二次 12h、封顶 24h。
+// TestBlockModelBackoffExponentialTtl 11102 退避：首次 2m、二次 4m、封顶 10m。
 func TestBlockModelBackoffExponentialTtl(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
@@ -751,7 +751,7 @@ func TestBlockModelBackoffExponentialTtl(t *testing.T) {
 	first := time.Until(p.byUID["u1"].modelCooldowns["m"].Until)
 	p.mu.RUnlock()
 	if d := first - modelBlockBaseTTL; d > time.Second || d < -time.Second {
-		t.Errorf("首次 TTL=%v want ~6h", first)
+		t.Errorf("首次 TTL=%v want ~%v", first, modelBlockBaseTTL)
 	}
 
 	p.BlockModelBackoff("u1", "m", "11102 model not available")
@@ -763,11 +763,11 @@ func TestBlockModelBackoffExponentialTtl(t *testing.T) {
 	if hits != 2 {
 		t.Errorf("hits=%d want 2", hits)
 	}
-	if d := second - 12*time.Hour; d > time.Second || d < -time.Second {
-		t.Errorf("二次 TTL=%v want ~12h", second)
+	if want := 2 * modelBlockBaseTTL; second-want > time.Second || second-want < -time.Second {
+		t.Errorf("二次 TTL=%v want ~%v", second, want)
 	}
 
-	// 连打到远超封顶：TTL 封顶 24h。
+	// 连打到远超封顶：TTL 封顶 modelBlockMaxTTL。
 	for i := 0; i < 10; i++ {
 		p.BlockModelBackoff("u1", "m", "11102 model not available")
 	}
@@ -775,7 +775,7 @@ func TestBlockModelBackoffExponentialTtl(t *testing.T) {
 	capped := time.Until(p.byUID["u1"].modelCooldowns["m"].Until)
 	p.mu.RUnlock()
 	if d := capped - modelBlockMaxTTL; d > time.Second || d < -time.Second {
-		t.Errorf("封顶 TTL=%v want ~24h", capped)
+		t.Errorf("封顶 TTL=%v want ~%v", capped, modelBlockMaxTTL)
 	}
 }
 
@@ -831,5 +831,122 @@ func TestBlockModelBackoffPickSkips(t *testing.T) {
 	// 其他模型 u1 恢复可选（豁免保持）。
 	if got := p.PickExcludingForRealm(nil, "glm-5.3", ""); got == nil || got.UID != "u1" {
 		t.Fatalf("其他模型应豁免 u1, got %+v", got)
+	}
+}
+
+// TestBlockModelBackoffHitsSurvivePrune 11102 条目 Until 到期后，pruneExpiredModelCooldowns
+// 保留 modelBlockMaxTTL 宽限期以承接 Hits：低 QPS 下 2m 到期与下一次命中之间可能隔很久，
+// 若过期即删，Hits 永远从 1 重来，指数退避/10m 封顶在真实流量下不可达。
+// 同时锚定：过期后 healthyForModel 按「Until 已过 = 可用」放行（半开探测），
+// status/ModelBlockedNow 只统计 active 条目。
+func TestBlockModelBackoffHitsSurvivePrune(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.BlockModelBackoff("u1", "m", "11102 model not available")
+
+	// 模拟首次 2m 到期：把 Until 拨到过去，再走 pick 写锁路径的惰性清理。
+	p.mu.Lock()
+	e := p.byUID["u1"]
+	mc := e.modelCooldowns["m"]
+	mc.Until = time.Now().Add(-time.Second)
+	e.modelCooldowns["m"] = mc
+	e.pruneExpiredModelCooldowns(time.Now())
+	_, kept := e.modelCooldowns["m"]
+	p.mu.Unlock()
+	if !kept {
+		t.Fatal("11102 过期条目应在 modelBlockMaxTTL 宽限期内保留（Hits 承载体）")
+	}
+	if !e.healthyForModel(time.Now(), "m") {
+		t.Fatal("Until 已过期的 11102 条目不应再拦该模型（半开探测放行）")
+	}
+	if st, _ := p.Status("u1"); len(st.RateLimitedModels) != 0 {
+		t.Errorf("过期条目不应出现在 status 台账: %+v", st.RateLimitedModels)
+	}
+	if blocked, _, _ := p.ModelBlockedNow("cn", "m"); blocked {
+		t.Error("过期条目不应让 ModelBlockedNow 判 blocked")
+	}
+
+	// 再次命中：Hits 续到 2，TTL = 2×base（而不是从 hits=1 的 2m 重来）。
+	p.BlockModelBackoff("u1", "m", "11102 model not available")
+	p.mu.RLock()
+	mc = p.byUID["u1"].modelCooldowns["m"]
+	p.mu.RUnlock()
+	if mc.Hits != 2 {
+		t.Errorf("Hits=%d want 2（过期条目保留后第二次命中应继续累计）", mc.Hits)
+	}
+	want := 2 * modelBlockBaseTTL
+	if d := time.Until(mc.Until); d-want > time.Second || d-want < -time.Second {
+		t.Errorf("第二次命中 TTL=%v want ~%v", time.Until(mc.Until), want)
+	}
+}
+
+// TestPruneExpiredModelCooldownsGrace 过期清理的两类口径：6004 过期即删；
+// 11102 在 modelBlockMaxTTL 宽限期内保留、超出宽限期才删；零值 Until 恒删。
+func TestPruneExpiredModelCooldownsGrace(t *testing.T) {
+	now := time.Now()
+	e := &entry{modelCooldowns: map[string]modelCooldown{
+		"active11102":  {Until: now.Add(time.Minute), Reason: "11102 model not available", Hits: 1},
+		"expired11102": {Until: now.Add(-time.Minute), Reason: "11102 model not available", Hits: 2},
+		"stale11102":   {Until: now.Add(-modelBlockMaxTTL - time.Minute), Reason: "11102 model not available", Hits: 5},
+		"expired6004":  {Until: now.Add(-time.Minute), Reason: "6004 model rate limit"},
+		"zero":         {Reason: "11102 model not available"},
+	}}
+	e.pruneExpiredModelCooldowns(now)
+
+	want := map[string]bool{
+		"active11102":  true,
+		"expired11102": true, // 宽限期内保留 Hits
+		"stale11102":   false,
+		"expired6004":  false,
+		"zero":         false,
+	}
+	for m, keep := range want {
+		_, ok := e.modelCooldowns[m]
+		if ok != keep {
+			t.Errorf("条目 %q 保留=%v want %v（prune 后 map=%+v）", m, ok, keep, e.modelCooldowns)
+		}
+	}
+}
+
+// TestModelCooldownsRestoreClampsLegacy11102TTL 升级兼容：旧 state.json 里的 11102
+// 条目可能还是 6h/24h。恢复时把 Until 钳到 now+modelBlockMaxTTL（6004 不动），
+// 避免重启把 2m/10m 新参数的自愈速度打回小时级。
+// 已知边界：stateModelCooldown 无 Hits 字段，恢复后 Hits=0（退避从 2m 基数重来）。
+func TestModelCooldownsRestoreClampsLegacy11102TTL(t *testing.T) {
+	dir := t.TempDir()
+	fp := dir + "/state.json"
+	now := time.Now()
+	legacyUntil := now.Add(6 * time.Hour).UTC().Format(time.RFC3339Nano)
+	sixUntil := now.Add(5 * time.Hour).UTC().Format(time.RFC3339Nano)
+	raw := `{"accounts":{"u1":{"model_cooldowns":{` +
+		`"blocked":{"until":"` + legacyUntil + `","reason":"11102 model not available"},` +
+		`"limited":{"until":"` + sixUntil + `","reset_at":"` + sixUntil + `","reason":"6004 model rate limit"}` +
+		`}}}}`
+	if err := os.WriteFile(fp, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.mu.RLock()
+	mcs := p.byUID["u1"].modelCooldowns
+	blocked, blockedOK := mcs["blocked"]
+	limited, limitedOK := mcs["limited"]
+	p.mu.RUnlock()
+
+	if !blockedOK {
+		t.Fatal("旧 11102 条目未被恢复")
+	}
+	if d := time.Until(blocked.Until); d-modelBlockMaxTTL > time.Second || d-modelBlockMaxTTL < -time.Second {
+		t.Errorf("旧 11102 Until 应钳到 ~%v 后, 实际剩余 %v", modelBlockMaxTTL, d)
+	}
+	if blocked.Hits != 0 {
+		t.Errorf("Hits=%d want 0（stateModelCooldown 无 Hits 字段，恢复后从 0 开始）", blocked.Hits)
+	}
+	if !limitedOK {
+		t.Fatal("6004 条目未被恢复")
+	}
+	// 6004 不参与钳制：保留上游重置墙钟（写入侧已按 soft_rate_max 截断）。
+	if d := limited.Until.Sub(now.Add(5 * time.Hour)); d < -time.Second || d > time.Second {
+		t.Errorf("6004 Until 不应被钳制, got %v want ~%v", limited.Until, now.Add(5*time.Hour))
 	}
 }

@@ -725,6 +725,20 @@ func (h *Handler) runSearch(ctx context.Context, query string, maxResults int, r
 		var ue *upstream.Error
 		if errors.As(serr, &ue) {
 			lastStatus = ue.Status
+			// 渠道校验（11-128）是请求/渠道级拒绝，不是账号故障：同一搜索换
+			// 任何账号都会被同样的渠道指纹检查打回。**不罚账号、不轮转**——
+			// 直接 400 透传上游原文终止（review 修复：此前落 applyErrorPolicy
+			// 按 ErrAccountFault 处理并继续换号，既浪费健康号配额又给账号记错）。
+			// ChannelCheck 来自完整 body 的稳定标记（Msg 已截断到 200 字符），
+			// 两个判据都要看。搜索请求没有 system/messages，不存在 chat 侧的
+			// system→user 抢救路径。
+			if ue.Kind == upstream.ErrAccountFault && (ue.ChannelCheck || upstream.IsChannelCheck(ue.Msg)) {
+				return nil, &searchFailure{
+					status: http.StatusBadRequest,
+					msg:    ue.Msg,
+					hint:   h.hintOf(ue.Kind, ue.Msg, "", false, ue),
+				}
+			}
 			// 2xx + 业务 code!=0：先区分账号级 vs 请求级。
 			//   - 14018 余额耗尽 / 12153 session dead / 429 限流 / 14017 账号故障
 			//     即使 HTTP 200 也是账号级语义，必须走 applyErrorPolicy 冷却/禁用；

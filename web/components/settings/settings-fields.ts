@@ -468,33 +468,29 @@ export const FEATURES_FIELDS: Field[] = [
  * 渠道校验守卫（features.channel_check_guard，channel_guard.go）：上游 11-128
  * 「没通过渠道校验」的抓包留证 + 本地拦截。全部字段保存即热生效（saveConfig
  * 重建守卫整体换入，无需重启）。
+ *
+ * fail_fast / channel_check_cooldown 已废弃（11-128 改为请求级，不冷却/不轮转），
+ * 不再渲染；旧配置里的值会被后端忽略，保留仅为兼容。
  */
 export const CHANNEL_GUARD_FIELDS: Field[] = [
   {
     key: 'enabled',
     kind: 'bool',
     label: '启用渠道校验守卫',
-    desc: '上游以 11-128 拒绝请求时：抓取请求体留证，并把同 body / 同模板的后续请求在网关本地直接拒绝，不再消耗账号',
+    desc: '上游以强渠道文案拒绝、且 system→user 抢救仍失败时：抓取原始出站请求体留证，并把同 body / 同模板的后续请求在网关本地直接拒绝，不再消耗账号。裸 11-128 / unapproved channel 走内容拦截路径，不在此抓包',
     def: true,
   },
   {
     key: 'mode',
     kind: 'select',
     label: '拦截模式',
-    desc: 'block = 命中即本地 400；warn = 只记日志照常出站（观察模式）；off = 等价关闭',
+    desc: 'block = 本地预检命中即 400；warn = 本地只记日志照常出站（观察模式）；off = 关闭本地守卫。上游 11-128 始终按请求级处理（一次 system→user 抢救后仍拒即 400），不冷却/不换号/不禁用，不受本模式影响',
     options: [
       {value: 'block', label: 'block（本地 400，默认）'},
       {value: 'warn', label: 'warn（只记日志）'},
       {value: 'off', label: 'off（关闭）'},
     ],
     def: 'block',
-  },
-  {
-    key: 'fail_fast',
-    kind: 'bool',
-    label: '首个号被拒即终止',
-    desc: '开启时一次 11-128 就停止换号并回 400，最大限度保护账号池；关闭则保留「换号可能成功」的旧行为',
-    def: false,
   },
   {
     key: 'block_ttl',
@@ -511,14 +507,6 @@ export const CHANNEL_GUARD_FIELDS: Field[] = [
     desc: '同一模板（system/developer + tools 定义）被拒后，多久内同模板的新请求也本地拒绝。窗口过长可能误伤偶发成功的模板，默认与上项同量级',
     def: '10m',
     noZero: true,
-  },
-  {
-    key: 'channel_check_cooldown',
-    kind: 'duration',
-    label: '渠道校验账号冷却',
-    desc: '命中 11-128 时该账号的软冷却时长（渠道校验是请求问题不是账号故障，默认远小于限流冷却）。填 0 = 沿用「限流与冷却」分组的 soft_rate',
-    offWhenZero: true,
-    def: '60s',
   },
   {
     key: 'scan_messages',

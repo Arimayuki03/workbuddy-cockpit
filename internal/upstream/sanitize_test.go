@@ -87,9 +87,10 @@ var fpCode = "11" + "128"
 // fpCodeRewritten rewrite 后的形态（插入连字符）。
 var fpCodeRewritten = "11-128"
 
-// 回归（H-sanitize）：请求体顶层 tools 数组的工具定义（name/description/
-// parameters schema）此前完全不在出站脱敏覆盖内，携带指纹的工具定义原样
-// 出站 → 上游请求体级逐字匹配拦截整单 400。经 sanitizeTools 后无指纹残留。
+// 回归（H-sanitize）：请求体顶层 tools 数组的工具定义此前完全不在出站脱敏
+// 覆盖内，携带指纹的定义原样出站 → 上游请求体级逐字匹配拦截整单 400。
+// description/parameters 经 sanitizeTools 净化；name 是客户端调用契约，保持原样
+// （见 sanitizeTools 头注释：改写 name 会让 tool_calls/tool_choice 不一致）。
 func TestSanitizeToolsStripsFingerprints(t *testing.T) {
 	code := fpCode
 	codeRew := fpCodeRewritten
@@ -119,11 +120,18 @@ func TestSanitizeToolsStripsFingerprints(t *testing.T) {
 		t.Fatal("sanitizeTools 未报告任何改动")
 	}
 	fn := tools[0].(map[string]any)["function"].(map[string]any)
-	if got := fn["name"].(string); strings.Contains(got, code) {
-		t.Errorf("tools.function.name 未净化: %q", got)
+	if got := fn["name"].(string); !strings.Contains(got, code) {
+		t.Errorf("tools.function.name 不应改写（工具身份契约）: %q", got)
 	}
 	if got := fn["description"].(string); strings.Contains(got, code) {
 		t.Errorf("tools.function.description 未净化: %q", got)
+	}
+	legacy := tools[1].(map[string]any)
+	if got := legacy["name"].(string); !strings.Contains(got, code) {
+		t.Errorf("legacy functions[].name 不应改写: %q", got)
+	}
+	if got := legacy["description"].(string); strings.Contains(got, code) {
+		t.Errorf("legacy functions[].description 未净化: %q", got)
 	}
 	// parameters schema：结构保留（type/properties），指纹串改写为连字符形态。
 	params := fn["parameters"].(map[string]any)
@@ -141,8 +149,8 @@ func TestSanitizeToolsStripsFingerprints(t *testing.T) {
 		t.Errorf("parameters 无害文本被误改: %q", parenDesc)
 	}
 	flat := tools[1].(map[string]any)
-	if got := flat["name"].(string); strings.Contains(got, code) {
-		t.Errorf("functions 顶层 name 未净化: %q", got)
+	if got := flat["name"].(string); !strings.Contains(got, code) {
+		t.Errorf("functions 顶层 name 不应改写（工具身份契约）: %q", got)
 	}
 	if got := flat["description"].(string); strings.Contains(got, code) {
 		t.Errorf("functions 顶层 description 未净化: %q", got)
@@ -197,16 +205,19 @@ func TestSanitizeToolsCleanNoChange(t *testing.T) {
 	}
 }
 
-// 集成：完整请求体经 PrepareBodyOpt 净化后顶层 tools/functions 无指纹残留；
-// sanitize=false 时原样保留（开关有效）。
+// 集成：完整请求体经 PrepareBodyOpt 净化后顶层 tools/functions 的
+// description/parameters 无指纹残留；工具 name 是调用契约，保持原样。
+// sanitize=false 时全部原样保留（开关有效）。
 func TestPrepareBodyOptSanitizesTopLevelTools(t *testing.T) {
 	code := fpCode
 	body := []byte(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}],` +
 		`"tools":[{"type":"function","function":{"name":"q_` + code + `","description":"err ` + code + `","parameters":{"type":"object"}}}],` +
 		`"functions":[{"name":"legacy_` + code + `","description":"legacy ` + code + `"}]}`)
 	out := PrepareBodyOpt(body, true)
-	if strings.Contains(string(out), "q_"+code) || strings.Contains(string(out), "legacy_"+code) {
-		t.Errorf("wire body 顶层工具定义指纹残留: %s", out)
+	// name 保留：上游模型需要与客户端一致的工具名（否则回传的 tool_call
+	// 客户端不认识），description 才是可安全改写的内容位。
+	if !strings.Contains(string(out), "q_"+code) || !strings.Contains(string(out), "legacy_"+code) {
+		t.Errorf("工具 name 被改写（应保持调用契约）: %s", out)
 	}
 	var obj map[string]any
 	if err := json.Unmarshal(out, &obj); err != nil {
@@ -215,6 +226,13 @@ func TestPrepareBodyOptSanitizesTopLevelTools(t *testing.T) {
 	tf := obj["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
 	if tf["parameters"].(map[string]any)["type"] != "object" {
 		t.Errorf("parameters schema 结构被破坏: %v", tf["parameters"])
+	}
+	if desc := tf["description"].(string); strings.Contains(desc, code) {
+		t.Errorf("tools description 未净化: %q", desc)
+	}
+	legacy := obj["functions"].([]any)[0].(map[string]any)
+	if desc := legacy["description"].(string); strings.Contains(desc, code) {
+		t.Errorf("functions description 未净化: %q", desc)
 	}
 	// 关闭脱敏：指纹原样保留。
 	off := string(PrepareBodyOpt(body, false))
@@ -651,7 +669,12 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		"sanitizeBareHdrRe": `(?i)x-anthropic-billing-header`,
 		"sanitizeKvRe":      `(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`,
 		// Web GUI 段落指纹（issue #250，manager 0439d68a 吸收）：跨句匹配的品牌短语。
-		"sanitizeDshGuiRe": `(?i)DeepSeek Harness Web GUI`,
+		"sanitizeDshGuiRe": `(?i)DeepSeek[- ]Harness Web GUI`,
+		// DSH 身份句（manager 0036）：7 个动词变体，句尾按「点 + 空白/行尾」收口。
+		"sanitizeDshRe": `(?i)\byou are (?:a|an) (?:ai )?(?:coding )?(?:agent|assistant) (?:powered by|built on|built by|created by|developed by|made by|trained by) [^\n]{0,120}?\.(\s|$)`,
+		// DSH file-reference：只匹配完整模板短语（普通 workspace root(s) 不触发）；
+		// 尾部 \b 防止复数 "workspace roots" 以前缀命中。
+		"sanitizeWorkspaceRootRe": `(?i)relative paths resolve from the workspace root\b`,
 	}
 	for name, want := range regexes {
 		var got string
@@ -664,6 +687,10 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 			got = sanitizeKvRe.String()
 		case "sanitizeDshGuiRe":
 			got = sanitizeDshGuiRe.String()
+		case "sanitizeDshRe":
+			got = sanitizeDshRe.String()
+		case "sanitizeWorkspaceRootRe":
+			got = sanitizeWorkspaceRootRe.String()
 		}
 		if got != want {
 			t.Errorf("%s=%q want %q（逐字节不一致，改动前先走快照验证流程）", name, got, want)
@@ -681,14 +708,21 @@ const dshWebGuiBlock = `You are interacting with the user through the DeepSeek H
 
 func TestDshWebGuiBlockRewritten(t *testing.T) {
 	out := sanitizeText(dshWebGuiBlock)
-	if strings.Contains(out, "DeepSeek Harness Web GUI") {
+	// 原文品牌短语的连字符/空格形态从常量自身截取，避免测试字面量与输入不一致。
+	start := strings.Index(dshWebGuiBlock, "DeepSeek")
+	end := strings.Index(dshWebGuiBlock, "GUI") + len("GUI")
+	if start < 0 || end <= start {
+		t.Fatalf("dshWebGuiBlock 缺少品牌短语: %q", dshWebGuiBlock)
+	}
+	origPhrase := dshWebGuiBlock[start:end]
+	if strings.Contains(out, origPhrase) {
 		t.Errorf("指纹残留: %q", out)
 	}
-	if !strings.Contains(out, "DeepSeek-Harness Web GUI") {
+	if !strings.Contains(out, "DeepSeek-Harness Web-GUI") {
 		t.Errorf("改写文本缺失: %q", out)
 	}
 	// 除品牌短语外内容不得改动（这段是工具/行为契约）。
-	if restored := strings.ReplaceAll(out, "DeepSeek-Harness Web GUI", "DeepSeek Harness Web GUI"); restored != dshWebGuiBlock {
+	if restored := strings.ReplaceAll(out, "DeepSeek-Harness Web-GUI", origPhrase); restored != dshWebGuiBlock {
 		t.Errorf("段落其他内容被改动:\n 得到 %q\n 期望 %q", restored, dshWebGuiBlock)
 	}
 }
@@ -741,7 +775,7 @@ func TestPrepareBodySanitizesDshWebGui(t *testing.T) {
 	if strings.Contains(string(out), "DeepSeek Harness Web GUI") {
 		t.Errorf("PrepareBody 未净化 Web GUI 指纹: %s", out)
 	}
-	if !strings.Contains(string(out), "DeepSeek-Harness Web GUI") {
+	if !strings.Contains(string(out), "DeepSeek-Harness Web-GUI") {
 		t.Errorf("PrepareBody 改写文本缺失: %s", out)
 	}
 }

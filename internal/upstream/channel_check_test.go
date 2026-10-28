@@ -74,6 +74,21 @@ func TestClassifyChannelCheckIsAccountFault(t *testing.T) {
 	}
 }
 
+// 弱 11-128 封套（只有业务码 + request illegal，没有强渠道文案）不能落到
+// accountFaultRule 被硬禁用；归请求级 ErrContentBlocked，走内容拦截/降级。
+func TestClassifyWeakChannelCodeIsRequestLevel(t *testing.T) {
+	for _, code := range []string{
+		channelCheckCodeDashed,
+		channelCheckCodePlain,
+		`"` + channelCheckCodeDashed + `"`,
+	} {
+		body := `{"code":` + code + `,"msg":"request illegal","requestId":"r1"}`
+		if got := Classify(http.StatusBadRequest, body); got != ErrContentBlocked {
+			t.Errorf("Classify(weak 11-128 code=%s)=%v want ErrContentBlocked", code, got)
+		}
+	}
+}
+
 func TestClassifyEmptyMessage(t *testing.T) {
 	bodies := []string{
 		`{"code":11151,"msg":"a message has empty content, please check the conversation history and retry","requestId":"r1"}`,

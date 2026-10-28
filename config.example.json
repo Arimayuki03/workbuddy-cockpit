@@ -69,10 +69,13 @@
     "device_token": "",
     "device_token_file": "",
     "client_name": "WorkBuddy",
-    "passthrough_ip": false
+    "passthrough_ip": false,
+    "gzip_body": true
   },
   "features": {
     "sanitize_blacklist_fingerprints": true,
+    "sanitize_extra_features": [],
+    "sanitize_extra_rewrites": [],
     "channel_check_guard": {
       "enabled": true,
       "mode": "block",
@@ -80,13 +83,13 @@
       "capture_max_mb": 256,
       "block_ttl": "10m",
       "template_ttl": "10m",
-      "channel_check_cooldown": "60s",
       "scan_messages": true,
-      "block_patterns": [],
-      "fail_fast": false
+      "block_patterns": []
     }
   },
-  "_note_channel_check_guard": "channel_check_guard：上游渠道校验（HTTP 400 code=11-128，「没通过渠道校验 / Illegal API invocation from an unapproved channel」）守卫。enabled=true 时：①命中 11-128 把当前出站 body 原样落盘到 capture_dir（每 body 去重、capture_max_mb 总量封顶，含 .meta.json：模型/账号/上游原文/system 预览）；②按完整 body 哈希与模板哈希（system/developer + tools）做 block_ttl/template_ttl 负缓存，窗口内同 body/同模板在网关本地直接 400 channel_check_blocked，不再选号、不再冷却账号、不再回 503；③block_patterns 为预置短语（大小写不敏感子串，scan_messages=true 时扫全部消息），命中即本地拦截——默认空，先抓包看清指纹再显式填。mode=warn 只记日志不拦；mode=off 等价关闭。channel_check_cooldown：渠道校验命中时账号软冷却时长（默认 60s，0=回落 cooldown.soft_rate 旧口径）。fail_fast=true 时首个号被拒即终止轮转回 400（默认 false 保留换号可能成功的旧语义）。改完需重启容器生效。",
+  "_note_upstream_gzip": "gzip_body：chat 请求体超过 64KB 时 gzip 压缩后发上游（默认 true）。窄出口带宽下可显著降低大上下文请求的首字节延迟；上游不接受压缩时会自动去压缩重发一次。排障可显式配 false。",
+  "_note_sanitize_extra": "sanitize_extra_features / sanitize_extra_rewrites：运行期追加的上游黑名单词表（manager 0036）。上游逐词扩充指纹（GUI 句 → workspace root → …）时改这里并重启即可，不必重编译；features 让预检命中，rewrites 做实际逐字替换，格式 [[\"原串\",\"替换串\"], …]（大小写不敏感字面量匹配，replacement 不解释 $；rewrites 源串会自动纳入预检，空源串/空 replacement 会被过滤）。空表 = 只用内置静态表。",
+  "_note_channel_check_guard": "channel_check_guard：上游渠道校验（HTTP 400 code=11-128，「没通过渠道校验 / Illegal API invocation from an unapproved channel」）守卫。enabled=true 时：①命中 11-128 把当前出站 body 原样落盘到 capture_dir（每 body 去重、capture_max_mb 总量封顶，含 .meta.json：模型/账号/上游原文/system 预览）；②按完整 body 哈希与模板哈希（system/developer + tools）做 block_ttl/template_ttl 负缓存，窗口内同 body/同模板在网关本地直接 400 channel_check_blocked，不再选号、不再冷却账号、不再回 503；③block_patterns 为预置短语（大小写不敏感子串，scan_messages=true 时扫全部消息），命中即本地拦截——默认空，先抓包看清指纹再显式填。mode=warn 只记日志不拦；mode=off 等价关闭。channel_check_cooldown / fail_fast 已废弃（保留字段仅为兼容旧配置，取值被忽略）。2026-10-28 起 11-128 按请求级处理：首次被拒先做一次 system→user 内容通道抢救，仍被拒即透传上游原文回 400，不冷却/不禁用/不换号。改完需重启容器生效。",
   "reasoning_as_content": false,
   "_note_reasoning_as_content": "reasoning_as_content：思考通道兜底（默认 false，需重启生效）。仅当整轮既无正文也无工具调用时，把 reasoning_content 原文同时作为 content 下发，服务只看 content 的客户端；同时渲染两个字段的客户端保持 false 以避免重复显示。JSON 布尔或 WB2A_REASONING_AS_CONTENT=1/0 覆盖；面板保存只落盘并提示重启（main 启动期才应用），不影响 OpenAI/Anthropic/Responses 既有协议的正常帧序",
   "prompt": {

@@ -184,7 +184,11 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 					// 走 Classify），Msg 装 payload 原文（message 是上游原文的透传原则
 					// 不变），由 handler 既有错误分支（502 upstream_parse）透出。
 					if _, hasErr := chunk["error"]; hasErr {
-						return nil, &Error{Kind: FrameKind(payload), Status: http.StatusOK, Msg: payload}
+						return nil, &Error{
+							Kind: FrameKind(payload), Status: http.StatusOK, Msg: payload,
+							ChannelCheck:     IsChannelCheck(payload),
+							WeakChannelCheck: IsWeakChannelCode(payload),
+						}
 					}
 					// 有效事件计数（收紧口径）：仅携带实质内容的事件计入
 					// （frameHasSubstantiveContent）。纯 id/空壳帧不计，全空壳帧流落入
