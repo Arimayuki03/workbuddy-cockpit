@@ -42,11 +42,11 @@ func (h staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 已知 API 前缀显式 404：静态 handler 兜在根路径，Admin.Enabled=false /
-	// Panel=nil 的部署里 /admin/*、/api/*、未注册的 /v1/*（如方法不匹配）不会
+	// Panel=nil 的部署里 /admin/*、/api/*、未注册的 /v1/*、/v2/* 不会
 	// 有更具体的 mux 条目命中——若回落 not-found.html 会伪装成 200 HTML 页，
 	// 掩盖 API 404/405 语义。这里显式 404，保证 API 路径的错误形态可被客户端识别。
-	if strings.HasPrefix(r.URL.Path, "/v1/") || strings.HasPrefix(r.URL.Path, "/admin/") ||
-		strings.HasPrefix(r.URL.Path, "/api/") {
+	if strings.HasPrefix(r.URL.Path, "/v1/") || strings.HasPrefix(r.URL.Path, "/v2/") ||
+		strings.HasPrefix(r.URL.Path, "/admin/") || strings.HasPrefix(r.URL.Path, "/api/") {
 		http.NotFound(w, r)
 		return
 	}

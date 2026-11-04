@@ -48,6 +48,15 @@ type Config struct {
 	RedisMode    string
 	SoftCooldown time.Duration // 429/限流文案软冷却基数，默认 600s（连续触发指数退避，封顶 soft_rate_max）
 	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
+	// LargeRequestBytes 大上下文阈值（默认 2 MiB）；<0 关闭整条大请求策略。
+	LargeRequestBytes int
+	// LargeRequestBudget 滑动窗口内单账号可承接的大请求条数（默认 6）；
+	// <0 关闭预算并退回 legacy 逐请求轮换。
+	LargeRequestBudget int
+	// LargeRequestBudgetWindow 大请求预算滑动窗口（默认 120s）。
+	LargeRequestBudgetWindow time.Duration
+	// LargeRequestCooldown legacy 逐请求轮换窗口；默认 0 = 关闭。
+	LargeRequestCooldown time.Duration
 
 	// PromptMode "passthrough"（默认，透传客户端原始 system）/ "custom"（网关替换）。
 	PromptMode string
@@ -174,6 +183,65 @@ func (h *Handler) softCooldown() time.Duration {
 	return h.cfg.SoftCooldown
 }
 
+// largeExclusions 返回当前应让出下一条大请求的账号集合，并顺手清掉窗口外记录。
+// 预算模式只在窗口内条数达到 LargeRequestBudget 时排除；legacy 模式窗口内用过
+// 一次即排除。阈值 <0 时整条策略关闭。
+func (h *Handler) largeExclusions(now time.Time) map[string]bool {
+	if h.cfg.LargeRequestBytes < 0 {
+		return nil
+	}
+	budgetMode := h.cfg.LargeRequestBudget > 0 && h.cfg.LargeRequestBudgetWindow > 0
+	rotateMode := !budgetMode && h.cfg.LargeRequestCooldown > 0
+	if !budgetMode && !rotateMode {
+		return nil
+	}
+	window := h.cfg.LargeRequestBudgetWindow
+	if !budgetMode {
+		window = h.cfg.LargeRequestCooldown
+	}
+	h.largeMu.Lock()
+	defer h.largeMu.Unlock()
+	if len(h.largeUsed) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(h.largeUsed))
+	for uid, stamps := range h.largeUsed {
+		kept := stamps[:0]
+		for _, at := range stamps {
+			if at.After(now.Add(-window)) {
+				kept = append(kept, at)
+			}
+		}
+		if len(kept) == 0 {
+			delete(h.largeUsed, uid)
+			continue
+		}
+		h.largeUsed[uid] = kept
+		if budgetMode {
+			if len(kept) >= h.cfg.LargeRequestBudget {
+				out[uid] = true
+			}
+			continue
+		}
+		out[uid] = true
+	}
+	return out
+}
+
+// noteLargeUse 登记一次大请求选号。计数在选号成功后立即写入，后续同请求重试或
+// 不同会话都按滑动窗口共享预算。
+func (h *Handler) noteLargeUse(uid string, now time.Time) {
+	if uid == "" || h.cfg.LargeRequestBytes < 0 {
+		return
+	}
+	h.largeMu.Lock()
+	if h.largeUsed == nil {
+		h.largeUsed = make(map[string][]time.Time)
+	}
+	h.largeUsed[uid] = append(h.largeUsed[uid], now)
+	h.largeMu.Unlock()
+}
+
 // maxBodyBytes 当前生效的请求体上限（字节）。max_body_mb 不在面板热改范围
 // （面板热改范围注释见 panel_config.go），恒取静态值；防御性兜底非正值回落默认。
 func (h *Handler) maxBodyBytes() int64 {
@@ -208,6 +276,9 @@ type Handler struct {
 	// 既掩盖故障又放大上游压力）。请求内的 modelBlocksCleared 仍独立把关。
 	modelBlockHealMu sync.Mutex
 	modelBlockHealAt map[string]time.Time
+	// largeUsed 最近承接过大上下文请求的账号时刻（uid → 滑动窗口内时间戳）。
+	largeMu   sync.Mutex
+	largeUsed map[string][]time.Time
 }
 
 // NewHandler 构建 handler。
@@ -217,6 +288,15 @@ func NewHandler(cfg Config) *Handler {
 	}
 	if cfg.SoftCooldown <= 0 {
 		cfg.SoftCooldown = 600 * time.Second // 软限流基数（连续触发按指数退避放大）
+	}
+	if cfg.LargeRequestBytes == 0 {
+		cfg.LargeRequestBytes = 2 << 20
+	}
+	if cfg.LargeRequestBudget == 0 {
+		cfg.LargeRequestBudget = 6
+	}
+	if cfg.LargeRequestBudgetWindow <= 0 {
+		cfg.LargeRequestBudgetWindow = 120 * time.Second
 	}
 	if cfg.RefreshSkew <= 0 {
 		cfg.RefreshSkew = 10 * time.Minute
@@ -231,6 +311,7 @@ func NewHandler(cfg Config) *Handler {
 		cfg: cfg, mux: http.NewServeMux(),
 		trustedCIDRs: cfg.TrustedProxyCIDRs, trustedHops: cfg.TrustedProxyHops,
 		modelBlockHealAt: make(map[string]time.Time),
+		largeUsed:        make(map[string][]time.Time),
 	}
 	h.channelGuard.Store(NewChannelGuard(cfg.ChannelGuard))
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
@@ -301,6 +382,12 @@ func NewIPRules(filePath string, spec IPRulesSpec) (*IPBlockRules, []string) {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if gatewayAPIPath(r.URL.Path) {
+		ew := &gatewayErrorWriter{w: w, path: r.URL.Path}
+		h.mux.ServeHTTP(ew, r)
+		ew.finish()
+		return
+	}
 	h.mux.ServeHTTP(w, r)
 }
 
@@ -515,9 +602,7 @@ func fmtCreditsPrefix(raw string) string {
 //
 // 它们不看我们自己的 supports_images / reasoning_supported_efforts，只看
 // `modalities.input` 里有没有 "image"、以及 `supported_reasoning_levels` 里每项的
-// `effort`。我们的字段是既有约定（面板与别的客户端在用），所以这里**只增不改**：
-// 两边同时输出，谁都能读。模型 ID 上的 cn:/global: 前缀保持不变 —— 它区分版本，
-// 不能为了目录兜底而抹掉。
+// `effort`。我们的字段是既有约定（面板与别的客户端在用），所以这里只增不改。
 func addListingCompat(entry map[string]any) map[string]any {
 	if entry["supports_images"] == true {
 		entry["modalities"] = map[string]any{"input": []string{"text", "image"}}
@@ -599,14 +684,15 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 }
 
 // modelList 动态获取模型列表并包装成 OpenAI 格式（含 context_length）。
-// CN 模型输出统一加 "cn:" 前缀（gateway 路由协议，与 resolveModel 对称）。
+// CN 模型输出裸名，与模型中心及 manager v2.11.9 口径一致；裸名仍按 resolveModel
+// 默认路由到 CN。显式 `cn:` 前缀继续兼容，global 模型仍带 `global:` 前缀。
 // 纯动态：动态拉取失败/无号 → 该域空列表，无静态兜底；
 // global.enabled=false（显式逃生门）时只列 CN（global 名单不出现）。
 func (h *Handler) modelList() []map[string]any {
 	out := make([]map[string]any, 0)
 	for _, mi := range h.fetchDynamicModels() {
 		entry := map[string]any{
-			"id":       "cn:" + mi.ID,
+			"id":       mi.ID,
 			"object":   "model",
 			"created":  1753600000,
 			"owned_by": "workbuddy",
@@ -1127,11 +1213,23 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 重试前就退出循环，客户端收到 503 no_healthy_account 而非约定的 400
 	// content_blocked（MaxRotate 是换号预算，不是同号降级重试预算）。豁免天然
 	// 一次性：degradedApplied 置位后本分支不再进入，不会钉死循环。
+	// 大请求策略（manager v2.11.10 / 0048）：默认保留粘性，只在单号达到滑动窗口
+	// 预算后迁移一次会话；legacy 逐请求轮换需预算 <0 且 cooldown>0 才启用。
+	largeReq := h.cfg.LargeRequestBytes >= 0 && len(body) >= h.cfg.LargeRequestBytes
+	budgetMode := largeReq && h.cfg.LargeRequestBudget > 0 && h.cfg.LargeRequestBudgetWindow > 0
+	rotateMode := largeReq && !budgetMode && h.cfg.LargeRequestCooldown > 0
+	if rotateMode {
+		unbindSticky()
+	}
+	var hotAccounts map[string]bool
+	if budgetMode || rotateMode {
+		hotAccounts = h.largeExclusions(time.Now())
+	}
 	modelBlocksCleared := false
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
-		if stickyUID != "" {
+		if stickyUID != "" && !(budgetMode && hotAccounts[stickyUID]) {
 			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, bareModel)
 			if acct == nil || (realm != "" && acct.Realm() != realm) {
 				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）或 realm 不符 → 解绑。
@@ -1145,7 +1243,28 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if acct == nil {
 			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
 			// （healthyForModel），realm 谓词过滤跨域账号。
-			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
+			pickTried := tried
+			if rotateMode || budgetMode {
+				if len(hotAccounts) > 0 {
+					pickTried = make(map[string]bool, len(tried)+len(hotAccounts))
+					for uid, used := range tried {
+						pickTried[uid] = used
+					}
+					for uid, hot := range hotAccounts {
+						if hot {
+							pickTried[uid] = true
+						}
+					}
+				}
+			}
+			acct = h.cfg.Pool.PickExcludingForRealm(pickTried, bareModel, realm)
+			if acct == nil && (rotateMode || budgetMode) {
+				// 全池都达到预算：退化为普通轮换，避免直接 503。
+				acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
+			}
+		}
+		if acct != nil && (rotateMode || budgetMode) {
+			h.noteLargeUse(acct.UID, time.Now())
 		}
 		if acct == nil {
 			// 自愈（manager 0034/0040，review 修复）：该 (realm, 模型) 被模型级冷却
@@ -1634,7 +1753,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				//（与 default 同语义），wire 200 已发出，仅流不完整。
 				h.cfg.Pool.NoteSuccess(acct.UID)
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-				if stickyKey != "" && h.cfg.Session != nil {
+				if stickyKey != "" && h.cfg.Session != nil && !rotateMode {
 					h.cfg.Session.Bind(stickyKey, acct.UID)
 				}
 			default:
@@ -1645,7 +1764,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
 				h.cfg.Pool.NoteSuccess(acct.UID)
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-				if stickyKey != "" && h.cfg.Session != nil {
+				if stickyKey != "" && h.cfg.Session != nil && !rotateMode {
 					h.cfg.Session.Bind(stickyKey, acct.UID)
 				}
 			}
@@ -1747,7 +1866,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 清 11102 负缓存/绑粘性（与流式 default 分支同语义，见上方延后绑定总注释）。
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-		if stickyKey != "" && h.cfg.Session != nil {
+		if stickyKey != "" && h.cfg.Session != nil && !rotateMode {
 			h.cfg.Session.Bind(stickyKey, acct.UID)
 		}
 		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
@@ -1801,6 +1920,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusTooManyRequests
 			code = "rate_limit_exceeded"
 			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
+		case upstream.ErrModelBlocked:
+			// 11102 是「该模型在后端不存在」的确定性答复，换多少账号都不会成功。
+			// 继续回 503 会诱导客户端反复重试，也把排障方向误导到账号池；改为 404，
+			// 上游原文与 gateway_hint 仍由下方统一透传。
+			status = http.StatusNotFound
+			code = "model_not_found"
+			msg = "model not found at upstream: " + bareModel
 		case upstream.ErrAccountFault:
 			// 渠道校验（11-128）落到末端：这是请求/渠道级拒绝，不是「账号池暂时
 			// 不可用」。回 400 + 上游原文（code/requestId 保留），客户端不应按 503
@@ -1842,6 +1968,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			msg = s
 			ueMsg = s
 		}
+	}
+	// 429 若上游文案/响应头给出了重置时间，换算出标准 Retry-After。与 model_blocked
+	// 的 503 退避分开：这里覆盖账号级限流与密钥配额类 429。
+	if status == http.StatusTooManyRequests && ue != nil {
+		retryAfterSec = retryAfterSecondsForGateway(ue.Msg, ue.RetryAfter, time.Now())
 	}
 	// 全池模型级阻塞（吸收自 workbuddy2api-panel commit 44d6e049）：轮转耗尽且该
 	// (realm, model) 的全部参与选号账号都被**该模型自身**的冷却（6004 / 11102）挡住
@@ -2050,6 +2181,10 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 			// 避免任何未来调用方把请求错误记成账号处罚。
 			return
 		}
+		if upstream.IsUpstreamRestriction(body) {
+			h.cfg.Pool.Disable(uid, "account banned by upstream (code 11140, unusual activity, appeal required; re-login ineffective)")
+			return
+		}
 		if strings.Contains(strings.ToLower(body), "request illegal") {
 			h.cfg.Pool.Disable(uid, "account banned by upstream (11140 request illegal), re-login required")
 			return
@@ -2121,6 +2256,28 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(raw)
+}
+
+// retryAfterSecondsForGateway 计算对外 429 的标准 Retry-After（秒，封顶 1 天）。
+// 上游文案里的重置墙钟优先于响应头（同 applyErrorPolicy 的冷却口径）。
+func retryAfterSecondsForGateway(body string, headerWait time.Duration, now time.Time) int {
+	var wait time.Duration
+	if resetAt, ok := upstream.ParseRateReset(body); ok {
+		wait = resetAt.Sub(now)
+	} else {
+		wait = headerWait
+	}
+	if wait <= 0 {
+		return 0
+	}
+	sec := int((wait + time.Second - 1) / time.Second)
+	if sec > 24*60*60 {
+		sec = 24 * 60 * 60
+	}
+	if sec < 1 {
+		sec = 1
+	}
+	return sec
 }
 
 func writeOpenAIError(w http.ResponseWriter, status int, code, msg string) {

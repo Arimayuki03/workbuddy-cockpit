@@ -94,9 +94,11 @@ export function availabilityOf(a: Account): AvailabilityTier {
 export function availabilityLabelKey(tier: AvailabilityTier, a?: Account): string {
   switch (tier) {
     case 'disabled':
-      // 11140（request illegal）与 401 网关页都是「到期也不自愈、必须重新登录」的
-      // 硬禁用；只说「已禁用」会让人干等。401 形态由 upstream.SessionRevokedReason
-      // 写入 disabled_reason（含 "401 gateway page" / "re-login required"）。
+      // 上游异常行为封禁需要申诉，重新登录无效；与凭证失效分开提示。
+      // 普通 11140 request illegal 与 401 网关页仍提示重新登录。
+      if (/appeal required|unusual activity|异常行为|異常行為/i.test(String(a?.disabled_reason || ''))) {
+        return 'accounts.badgeDisabledBanned';
+      }
       return /11140|request illegal|401 gateway page|session revoked|re-login/i.test(
         String(a?.disabled_reason || ''),
       )

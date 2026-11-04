@@ -14,12 +14,12 @@ OpenAI 兼容端点的「真实输出上限」探测工具
   finish=stop   且 输出 < 请求  → 模型自己不想写了，**不可作判据**，需强化提示重试
 
 用法：
-  # 测某网关全部以给定前缀开头的模型（默认 cn:）
+  # 测某网关全部模型（CN 裸名 + global: 前缀）
   python probe_max_tokens.py --base http://211.154.25.123:7863/v1 --key sk-xxx
 
-  # 指定模型 / 多个前缀 / 只看计划
+  # 指定模型 / 只看国际版 / 只看计划
   python probe_max_tokens.py --base ... --key ... --models flash,glm-5.3
-  python probe_max_tokens.py --base ... --key ... --prefix cn: --prefix global:
+  python probe_max_tokens.py --base ... --key ... --prefix global:
   python probe_max_tokens.py --base ... --key ... --dry-run
 
   # 控制成本与时长
@@ -29,7 +29,7 @@ OpenAI 兼容端点的「真实输出上限」探测工具
   - 控制台表格：模型 | 声称上限 | 实测上限 | 判据 | 耗时
   - JSONL 落盘（--out，默认 probe-max-tokens.jsonl），**支持 --resume 断点续测**
   - --panel-out PATH 额外写面板契约文件（默认关闭；网关面板「模型与档位」的实测列读它）：
-      {"version":1,"probes":{"cn:glm-5.2":{"claimed":131072,"measured":48000,
+      {"version":1,"probes":{"glm-5.2":{"claimed":131072,"measured":48000,
        "verdict":"clamped|at_least|inconclusive","note":"原始判据文本",
        "tested_at":"...","source":"probe_max_tokens.py"}}}
     写入为合并语义：未重测的模型保留旧记录；文件放网关 state 文件同目录
@@ -288,7 +288,7 @@ def main() -> None:
     ap.add_argument("--base", required=True, help="接口基址，如 http://host:7863/v1")
     ap.add_argument("--key", default=None, help="API Key（也可用环境变量 PROBE_API_KEY）")
     ap.add_argument("--prefix", action="append", default=None,
-                    help="只测以此前缀开头的模型（可多次；默认 cn:）")
+                    help="只测以此前缀开头的模型（可多次；默认全部，如 --prefix global:）")
     ap.add_argument("--models", default=None, help="按子串匹配模型 id（逗号分隔，优先级高于 --prefix）")
     ap.add_argument("--tiers", default="40000,100000",
                     help="阶梯请求值，逗号分隔（默认 40000,100000；越高越慢越费额度）")
@@ -339,7 +339,7 @@ def main() -> None:
         best = max((s for _, s in scored), default=0)
         targets = [m for m, s in scored if s == best and s > 0]
     else:
-        prefixes = args.prefix or ["cn:"]
+        prefixes = args.prefix or [""]
         targets = [m for m in all_models if any(m["id"].startswith(p) for p in prefixes)]
     if args.limit:
         targets = targets[:args.limit]

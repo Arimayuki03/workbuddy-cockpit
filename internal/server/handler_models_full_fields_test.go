@@ -26,13 +26,13 @@ func TestModelListFullFieldsDynamicCN(t *testing.T) {
 	got := h.modelList()
 	var entry map[string]any
 	for _, m := range got {
-		if id, ok := m["id"].(string); ok && id == "cn:hy3" {
+		if id, ok := m["id"].(string); ok && id == "hy3" {
 			entry = m
 			break
 		}
 	}
 	if entry == nil {
-		t.Fatalf("cn:hy3 not found in %v", got)
+		t.Fatalf("hy3 not found in %v", got)
 	}
 	if entry["description"] != "[x0.05 credit] 混元思考模型，具有增强的推理能力" {
 		t.Errorf("description=%v want [x0.05 credit] 混元思考模型，具有增强的推理能力", entry["description"])
@@ -88,7 +88,7 @@ func TestModelListFullFieldsDynamicCNOmitted(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up, GlobalEnabled: false})
 
 	for _, m := range h.modelList() {
-		if id, ok := m["id"].(string); ok && id != "cn:bare-model" {
+		if id, ok := m["id"].(string); ok && id != "bare-model" {
 			continue
 		}
 		for _, field := range []string{"name", "description", "credits", "tags", "vendor", "is_default",

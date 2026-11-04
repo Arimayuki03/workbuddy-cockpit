@@ -51,21 +51,15 @@ func keyStateFrom(r *http.Request) *keyStoreState {
 	return v
 }
 
-// keyBareModel 模型白名单比对用的归一：剥 `cn:` 与 `global:` 前缀，两侧同剥后
-// 精确比对。与 keystore 包内 bareModel 同口径（界面上显示裸名、用户照着填，存量
-// 白名单可能写带前缀的形态，归一后两种写法等价）。keystore 不导出该函数，这里保持
-// 同一规则的两份实现——规则漂移由 keystore 侧 Validate 白名单单测与 server 侧
-// 对齐测试共同锁定。global: 也剥的理由同 keystore.bareModel 注释：列表裁剪
-// （本函数）与调用校验（keystore.Validate，server 传裸名）必须同口径，否则
-// 「列表里能看到、调用必被拒」。
-func keyBareModel(model string) string {
+// keySplitModelRealm 把模型名拆成（版本, 裸名），与调用侧白名单判据同口径。
+func keySplitModelRealm(model string) (string, string) {
 	if strings.HasPrefix(model, "cn:") {
-		return model[3:]
+		return "cn", model[3:]
 	}
 	if strings.HasPrefix(model, "global:") {
-		return model[7:]
+		return "global", model[7:]
 	}
-	return model
+	return "", model
 }
 
 // ---------------------------------------------------------------------------
@@ -194,9 +188,9 @@ func (h *Handler) validateKeyForRequest(r *http.Request, model, realm string, no
 // keystore 侧 model_whitelist 存的也是映射后名字，直接对齐）：
 //   - realm：key.Realm 非空（归一后）时只保留该域条目，条目归属按下发 id 前缀判
 //     （global: 前缀 = global，cn: 前缀与裸名 = cn，与 resolveModel 前缀协议同口径）；
-//   - 白名单：key.ModelWhitelist 非空时只保留命中条目，下发 id 与白名单条目两侧过
-//     keyBareModel 后精确比对（cn:/global: 前缀写法等价——与调用侧 keystore.Validate
-//     同口径，保证「列表里有的就能调用」）。id 用 /v1/models 现有下发口径原样匹配。
+//   - 白名单：key.ModelWhitelist 非空时只保留命中条目。密钥已锁定 realm 时只比
+//     裸名；未锁定时裸名放行任意版本、显式前缀只放行同版本（issue #357）。列表
+//     裁剪与调用侧 keystore.Validate 共用同一语义，保证「列表里有的就能调用」。
 //
 // 无密钥上下文 / keystore 未接线 / 两个约束都空 → 原样返回（零裁剪零回归）。
 func (h *Handler) filterModelsForKey(r *http.Request, list []map[string]any) []map[string]any {
@@ -218,7 +212,7 @@ func (h *Handler) filterModelsForKey(r *http.Request, list []map[string]any) []m
 		if wantRealm != "" && keyRealmOf(id) != wantRealm {
 			continue
 		}
-		if hasModels && !keyModelAllowed(st.key.ModelWhitelist, id) {
+		if hasModels && !keyModelAllowed(st.key.Realm, st.key.ModelWhitelist, id) {
 			continue
 		}
 		out = append(out, entry)
@@ -248,12 +242,21 @@ func keyRealmOf(id string) string {
 	return "cn"
 }
 
-// keyModelAllowed 报告下发 id 是否命中密钥的模型白名单：两侧过 keyBareModel 后
-// 精确比对（与 keystore.Validate 的白名单比对同规则）。
-func keyModelAllowed(allow []string, id string) bool {
-	bare := keyBareModel(id)
+// keyModelAllowed 报告下发 id 是否命中密钥的模型白名单。判据与
+// keystore.Validate 对齐：锁定 realm 只比裸名；未锁定时裸名通配两版，显式前缀
+// 仅匹配本版。
+func keyModelAllowed(lockRealm string, allow []string, id string) bool {
+	lock := normKeyRealm(lockRealm)
+	requestRealm, requestBare := keySplitModelRealm(id)
+	if requestRealm == "" {
+		requestRealm = "cn"
+	}
 	for _, a := range allow {
-		if keyBareModel(a) == bare {
+		allowRealm, allowBare := keySplitModelRealm(strings.TrimSpace(a))
+		if allowBare != requestBare {
+			continue
+		}
+		if lock != "" || allowRealm == "" || allowRealm == requestRealm {
 			return true
 		}
 	}

@@ -202,20 +202,23 @@ export default function ModelsPage() {
     () =>
       models
         .filter((m) => {
-          // 双域 id 自带 cn:/global: 前缀：只保留当前域的条目——把对方域的
-          // 条目改前缀混进来会让两版列表看起来一样（裸 id 是旧数据形态，归当前域）。
+          // CN 模型以裸名下发，国际版带 global: 前缀；旧数据里的 cn: 前缀继续兼容。
+          // 裸名按 CN 归属，避免国际版页面混入国内版模型。
           const hasCn = m.id.startsWith('cn:');
           const hasGlobal = m.id.startsWith('global:');
-          if (hasCn || hasGlobal) {
-            return realm === 'global' ? hasGlobal : hasCn;
-          }
-          return true;
+          return realm === 'global' ? hasGlobal : (!hasGlobal || hasCn);
         })
         .map((m) => {
-          const prefix = realm === 'global' ? 'global:' : 'cn:';
-          const bare = m.id.startsWith('cn:') || m.id.startsWith('global:') ? m.id.slice(3) : m.id;
-          const probe = probes[bare] ?? probes[m.id] ?? null;
-          return {...m, id: m.id.startsWith(prefix) ? m.id : (prefix + bare), probe};
+          const bare = m.id.startsWith('global:')
+            ? m.id.slice('global:'.length)
+            : m.id.startsWith('cn:') ? m.id.slice('cn:'.length) : m.id;
+          // 旧探测文件用 cn: 前缀；新文件跟随 /v1/models 使用裸名。
+          const probe = realm === 'global'
+            ? (probes[`global:${bare}`] ?? probes[bare] ?? null)
+            : (probes[bare] ?? probes[`cn:${bare}`] ?? null);
+          // CN 展示与调用都用裸名；global 保留路由前缀。
+          const displayID = realm === 'global' ? (m.id.startsWith('global:') ? m.id : `global:${bare}`) : bare;
+          return {...m, id: displayID, probe};
         }),
     [models, probes, realm],
   );

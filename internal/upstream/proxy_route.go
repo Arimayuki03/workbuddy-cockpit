@@ -43,6 +43,10 @@ import (
 	"workbuddy2api/internal/logfmt"
 )
 
+// DirectRouteName 账号级「强制直连」保留线路名，与 manager / 上游账号文件
+// `proxy_route: "__direct__"` 兼容。空绑定和该保留名都表示不走命名线路。
+const DirectRouteName = "__direct__"
+
 // proxySchemes 当前支持的代理 URL scheme（http/https 标准代理）。
 //
 // socks5 支持结论（任务书要求显式说明）：golang.org/x/net/proxy 提供 socks5
@@ -340,7 +344,7 @@ func (c *Client) SetProxyRoutes(routes map[string]string) error {
 //   - 未命中 → 非空错误（拒绝发出语义，绝不静默回退直连）。
 func (c *Client) resolveProxy(a *auth.Auth) (string, string, error) {
 	route := a.ProxyRouteValue()
-	if route == "" {
+	if route == "" || route == DirectRouteName {
 		return "", "", nil
 	}
 	c.proxyMu.RLock()

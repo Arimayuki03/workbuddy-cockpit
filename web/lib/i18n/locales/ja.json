@@ -222,6 +222,7 @@
     "degradedHint": "うち {count} 件のアカウントが連敗による降格中です",
     "noCooling": "クールダウン中のアカウントはありません",
     "creditsUsedHint": "使用済み {used} · {n} アカウント",
+    "creditsUnavailableHint": "利用不可 {amount}（{n} アカウント）",
     "loadErrorTitle": "ダッシュボードデータの読み込みに失敗しました"
   },
   "stats": {
@@ -340,6 +341,7 @@
     "manualDisabled": "アカウントを停止しました（転送先から除外。チェックインと維持は継続）",
     "enabled": "アカウントを有効化しました",
     "badgeDisabledRelogin": "● 無効（再ログインが必要）",
+    "badgeDisabledBanned": "● 利用停止（異議申し立てが必要）",
     "badgeExpired": "● 期限切れ",
     "badgeCooling": "● クールダウン中",
     "badgeOnline": "● オンライン",
@@ -520,7 +522,7 @@
     "maxIps": "最大 IP 数（0 = 無制限）",
     "quotaTokens": "Token クォータ（0 = 無制限）",
     "ipWhitelist": "IP 許可リスト（1 行に 1 件、CIDR 対応、空 = 制限なし）",
-    "modelWhitelist": "モデル許可リスト（カンマ区切り、空 = そのエディションの全モデル）",
+    "modelWhitelist": "モデル許可リスト（カンマ区切り、空 = 制限なし。裸名は両版、cn:/global: はその版のみ）",
     "modelPrefixNote": "選択したエディションの中でさらにモデルを絞り込みます: `global:gpt-5.4` はグローバル版、`glm-5.2` は中国版のモデルです。空欄なら制限しません。",
     "create": "作成",
     "createdTitle": "キーを作成しました",

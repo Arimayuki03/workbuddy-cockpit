@@ -18,6 +18,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"time"
@@ -44,6 +45,7 @@ func main() {
 		authDir = v
 	}
 	up := upstream.New()
+	upstream.LoadRoutesAndLog(up, log.Printf)
 	up.GlobalEnabled = true // 允许按 realm 路由：global 账查积分走 workbuddy.ai
 	accounts := collect(authDir, up)
 	printAccounts(accounts, pretty)

@@ -222,6 +222,7 @@
     "degradedHint": "이 중 {count}개 계정이 연패 강등 중입니다",
     "noCooling": "쿨다운 중인 계정이 없습니다",
     "creditsUsedHint": "사용 {used} · {n}개 계정",
+    "creditsUnavailableHint": "사용 불가 {amount} ({n}개 계정)",
     "loadErrorTitle": "대시보드 데이터 로드 실패"
   },
   "stats": {
@@ -340,6 +341,7 @@
     "manualDisabled": "계정을 중지했습니다 (트래픽 대상에서 제외, 출석 체크와 유지 작업은 계속)",
     "enabled": "계정을 사용하도록 했습니다",
     "badgeDisabledRelogin": "● 비활성화됨 (재로그인 필요)",
+    "badgeDisabledBanned": "● 차단됨 (이의 제기 필요)",
     "badgeExpired": "● 만료됨",
     "badgeCooling": "● 쿨다운 중",
     "badgeOnline": "● 온라인",
@@ -520,7 +522,7 @@
     "maxIps": "최대 IP 수 (0 = 무제한)",
     "quotaTokens": "Token 할당량 (0 = 무제한)",
     "ipWhitelist": "IP 허용 목록 (한 줄에 하나, CIDR 지원, 비우면 제한 없음)",
-    "modelWhitelist": "모델 허용 목록 (쉼표로 구분, 비우면 해당 버전의 모든 모델)",
+    "modelWhitelist": "모델 허용 목록 (쉼표로 구분, 비우면 제한 없음. 맨 이름은 두 버전, cn:/global:은 해당 버전만)",
     "modelPrefixNote": "선택한 버전 안에서 모델을 더 좁힙니다. `global:gpt-5.4`는 글로벌 버전, `glm-5.2`는 중국 버전 모델입니다. 비워 두면 제한하지 않습니다.",
     "create": "생성",
     "createdTitle": "키가 생성되었습니다",

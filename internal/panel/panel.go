@@ -694,14 +694,19 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": out})
 }
 
-// panelModelEntry 构造单个模型条目（两域共用）：id 带 realm 前缀（调用值即显示值），
+// panelModelEntry 构造单个模型条目（两域共用）：CN 用裸名，国际版带 global:
+// 前缀（调用值即显示值），与 manager v2.11.9 的 /v1/models 口径一致；
 // context_length / max_output_tokens 走四级查找链，effort 档位按 realm 域取
 // EffortListing（远端权威 ∪ 静态兜底表）——与 /v1/models 同一口径，两侧不再漂移。
 // 注：主仓库 ModelInfo 无 panel 快照的 CanDisableThinking 字段（上游未下发），
 // 该键不透出（漂移适配，前端按缺省处理）。
 func panelModelEntry(realm string, mi upstream.ModelInfo, remoteEfforts []string, remoteDefault string, httpc *http.Client) map[string]any {
+	id := mi.ID
+	if realm == "global" {
+		id = "global:" + mi.ID
+	}
 	entry := map[string]any{
-		"id":                 realm + ":" + mi.ID,
+		"id":                 id,
 		"name":               mi.Name,
 		"default_effort":     mi.DefaultEffort,
 		"supported_efforts":  mi.Efforts,

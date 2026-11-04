@@ -1218,22 +1218,22 @@ func TestModelsDynamic(t *testing.T) {
 	for _, m := range data {
 		ids[m.(map[string]any)["id"].(string)] = true
 	}
-	if !ids["cn:dyn-model-a"] || !ids["cn:glm-9.9"] {
-		t.Errorf("dynamic ids (cn-prefixed) missing: %v", ids)
+	if !ids["dyn-model-a"] || !ids["glm-9.9"] {
+		t.Errorf("dynamic bare CN ids missing: %v", ids)
 	}
 
 	// 断言字段映射：maxInputTokens → context_length，maxOutputTokens → max_output_tokens
 	for _, m := range data {
 		mm := m.(map[string]any)
 		switch mm["id"] {
-		case "cn:dyn-model-a":
+		case "dyn-model-a":
 			if mm["context_length"].(float64) != 65536 {
 				t.Errorf("cn:dyn-model-a context_length=%v want 65536", mm["context_length"])
 			}
 			if mm["max_output_tokens"].(float64) != 8192 {
 				t.Errorf("cn:dyn-model-a max_output_tokens=%v want 8192", mm["max_output_tokens"])
 			}
-		case "cn:glm-9.9":
+		case "glm-9.9":
 			if mm["context_length"].(float64) != 262144 {
 				t.Errorf("cn:glm-9.9 context_length=%v want 262144", mm["context_length"])
 			}
@@ -1403,9 +1403,9 @@ func TestModelsDynamicZeroContextFallback(t *testing.T) {
 	real := map[string]any{}
 	for _, m := range resp.Data {
 		switch m["id"] {
-		case "cn:dyn-zero-ctx":
+		case "dyn-zero-ctx":
 			zero = m
-		case "cn:dyn-real-ctx":
+		case "dyn-real-ctx":
 			real = m
 		}
 	}
@@ -1453,15 +1453,15 @@ func TestModelsDynamicPreservesBodies(t *testing.T) {
 	// 动态优先：动态模型出现即证明未走静态 fallback。
 	found := false
 	for _, m := range resp.Data {
-		if m["id"] == "cn:dyn-only" {
+		if m["id"] == "dyn-only" {
 			found = true
 			if cl, _ := m["context_length"].(float64); cl != 200000 {
-				t.Errorf("cn:dyn-only context_length=%v want 200000 (dynamic value)", cl)
+				t.Errorf("dyn-only context_length=%v want 200000 (dynamic value)", cl)
 			}
 		}
 	}
 	if !found {
-		t.Errorf("/v1/models must include cn:dyn-only when dynamic fetch succeeds: %v", resp.Data)
+		t.Errorf("/v1/models must include dyn-only when dynamic fetch succeeds: %v", resp.Data)
 	}
 
 }
@@ -2476,7 +2476,7 @@ func TestContentBlockedCustomIgnoresActiveDegrade(t *testing.T) {
 }
 
 // TestStaleSnapshotBoundedByPickGate 粘性快照陈旧被 Pick 闸兜底的契约锚
-//（pr134-watchlist-analysis.md #10）：
+// （pr134-watchlist-analysis.md #10）：
 // session.ResolveForModel 在取任何锁之前拿 pool 可用性快照——若快照后、Pick 前
 // 粘性号 A 被冷却（快照陈旧判 available），Session 层仍会返回 A 作为建议 uid；
 // 但真正的可用性权威闸是 handler 的 Pool.PickByUIDForModel（锁内新鲜判定

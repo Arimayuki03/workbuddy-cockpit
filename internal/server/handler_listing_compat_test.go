@@ -59,19 +59,19 @@ func TestModelListCarriesMagpieCompatFields(t *testing.T) {
 				}
 			}
 		}
-		if id, _ := obj["id"].(string); id == "cn:hy3" {
+		if id, _ := obj["id"].(string); id == "hy3" {
 			hy3 = obj
 		}
 	}
 	if hy3 == nil {
-		t.Fatalf("fixture 里的 cn:hy3 没出现在列表里 —— 用例前提不成立")
+		t.Fatalf("fixture 里的 hy3 没出现在列表里 —— 用例前提不成立")
 	}
 	if got := hy3["modalities"]; !reflect.DeepEqual(got, map[string]any{"input": []any{"text", "image"}}) {
-		t.Errorf("cn:hy3 modalities=%v want {input:[text image]}", got)
+		t.Errorf("hy3 modalities=%v want {input:[text image]}", got)
 	}
 	want := []any{map[string]any{"effort": "low"}, map[string]any{"effort": "high"}}
 	if got := hy3["supported_reasoning_levels"]; !reflect.DeepEqual(got, want) {
-		t.Errorf("cn:hy3 supported_reasoning_levels=%v want %v", got, want)
+		t.Errorf("hy3 supported_reasoning_levels=%v want %v", got, want)
 	}
 	if hy3["supports_images"] != true || hy3["reasoning_supported_efforts"] == nil {
 		t.Error("既有字段被动了 —— 兼容字段只能新增，不能替换")

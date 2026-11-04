@@ -187,7 +187,7 @@ func TestResponsesToChatReasoningBackfill(t *testing.T) {
 func TestResponsesToChatReasoningCredentialDecode(t *testing.T) {
 	full := "完整推理原文，客户端可能截断 summary"
 	item := map[string]any{
-		"type": "reasoning",
+		"type":              "reasoning",
 		"encrypted_content": rspEncodeCredential(full),
 		"summary": []any{
 			map[string]any{"type": "summary_text", "text": "截断"},
@@ -287,8 +287,8 @@ func TestResponsesToChatReasoningAccumulates(t *testing.T) {
 // 只透传）。
 func TestResponsesToChatPromptCacheKeyPassthrough(t *testing.T) {
 	body := map[string]any{
-		"model":           "glm-5.2",
-		"input":           "hi",
+		"model":            "glm-5.2",
+		"input":            "hi",
 		"prompt_cache_key": "codex:abc123",
 	}
 	chat, rerr := responsesToChat(body)
@@ -463,8 +463,8 @@ func TestChatToResponsesToolCalls(t *testing.T) {
 				"role":    "assistant",
 				"content": nil,
 				"tool_calls": []any{map[string]any{
-					"id":   "call_1",
-					"type": "function",
+					"id":       "call_1",
+					"type":     "function",
 					"function": map[string]any{"name": "lookup", "arguments": `{"q":"go"}`},
 				}},
 			},
@@ -650,6 +650,9 @@ func TestResponsesStreamEventSequence(t *testing.T) {
 	}
 	if events[2].Data["delta"] != "想一想" {
 		t.Errorf("reasoning delta=%v", events[2].Data["delta"])
+	}
+	if events[2].Data["summary_index"] != float64(0) && events[2].Data["summary_index"] != 0 {
+		t.Errorf("reasoning delta summary_index=%v want 0", events[2].Data["summary_index"])
 	}
 	// completed 带 usage（Responses 口径映射）。
 	completed := events[len(events)-1].Data["response"].(map[string]any)

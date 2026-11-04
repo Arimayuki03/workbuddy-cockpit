@@ -130,6 +130,19 @@ func TestProxyRouteUnknownRefuses(t *testing.T) {
 	}
 }
 
+// manager 保留名 "__direct__" 是合法的强制直连绑定，不能当不存在线路拒绝。
+func TestProxyRouteDirectReservedName(t *testing.T) {
+	c := New()
+	a := &auth.Auth{UID: "u1", ProxyRoute: DirectRouteName}
+	route, raw, err := c.resolveProxy(a)
+	if err != nil || route != "" || raw != "" {
+		t.Fatalf("resolveProxy(__direct__)=(%q,%q,%v) want empty direct", route, raw, err)
+	}
+	if hc, err := c.TransportForForTest(a); err != nil || hc != nil {
+		t.Fatalf("TransportForForTest(__direct__)=(%v,%v) want nil,nil", hc, err)
+	}
+}
+
 // TestProxyRouteChatEndpointRejects chat 形态同样拒绝（ChatStreamContext 底座）。
 func TestProxyRouteChatEndpointRejects(t *testing.T) {
 	c, _, _ := newProxyRouteTestClient(t, nil)
@@ -346,7 +359,7 @@ func TestValidateProxyRoutes(t *testing.T) {
 func TestSetProxyRoutesSkipsNoteKeys(t *testing.T) {
 	c := New()
 	if err := c.SetProxyRoutes(map[string]string{
-		"_note": "段内说明：route-a 是香港线路",
+		"_note":   "段内说明：route-a 是香港线路",
 		"route-a": "http://h:8080",
 	}); err != nil {
 		t.Fatalf("SetProxyRoutes 应跳过 _note 键: %v", err)

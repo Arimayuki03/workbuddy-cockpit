@@ -44,21 +44,21 @@ func TestModelListEffortFieldsDynamicCN(t *testing.T) {
 			byID[id] = m
 		}
 	}
-	if eff := byID["cn:dyn-effort"]["reasoning_supported_efforts"]; !reflect.DeepEqual(eff, []string{"low", "high"}) {
+	if eff := byID["dyn-effort"]["reasoning_supported_efforts"]; !reflect.DeepEqual(eff, []string{"low", "high"}) {
 		t.Errorf("dyn-effort supported=%v want [low high]", eff)
 	}
-	if def := byID["cn:dyn-effort"]["reasoning_default_effort"]; def != "high" {
+	if def := byID["dyn-effort"]["reasoning_default_effort"]; def != "high" {
 		t.Errorf("dyn-effort default=%v want high", def)
 	}
 	// 有档位但无 defaultEffort → 只带 supported，不带 default。
-	if byID["cn:dyn-nodefault"]["reasoning_supported_efforts"] == nil {
+	if byID["dyn-nodefault"]["reasoning_supported_efforts"] == nil {
 		t.Error("dyn-nodefault should carry supported efforts")
 	}
-	if _, ok := byID["cn:dyn-nodefault"]["reasoning_default_effort"]; ok {
+	if _, ok := byID["dyn-nodefault"]["reasoning_default_effort"]; ok {
 		t.Error("dyn-nodefault should NOT carry default effort (upstream omitted)")
 	}
 	// 无档位 → 字段整体省略（非空数组）。
-	if _, ok := byID["cn:dyn-none"]["reasoning_supported_efforts"]; ok {
+	if _, ok := byID["dyn-none"]["reasoning_supported_efforts"]; ok {
 		t.Error("dyn-none should omit reasoning_supported_efforts")
 	}
 }

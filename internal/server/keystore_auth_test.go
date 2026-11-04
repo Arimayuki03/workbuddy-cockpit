@@ -351,10 +351,10 @@ func TestKeyStoreRateLimitedRetryAfter(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestModelsFilteredForKey /v1/models 密钥裁剪：realm=global 只留 global: 条目；
-// 白名单按映射后名字（下发口径）匹配，cn: 前缀写法等价；无密钥（全局 key）原样输出。
+// CN 模型按裸名下发，白名单同时兼容旧 cn: 写法；无密钥（全局 key）原样输出。
 func TestModelsFilteredForKey(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
-		return 200, fullFieldsModelsBody, false // CN 目录：hy3 → 下发 "cn:hy3"
+		return 200, fullFieldsModelsBody, false // CN 目录：hy3 → 下发 "hy3"
 	})
 	ks, err := keystore.Open("")
 	if err != nil {
@@ -370,7 +370,7 @@ func TestModelsFilteredForKey(t *testing.T) {
 	})
 	resetModelsCache()
 
-	// 全局 key：原样输出（裁剪 no-op），cn:hy3 在列。
+	// 全局 key：原样输出（裁剪 no-op），hy3 在列。
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer at1")
@@ -378,11 +378,11 @@ func TestModelsFilteredForKey(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("global key /v1/models must pass, code=%d", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "cn:hy3") {
-		t.Fatalf("global key must see cn:hy3, body=%s", rec.Body)
+	if !strings.Contains(rec.Body.String(), `"id":"hy3"`) {
+		t.Fatalf("global key must see hy3, body=%s", rec.Body)
 	}
 
-	// wbk_ 白名单含 hy3（cn: 前缀写法）：列表裁剪后仍含 cn:hy3（「列表里有的就能调用」）。
+	// wbk_ 白名单含旧 cn: 前缀写法：归一后仍匹配裸名 hy3。
 	plain := mustCreateKey(t, ks, keystore.CreateParams{Name: "单模型", ModelWhitelist: []string{"cn:hy3"}})
 	rec2 := httptest.NewRecorder()
 	req2 := httptest.NewRequest("GET", "/v1/models", nil)
@@ -400,8 +400,8 @@ func TestModelsFilteredForKey(t *testing.T) {
 	if len(listBody.Data) != 1 {
 		t.Fatalf("whitelisted key must see exactly 1 model, got %d body=%s", len(listBody.Data), rec2.Body)
 	}
-	if listBody.Data[0]["id"] != "cn:hy3" {
-		t.Errorf("id=%v want cn:hy3", listBody.Data[0]["id"])
+	if listBody.Data[0]["id"] != "hy3" {
+		t.Errorf("id=%v want hy3", listBody.Data[0]["id"])
 	}
 
 	// wbk_ 白名单不含 hy3：列表为空。
@@ -413,7 +413,7 @@ func TestModelsFilteredForKey(t *testing.T) {
 	if rec3.Code != 200 {
 		t.Fatalf("wbk_ /v1/models must pass, code=%d", rec3.Code)
 	}
-	if strings.Contains(rec3.Body.String(), "cn:hy3") {
+	if strings.Contains(rec3.Body.String(), `"id":"hy3"`) {
 		t.Errorf("non-whitelisted model must be pruned, body=%s", rec3.Body)
 	}
 
@@ -426,8 +426,8 @@ func TestModelsFilteredForKey(t *testing.T) {
 	if rec4.Code != 200 {
 		t.Fatalf("wbk_ /v1/models must pass, code=%d", rec4.Code)
 	}
-	if strings.Contains(rec4.Body.String(), "cn:hy3") {
-		t.Errorf("global-realm key must not see cn: entries, body=%s", rec4.Body)
+	if strings.Contains(rec4.Body.String(), `"id":"hy3"`) {
+		t.Errorf("global-realm key must not see CN entries, body=%s", rec4.Body)
 	}
 }
 
@@ -517,6 +517,23 @@ func TestRecordUseSuccessPathNonStream(t *testing.T) {
 	}
 	if k.UsedCredits != 0 {
 		t.Errorf("UsedCredits=%v want 0 (credit missing → not counted)", k.UsedCredits)
+	}
+}
+
+// manager v2.11.7 / issue #357：未锁定 realm 时，裸名白名单通配两版；
+// 显式前缀只放行同版本。列表裁剪必须与调用校验同口径。
+func TestKeyModelWhitelistRealmSemantics(t *testing.T) {
+	if !keyModelAllowed("", []string{"glm-5.2"}, "global:glm-5.2") {
+		t.Error("裸名白名单应放行 global 版本")
+	}
+	if keyModelAllowed("", []string{"global:glm-5.2"}, "cn:glm-5.2") {
+		t.Error("global: 白名单不得放行 CN 版本")
+	}
+	if !keyModelAllowed("global", []string{"glm-5.2"}, "global:glm-5.2") {
+		t.Error("密钥锁定 global 时白名单只比裸名")
+	}
+	if keyModelAllowed("", []string{"other"}, "global:glm-5.2") {
+		t.Error("不同模型不得放行")
 	}
 }
 

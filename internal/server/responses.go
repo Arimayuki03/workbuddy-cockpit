@@ -1256,7 +1256,9 @@ func (t *rspStreamTranslator) feed(obj map[string]any) []byte {
 		t.reasonBuf.WriteString(rc)
 		out = append(out, rspEventFrame("response.reasoning_summary_text.delta", map[string]any{
 			"type": "response.reasoning_summary_text.delta", "output_index": t.reasonIdx,
-			"item_id": t.reasonID, "delta": rc,
+			// summary_index 是 Responses 规范必填项。ai-sdk 系客户端缺它会整帧丢弃，
+			// 表现为思考块存在但内容恒空。本网关只产第 0 段 summary。
+			"summary_index": 0, "item_id": t.reasonID, "delta": rc,
 		})...)
 	}
 

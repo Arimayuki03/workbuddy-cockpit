@@ -21,12 +21,12 @@ func warmCNCatalog(t *testing.T, h *Handler) {
 	got := h.modelList()
 	found := false
 	for _, m := range got {
-		if id, ok := m["id"].(string); ok && id == "cn:hy3" {
+		if id, ok := m["id"].(string); ok && id == "hy3" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("预热失败：modelList 无 cn:hy3：%v", got)
+		t.Fatalf("预热失败：modelList 无 hy3：%v", got)
 	}
 }
 

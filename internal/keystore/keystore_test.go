@@ -247,6 +247,15 @@ func TestRejectModelWhitelist(t *testing.T) {
 	if rej := s.Validate(kg, "", "gpt-5.4", "global", now); rej != nil {
 		t.Fatalf("global: 白名单条目对裸名请求被拒: %+v", rej)
 	}
+	// 显式 global: 只放行国际版；裸名请求默认国内版，不能被同名 global 条目放行。
+	if rej := s.Validate(kg, "", "gpt-5.4", "cn", now); rej == nil || rej.Reason != ReasonModelNotAllowed {
+		t.Fatalf("global: 白名单不得放行 CN 版本: %+v", rej)
+	}
+	// 裸名白名单视为任意版本：global 请求也应放行（issue #357）。
+	_, kbare := mustCreate(t, s, CreateParams{ModelWhitelist: []string{"gpt-5.4"}})
+	if rej := s.Validate(kbare, "", "gpt-5.4", "global", now); rej != nil {
+		t.Fatalf("裸名白名单应放行 global 请求: %+v", rej)
+	}
 	// 完全不在白名单（cn realm 同口径）。
 	rej = s.Validate(k, "", "gpt-9", "cn", now)
 	if rej == nil || rej.Status != 400 || rej.Reason != ReasonModelNotAllowed {

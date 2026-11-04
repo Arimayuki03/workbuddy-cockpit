@@ -117,6 +117,7 @@ func main() {
 // 与 cmd/signin、cmd/credit、cmd/trial 同风格：显式接线，避免 Producer 误读成「未适配」。
 func newUpstream(c *cfgFile) *upstream.Client {
 	up := upstream.New()
+	upstream.LoadRoutesAndLog(up, log.Printf)
 	up.GlobalEnabled = true
 	if c.Upstream.TimeoutSeconds > 0 {
 		up.HTTP.Timeout = time.Duration(c.Upstream.TimeoutSeconds) * time.Second

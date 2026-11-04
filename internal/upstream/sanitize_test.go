@@ -622,6 +622,7 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
 		"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 		"11128",                                           // 上游反探测：裸数字错误码
+		"Tokens prefixed with @",                          // DSH file-reference 提示词首句
 	}
 	if len(sanitizeFeatures) != len(features) {
 		t.Fatalf("sanitizeFeatures 项数=%d want %d（快照与实现不同步，见测试头注释的验证步骤）", len(sanitizeFeatures), len(features))
@@ -652,6 +653,10 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		{
 			"11128",
 			"11-128",
+		},
+		{
+			"Tokens prefixed with @ are paths the user explicitly referenced",
+			"Tokens prefixed with the at-sign are paths the user explicitly referenced",
 		},
 	}
 	if len(sanitizeRewrites) != len(rewrites) {
@@ -756,6 +761,23 @@ func TestDshWebGuiPlainTextNotTouched(t *testing.T) {
 		if out := sanitizeText(in); out != in {
 			t.Errorf("不应改写: %q -> %q", in, out)
 		}
+	}
+}
+
+// manager v2.11.5 / issue #321：file-reference 首句单独出现也必须改写；
+// `@"..."` 示例保持原样。预检由 sanitizeFeatures 精确命中。
+func TestDshFileReferenceTokensRewritten(t *testing.T) {
+	in := `Tokens prefixed with @ are paths the user explicitly referenced. @"..." quotes a path containing spaces.`
+	if !hasFingerprint(in) {
+		t.Fatalf("特征预检未命中: %q", in)
+	}
+	got := sanitizeText(in)
+	if strings.Contains(got, "Tokens prefixed with @") {
+		t.Fatalf("改写后仍含触发句: %q", got)
+	}
+	want := `Tokens prefixed with the at-sign are paths the user explicitly referenced. @"..." quotes a path containing spaces.`
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
 	}
 }
 

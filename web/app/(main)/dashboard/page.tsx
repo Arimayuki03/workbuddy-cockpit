@@ -48,6 +48,7 @@ import {
   isDegraded,
   type AvailabilityTier,
 } from '@/lib/account-status';
+import {splitAccountCredits} from '@/lib/credit-availability';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {StatCard} from '@/components/common/layout/StatCard';
 import {EmptyState} from '@/components/common/layout/EmptyState';
@@ -399,8 +400,14 @@ export default function DashboardPage() {
   // 积分余额合计（仅统计已同步到的账号）
   const credOf = (a: Account) => liveCredits[a.uid] ?? a.credits;
   const creditsKnown = scoped.filter((a) => typeof credOf(a) === 'number');
-  const totalCredits = creditsKnown.reduce((sum, a) => sum + (credOf(a) || 0), 0);
-  const creditsLow = creditsKnown.filter((a) => (credOf(a) || 0) < 200).length;
+  // 冷却只是暂时出池，余额仍然可用；封禁、手动停用与状态未知才计入不可用。
+  // 与 manager v2.11.9 的口径一致：可用积分不再把坏号余额算进来。
+  const creditSplit = splitAccountCredits(scoped, credOf);
+  const availableCreditRows = creditSplit.availableRows;
+  const availableCredits = creditSplit.available;
+  const unavailableCredits = creditSplit.unavailable;
+  const unavailableKnownCount = creditSplit.unavailableRows.length;
+  const creditsLow = availableCreditRows.filter((a) => (credOf(a) || 0) < 200).length;
   // 已用积分合计：与余额同源（packages），只在查到至少一个账号时显示。
   const usedKnown = scoped.filter((a) => typeof liveUsed[a.uid] === 'number');
   const totalUsed = usedKnown.reduce((sum, a) => sum + (liveUsed[a.uid] || 0), 0);
@@ -500,7 +507,7 @@ export default function DashboardPage() {
             </span>
           }
           // 值里带上最近到期：额度高但下周作废，比额度低更值得注意
-          value={creditsKnown.length ? fmtNumber(totalCredits) : '—'}
+          value={creditsKnown.length ? fmtNumber(availableCredits) : '—'}
           // hint 分段拼接：已用合计（数据同步后恒显示）+ 警告（低余额或紧急到期，
           // 二者取一）——警告不该把「已用」整个挤掉，两者用分隔符并列。
           hint={
@@ -510,6 +517,13 @@ export default function DashboardPage() {
                   const parts: string[] = [];
                   if (usedKnown.length) {
                     parts.push(t('dashboard.creditsUsedHint', {used: fmtNumber(totalUsed), count: usedKnown.length, n: usedKnown.length}));
+                  }
+                  if (unavailableKnownCount > 0) {
+                    parts.push(t('dashboard.creditsUnavailableHint', {
+                      amount: fmtNumber(unavailableCredits),
+                      count: unavailableKnownCount,
+                      n: unavailableKnownCount,
+                    }));
                   }
                   if (creditsLow > 0) {
                     parts.push(t('dashboard.creditsLow', {count: creditsLow, n: creditsLow}));
@@ -538,14 +552,17 @@ export default function DashboardPage() {
                           amount: fmtNumber(nextExpiry.amount),
                         });
                   }
-                  return t('dashboard.creditsCovered', {count: creditsKnown.length, n: creditsKnown.length});
+                  const covered = availableCreditRows.length;
+                  return t('dashboard.creditsCovered', {count: covered, n: covered});
                 })()
           }
           icon={Coins}
           tone={
-            !creditsKnown.length ? 'neutral' : creditsLow > 0 || expiryUrgent ? 'warning' : 'accent'
+            !creditsKnown.length
+              ? 'neutral'
+              : creditsLow > 0 || expiryUrgent || unavailableCredits > 0 ? 'warning' : 'accent'
           }
-          hintTone={creditsLow > 0 || expiryUrgent ? 'warning' : undefined}
+          hintTone={creditsLow > 0 || expiryUrgent || unavailableCredits > 0 ? 'warning' : undefined}
           delay={0.12}
         />
         <StatCard

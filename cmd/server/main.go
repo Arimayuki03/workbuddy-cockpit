@@ -624,8 +624,14 @@ func main() {
 		StickyCount:  sessCount,
 		RedisMode:    redisMode,
 		SoftCooldown: cfg.SoftRateDur,
-		PromptMode:   cfg.Prompt.Mode,
-		PromptText:   cfg.PromptText,
+		// 大请求：默认按账号级滑动预算，超出后只迁移一次会话；legacy 逐请求轮换
+		// 默认关闭，避免破坏上游按账号存放的前缀缓存。
+		LargeRequestBytes:        cfg.Pool.LargeRequestBytes,
+		LargeRequestBudget:       cfg.Pool.LargeRequestBudget,
+		LargeRequestBudgetWindow: cfg.LargeRequestBudgetWindowDur,
+		LargeRequestCooldown:     cfg.LargeRequestCooldownDur,
+		PromptMode:               cfg.Prompt.Mode,
+		PromptText:               cfg.PromptText,
 		// api_key / soft_rate 热改通道（使用指南 §5.5：面板改 api_key 后网关端点
 		// 即时生效，免重启）：Live 非 nil 时 withAuth 的鉴权密钥与软冷却基数经
 		// live 快照读取（面板保存配置 → live.Store → 下一个请求生效）；
@@ -735,8 +741,12 @@ func main() {
 	} else {
 		log.Printf("global realm 已禁用（config global.enabled=false，纯 CN）")
 	}
+	ln, err := listenForServer(cfg.Listen)
+	if err != nil {
+		fatalExit("http: %v（%s 端口被占用？先停掉旧实例：start-workbuddy2api.cmd / status-workbuddy2api.cmd）", err, cfg.Listen)
+	}
 	log.Printf("workbuddy2api listening on %s (api_key=%v)", cfg.Listen, cfg.APIKey != "")
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		// 端口占用是 Windows 双击场景最常见的「闪退」（上一次实例还在跑）：
 		// fatalExit 在交互控制台下等回车，用户能看到「端口已被占用」与处置提示。
 		fatalExit("http: %v（%s 端口被占用？先停掉旧实例：start-workbuddy2api.cmd / status-workbuddy2api.cmd）", err, cfg.Listen)

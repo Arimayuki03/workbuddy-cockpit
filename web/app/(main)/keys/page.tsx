@@ -773,8 +773,8 @@ export default function KeysPage() {
                   onChange={(e) => setForm({...form, models: e.target.value})}
                   placeholder={'glm-5.2\nglobal:gpt-5.4'}
                 />
-                {/* 模型白名单与版本归属是两道检查：版本拦跨域调用，
-                    白名单在版本之内再收窄到具体模型。 */}
+                {/* 模型白名单与版本归属是两道检查：裸名条目通配同名两版，
+                    显式 cn:/global: 条目只放行对应版本。 */}
                 <p className="text-[10px] leading-4 text-muted-foreground">
                   <RichText text={t('keys.modelPrefixNote')} />
                 </p>

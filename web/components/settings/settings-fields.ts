@@ -391,6 +391,36 @@ export const POOL_FIELDS: Field[] = [
     def: 2,
   },
   {
+    key: 'large_request_bytes',
+    kind: 'num',
+    label: '大请求阈值',
+    desc: '请求体达到该字节数后计入账号级大请求预算（默认 2 MiB）。'
+      + '填 -1 关闭整条策略；0 表示使用默认值。',
+    unit: '字节',
+    min: -1,
+    max: 64 * 1024 * 1024,
+    step: 1024 * 1024,
+    def: 2 * 1024 * 1024,
+  },
+  {
+    key: 'large_request_budget',
+    kind: 'num',
+    label: '大请求预算',
+    desc: '单账号在滑动窗口内最多承接几条大请求。达到预算后只把会话迁移一次，'
+      + '之后继续复用新账号的前缀缓存。填 -1 关闭预算并启用旧版逐请求轮换。',
+    unit: '条',
+    min: -1,
+    max: 100,
+    def: 6,
+  },
+  {
+    key: 'large_request_budget_window',
+    kind: 'duration',
+    label: '大请求预算窗口',
+    desc: '预算的滑动窗口（默认 120s）。窗口滑过后账号自动恢复承接大请求。',
+    def: '120s',
+  },
+  {
     key: 'breaker_threshold',
     kind: 'num',
     label: '连续失败熔断阈值',

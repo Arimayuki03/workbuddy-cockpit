@@ -28,10 +28,10 @@ func TestModelListNameFieldDynamicCN(t *testing.T) {
 			byID[id] = m
 		}
 	}
-	if name := byID["cn:dyn-named"]["name"]; name != "Hunyuan T1" {
+	if name := byID["dyn-named"]["name"]; name != "Hunyuan T1" {
 		t.Errorf("dyn-named name=%v want Hunyuan T1", name)
 	}
-	if _, ok := byID["cn:dyn-unnamed"]["name"]; ok {
+	if _, ok := byID["dyn-unnamed"]["name"]; ok {
 		t.Error("dyn-unnamed should omit name field (upstream omitted)")
 	}
 }

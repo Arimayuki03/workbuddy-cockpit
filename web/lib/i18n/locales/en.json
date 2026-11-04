@@ -234,6 +234,7 @@
     "degradedHint": "{count} account(s) currently degraded after consecutive failures",
     "noCooling": "No accounts cooling",
     "creditsUsedHint": "{used} used · {n} accounts covered",
+    "creditsUnavailableHint": "Unavailable {amount} ({n} accounts)",
     "loadErrorTitle": "Failed to load dashboard data"
   },
   "stats": {
@@ -314,6 +315,7 @@
     "manualDisabled": "Account paused (no longer picked for traffic; check-in and keep-alive continue)",
     "enabled": "Account enabled",
     "badgeDisabledRelogin": "● Disabled (re-login required)",
+    "badgeDisabledBanned": "● Banned (appeal required)",
     "badgeExpired": "● Expired",
     "badgeCooling": "● Cooling down",
     "badgeOnline": "● Online",
@@ -489,7 +491,7 @@
     "maxIps": "Max IPs (0 = unlimited)",
     "quotaTokens": "Token quota (0 = unlimited)",
     "ipWhitelist": "IP allowlist (one per line, CIDR supported, empty = unrestricted)",
-    "modelWhitelist": "Model allowlist (comma separated, empty = every model of that edition)",
+    "modelWhitelist": "Model allowlist (comma separated, empty = unlimited; bare names match both editions, cn:/global: only that edition)",
     "modelPrefixNote": "Narrows to specific models within the pinned edition: `global:gpt-5.4` is a Global-edition model, `glm-5.2` a China-edition one. Leave empty for no restriction.",
     "create": "Create",
     "createdTitle": "Key created",

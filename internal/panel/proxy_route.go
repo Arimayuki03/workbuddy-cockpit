@@ -86,7 +86,7 @@ func (p *Panel) accountProxyRoute(w http.ResponseWriter, r *http.Request) {
 	// 线路名合法性：绑定值必须存在于当前线路表（空串 = 解绑放行）。线路表读
 	// config.json（与 GET 同源）；LoadConfig 未注入时仅允许解绑（最小装配形态
 	// 不提供绑定能力，避免「看不到表还绑出去」）。
-	if route != "" && p.cfg.LoadConfig != nil {
+	if route != "" && route != upstream.DirectRouteName && p.cfg.LoadConfig != nil {
 		cfg, err := p.cfg.LoadConfig()
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "load config: "+err.Error())

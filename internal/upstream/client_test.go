@@ -484,6 +484,24 @@ func TestIsModelBlocked(t *testing.T) {
 	}
 }
 
+func TestIsUpstreamRestriction(t *testing.T) {
+	cases := []struct {
+		body string
+		want bool
+	}{
+		{`{"code":11140,"msg":"request illegal","displayMsg":{"en":"Your account has been restricted due to unusual activity"}}`, true},
+		{`{"code":11140,"msg":"request illegal","displayMsg":{"zh":"账号存在异常行为，已被限制使用"}}`, true},
+		{`{"code":11140,"msg":"request illegal","displayMsg":{"zh-TW":"帳號存在異常行為"}}`, true},
+		{`{"code":11140,"msg":"request illegal"}`, false},
+		{`{"code":14017,"msg":"trial not activated"}`, false},
+	}
+	for _, tc := range cases {
+		if got := IsUpstreamRestriction(tc.body); got != tc.want {
+			t.Errorf("IsUpstreamRestriction(%s)=%v want %v", tc.body, got, tc.want)
+		}
+	}
+}
+
 // TestParseRateReset 统一解析任意限流响应（6004 **和** 非 6004，如 11140 rate-limiting）
 // msg 里的「将在 … 重置」时间（UTC+8）。旧语义（非 6004 带时间 → false）是有意推翻的：
 // 11140 的 rate-limiting 变体带重置时间时同样应被精确对齐到上游重置墙钟。

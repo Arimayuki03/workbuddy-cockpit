@@ -222,6 +222,7 @@
     "degradedHint": "其中 {count} 個帳號正被連敗降權",
     "noCooling": "沒有帳號在冷卻",
     "creditsUsedHint": "已用 {used} · 覆蓋 {n} 個帳號",
+    "creditsUnavailableHint": "不可用 {amount}（{n} 個帳號）",
     "loadErrorTitle": "面板資料載入失敗"
   },
   "stats": {
@@ -340,6 +341,7 @@
     "manualDisabled": "已停用該帳號（不再被選中轉發；簽到與保活照常）",
     "enabled": "已啟用該帳號",
     "badgeDisabledRelogin": "● 已停用（需重新登入）",
+    "badgeDisabledBanned": "● 已封禁（需申訴）",
     "badgeExpired": "● 已過期",
     "badgeCooling": "● 冷卻中",
     "badgeOnline": "● 線上",
@@ -520,7 +522,7 @@
     "maxIps": "最大 IP 數（0 = 不限）",
     "quotaTokens": "配額 Token（0 = 不限）",
     "ipWhitelist": "IP 白名單（每行一個，支援 CIDR，留空 = 不限制）",
-    "modelWhitelist": "模型白名單（逗號分隔，留空 = 該版本全部模型）",
+    "modelWhitelist": "模型白名單（逗號分隔，留空 = 不限；裸名通配兩版，cn:/global: 只限本版）",
     "modelPrefixNote": "在所選版本之內再限制到具體模型：`global:gpt-5.4` 是國際版模型，`glm-5.2` 是中國版模型。留空則不限制。",
     "create": "建立",
     "createdTitle": "金鑰建立成功",

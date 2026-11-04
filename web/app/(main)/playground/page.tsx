@@ -175,17 +175,22 @@ export default function PlaygroundPage() {
   const loadModels = useCallback(async () => {
     try {
       const r = await modelApi.models(realm);
-      // panel models 每条 id 自带 cn:/global: 前缀（即调用时的完整 model 值）；
-      // playground 直连 /v1/chat/completions，按当前域过滤后原样使用。
-      const prefix = realm === 'global' ? 'global:' : 'cn:';
+      // CN 用裸名，国际版带 global: 前缀；旧版 cn: 前缀继续兼容。
+      // playground 直连 /v1/chat/completions，按当前域过滤后使用调用名。
       const list = (r.models ?? [])
-        .filter((m) => m.id.startsWith(prefix))
-        .map((m) => ({
-          id: m.id,
-          name: m.name || m.id,
-          efforts: m.supported_efforts ?? [],
-          series: m.id.slice(prefix.length).split('-')[0],
-        }));
+        .filter((m) => realm === 'global' ? m.id.startsWith('global:') : !m.id.startsWith('global:'))
+        .map((m) => {
+          const bare = m.id.startsWith('global:')
+            ? m.id.slice('global:'.length)
+            : m.id.startsWith('cn:') ? m.id.slice('cn:'.length) : m.id;
+          const id = realm === 'global' ? `global:${bare}` : bare;
+          return {
+            id,
+            name: m.name || id,
+            efforts: m.supported_efforts ?? [],
+            series: bare.split('-')[0],
+          };
+        });
       setModels(list);
       // 切版本后旧模型多半不在新列表里，直接选第一个，避免发出去被上游拒
       setModel(list[0]?.id || '');

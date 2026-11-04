@@ -119,12 +119,13 @@ func TestModelListTwoFamilies(t *testing.T) {
 		switch {
 		case strings.HasPrefix(id, "global:"):
 			globIDs = append(globIDs, strings.TrimPrefix(id, "global:"))
-		case strings.HasPrefix(id, "cn:"):
+		default:
+			// CN 模型以裸名下发；显式 cn: 前缀仅用于兼容旧客户端请求。
 			cnIDs = append(cnIDs, strings.TrimPrefix(id, "cn:"))
 		}
 	}
 	if len(cnIDs) == 0 {
-		t.Error("no cn:* models in /v1/models")
+		t.Error("no CN models in /v1/models")
 	}
 	if len(globIDs) == 0 {
 		t.Fatal("no global:* models in /v1/models")

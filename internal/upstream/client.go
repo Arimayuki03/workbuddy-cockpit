@@ -411,6 +411,27 @@ func IsWeakChannelCode(body string) bool {
 	return codeMarker(lower, channelCheckHyphenCode) || codeMarker(lower, channelCheckPlainCode)
 }
 
+// IsUpstreamRestriction 报告 11140 是否是上游账号风控封禁（不是普通
+// `request illegal` 授权拒绝）。风控话术表明账号被限制使用、需要申诉；重新登录
+// 不会解除，也不能当作可自行恢复的软冷却反复探测。只认明确话术，宁缺毋滥。
+func IsUpstreamRestriction(body string) bool {
+	lower := strings.ToLower(body)
+	for _, marker := range []string{
+		"unusual activity",
+		"abnormal activity",
+		"abnormal usage",
+		"异常行为",
+		"異常行為",
+		"账号存在异常",
+		"帳號存在異常",
+	} {
+		if strings.Contains(lower, strings.ToLower(marker)) {
+			return true
+		}
+	}
+	return false
+}
+
 // softRateResetLoc 上游 429 6004 文案中的重置时间固定按 UTC+8 解释（上游文案如此，
 // 与容器时区无关）。
 var softRateResetLoc = time.FixedZone("UTC+8", 8*60*60)

@@ -467,7 +467,7 @@ export interface VouchersResponse {
 
 /* ── 模型（panel models / model_probes）─────────────────── */
 
-/** panel 模型条目（两域共用；id 带 cn:/global: 前缀即调用值） */
+/** panel 模型条目（两域共用；CN 为裸名，国际版带 global: 前缀，即调用值） */
 export interface PanelModel {
   id: string;
   name: string;

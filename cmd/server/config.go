@@ -179,11 +179,21 @@ type Config struct {
 	} `json:"upstash"`
 
 	Pool struct {
-		MaxInFlight        int    `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
-		MaxInFlightGlobal  int    `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 403 风控分档），0 = 回落 max_in_flight
-		BreakerThreshold   int    `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
-		BreakerCooldown    string `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
-		BreakerCooldownMax string `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
+		// LargeRequestBytes 大上下文阈值（默认 2 MiB）。请求体达到该值后进入
+		// 账号级大请求预算；<0 关闭整条策略（0 = 未设置，回落默认）。
+		LargeRequestBytes int `json:"large_request_bytes"`
+		// LargeRequestBudget 滑动窗口内单账号可承接的大请求条数（默认 6）；
+		// <0 关闭预算，退回 large_request_cooldown 的 legacy 逐请求轮换。
+		LargeRequestBudget int `json:"large_request_budget"`
+		// LargeRequestBudgetWindow 大请求预算滑动窗口（默认 120s）。
+		LargeRequestBudgetWindow string `json:"large_request_budget_window"`
+		// LargeRequestCooldown legacy 逐请求轮换窗口；默认 0s 关闭。仅预算关闭时生效。
+		LargeRequestCooldown string `json:"large_request_cooldown"`
+		MaxInFlight          int    `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
+		MaxInFlightGlobal    int    `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 403 风控分档），0 = 回落 max_in_flight
+		BreakerThreshold     int    `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
+		BreakerCooldown      string `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
+		BreakerCooldownMax   string `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
 		// 连败降权（issue #114「累计错误率高/连续失败 N 次的账号移出候选池一段时间」）：
 		// ErrClient/传输层这类「不罚号」失败连续计数，达阈临时出池。与冷却/熔断
 		// 并存取更长者不叠加。默认 5 次 / 10m。
@@ -316,16 +326,18 @@ type Config struct {
 	ReasoningAsContent *bool `json:"reasoning_as_content"`
 
 	// 解析后
-	SoftRateDur         time.Duration `json:"-"`
-	SoftRateMaxDur      time.Duration `json:"-"`
-	CreditExhaustedDur  time.Duration `json:"-"` // cooldown.credit_exhausted 解析结果；0 = 旧行为（硬冷却到次日 04:00）
-	BreakerCooldownDur  time.Duration `json:"-"`
-	BreakerCooldownMaxD time.Duration `json:"-"`
-	DegradeCooldownDur  time.Duration `json:"-"`
-	DegradeCooldownMaxD time.Duration `json:"-"`
-	SessionTTL          time.Duration `json:"-"`
-	SessionGCInterval   time.Duration `json:"-"`
-	ExpiringSoonDur     time.Duration `json:"-"`
+	SoftRateDur                 time.Duration `json:"-"`
+	SoftRateMaxDur              time.Duration `json:"-"`
+	CreditExhaustedDur          time.Duration `json:"-"` // cooldown.credit_exhausted 解析结果；0 = 旧行为（硬冷却到次日 04:00）
+	BreakerCooldownDur          time.Duration `json:"-"`
+	BreakerCooldownMaxD         time.Duration `json:"-"`
+	DegradeCooldownDur          time.Duration `json:"-"`
+	DegradeCooldownMaxD         time.Duration `json:"-"`
+	LargeRequestCooldownDur     time.Duration `json:"-"`
+	LargeRequestBudgetWindowDur time.Duration `json:"-"`
+	SessionTTL                  time.Duration `json:"-"`
+	SessionGCInterval           time.Duration `json:"-"`
+	ExpiringSoonDur             time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
 	// ChannelGuardBlockTTL / ChannelGuardTemplateTTL / ChannelGuardCooldown
@@ -385,6 +397,12 @@ func Default() *Config {
 	c.ReasoningAsContent = &reasoningAsContent
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：默认透传客户端原始 system；显式配置 custom 仍可覆盖回替换
 	c.Pool.MaxInFlight = 3
+	// 大请求默认走推荐策略：2 MiB 阈值、120s 窗口内单号最多 6 条；超预算只迁移
+	// 一次会话，之后继续命中新号的前缀缓存。legacy 逐请求轮换默认关闭。
+	c.Pool.LargeRequestBytes = 2 << 20
+	c.Pool.LargeRequestBudget = 6
+	c.Pool.LargeRequestBudgetWindow = "120s"
+	c.Pool.LargeRequestCooldown = "0s"
 	// MaxInFlightGlobal 缺省 2：global 域 WAF 风控更紧，压低单号并发（WAF 403
 	// 修复 P1-1）；0/负数 normalize 回落。显式 0 需配 -1 之外的方式关闭分档
 	// ——这里约定 0 = 未设置回落默认 2（与 max_in_flight 的 0=不限语义不同，
@@ -687,6 +705,28 @@ func (c *Config) normalize() error {
 	}
 	if c.DegradeCooldownMaxD, err = time.ParseDuration(c.Pool.DegradeCooldownMax); err != nil {
 		return fmt.Errorf("pool.degrade_cooldown_max: %w", err)
+	}
+	// 大请求预算：0 = 未设置回落默认；负值显式关闭（退回 legacy 轮换）。
+	if c.Pool.LargeRequestBytes == 0 {
+		c.Pool.LargeRequestBytes = 2 << 20
+	}
+	if c.Pool.LargeRequestBudget == 0 {
+		c.Pool.LargeRequestBudget = 6
+	}
+	if c.Pool.LargeRequestBudgetWindow == "" {
+		c.Pool.LargeRequestBudgetWindow = "120s"
+	}
+	if c.LargeRequestBudgetWindowDur, err = time.ParseDuration(c.Pool.LargeRequestBudgetWindow); err != nil {
+		return fmt.Errorf("pool.large_request_budget_window: %w", err)
+	}
+	if c.Pool.LargeRequestCooldown == "" {
+		c.Pool.LargeRequestCooldown = "0s"
+	}
+	if c.LargeRequestCooldownDur, err = time.ParseDuration(c.Pool.LargeRequestCooldown); err != nil {
+		return fmt.Errorf("pool.large_request_cooldown: %w", err)
+	}
+	if c.LargeRequestCooldownDur < 0 {
+		c.LargeRequestCooldownDur = 0
 	}
 	if c.SessionTTL, err = time.ParseDuration(c.SessionSticky.TTL); err != nil {
 		return fmt.Errorf("session_sticky.ttl: %w", err)

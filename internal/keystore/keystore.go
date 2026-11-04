@@ -177,23 +177,55 @@ type keyFile struct {
 // 模型名归一化（口径对齐 internal/server/resolve_model.go，见包注释）
 // ---------------------------------------------------------------------------
 
-// bareModel 白名单比对用的模型名归一：剥 `cn:` 与 `global:` 前缀，两侧同剥后
-// 精确比对。大小写敏感（与 resolveModel 的「前缀必须是精确的小写枚举」同口径——
-// 参考实现 _bare_model 是小写不敏感，此处从 server 口径，理由见包注释）。
-//
-// 为什么 global: 也要剥：server 侧 handler 调用 Validate 时传的是 resolveModel
-// 剥完前缀的**裸名**（global:gpt-x → gpt-x）。若此处保留 global:，白名单照
-// /v1/models 下发的 id 抄写 global:gpt-x 时，比对变成 "global:gpt-x" vs "gpt-x"
-// 永不相等，密钥对全部 global 模型恒 400 model_not_allowed。版本归属的判定职责
-// 在 Realm 检查（realmOf），白名单只管「模型本身」，剥掉全部路由前缀。
-func bareModel(model string) string {
+// splitModelRealm 把模型名拆成（版本, 裸名）。不带前缀返回 ("", 原名)。
+func splitModelRealm(model string) (string, string) {
 	if strings.HasPrefix(model, "cn:") {
-		return model[3:]
+		return "cn", model[3:]
 	}
 	if strings.HasPrefix(model, "global:") {
-		return model[7:]
+		return "global", model[7:]
 	}
-	return model
+	return "", model
+}
+
+// bareModel 白名单比对用的模型名归一：剥 `cn:` 与 `global:` 前缀。
+func bareModel(model string) string {
+	_, bare := splitModelRealm(model)
+	return bare
+}
+
+// modelAllowedForWhitelist 模型白名单判据。
+//
+// manager v2.11.7 / issue #357 的语义：
+//   - 密钥已锁定 realm：版本由密钥统一约束，白名单两侧只比裸名；
+//   - 密钥未锁定：白名单裸名视为「该模型的任意版本」，显式 `cn:` / `global:`
+//     只放行同版本。这样编辑器存入裸名时，带 `global:` 的客户端请求不会被误拒；
+//     想只放行某一版时写显式前缀即可。
+func modelAllowedForWhitelist(lockRealm, requestModel, requestRealm string, whitelist []string) bool {
+	lock := normRealm(lockRealm)
+	requestBare := bareModel(requestModel)
+	if lock != "" {
+		for _, allow := range whitelist {
+			if bareModel(allow) == requestBare {
+				return true
+			}
+		}
+		return false
+	}
+	reqRealm := normRealm(requestRealm)
+	if reqRealm == "" {
+		reqRealm = realmOf(requestModel) // 裸名默认国内版，与 resolveModel 同口径
+	}
+	for _, allow := range whitelist {
+		allowRealm, allowBare := splitModelRealm(strings.TrimSpace(allow))
+		if allowBare != requestBare {
+			continue
+		}
+		if allowRealm == "" || allowRealm == reqRealm {
+			return true
+		}
+	}
+	return false
 }
 
 // realmOf 模型名的版本归属推断：`global:` 前缀 = global，其余（含 `cn:` 前缀与
@@ -628,18 +660,14 @@ func (s *Store) Validate(k *Key, ip, model, realm string, now time.Time) *Reject
 	}
 	// --- 模型白名单 → 400。**不能因 model 缺失就跳过检查**（参考实现的实测坑：
 	// `if models and model and ...` 让限定单模型的密钥可用「不带 model」走上游
-	// 默认模型，白名单形同虚设）。比对两侧都过 bareModel：请求名与白名单条目的
-	// `cn:`/`global:` 前缀写法等价（版本归属由上方 Realm 检查单独判定，白名单
-	// 只管模型本身）。
+	// 默认模型，白名单形同虚设）。
 	if len(k.ModelWhitelist) > 0 {
 		m := strings.TrimSpace(model)
 		if m == "" {
 			return &Rejection{Status: 400, Reason: ReasonModelNotAllowed}
 		}
-		for _, allow := range k.ModelWhitelist {
-			if bareModel(allow) == bareModel(m) {
-				return nil
-			}
+		if modelAllowedForWhitelist(k.Realm, m, realm, k.ModelWhitelist) {
+			return nil
 		}
 		return &Rejection{Status: 400, Reason: ReasonModelNotAllowed}
 	}

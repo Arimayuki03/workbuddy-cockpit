@@ -220,6 +220,9 @@ func restartRequiredFields(c *Config) []string {
 		out = append(out, "upstash")
 	}
 	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
+	// 大请求预算在 Handler 装配期进入请求路径；面板保存只落盘，重启后生效。
+	out = append(out, "pool.large_request_bytes", "pool.large_request_budget",
+		"pool.large_request_budget_window", "pool.large_request_cooldown")
 	// 随机延后 / 账号错峰（v1.19.2）在 scheduler 装配期进 Config（与 activity_report_count
 	// 同口径），只能重启生效；hours/开关是热改的，故不在此列。
 	out = append(out, "schedule.random_delay_minutes",
