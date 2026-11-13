@@ -91,6 +91,14 @@ func mpEventBase(a *auth.Auth) map[string]any {
 
 // ReportMPEvent 以小程序指纹向 /v2/report 批量上报事件。
 func (c *Client) ReportMPEvent(a *auth.Auth, events ...map[string]any) error {
+	return c.ReportMPEventEnv(a, nil, events...)
+}
+
+// ReportMPEventEnv 同 ReportMPEvent，但可注入额外的公共字段（env）。
+// 活动任务（Campaign）判据按「页面上下文」认人：真机每条事件都带
+// pageURL/pageName，缺了不推进度——调用方通过 env 传入 page 字段。
+// env 覆盖 mpEventBase 的同名键，业务事件再覆盖 env（与既有合并顺序一致）。
+func (c *Client) ReportMPEventEnv(a *auth.Auth, env map[string]any, events ...map[string]any) error {
 	if a.IsGlobal() { // 客户端防线:mp 事件仅 CN 域(与 trial.go 客户端侧防线口径一致)
 		return fmt.Errorf("mp report: global 账号不支持(mp 事件仅 CN 域)")
 	}
@@ -98,6 +106,9 @@ func (c *Client) ReportMPEvent(a *auth.Auth, events ...map[string]any) error {
 		return fmt.Errorf("mp report: no events")
 	}
 	base := mpEventBase(a)
+	for k, v := range env {
+		base[k] = v
+	}
 	arr := make([]map[string]any, 0, len(events))
 	for _, ev := range events {
 		m := map[string]any{}

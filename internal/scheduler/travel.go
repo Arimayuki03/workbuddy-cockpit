@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -104,7 +105,19 @@ func (s *Scheduler) runTravel(ctx context.Context) {
 	}
 }
 
-// travelOne 单账号单趟状态机：查有无猫 + 查状态 + 最多一个动作，不轮询不等待。
+// travelOne 单账号单趟状态机：查有无猫 + 查状态 + 顺序化 Buddy 写操作。
+//
+// v1.25.0 §4 顺序不变量（两个参考实现独立收敛，违反会静默丢奖励）：
+//
+//	travel status（闸门：查询失败/未知状态 → 本轮不做任何 Buddy 写）
+//	  ↓
+//	claim 旅行礼物（必须在任何 Buddy 变更之前：开盒会覆盖 travel record）
+//	  ↓
+//	回读状态必须回到 idle（arrived 但 claim 失败 / 未确认 → 不开盒也不 depart）
+//	  ↓
+//	open 盲盒（仅 idle）
+//	  ↓
+//	depart（最后一个写操作）
 func (s *Scheduler) travelOne(a *auth.Auth) {
 	buddy, err := s.cfg.Upstream.BuddyInfo(a)
 	if err != nil {
@@ -120,22 +133,89 @@ func (s *Scheduler) travelOne(a *auth.Auth) {
 		log.Printf("travel %s: status: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 		return
 	}
-	switch ts.State {
+	state := normalizeTravelState(ts.State)
+	switch state {
 	case travelStateArrived:
-		s.travelClaim(a, ts)
+		if !s.travelClaim(a, ts) {
+			return // claim 失败/未确认：不开盒也不 depart（§4 补充不变量）
+		}
+		// claim 后必须回读确认回到 idle，才允许后续 Buddy 写。
+		ts2, err := s.cfg.Upstream.TravelStatus(a)
+		if err != nil {
+			log.Printf("travel %s: status after claim: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
+			return
+		}
+		if normalizeTravelState(ts2.State) != travelStateIdle {
+			log.Printf("travel %s: skip blindbox/depart (state after claim %q)", logfmt.Label(a.UID, a.NicknameValue()), ts2.State)
+			return
+		}
+		ts = ts2
 	case travelStateIdle:
-		s.travelDepart(a, ts)
+		// 已确认 idle，继续开盒 + 派出。
 	case travelStateTraveling:
-		log.Printf("travel %s: skip (traveling record=%d)", logfmt.Label(a.UID, a.NicknameValue()), ts.RecordID)
+		log.Printf("travel %s: skip all buddy writes (traveling record=%d)", logfmt.Label(a.UID, a.NicknameValue()), ts.RecordID)
+		return
 	default:
-		log.Printf("travel %s: skip (unknown state %q)", logfmt.Label(a.UID, a.NicknameValue()), ts.State)
+		log.Printf("travel %s: skip all buddy writes (unknown state %q)", logfmt.Label(a.UID, a.NicknameValue()), ts.State)
+		return
 	}
+	// idle 已确认：开盒必须在 depart 之前（开盒覆盖 travel record）。
+	s.openBlindBox(a)
+	s.travelDepart(a, ts)
+}
+
+// normalizeTravelState 归一上游状态串（大小写/空白容错）。
+func normalizeTravelState(state string) string {
+	return strings.ToLower(strings.TrimSpace(state))
+}
+
+// openBlindBox 在旅行 idle 状态开盲盒（v1.25.0 G1）。
+// count = min(affordable, max_open_count, 5)；额度不足/查询失败静默跳过。
+// 开盒失败只记日志，不阻塞后续 depart（开盒与派出是独立写）。
+func (s *Scheduler) openBlindBox(a *auth.Auth) {
+	q, err := s.cfg.Upstream.BuddyQuota(a)
+	if err != nil {
+		log.Printf("travel %s: blindbox quota: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
+		return
+	}
+	n := q.OpenCount()
+	if n <= 0 {
+		return // 能量不足/无额度：正常态，不刷日志
+	}
+	res, err := s.cfg.Upstream.BuddyOpen(a, n, "")
+	if err != nil {
+		log.Printf("travel %s: blindbox open count=%d: %v", logfmt.Label(a.UID, a.NicknameValue()), n, err)
+		return
+	}
+	log.Printf("travel %s: blindbox open ok count=%d names=%s",
+		logfmt.Label(a.UID, a.NicknameValue()), res.Count, strings.Join(res.Names, ","))
+}
+
+// travelClaim 到站领奖（必须带 record_id），返回是否确认成功。
+// 未确认（无 record_id / 上游 200 但无 reward_credit）时返回 false，调用方
+// 据此停止后续开盒与派出。
+func (s *Scheduler) travelClaim(a *auth.Auth, ts *upstream.TravelState) bool {
+	if ts.RecordID == 0 {
+		log.Printf("travel %s: claim skipped (arrived but no record_id)", logfmt.Label(a.UID, a.NicknameValue()))
+		return false
+	}
+	reward, confirmed, err := s.cfg.Upstream.TravelClaimDetailed(a, ts.RecordID)
+	if err != nil {
+		log.Printf("travel %s: claim record=%d: %v", logfmt.Label(a.UID, a.NicknameValue()), ts.RecordID, err)
+		return false
+	}
+	if !confirmed {
+		log.Printf("travel %s: claim unconfirmed record=%d (no reward in response)", logfmt.Label(a.UID, a.NicknameValue()), ts.RecordID)
+		return false
+	}
+	log.Printf("travel %s: claim ok record=%d reward=%d", logfmt.Label(a.UID, a.NicknameValue()), ts.RecordID, reward)
+	return true
 }
 
 // travelDepart 空闲且未达当日上限时派出（每日 1 次，自然日 00:00 CST 重置）。
 func (s *Scheduler) travelDepart(a *auth.Auth, ts *upstream.TravelState) {
 	if ts.DailyLimitReached {
-		log.Printf("travel %s: skip (daily limit reached)", logfmt.Label(a.UID, a.NicknameValue()))
+		log.Printf("travel %s: skip depart (daily limit reached)", logfmt.Label(a.UID, a.NicknameValue()))
 		return
 	}
 	if err := s.cfg.Upstream.TravelDepart(a, travelLocationID); err != nil {
@@ -143,20 +223,6 @@ func (s *Scheduler) travelDepart(a *auth.Auth, ts *upstream.TravelState) {
 		return
 	}
 	log.Printf("travel %s: depart ok location=%d", logfmt.Label(a.UID, a.NicknameValue()), travelLocationID)
-}
-
-// travelClaim 到站领奖（必须带 record_id）。
-func (s *Scheduler) travelClaim(a *auth.Auth, ts *upstream.TravelState) {
-	if ts.RecordID == 0 {
-		log.Printf("travel %s: claim skipped (arrived but no record_id)", logfmt.Label(a.UID, a.NicknameValue()))
-		return
-	}
-	reward, err := s.cfg.Upstream.TravelClaim(a, ts.RecordID)
-	if err != nil {
-		log.Printf("travel %s: claim record=%d: %v", logfmt.Label(a.UID, a.NicknameValue()), ts.RecordID, err)
-		return
-	}
-	log.Printf("travel %s: claim ok record=%d reward=%d", logfmt.Label(a.UID, a.NicknameValue()), ts.RecordID, reward)
 }
 
 // travelAdopt 旅行巡检时领养：受 adoptTriedToday 当日防抖约束。

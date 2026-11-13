@@ -1205,6 +1205,12 @@ type Client struct {
 	// 空 = webBase 回落默认值 https://www.workbuddy.cn。
 	WebBaseCN string
 
+	// OpenBaseCN 开放平台域（open.workbuddy.cn）：技能分享渠道创建端点所在域
+	//（skill_share 任务，v1.25.0）。空 = 回落默认值 https://open.workbuddy.cn。
+	// 独立字段而非复用 webBase：该域只提供 open-platform 接口，混用会让
+	// 领奖/上报类路径错误地打到开放平台。
+	OpenBaseCN string
+
 	// ChatBaseGlobal / BillingBaseGlobal 国际版（global realm）上游 base。
 	// 空 = 缺省默认 https://www.workbuddy.ai（D5）。
 	ChatBaseGlobal    string
@@ -1260,6 +1266,7 @@ func New() *Client {
 		GlobalEnabled:        true,
 		ChatBaseCN:           "https://copilot.tencent.com",
 		BillingBaseCN:        "https://www.codebuddy.cn",
+		OpenBaseCN:           "https://open.workbuddy.cn",
 	}
 	// 热改快照与字段同值初始化：运行期读侧恒走快照（headers.go），快照必须从
 	// 零值起就与字段同步，否则看不到 New 预置的默认值。
@@ -2697,10 +2704,43 @@ func packageRemainUsed(a respAccount) (remain, used, size int64) {
 // 偶发上游 5xx（code 10000 / http 500）做有界重试（见 retryBillingTransient，panel
 // commit dd4ea34d）——单次抖动不再让该账号整天漏签；「已签到」等业务错误不重试。
 func (c *Client) DailyCheckin(a *auth.Auth) error {
-	return c.retryBillingTransient(func() error {
-		_, err := c.billingMeterJSON(a, c.checkinMeterPaths(a), http.MethodPost, map[string]any{})
-		return err
+	_, err := c.DailyCheckinDetailed(a)
+	return err
+}
+
+// CheckinResult 签到回执（v1.25.0 G5.1）：credit_delayed=true 表示积分待入账，
+// **不是失败**——上游先记签到、积分异步到账。调用方据此区分「已签到·待入账」
+// 与真正的失败，避免次日重复签到/误报警。
+type CheckinResult struct {
+	Credit        int64 `json:"credit"`
+	Energy        int64 `json:"energy"`
+	CreditDelayed bool  `json:"credit_delayed"`
+}
+
+// DailyCheckinDetailed 执行签到并返回回执明细（错误语义与 DailyCheckin 完全一致）。
+// 回执字段缺失不视为失败：amount 为 0 且 !CreditDelayed 时按「无新增」处理。
+func (c *Client) DailyCheckinDetailed(a *auth.Auth) (*CheckinResult, error) {
+	var result *CheckinResult
+	err := c.retryBillingTransient(func() error {
+		data, err := c.billingMeterJSON(a, c.checkinMeterPaths(a), http.MethodPost, map[string]any{})
+		if err != nil {
+			return err
+		}
+		res := &CheckinResult{}
+		if len(data) > 0 {
+			// 回执形状随版本漂移；解析失败不升级为签到失败（HTTP/信封已成功）。
+			_ = json.Unmarshal(data, res)
+		}
+		result = res
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		result = &CheckinResult{}
+	}
+	return result, nil
 }
 
 // IsAlreadyCheckin 报告 err 是否表示"今天已签到"（上游幂等拒绝重复签到）。

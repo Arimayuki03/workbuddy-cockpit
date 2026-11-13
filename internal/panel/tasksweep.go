@@ -305,6 +305,8 @@ func (p *Panel) RunTaskSweepOnceContext(ctx context.Context) TaskSweepStats {
 		return TaskSweepStats{QueueBusy: true}
 	}
 
+	// 一轮清扫算一轮：允许对上一轮未确认的 claim 重试一次（同一轮内不重复 POST）。
+	p.resetClaimUnconfirmed()
 	stats := p.runTaskSweepAccounts(ctx)
 	if stats.Claimed > 0 || stats.Accepted > 0 || stats.Errors > 0 || stats.Deferred > 0 || stats.Cancelled || stats.Skipped > 0 {
 		log.Printf("panel: 任务补领清扫：%d 个账号（忙跳过 %d / 过滤 %d）· 接受 %d · 领奖 %d · +%d 分 +%d 能 · 顺延 %d · 出错 %d%s",
@@ -506,15 +508,14 @@ func (p *Panel) sweepAccount(ctx context.Context, a *auth.Auth, uid string) (res
 		if t.Claimed || t.Locked || !t.Claimable {
 			continue
 		}
-		var credit, energy int64
-		var cErr error
-		if taskSweepUsesMP(t.TaskCode, mpOnly) {
-			credit, energy, cErr = p.cfg.Upstream.ClaimRewardMP(a, t.TaskCode)
-		} else {
-			credit, energy, cErr = p.cfg.Upstream.ClaimReward(a, t.TaskCode)
-		}
+		credit, energy, claimed, cErr := p.claimTaskReward(a, t.TaskCode, taskSweepUsesMP(t.TaskCode, mpOnly))
 		if cErr != nil {
 			res.errors++
+			continue
+		}
+		if !claimed {
+			// 回执未确认（可能延迟入账）：本轮不重复提交，下轮回读确认。
+			res.deferred++
 			continue
 		}
 		res.claimed++
@@ -536,12 +537,7 @@ func (p *Panel) acceptTaskSweepCodes(ctx context.Context, a *auth.Auth, codes []
 		if end > len(codes) {
 			end = len(codes)
 		}
-		var err error
-		if isMP {
-			err = p.cfg.Upstream.AcceptTasksMP(a, codes[start:end])
-		} else {
-			err = p.cfg.Upstream.AcceptTasks(a, codes[start:end])
-		}
+		err := p.acceptTasks(a, codes[start:end], isMP)
 		if err != nil {
 			res.errors++
 			return

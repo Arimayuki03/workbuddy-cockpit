@@ -43,6 +43,15 @@ func growthPending(t upstream.Task) bool {
 	if t.Claimed || t.Locked {
 		return false // Locked：Sequential 族每日零点解锁一环，锁定环 accept 不落账（吸收 panel 修复）
 	}
+	if t.Expired(time.Now()) {
+		return false // 已过 valid_end：不再打请求（G5.3 到期跳过）
+	}
+	if isCampaignTaskCode(t.TaskCode) {
+		// 活动任务由 campaignTasksForAccount 预筛（已领/未下发不会进来），
+		// 这里只需确认配方存在（app 任务不入表）。
+		_, ok := campaignRefFor(t.TaskCode)
+		return ok
+	}
 	if t.Target > 0 && t.Current >= t.Target {
 		// 达标未领 = 要补领：进度已满、奖励没到账，队列执行 runGrowthQueued 会回读
 		// claimable 并自动领奖；此处返回 false 会让这类任务永远不进待办、奖励永不
@@ -99,6 +108,9 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+			// v1.25.0 G4：活动任务（另属 portal/activity 契约）并入同一待办视图。
+			// 已领奖条目在 campaignTasksForAccount 内过滤；app 任务首版跳过。
+			it.Growth = append(it.Growth, p.campaignTasksForAccount(a, false)...)
 		}(i, st.UID)
 	}
 	wg.Wait()
@@ -237,6 +249,9 @@ func (p *Panel) startTaskQueue(concurrency int, wantGrowth bool) (total, seq int
 	}
 	q.running = true
 	q.mu.Unlock()
+	// 新一轮队列：清空未确认领奖标记，允许对上一轮延迟入账的 claim 重试一次
+	// （同一轮内仍不会重复 POST，见 claimTaskReward）。
+	p.resetClaimUnconfirmed()
 	// 新一轮执行的中断信号通道（上一轮取消时关闭的通道不复用——关闭是终态，
 	// 复用会让新队列一启动就被旧信号打断）。仅在真正开跑前重置，扫描失败回滚
 	// 时多占一个通道无副作用。
@@ -298,6 +313,8 @@ func (p *Panel) startTaskQueue(concurrency int, wantGrowth bool) (total, seq int
 							}
 						}
 					}
+					// v1.25.0 G4：活动任务并入队列（app 已排除）。
+					one.grow = append(one.grow, p.campaignTasksForAccount(a, false)...)
 					sort.Slice(one.grow, func(i, j int) bool { // 按 autoActions 顺序（依赖前置）
 						return autoActionIndex(one.grow[i].TaskCode) < autoActionIndex(one.grow[j].TaskCode)
 					})
@@ -484,6 +501,8 @@ func (p *Panel) pendingCount() (int, error) {
 					}
 				}
 			}
+			// 活动任务（portal/activity）另算：未领奖且配方存在即待办。
+			n += len(p.campaignTasksForAccount(a, false))
 			mu.Lock()
 			if failed {
 				scanFailed = true
@@ -562,7 +581,7 @@ func (p *Panel) acceptPendingTasks(a *auth.Auth) int {
 	if len(codes) == 0 {
 		return 0
 	}
-	if err := p.cfg.Upstream.AcceptTasks(a, codes); err != nil {
+	if err := p.acceptTasks(a, codes, false); err != nil {
 		log.Printf("panel: 队列 accept uid=%s: %v（不阻塞）", a.UID, err)
 		return 0
 	}
@@ -589,26 +608,37 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 	if before.Claimed {
 		return "已完成（已领取）", nil
 	}
-	msg, err := act.run(p, a)
+	if before.Expired(time.Now()) {
+		return "任务已过期（" + before.ValidEnd + "）", nil
+	}
+	if before.Locked && before.NotYetValid(time.Now()) {
+		return "未到上线时间（" + before.ValidStart + "）", nil
+	}
+	msg, err := p.runAutoAction(a, act)
 	if err != nil {
 		return "", err
 	}
 	var after *upstream.Task
-	if isMP {
+	switch {
+	case isCampaignTaskCode(code):
+		after, _ = p.taskByCode(a, code)
+	case isMP:
 		after, _ = p.taskByCodeMP(a, code)
-	} else {
+	default:
 		after, _ = p.taskByCodeWaiting(a, code)
 	}
-	if after != nil && after.Claimable {
-		var credit, energy int64
-		var cerr error
-		if isMP {
-			credit, energy, cerr = p.cfg.Upstream.ClaimRewardMP(a, code)
-		} else {
-			credit, energy, cerr = p.cfg.Upstream.ClaimReward(a, code)
-		}
-		if cerr == nil && (credit > 0 || energy > 0) {
+	if after != nil && after.Claimable && !isCampaignTaskCode(code) {
+		credit, energy, ok, cerr := p.claimTaskReward(a, code, isMP)
+		switch {
+		case cerr != nil:
+			msg += "；达标但领奖失败（下次重试）"
+			log.Printf("panel: 队列 growth uid=%s code=%s 领奖失败: %v", a.UID, code, cerr)
+		case ok && (credit > 0 || energy > 0):
 			msg += fmt.Sprintf("；自动领奖 +%d 分 +%d 能", credit, energy)
+		case ok:
+			msg += "；奖励此前已领取"
+		default:
+			msg += "；领奖已提交，等待入账确认"
 		}
 	}
 	if after != nil {

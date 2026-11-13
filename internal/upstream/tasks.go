@@ -22,6 +22,8 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strings"
+	"time"
 
 	"workbuddy2api/internal/auth"
 )
@@ -46,8 +48,10 @@ type Task struct {
 	Tag          string `json:"tag,omitempty"`       // 端标记（PC 等）
 	JumpURL      string `json:"jump_url,omitempty"`  // 客户端跳转协议（workbuddy://...）
 	Locked       bool   `json:"locked,omitempty"`    // 上游标记未解锁
-	Target       int64  `json:"target"`              // 目标次数（恒输出：0 是有效进度值）
-	Current      int64  `json:"current"`             // 当前进度（恒输出：0 是有效进度值）
+	ValidStart   string `json:"valid_start,omitempty"`
+	ValidEnd     string `json:"valid_end,omitempty"`
+	Target       int64  `json:"target"`  // 目标次数（恒输出：0 是有效进度值）
+	Current      int64  `json:"current"` // 当前进度（恒输出：0 是有效进度值）
 	AcceptStatus string `json:"accept_status,omitempty"`
 	Status       string `json:"status,omitempty"`    // 上游任务状态（complete 等）
 	Claimable    bool   `json:"claimable,omitempty"` // 进度达标且未领取（本地推算）
@@ -90,35 +94,42 @@ func (c *Client) AcceptTasksMP(a *auth.Auth, taskCodes []string) error {
 // + mp 头（上游 task_runner claim_one(mp=True) 同款）；chat 域 400 时降级 Web 域
 // 领奖端点（ClaimReward，x-client-platform: web 形态）。返回 (credit, energy, err)。
 func (c *Client) ClaimRewardMP(a *auth.Auth, taskCode string) (credit, energy int64, err error) {
+	credit, energy, _, err = c.ClaimRewardMPDetailed(a, taskCode)
+	return credit, energy, err
+}
+
+// ClaimRewardMPDetailed 同 ClaimRewardMP，但额外返回 already_claimed。
+// 调用方据此把「此前已领取」与「回执无金额的延迟入账」区分开（v1.25.0 G5.2）。
+func (c *Client) ClaimRewardMPDetailed(a *auth.Auth, taskCode string) (credit, energy int64, already bool, err error) {
 	data, err := c.growthJSONMP(a, http.MethodPost,
 		"/activity/growth/tasks/"+url.PathEscape(taskCode)+"/claim", nil)
 	if err != nil {
 		// chat 域对该路径 400（部分任务/租户形态）→ Web 域降级（已实测可领）。
 		var ue *Error
 		if errors.As(err, &ue) && ue.Status == http.StatusBadRequest {
-			return c.ClaimReward(a, taskCode)
+			return c.ClaimRewardDetailed(a, taskCode)
 		}
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 	return parseClaimReward(data)
 }
 
 // parseClaimReward 解析领奖响应 data：{"already_claimed":bool,"credit":n,"energy":n}。
-func parseClaimReward(data json.RawMessage) (credit, energy int64, err error) {
+func parseClaimReward(data json.RawMessage) (credit, energy int64, already bool, err error) {
 	var resp struct {
 		AlreadyClaimed bool  `json:"already_claimed"`
 		Credit         int64 `json:"credit"`
 		Energy         int64 `json:"energy"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 	// 幂等口径与 ClaimReward（Web 域）对齐：重复领取不算错误，但 credit/energy 是
 	// 上游回显的历史奖励，不是"本次到账"，返回 0 防虚报。
 	if resp.AlreadyClaimed {
-		return 0, 0, nil
+		return 0, 0, true, nil
 	}
-	return resp.Credit, resp.Energy, nil
+	return resp.Credit, resp.Energy, false, nil
 }
 
 // parseGrowthTasks 解析 growth 任务列表 data.tasks[]（默认与 mp 口径共用）。
@@ -137,6 +148,8 @@ func parseGrowthTasks(data json.RawMessage) ([]Task, error) {
 			Tag          string          `json:"tag"`
 			JumpURL      string          `json:"jump_url"`
 			Locked       bool            `json:"locked"`
+			ValidStart   string          `json:"valid_start"`
+			ValidEnd     string          `json:"valid_end"`
 			AcceptStatus string          `json:"accept_status"`
 			Status       string          `json:"status"`
 			Target       int64           `json:"target"`
@@ -174,6 +187,8 @@ func parseGrowthTasks(data json.RawMessage) ([]Task, error) {
 			Tag:          t.Tag,
 			JumpURL:      t.JumpURL,
 			Locked:       t.Locked,
+			ValidStart:   t.ValidStart,
+			ValidEnd:     t.ValidEnd,
 			Target:       tgt,
 			Current:      cur,
 			AcceptStatus: t.AcceptStatus,
@@ -183,6 +198,55 @@ func parseGrowthTasks(data json.RawMessage) ([]Task, error) {
 		})
 	}
 	return out, nil
+}
+
+// taskTimeLayouts 上游 valid_start/valid_end 的已知形态（RFC3339 / 纯日期 / 空格分隔）。
+var taskTimeLayouts = []string{
+	time.RFC3339,
+	"2006-01-02T15:04:05",
+	"2006-01-02 15:04:05",
+	"2006-01-02",
+}
+
+// ParseTaskTime 解析上游任务有效期字段；空串/无法解析返回 (零值, false)。
+// 无法解析按「无时间约束」处理——宁可多打一次请求，也不把可做任务误判为未上线。
+func ParseTaskTime(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range taskTimeLayouts {
+		// 无时区后缀的形态按上游自然日口径 CST 解析（与 travelDay/补签同源），
+		// 避免 UTC 容器把「今日 00:00 上线」误判成未来 8 小时。
+		if t, err := time.ParseInLocation(layout, raw, cstShanghai); err == nil {
+			return t, true
+		}
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// NotYetValid 报告任务是否「未到上线时间」（valid_start 在未来）。
+// 仅对 locked 或 accept_status 为空的未开始任务有意义；调用方先判 Locked。
+func (t Task) NotYetValid(now time.Time) bool {
+	start, ok := ParseTaskTime(t.ValidStart)
+	return ok && start.After(now)
+}
+
+// Expired 报告任务是否已过有效期（valid_end 在 now 之前）。
+// 纯日期形态（2006-01-02）按当日 23:59:59 截止，避免上游只下发日期时
+// 在当天凌晨就误判过期。
+func (t Task) Expired(now time.Time) bool {
+	end, ok := ParseTaskTime(t.ValidEnd)
+	if !ok {
+		return false
+	}
+	if len(strings.TrimSpace(t.ValidEnd)) == len("2006-01-02") {
+		end = end.Add(24*time.Hour - time.Second)
+	}
+	return end.Before(now)
 }
 
 // AcceptTasks 接受任务（幂等：已 accepted 时上游返回成功或业务提示，均不视为致命错误）。
@@ -203,13 +267,19 @@ func (c *Client) AcceptTasks(a *auth.Auth, taskCodes []string) error {
 // 一直返回 400 "task not completed"，是此前领奖失败的真实原因。
 // 本实现返回 (credit, energy, err)：credit/energy 为本次到账奖励（已领取过时为 0）。
 func (c *Client) ClaimReward(a *auth.Auth, taskCode string) (credit, energy int64, err error) {
+	credit, energy, _, err = c.ClaimRewardDetailed(a, taskCode)
+	return credit, energy, err
+}
+
+// ClaimRewardDetailed 同 ClaimReward，但额外返回 already_claimed（区分幂等态）。
+func (c *Client) ClaimRewardDetailed(a *auth.Auth, taskCode string) (credit, energy int64, already bool, err error) {
 	// Origin/Referer 与 URL 同源（realm 感知的 webBase），global 账号不出现
 	// "AI 域 URL + CN 域来源头"的不自洽形态。
 	base := c.webBase(a)
 	req, err := http.NewRequest(http.MethodPost,
 		base+"/activity/growth/tasks/"+url.PathEscape(taskCode)+"/claim", nil)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 	// Web 端请求头形状（对照浏览器实际请求）：Origin/Referer 指向成长中心页，
 	// 带 x-client-platform: web 标记来源端。
@@ -235,7 +305,7 @@ func (c *Client) ClaimReward(a *auth.Auth, taskCode string) (credit, energy int6
 
 	data, err := c.doJSONAuth(a, req)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 	// 响应 data：{"already_claimed":bool,"credit":100,"energy":5,...}
 	var resp struct {
@@ -244,10 +314,10 @@ func (c *Client) ClaimReward(a *auth.Auth, taskCode string) (credit, energy int6
 		Energy         int64 `json:"energy"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 	if resp.AlreadyClaimed {
-		return 0, 0, nil // 幂等：重复领取不算错误，但无新增奖励
+		return 0, 0, true, nil // 幂等：重复领取不算错误，但无新增奖励
 	}
-	return resp.Credit, resp.Energy, nil
+	return resp.Credit, resp.Energy, false, nil
 }

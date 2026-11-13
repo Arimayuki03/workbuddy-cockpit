@@ -399,33 +399,7 @@ func (c *Client) MarketExpertList(a *auth.Auth, expertType string) ([]MarketExpe
 	if expertType != "" {
 		body["expert_type"] = expertType
 	}
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequest(http.MethodPost, c.chatBase(a)+"/portal/operation-platform/market/expert/list", bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", desktopUA)
-	req.Header.Set("X-Domain", c.chatBase(a))
-	req.Header.Set("X-Product", "SaaS")
-	if a.UID != "" {
-		req.Header.Set("X-User-Id", a.UID)
-	}
-	var out struct {
-		Experts []MarketExpert `json:"experts"`
-	}
-	data, err := c.doJSONAuth(a, req)
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, fmt.Errorf("expert list parse: %w", err)
-	}
-	return out.Experts, nil
+	return c.marketExpertList(a, body)
 }
 
 // desktopChatTotalTimeout DesktopChatWithExpert 的 SSE 总时长上限。该路径只为抓

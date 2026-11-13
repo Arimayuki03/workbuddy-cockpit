@@ -756,22 +756,24 @@ func checkinRetryable(err error) bool {
 
 // dailyCheckinWithRetry 执行签到，遇到上游瞬时失败（HTTP 5xx / code 10001）
 // 按 checkinRetryDelays 退避重试；ctx 取消立即返回最后一次错误。
-func (s *Scheduler) dailyCheckinWithRetry(ctx context.Context, a *auth.Auth, label string) error {
-	err := s.cfg.Upstream.DailyCheckin(a)
+// 返回回执明细：credit_delayed=true 表示积分待入账（不是失败，调用方照常记
+// CheckinOK 并说明待入账）。
+func (s *Scheduler) dailyCheckinWithRetry(ctx context.Context, a *auth.Auth, label string) (*upstream.CheckinResult, error) {
+	res, err := s.cfg.Upstream.DailyCheckinDetailed(a)
 	for i, delay := range checkinRetryDelays {
 		if err == nil || upstream.IsAlreadyCheckin(err) || !checkinRetryable(err) {
-			return err
+			return res, err
 		}
 		log.Printf("checkin %s: %v — %s 后重试(%d/%d)", label, err, delay, i+1, len(checkinRetryDelays))
 		if !sleepCtx(ctx, delay) {
-			return err
+			return res, err
 		}
 		if ctx.Err() != nil {
-			return err
+			return res, err
 		}
-		err = s.cfg.Upstream.DailyCheckin(a)
+		res, err = s.cfg.Upstream.DailyCheckinDetailed(a)
 	}
-	return err
+	return res, err
 }
 
 func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
@@ -890,18 +892,25 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 		}
 		// 签到返回错误（含"今天已签到"）也继续查余额：余额恢复即可解冻账号。
 		// 瞬时失败（HTTP 5xx / 10001 非幂等形态）先原地退避重试，避免错过当天（0029）。
-		if err := s.dailyCheckinWithRetry(ctx, a, logfmt.Label(st.UID, st.Nickname)); err != nil {
-			if upstream.IsAlreadyCheckin(err) {
+		// 成功回执里 credit_delayed=true 表示积分待入账——照常记 ok，仅附说明，
+		// 绝不当失败（否则会触发当日重签，且面板出现误导性红色失败）。
+		checkinRes, cerr := s.dailyCheckinWithRetry(ctx, a, logfmt.Label(st.UID, st.Nickname))
+		if cerr != nil {
+			if upstream.IsAlreadyCheckin(cerr) {
 				// "今天已签到"是幂等成功，不是错误：不填 detail，免得回执里
 				// 出现一整段 400 报文、被误读成签到失败。
 				oc.Status = CheckinAlready
 			} else {
 				oc.Status = CheckinFail
-				oc.Detail = err.Error()
-				log.Printf("checkin %s: %v", logfmt.Label(st.UID, st.Nickname), err)
+				oc.Detail = cerr.Error()
+				log.Printf("checkin %s: %v", logfmt.Label(st.UID, st.Nickname), cerr)
 			}
 		} else {
 			oc.Status = CheckinOK
+			if checkinRes != nil && checkinRes.CreditDelayed {
+				oc.Detail = "积分待入账（credit_delayed=true）"
+				log.Printf("checkin %s: ok, 积分待入账（credit_delayed=true）", logfmt.Label(st.UID, st.Nickname))
+			}
 		}
 		// 分桶查余额：快过期窗口内的积分单独标记，pool 优先消耗（issue:积分过期）。
 		// ExpiringSoonWindow<=0 时退化为纯总量（与引入前一致）。

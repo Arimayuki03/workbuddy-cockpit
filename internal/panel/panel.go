@@ -131,6 +131,13 @@ type Panel struct {
 	taskMu    sync.Mutex
 	taskLocks map[string]*sync.Mutex
 
+	// claimMu/claimUnconfirmed 未确认领奖去重（v1.25.0 G5.2）：uid + "\x00" +
+	// task_code → true。上游 claim 可能 200 但回执无到账额、回读又尚未落账；
+	// 此时同一轮/本进程内不得再次 POST（重复提交会被上游当异常）。回读确认
+	// 已领取或拿到非零到账额时清除。
+	claimMu          sync.Mutex
+	claimUnconfirmed map[string]bool
+
 	// batchMu/batchLocks 全账号批量任务的按类型互斥（签到/旅行/活跃/保活/
 	// 余额/开学季）：同一类型同时只允许一轮全账号扫描在跑，重复触发返回
 	// 409「同类任务正在执行」而不是叠加扫描（TryLock 语义，条目常驻）。

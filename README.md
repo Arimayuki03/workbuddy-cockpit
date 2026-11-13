@@ -73,7 +73,7 @@ WorkBuddy Cockpit 是一个自托管的一体化项目：**后端**是多账号 
 
 - **总览** — 账号健康分布、今日请求 / token / 积分扣费一目了然；到期积分按天归并口径切换（本地偏好）
 - **账号** — 池总览（状态 / 积分进度条 / 冷却倒计时 / 成功失败计数 / 在途数）；单号禁用 / 恢复 / 复活 / 签到 / 查余额 / 移除；批量签到 / 保活 / 余额刷新；**扫码 / 授权登录添加账号**，凭证落盘后热加载进池，免重启；**凭据导出 / 导入**（跨部署迁移账号，同 UID 覆盖更新）；**强制清冷却**（冷却 / 熔断 / 连败降权 / 模型级限流一键归零，不碰禁用位）；**账号备注**（后端持久化进 state.json，换浏览器不丢）与**搜索 + 分页**；**手写选号权重**（天平图标，`0.1..100` 乘数，默认 1；持久化进 auth 文件顶层 `weight`，导出/导入与 token 刷新保留；冷却/熔断/禁用/在途/成本分层/`credits_desc` 硬门槛不受影响）；积分变动流水（余额刷新对比快照，增加即记）
-- **任务** — 成长任务一键自动化（25 个任务动作纯 API 完成：推进 → 轮询计分 → 自动领奖，执行队列账号内串行、账号间并发；含小程序 Sequential_Tasks_1..7 顺序任务链——专家对话、5/10 次对话、GLM5.2、灵感功能等，链式依赖每日解锁自动重试，**锁定环不扫入待办**，小程序对话上报按真人节奏执行——每条间隔 45s+ 随机抖动、可被队列取消中断）；历史券码二维码查询（开学季任务闭环已随活动 2026-09-24 结束下线）；六类定时任务快照与手动触发；**积分变动流水**（任务中心记录流 kind=credit）
+- **任务** — 成长任务一键自动化（30+ 个任务动作纯 API 完成：推进 → 轮询计分 → 自动领奖，执行队列账号内串行、账号间并发；含小程序 Sequential_Tasks_1..7 顺序任务链——专家对话、5/10 次对话、GLM5.2、灵感功能等，链式依赖每日解锁自动重试，**锁定环不扫入待办**，小程序对话上报按真人节奏执行——每条间隔 45s+ 随机抖动、可被队列取消中断）；**v1.25.0 覆盖度补齐**——专家族 `WorkBuddy_Valorant` / `expert_use_*` 四任务（jump_url 动态解析 + 常量兜底）、`skill_share`（真实分享渠道 + 渠道事件）、两个小程序活动任务（星巴克/记者节共 5 项，`viewed → 事件 → 回读 → claim → claimed_at` 闭环，首版跳过 app），以及猫猫旅行**盲盒**（`buddy/quota` + `buddy/open`，严格按 `claim → idle 回读 → 开盒 → depart` 顺序执行）；历史券码二维码查询（开学季任务闭环已随活动 2026-09-24 结束下线）；六类定时任务快照与手动触发；**积分变动流水**（任务中心记录流 kind=credit）
 - **统计** — 逐请求用量分桶（时间片 × 域 × 账号 × 模型）时间轴图表 + 按模型 / 账号聚合的请求量 / token / 延迟 / 扣费 / **积分（含积分每百万 token 单价，与积分同时观测的配对 token 才计入比例）**；时间窗筛选图和表同步生效；时间窗含近 24h / 72h / 7d / 30d 数字档与「启动以来」全量档
 - **日志** — 请求日志（模型 / 账号 / 状态 / tokens / 首字延迟 / 扣费 / 错误 / **prompt 缓存命中三段观测**，环形缓冲最近约 1000 条）+ 系统日志（任务 / 对话 / 系统三频道）；请求日志可 **JSONL 归档**（`data/requests/` 按天轮转，重启不丢，`logging` 段配置保留天数与容量上限；client_ip / user_agent 脱敏开关默认不采集）
 - **安全** — **IP 黑 / 白名单规则编辑**（CIDR，热生效）、**拦截日志**（只记拦截，环形 512 条：missing_key / invalid_key / ip_blocked / ip_not_whitelisted）、**模型锁池卡片**（locked / starved / partial 三态、最早 / 全部解锁时刻）
@@ -295,6 +295,9 @@ workbuddy-cockpit/
 | [使用指南.md](使用指南.md) | 启停 / 配置 / 账号管理 / 接口验证 / 多密钥分发 / 双协议接入 / 入站 IP 安全 / credit_floor / 作用域 Token / 面板用法（含凭据导入导出）/ 常见问题排查 |
 | [docs/DEPLOY-R28S.md](docs/DEPLOY-R28S.md) | NanoPi R28S（FriendlyWrt / OpenWrt ARM64）单容器部署：目录布局、管理桥、升级、备份、SD 卡写入与安全边界 |
 | [docs/DESIGN-v1.2.0-panel-manager.md](docs/DESIGN-v1.2.0-panel-manager.md) | v1.2.0 面板整合设计定稿 |
+| [docs/DESIGN-v1.25.0-growth-coverage.md](docs/DESIGN-v1.25.0-growth-coverage.md) | v1.25.0 成长中心覆盖度分析与实施记录（盲盒 / expert_use 家族 / skill_share / Campaign / 顺序不变量） |
+| [docs/RELEASE-v1.25.0.md](docs/RELEASE-v1.25.0.md) | v1.25.0 发行说明（能力清单、行为变化、验证与未做项） |
+| [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) | 第三方 MIT 声明（88lin/workbuddy-auto-signin、L0NE-6/WorkBuddy-Daily） |
 | [config.example.json](config.example.json) | 全量配置键参考（含注释级说明） |
 
 ## 🔄 版本
@@ -327,6 +330,7 @@ workbuddy-cockpit/
 
 | v1.23.0 | 2026-11-04 | **吸收 manager v2.11.5..v2.11.10（Go 网关适用部分）**——**大上下文改账号级滑动预算**（默认 2 MiB / 6 条 / 120s；保留粘性，超预算只迁移一次会话后重新绑定，不再逐请求换号丢前缀缓存；legacy 轮换需显式配置）；**网关错误契约**（上游 11102 实际答复改 404 `model_not_found`、429 统一补标准 `Retry-After`、`/v1` 与 `/v2` 兜底 404/405 回 OpenAI JSON，不再漏 HTML/纯文本）；**Responses 思考增量补 `summary_index`**；**CN 模型名去 `cn:` 前缀**（裸名即调用值，显式 `cn:` 保持兼容）；**密钥白名单版本语义**（裸名通配两版、显式前缀只放行同版本）；**DSH 新指纹首句**（`Tokens prefixed with @` → `the at-sign`）；**账号风控封禁与重登分离**（11140 unusual activity 标明申诉、不再提示重新登录）；**面板可用积分拆分**（冷却余额仍可用，封禁/停用/未知余额单列）；**出口线路补齐**（`__direct__` 保留名、signin/trial/activity/credit 读取 `proxy_routes`）；**Windows `::` 双栈监听**。未吸收的 manager UI/部署/计费类见 [发行说明](docs/RELEASE-v1.23.0.md) |
 | v1.24.0 | 2026-11-13 | **吸收 manager v2.11.10..v2.11.14（Go 网关适用部分）**——**客户端余额协议**（`/v1/credits`、`/api/usage/token/`、公开 `/api/status`；积分/token 双上限按更紧比例折算，`?scope=cn|global|merged` 分版本；停用/过期密钥仍可读余额）；**6004 限流保留到上游 ResetAt**（本地 soft_rate_max 先到也不虚假恢复；签到解冻/账号级冷却不再抹掉模型台账）；**429 返回最早恢复时间**（多号同时限流时 message/hint/Retry-After 取最早墙钟）；**6020 排队不罚号**（全局队列不冷却/不计数/不禁用，仍回 429）；**净化词表 10s 热重载**（原子换表，解析失败保留旧表）；**登录表单 method=post + 就绪前禁用**（密码不再可能写进地址栏）。未吸收 Trace Tap / HTTP/2 开关等见 [发行说明](docs/RELEASE-v1.24.0.md) |
+| v1.25.0 | 2026-11-13 | **成长中心覆盖度补齐（吸收两个 MIT 参考实现的端点配方）**——**盲盒**（`GET /v2/activity/growth/buddy/quota` + `POST /v2/activity/growth/buddy/open`；严格 `claim 旅行礼物 → 回读 idle → 开盒 → depart`，traveling/未知状态/claim 未确认一律封锁后续 Buddy 写）；**专家族**（`WorkBuddy_Valorant` + 4 个 `expert_use_*`：jump_url `ex_*` 动态解析为主、市场分页精确落位、常量表兜底，LOCAL 专家链带 `has_expert` + `expert_actual_use(mode=LOCAL,cost=0)`）；**`skill_share`**（市场技能 → `open.workbuddy.cn` asset-share 渠道 → clipboard click/success 两事件）；**小程序活动任务**（星巴克/记者节 5 项：`tasks → viewed → 事件 → 回读 → claim → claimed_at`，首版跳过 app）；**任务链硬化**（`credit_delayed=true` 记待入账不判失败、未确认 claim 不重复 POST、`valid_start/valid_end` 未上线跳过、401 刷新后重放一次）。无新增配置键；未做徽章只读端点与 MP 45s 节奏 A/B，见 [发行说明](docs/RELEASE-v1.25.0.md) |
 
 
 完整变更见 [Releases](https://github.com/Arimayuki03/workbuddy-cockpit/releases)。
@@ -336,6 +340,9 @@ workbuddy-cockpit/
 - [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) — 网关核心的上游基座（本 fork 的起点；上游仓库已删库下线，署名依 MIT 保留）
 - [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) — 面板后端能力（账号池视图 / 任务自动化 / 开学季 / 用量分桶 / OAuth 加号 / 配置热编辑）的移植源（MIT）
 - [ithtelab/workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) — 前端面板设计与页面结构的来源（MIT）；其 UI 设计 token 与组件层改编自 [linux-do/cdk](https://github.com/linux-do/cdk)（MIT），一并致谢
+- [88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin)（MIT）— v1.25.0 成长中心 / 盲盒端点交叉验证源
+- [L0NE-6/WorkBuddy-Daily](https://github.com/L0NE-6/WorkBuddy-Daily)（MIT）— v1.25.0 `expert_use_*` / `skill_share` / Campaign 活动任务配方与顺序不变量来源
+- 第三方版权与许可全文见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
 
 ## ⚠️ 免责声明
 

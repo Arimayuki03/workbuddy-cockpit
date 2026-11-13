@@ -227,8 +227,9 @@ func TestRunTravelStateMachine(t *testing.T) {
 		},
 		{
 			name: "有猫-arrived-领奖", buddy: buddyPresent,
-			state:    `{"state":"arrived","record_id":42,"reward_credit":9}`,
-			wantInfo: 1, wantStatus: 1, wantClaim: 1, wantRecord: 42,
+			state: `{"state":"arrived","record_id":42,"reward_credit":9}`,
+			// v1.25.0 §4：claim 后必须回读确认回到 idle，故 status 调用 2 次。
+			wantInfo: 1, wantStatus: 2, wantClaim: 1, wantRecord: 42,
 		},
 		{
 			name: "有猫-arrived-缺record_id-跳过领奖", buddy: buddyPresent,

@@ -100,6 +100,10 @@ SPEC.md
 !docs/RELEASE-v1.21.0.md
 !docs/RELEASE-v1.22.0.md
 !docs/RELEASE-v1.23.0.md
+!docs/RELEASE-v1.24.0.md
+!docs/RELEASE-v1.25.0.md
+!docs/DESIGN-v1.25.0-growth-coverage.md
+!THIRD_PARTY_NOTICES.md
 
 web/node_modules/
 web/.next/

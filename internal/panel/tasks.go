@@ -53,6 +53,9 @@ func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// v1.25.0 G4：活动任务（portal/activity 契约）并入同一任务视图，
+	// 合成码 campaign:<activity>:<task> 由 taskByCode/auto 端点识别。
+	tasks = append(tasks, p.campaignTasksForAccount(a, true)...)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tasks": tasks})
 }
 
@@ -81,7 +84,7 @@ func (p *Panel) accountTaskAccept(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := p.cfg.Upstream.AcceptTasks(a, body.TaskCodes); err != nil {
+	if err := p.acceptTasks(a, body.TaskCodes, false); err != nil {
 		writeErr(w, http.StatusBadGateway, "accept: "+err.Error())
 		return
 	}
@@ -144,7 +147,7 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 			mpCodes = append(mpCodes, t.TaskCode)
 		}
 		if len(mpCodes) > 0 {
-			if err := p.cfg.Upstream.AcceptTasksMP(a, mpCodes); err != nil {
+			if err := p.acceptTasks(a, mpCodes, true); err != nil {
 				log.Printf("panel: mp 批量接受失败 uid=%s err=%v", uid, err)
 				failed = append(failed, mpCodes...)
 			} else {
@@ -179,16 +182,47 @@ func (p *Panel) accountTaskClaim(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid task_code length")
 		return
 	}
-	// 小程序口径任务走 chat 域 mp 头领奖（缺头实测不可领）；其余 Web 端接口。
-	var credit, energy int64
-	var err error
-	if isMPTaskCode(body.TaskCode) {
-		credit, energy, err = p.cfg.Upstream.ClaimRewardMP(a, body.TaskCode)
-	} else {
-		credit, energy, err = p.cfg.Upstream.ClaimReward(a, body.TaskCode)
+	// 活动任务（合成码）走 portal/activity 领奖，且必须回读 claimed_at。
+	if ref, ok := campaignRefFor(body.TaskCode); ok {
+		t, err := p.taskByCode(a, body.TaskCode)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "campaign task: "+err.Error())
+			return
+		}
+		if t == nil {
+			writeErr(w, http.StatusNotFound, "活动任务未下发")
+			return
+		}
+		if t.Claimed {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "already_claimed": true, "message": "该奖励此前已领取"})
+			return
+		}
+		if !t.Claimable {
+			writeErr(w, http.StatusBadRequest, "活动任务尚未完成（progress 未达标）")
+			return
+		}
+		msg, err := p.claimCampaignTask(a, ref, t.Credit)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "claim: "+err.Error())
+			return
+		}
+		log.Printf("panel: 领取活动奖励 uid=%s code=%s: %s", uid, body.TaskCode, msg)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credit": t.Credit, "message": msg})
+		return
 	}
+	// 小程序口径任务走 chat 域 mp 头领奖（缺头实测不可领）；其余 Web 端接口。
+	// claimTaskReward 统一处理未确认去重（G5.2）与 401 刷新重放（G5.4）。
+	credit, energy, claimed, err := p.claimTaskReward(a, body.TaskCode, isMPTaskCode(body.TaskCode))
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "claim: "+err.Error())
+		return
+	}
+	if !claimed {
+		log.Printf("panel: 领取任务奖励 uid=%s code=%s（回执未确认，不重复提交）", uid, body.TaskCode)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "already_claimed": false, "pending": true,
+			"message": "领奖已提交，等待入账确认（本轮不重复提交）",
+		})
 		return
 	}
 	if credit == 0 && energy == 0 {

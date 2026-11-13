@@ -81,18 +81,31 @@ func (c *Client) TravelDepart(a *auth.Auth, locationID int) error {
 
 // TravelClaim 领取到站奖励，返回 reward_credit。
 func (c *Client) TravelClaim(a *auth.Auth, recordID int64) (int64, error) {
+	reward, _, err := c.TravelClaimDetailed(a, recordID)
+	return reward, err
+}
+
+// TravelClaimDetailed 领取到站奖励并报告回执是否带奖励字段。
+//
+// v1.25.0 §4 顺序不变量要求：claim 未确认时既不开盲盒也不 depart（否则
+// 开盒覆盖 travel record / depart 抢在 claim 前会静默丢礼物）。上游部分形态
+// 返回 200 但没有 reward_credit 字段，此时 confirmed=false，调用方必须停止
+// 后续 Buddy 写操作。
+func (c *Client) TravelClaimDetailed(a *auth.Auth, recordID int64) (reward int64, confirmed bool, err error) {
 	data, err := c.growthJSON(a, http.MethodPost, travelClaimPath, map[string]any{"record_id": recordID})
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	var resp struct {
-		RewardCredit int64 `json:"reward_credit"`
+		RewardCredit *int64 `json:"reward_credit"`
 	}
 	if len(data) > 0 {
-		// 奖励字段缺失不视为失败：调用方按 0 记日志即可。
 		_ = json.Unmarshal(data, &resp)
 	}
-	return resp.RewardCredit, nil
+	if resp.RewardCredit == nil {
+		return 0, false, nil
+	}
+	return *resp.RewardCredit, true, nil
 }
 
 // BuddyInfo 查询当前猫档案；返回 (nil, nil) 表示无猫（data.buddy 为 null 或空对象）。
