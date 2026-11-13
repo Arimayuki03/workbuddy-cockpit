@@ -153,17 +153,18 @@ func TestConfigureSanitizeRejectsBlankRewriteSource(t *testing.T) {
 		{"   ", "   "},
 		{"  ZCode  ", "WorkBuddy"},
 	})
-	if len(sanitizeExtraFeatures) != 1 || sanitizeExtraFeatures[0] != "ZCode" {
-		t.Fatalf("额外 feature 未按预期清洗: %v", sanitizeExtraFeatures)
+	table := sanitizeExtra.Load()
+	if table == nil || len(table.features) != 1 || table.features[0] != "ZCode" {
+		t.Fatalf("额外 feature 未按预期清洗: %+v", table)
 	}
-	if len(sanitizeExtraRewrites) != 1 {
-		t.Fatalf("空白源串未被过滤: %v", sanitizeExtraRewrites)
+	if len(table.rewrites) != 1 {
+		t.Fatalf("空白源串未被过滤: %+v", table.rewrites)
 	}
 	// 源串 TrimSpace 后按字面量预编译为大小写不敏感正则（元字符已 QuoteMeta）。
-	if got := sanitizeExtraRewrites[0].re.String(); got != "(?i)ZCode" {
+	if got := table.rewrites[0].re.String(); got != "(?i)ZCode" {
 		t.Fatalf("源串未按字面量预编译: %q", got)
 	}
-	if got := sanitizeExtraRewrites[0].repl; got != "WorkBuddy" {
+	if got := table.rewrites[0].repl; got != "WorkBuddy" {
 		t.Fatalf("replacement 未保留: %q", got)
 	}
 	// 若空白源串漏进来，下面每个空格都会被替换成 X。
@@ -250,8 +251,8 @@ func TestConfigureSanitizeRewritesOnly(t *testing.T) {
 func TestConfigureSanitizeRejectsEmptyReplacement(t *testing.T) {
 	t.Cleanup(func() { ConfigureSanitize(nil, nil) })
 	ConfigureSanitize([]string{"foo"}, [][2]string{{"foo"}})
-	if len(sanitizeExtraRewrites) != 0 {
-		t.Fatalf("空 replacement 条目未被过滤: %v", sanitizeExtraRewrites)
+	if table := sanitizeExtra.Load(); table != nil && len(table.rewrites) != 0 {
+		t.Fatalf("空 replacement 条目未被过滤: %+v", table.rewrites)
 	}
 	const in = "foo bar foo; keep the text"
 	if out := sanitizeText(in); out != in {
@@ -259,8 +260,8 @@ func TestConfigureSanitizeRejectsEmptyReplacement(t *testing.T) {
 	}
 	// 同一批里的合法条目仍应生效（只丢弃空 replacement 那一条）。
 	ConfigureSanitize([]string{"foo"}, [][2]string{{"foo"}, {"foo", "bar"}})
-	if len(sanitizeExtraRewrites) != 1 {
-		t.Fatalf("合法条目被连带丢弃: %v", sanitizeExtraRewrites)
+	if table := sanitizeExtra.Load(); table == nil || len(table.rewrites) != 1 {
+		t.Fatalf("合法条目被连带丢弃: %+v", table)
 	}
 	if out := sanitizeText("foo"); out != "bar" {
 		t.Errorf("合法 extra rewrite 未生效: %q", out)

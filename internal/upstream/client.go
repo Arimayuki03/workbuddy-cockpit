@@ -65,6 +65,10 @@ const (
 	// 一次误判就是永久杀号。故单列一类，由 handler 走「连续 N 次才禁用」的计数
 	// 路径（与 12153 的 NoteSessionDead 同口径、共用计数器）。
 	ErrAuthRejected
+	// ErrUpstreamQueue 上游「排队等待」（429 + 业务码 6020 / queue.waiting.title）
+	// 不是账号级限流：队列按账号等级全局共享，换号不会改变排队位置。账号不冷却、
+	// 不计数、不禁用；请求仍按 MaxRotate 轮转，最终以 429 返回让客户端等待。
+	ErrUpstreamQueue
 )
 
 func (k ErrKind) String() string {
@@ -99,6 +103,8 @@ func (k ErrKind) String() string {
 		return "empty_message"
 	case ErrAuthRejected:
 		return "auth_rejected"
+	case ErrUpstreamQueue:
+		return "upstream_queue"
 	case ErrClient:
 		return "client"
 	default:
@@ -789,6 +795,70 @@ func ParseRateReset(body string) (time.Time, bool) {
 	return t, true
 }
 
+// ParseQueueRetryAfter 解析排队响应体里的等待秒数（429 + 6020 queue.waiting 的
+// data.retry_after 字段）。上游只把等待时间放在 body、不回标准 Retry-After 头时，
+// 网关必须自己折算，否则对外 429 不带 Retry-After，客户端会立刻重试、把全局队列
+// 再打一遍（manager v2.11.13 / issue #416）。
+//
+// 宽松口径：递归找任意层级名为 retry_after 的字段（数字或数字字符串）。多级封套
+// 都可能承载它；正常响应只有一个，命中即返回。超过 retryAfterSanity 视为异常值
+// 丢弃，与响应头解析同口径。
+func ParseQueueRetryAfter(body string) (time.Duration, bool) {
+	if strings.TrimSpace(body) == "" {
+		return 0, false
+	}
+	var root any
+	if err := json.Unmarshal([]byte(body), &root); err != nil {
+		return 0, false
+	}
+	secs, ok := findRetryAfterSeconds(root)
+	if !ok || secs <= 0 {
+		return 0, false
+	}
+	d := time.Duration(secs * float64(time.Second))
+	if d <= 0 || d > retryAfterSanity {
+		return 0, false
+	}
+	return d, true
+}
+
+func findRetryAfterSeconds(node any) (float64, bool) {
+	switch n := node.(type) {
+	case map[string]any:
+		if raw, ok := n["retry_after"]; ok {
+			if secs, ok := numericSeconds(raw); ok {
+				return secs, true
+			}
+		}
+		for _, child := range n {
+			if secs, ok := findRetryAfterSeconds(child); ok {
+				return secs, true
+			}
+		}
+	case []any:
+		for _, child := range n {
+			if secs, ok := findRetryAfterSeconds(child); ok {
+				return secs, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func numericSeconds(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case json.Number:
+		f, err := n.Float64()
+		return f, err == nil
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(n), 64)
+		return f, err == nil
+	}
+	return 0, false
+}
+
 // Classify 按 HTTP 状态码 + body 判定错误类别。
 //
 // 判定顺序自「严」到「宽」，每层的先后都有语义依据：
@@ -837,6 +907,21 @@ func ParseRateReset(body string) (time.Time, bool) {
 //     判在通用 4xx 兜底**之前**（落 ErrClient 会轮转全池 + 喂连败计数，把健康号
 //     打出池）。只认 400，5xx/429/403 等状态码语义优先。
 //  12. 内容策略/参数错误/其他 4xx —— 通用兜底。
+//
+// IsUpstreamQueue 是否为「上游排队」而非账号限流：429 + 6020 / queue.waiting。
+//
+// 6020 的 queue_position 只随全局队列推进，换账号不会变好；把它当账号级 429
+// 会按软冷却把一个又一个健康号打出池（manager v2.11.13 / issue #416）。
+func IsUpstreamQueue(body string) bool {
+	if strings.TrimSpace(body) == "" {
+		return false
+	}
+	if strings.Contains(strings.ToLower(body), "queue.waiting") {
+		return true
+	}
+	return hasBusinessCode(body, "6020")
+}
+
 func Classify(status int, body string) ErrKind {
 	// 11102「该后端无此模型」须最先判：它是「模型在后端不存在」的确定性答复，语义比
 	// 计费/限流都更具体——若不先判，msg 里的 "service info not found" 虽不含余额词、
@@ -900,6 +985,11 @@ func Classify(status int, body string) ErrKind {
 	// 判定；无该 code 的 "credits exhausted" 文案仍保持普通 429 的软限流语义。
 	if status == http.StatusTooManyRequests && hasBusinessCode(body, "14018") {
 		return ErrHardCredit
+	}
+	// 6020「排队等待」不是账号级限流：队列全局共享，账号不该被冷却。必须判在
+	// 通用 429 兜底之前。只认 429；200 + 6020 文案保持原有分类。
+	if status == http.StatusTooManyRequests && IsUpstreamQueue(body) {
+		return ErrUpstreamQueue
 	}
 	// status==429 先于 hardRule（fork-scan-absorb T-3）：限流响应 body
 	// 高频携带 "quota exceeded"/"额度不足" 等跨两界措辞，hardRule 先判会误归

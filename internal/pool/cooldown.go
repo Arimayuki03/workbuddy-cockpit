@@ -62,18 +62,18 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 		// 提前回池再吃一次 402。既有未过期截止更晚时，保留原截止与原 kind/reason。
 		// 例外：d<=0 是「立即到期/清零」语义（测试/运维强制过期用），照常走写入路径。
 		if d > 0 && now.Before(e.until) && e.until.After(newUntil) {
-			// 仅清模型级豁免表（防换模型绕过），其他字段保持。
-			e.modelCooldowns = nil
+			// 账号级冷却已整体拦住选号；活跃的模型级条目保留到自身恢复时刻
+			// （模型限流独立于账号余额/账号限流），这里只清过期条目防 map 膨胀。
+			e.pruneExpiredModelCooldowns(now)
 			p.dirty.Store(true)
 			return
 		}
 		e.until = newUntil
 		e.coolKind = kind
 		e.reason = reason
-		// 非模型级冷却入口：清空 6004 模型级独立冷却表（modelCooldowns），
-		// 避免上一次模型级限流的模型豁免泄漏到本次**账号级**限流上
-		// （否则换模型请求会错误绕过本次冷却）。
-		e.modelCooldowns = nil
+		// 账号级冷却期间 healthy() 整体短路，模型级条目无需清空：保留活跃的
+		// 6004/11102 到各自恢复时刻，冷却结束后继续按模型拦截；仅 prune 过期项。
+		e.pruneExpiredModelCooldowns(now)
 		p.dirty.Store(true)
 	}
 }
@@ -113,7 +113,7 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 			// 同样不截短更长的硬冷却（余额耗尽）：兜底探测撞上 402 中的账号时，
 			// 保留原截止与原 kind，让账号等签到恢复。
 			if now.Before(e.until) && e.coolKind == CoolHard {
-				e.modelCooldowns = nil
+				e.pruneExpiredModelCooldowns(now)
 				p.dirty.Store(true)
 				return
 			}
@@ -124,7 +124,7 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 			}
 			e.coolKind = CoolSoft
 			e.reason = reason
-			e.modelCooldowns = nil
+			e.pruneExpiredModelCooldowns(now)
 		}
 		p.dirty.Store(true)
 	}
@@ -321,8 +321,8 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 			}
 			e.until = soft
 		} else if preserveHard {
-			// 仍处硬冷却：不动 until/softStreak，只清模型豁免。
-			e.modelCooldowns = nil
+			// 仍处硬冷却：不动 until/softStreak；模型级活跃条目保留，仅清过期项。
+			e.pruneExpiredModelCooldowns(now)
 			p.dirty.Store(true)
 			return
 		} else if e.coolKind != CoolSoft || !now.Before(e.until) {
@@ -335,7 +335,9 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 			e.coolKind = CoolSoft
 			e.reason = reason
 		}
-		e.modelCooldowns = nil // 账号级软冷却：清空模型豁免（切模型不绕过）
+		// 账号级软冷却期间 healthy() 整体短路；保留活跃模型级限流到恢复时刻，
+		// 仅清理过期条目（冷却结束后模型级拦截继续生效）。
+		e.pruneExpiredModelCooldowns(now)
 		p.dirty.Store(true)
 	}
 }

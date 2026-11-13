@@ -46,6 +46,10 @@ WorkBuddy Cockpit 是一个自托管的一体化项目：**后端**是多账号 
 
 面板「API 密钥」页可创建多把独立分发密钥（`wbk_` 前缀），替代单一全局 `api_key`（全局 key 仍兼容可用）。每把密钥独立可设：**realm 版本限定**（cn / global / 不限）、有效期、最大 IP 数、IP 白名单（CIDR）、模型白名单、Token 配额、**积分配额**（按上游真实扣费累计）与每分钟限流。明文仅创建时展示一次，库中只存 SHA-256 摘要；拒绝分类清晰可辨（参数 / 配置问题 400、凭据不可用 403、配额用尽 429 `insufficient_quota`），只有放行成功的请求才计入限流窗口与用量。创建弹窗内可一键导出 9 种客户端配置片段（Claude Code / Codex / cc-switch / ZCode / OpenAI SDK 等），密钥填错方向的问题一次消灭。
 
+#### 客户端余额协议（v1.24.0）
+
+网关同时提供三条余额读取路径，供客户端面板显示密钥剩余额度：`/v1/credits`（RikkaHub 等 OpenAI 兼容客户端的默认 `/credits` 路径，`total_usage` 与 `total_available` 同值）、`/api/usage/token/`（new-api 风格，`total_granted` / `total_used` / `total_available`）与公开元数据 `/api/status`（只声明单位 `UNIT`，不含额度）。支持 `?scope=cn|global|merged` 按版本汇总；密钥设了 Token/积分配额时按更紧的一份剩余比例折算。余额端点只校验密钥本身，不套用停用/过期/配额拒绝——调不动时仍能查到还剩多少。
+
 ### 🔀 双协议直连（Anthropic Messages + OpenAI Responses）
 
 - **Anthropic Messages API**（`/v1/messages` + `/v1/messages/count_tokens`）— Claude Code 等 Anthropic 协议客户端免转换层直连；`thinking` 的 enabled / adaptive 两态都支持；tool_result 内嵌图片正确提取为视觉输入（不再把 base64 塞进文本撑爆上下文）；count_tokens 按 CJK / 非 CJK 分类保守估算；鉴权与 chat completions 同口径（同一把 key）。流式经 io.Pipe 边生成边翻译下发（v1.17.1 前为全量缓冲伪流式）；并行 tool_calls 按上游 `index` 分槽成块，参数交错分片不串块（v1.17.1）。
@@ -322,6 +326,8 @@ workbuddy-cockpit/
 | v1.22.0 | 2026-10-28 | **吸收 manager v2.11.4（v2.10.0..v2.11.4）**——**11-128 改请求级**（system→user 抢救一次，仍拒即透传 400；不冷却/不换号/不禁用；守卫只缓存最终失败模板；`gateway_hint` 用 `ChannelCheck` 权威标记修正截断误判）；**DSH 脱敏扩展**（`workspace root`→`base`、7 动词句式、DSH/extra 大小写不敏感预检、可配置 `sanitize_extra_features/_rewrites`、修正 Web GUI 替换空操作）；**11102 自愈**（TTL 6h/24h→2m/10m、realm 维度自愈（只清当前 realm）、管理端探测回执端点）；**Responses 孤儿 `function_call_output` 降级为 user**；**大请求体 gzip**（>64KB，415/解析失败/任意 4xx/渠道校验自动去压缩重试）；新增 `upstream.gzip_body`，废弃 `channel_check_cooldown`/`fail_fast`；**复审修复**（Responses 带 call_id 孤儿保留、11102 自愈 realm/跨请求节流、搜索 11-128 直接 400、`wbk_` 管理/观测面 403（`/admin/*`、`/status`、`/v1/stats` 含 reset、`/api/request_logs`）、MoveSystemToUser 混合 content 保守放弃、workspace root 收窄到 DSH 完整句、gzip 4xx 安全重试与 10 分钟闩锁、面板移除废弃 `fail_fast`/`channel_check_cooldown` 字段并重建 dist）。未吸收的 console 路径切换与 manager UI/部署类见 [发行说明](docs/RELEASE-v1.22.0.md) |
 
 | v1.23.0 | 2026-11-04 | **吸收 manager v2.11.5..v2.11.10（Go 网关适用部分）**——**大上下文改账号级滑动预算**（默认 2 MiB / 6 条 / 120s；保留粘性，超预算只迁移一次会话后重新绑定，不再逐请求换号丢前缀缓存；legacy 轮换需显式配置）；**网关错误契约**（上游 11102 实际答复改 404 `model_not_found`、429 统一补标准 `Retry-After`、`/v1` 与 `/v2` 兜底 404/405 回 OpenAI JSON，不再漏 HTML/纯文本）；**Responses 思考增量补 `summary_index`**；**CN 模型名去 `cn:` 前缀**（裸名即调用值，显式 `cn:` 保持兼容）；**密钥白名单版本语义**（裸名通配两版、显式前缀只放行同版本）；**DSH 新指纹首句**（`Tokens prefixed with @` → `the at-sign`）；**账号风控封禁与重登分离**（11140 unusual activity 标明申诉、不再提示重新登录）；**面板可用积分拆分**（冷却余额仍可用，封禁/停用/未知余额单列）；**出口线路补齐**（`__direct__` 保留名、signin/trial/activity/credit 读取 `proxy_routes`）；**Windows `::` 双栈监听**。未吸收的 manager UI/部署/计费类见 [发行说明](docs/RELEASE-v1.23.0.md) |
+| v1.24.0 | 2026-11-13 | **吸收 manager v2.11.10..v2.11.14（Go 网关适用部分）**——**客户端余额协议**（`/v1/credits`、`/api/usage/token/`、公开 `/api/status`；积分/token 双上限按更紧比例折算，`?scope=cn|global|merged` 分版本；停用/过期密钥仍可读余额）；**6004 限流保留到上游 ResetAt**（本地 soft_rate_max 先到也不虚假恢复；签到解冻/账号级冷却不再抹掉模型台账）；**429 返回最早恢复时间**（多号同时限流时 message/hint/Retry-After 取最早墙钟）；**6020 排队不罚号**（全局队列不冷却/不计数/不禁用，仍回 429）；**净化词表 10s 热重载**（原子换表，解析失败保留旧表）；**登录表单 method=post + 就绪前禁用**（密码不再可能写进地址栏）。未吸收 Trace Tap / HTTP/2 开关等见 [发行说明](docs/RELEASE-v1.24.0.md) |
+
 
 完整变更见 [Releases](https://github.com/Arimayuki03/workbuddy-cockpit/releases)。
 

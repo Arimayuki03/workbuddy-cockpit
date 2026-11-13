@@ -43,6 +43,7 @@
   "login": {
     "subtitle": "Tencent CodeBuddy 계정 풀 관리 · OpenAI 호환 리버스 프록시 게이트웨이",
     "username": "사용자 이름",
+    "usernamePlaceholder": "사용자 이름 (임의 값)",
     "password": "비밀번호",
     "passwordPlaceholder": "비밀번호를 입력하세요",
     "submit": "로그인",

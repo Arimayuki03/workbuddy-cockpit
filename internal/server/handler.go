@@ -319,6 +319,10 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /v1/stats", h.withAuth(h.stats))
 	h.mux.HandleFunc("POST /v1/stats/reset", h.withAuth(h.statsReset))
+	// 客户端余额协议（manager v2.11.12/v2.11.13 吸收）：/v1/credits 与
+	// /api/usage/token/ 只认密钥本身，不套用调用侧配额/状态校验——「还剩多少」
+	// 恰恰在调不动的时候最需要。详见 credits_api.go。
+	h.registerCreditsAPI()
 	// 请求日志环形缓冲（v1.2.0，设计文档 §4.3.2）：面板「请求日志」tab 数据源。
 	// 与 /v1/stats 同鉴权（api_key / 会话 cookie 换发后的 Bearer 等价）。
 	h.mux.HandleFunc("GET /api/request_logs", h.withAuth(h.handleRequestLogs))
@@ -1002,6 +1006,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	tried := map[string]bool{}
 	var lastErr error
+	// 多号同时限流时，整池恢复时刻是**最早**那个上游重置墙钟（manager v2.11.11 /
+	// issue #403）。记录最早的一条 429 候选（原文 + 恢复时刻 + 头时长），末端若整体
+	// 仍以限流收场就用它，而不是最后轮到的号的（会更晚，让客户端白等一整个周期）。
+	// 候选同时覆盖 body 的「将在 … 重置」文案与 Retry-After 类响应头：只认文案会让
+	// header-only 的 429 永远进不了候选，反而制造出本功能要消除的过度等待。
+	var earliestRateBody string
+	var earliestRateAt time.Time
+	var earliestRateWait time.Duration
+	// 6020 排队的等待秒数只在 body 的 data.retry_after 里，上游未必回标准头；
+	// 记录一次（取最小 = 最新队位），末端折算成 Retry-After。
+	var queueRetryAfter time.Duration
 
 	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
 	// 按模型解析：同一个会话可能换模型，绑定号若在当前模型上被 6004 限额（对其他模型
@@ -1657,6 +1672,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadRequest
 				return
 			}
+			if kind == upstream.ErrSoftRate {
+				if at, wait, ok := rateRecoveryCandidate(string(respBody), uerr); ok &&
+					(earliestRateAt.IsZero() || at.Before(earliestRateAt)) {
+					earliestRateAt = at
+					earliestRateBody = string(respBody)
+					earliestRateWait = wait
+				}
+			}
+			if kind == upstream.ErrUpstreamQueue {
+				if wait, ok := upstream.ParseQueueRetryAfter(string(respBody)); ok &&
+					(queueRetryAfter == 0 || wait < queueRetryAfter) {
+					queueRetryAfter = wait
+				}
+			}
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 5755fe3 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）+
 			// ChannelCheck（末端据此把 11-128 映射为 400 而非 503）。
@@ -1920,6 +1949,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusTooManyRequests
 			code = "rate_limit_exceeded"
 			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
+		case upstream.ErrUpstreamQueue:
+			// 排队是全局队列，不是账号问题；仍返回 429 让客户端等待，不冷却账号。
+			status = http.StatusTooManyRequests
+			code = "rate_limit_exceeded"
+			msg = "upstream model is queueing: peak-hour wait list, please retry later"
 		case upstream.ErrModelBlocked:
 			// 11102 是「该模型在后端不存在」的确定性答复，换多少账号都不会成功。
 			// 继续回 503 会诱导客户端反复重试，也把排障方向误导到账号池；改为 404，
@@ -1969,10 +2003,38 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			ueMsg = s
 		}
 	}
-	// 429 若上游文案/响应头给出了重置时间，换算出标准 Retry-After。与 model_blocked
-	// 的 503 退避分开：这里覆盖账号级限流与密钥配额类 429。
+	// 限流收场：用**最早**恢复的那个号的上游原文与 Retry-After（issue #403）。
+	// 「更晚」的那条会让客户端按错误的时间等待，而池子在更早就已能服务。
+	rateBody := ""
+	rateWait := time.Duration(0)
 	if status == http.StatusTooManyRequests && ue != nil {
-		retryAfterSec = retryAfterSecondsForGateway(ue.Msg, ue.RetryAfter, time.Now())
+		rateBody = ue.Msg
+		rateWait = ue.RetryAfter
+		if ue.Kind == upstream.ErrUpstreamQueue && queueRetryAfter > 0 {
+			// 排队等待只在 body 的 data.retry_after 里：折算成标准头，否则客户端
+			// 会立刻重试、把全局队列再打一遍。
+			rateWait = queueRetryAfter
+		}
+		if ue.Kind == upstream.ErrSoftRate && !earliestRateAt.IsZero() {
+			if s := strings.TrimSpace(earliestRateBody); s != "" {
+				rateBody = s
+				msg = s
+				ueMsg = s
+				// hintOf 会优先用 uerr.Msg 覆盖 body 参数：传副本，避免 hint 仍来自
+				// 最后一个账号（可能是更晚的重置文案/别的标记）。
+				ueHint := *ue
+				ueHint.Msg = s
+				hint = h.hintOf(ue.Kind, s, bareModel, reqHasImage, &ueHint)
+			} else {
+				// 候选来自 header-only 尝试且没有可展示原文：清空 body，让下面改用
+				// 该候选的 Retry-After 头时长（否则最后一个账号的文案会盖掉更早的恢复时刻）。
+				rateBody = ""
+			}
+			rateWait = earliestRateWait
+		}
+		// 429 若上游文案/响应头给出了重置时间，换算出标准 Retry-After。与 model_blocked
+		// 的 503 退避分开：这里覆盖账号级限流、排队与密钥配额类 429。
+		retryAfterSec = retryAfterSecondsForGateway(rateBody, rateWait, time.Now())
 	}
 	// 全池模型级阻塞（吸收自 workbuddy2api-panel commit 44d6e049）：轮转耗尽且该
 	// (realm, model) 的全部参与选号账号都被**该模型自身**的冷却（6004 / 11102）挡住
@@ -2104,6 +2166,9 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 402 + 余额关键词即积分耗尽：同步冷却到次日 04:00（签到任务 09/21 点恢复），
 		// 不需要异步核查（冗余）。立即换号。
 		h.cfg.Pool.CooldownUntilTomorrow4AM(uid, "余额不足")
+	case upstream.ErrUpstreamQueue:
+		// 排队是全局队列，与账号无关：不冷却、不计数、不禁用。本次请求仍由调用方
+		// 继续轮转（MaxRotate 兜住总次数），最终映射为 429 让客户端等待。
 	case upstream.ErrSoftRate:
 		// 统一对齐上游重置时间（重构核心）：只要 body 带「将在 … 重置」，无论业务
 		// code 是 6004 还是 11140 rate-limiting 等形态，都精确冷却到该墙钟、绝不
@@ -2256,6 +2321,20 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(raw)
+}
+
+// rateRecoveryCandidate 估计一次软限流尝试的恢复时刻：优先 body 的「将在 … 重置」
+// 墙钟，退回上游 Retry-After 类响应头（与 applyErrorPolicy 的冷却口径一致）。
+// 只记录 body 文案会让 header-only 的 429 永远进不了「最早恢复」候选：上游若用
+// 纯响应头表达等待时常（WAF/网关限流常见），最终 429 仍会按最后一条（更晚）计算。
+func rateRecoveryCandidate(body string, uerr *upstream.Error) (time.Time, time.Duration, bool) {
+	if at, ok := upstream.ParseRateReset(body); ok {
+		return at, 0, true
+	}
+	if uerr != nil && uerr.RetryAfter > 0 {
+		return time.Now().Add(uerr.RetryAfter), uerr.RetryAfter, true
+	}
+	return time.Time{}, 0, false
 }
 
 // retryAfterSecondsForGateway 计算对外 429 的标准 Retry-After（秒，封顶 1 天）。

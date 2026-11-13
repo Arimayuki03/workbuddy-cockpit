@@ -91,7 +91,9 @@ export default function LoginPage() {
           </div>
         </div>
 
-        <form onSubmit={submit} className="rounded-[24px] bg-muted p-5">
+        {/* method="post" 是 JS 就绪前的兜底：静态页面在 hydration 前是原生表单，
+            默认 GET 提交会把密码写进地址栏。按钮在 auth 状态未就绪时同样禁用。 */}
+        <form method="post" onSubmit={submit} className="rounded-[24px] bg-muted p-5">
           <div className="space-y-4">
             <div className="space-y-1.5">
               <Label htmlFor="username" className="text-[11px] text-muted-foreground">
@@ -103,7 +105,7 @@ export default function LoginPage() {
                 autoComplete="username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder="admin"
+                placeholder={t('login.usernamePlaceholder')}
                 className="bg-background"
               />
             </div>
@@ -125,7 +127,7 @@ export default function LoginPage() {
 
             {error && <p className="text-xs text-red-500">{error}</p>}
 
-            <Button type="submit" disabled={busy} className="w-full rounded-full">
+            <Button type="submit" disabled={busy || loading} className="w-full rounded-full">
               {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogIn className="h-4 w-4" />}
               {t('login.submit')}
             </Button>

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // sanitizeFeatures 特征预检：任一命中才进入净化（strings.Contains 快速路径，
@@ -152,15 +153,17 @@ func sanitizeText(text string) string {
 		return text
 	}
 	// 运行期额外词表（features.sanitize_extra_rewrites）：上游逐词扩充黑名单时
-	// 改 config.json 重启即可，不必为每个新词重编译。
+	// 改 config.json 后 10 秒内热重载，不必为每个新词重编译或重启。
 	//
 	// 顺序刻意放在内置改写之前：extra 的 replacement 来自运维配置，可能重新引入
 	// 内置指纹（例如 11·128）；内置规则最后执行，保证任何来源的指纹都被收口。
-	for _, rw := range sanitizeExtraRewrites {
-		// 源串在 ConfigureSanitize 已按字面量预编译为 (?i) 正则：大小写变体
-		// （"zcode" / "ZCODE"）必须真正改写，而不是只靠末尾 TrimSpace。
-		// replacement 按字面量回填，避免配置里的 $ 被当成捕获组引用。
-		text = rw.re.ReplaceAllLiteralString(text, rw.repl)
+	if extra := sanitizeExtra.Load(); extra != nil {
+		for _, rw := range extra.rewrites {
+			// 源串在 ConfigureSanitize 已按字面量预编译为 (?i) 正则：大小写变体
+			// （"zcode" / "ZCODE"）必须真正改写，而不是只靠末尾 TrimSpace。
+			// replacement 按字面量回填，避免配置里的 $ 被当成捕获组引用。
+			text = rw.re.ReplaceAllLiteralString(text, rw.repl)
+		}
 	}
 	for _, rw := range sanitizeRewrites {
 		text = strings.ReplaceAll(text, rw[0], rw[1])
@@ -201,13 +204,13 @@ func hasFingerprint(text string) bool {
 	// 运行期额外特征（features.sanitize_extra_features）：保持大小写不敏感
 	// （运维配置的上游新词可能大小写不定）。与内置表分开存放，
 	// ConfigureSanitize 可幂等整体替换；仅在确有额外词时才分配小写副本。
-	if len(sanitizeExtraFeatures) > 0 {
+	if extra := sanitizeExtra.Load(); extra != nil && len(extra.features) > 0 {
 		lower := strings.ToLower(text)
-		for _, f := range sanitizeExtraFeatures {
+		for i, f := range extra.features {
 			if f == "" {
 				continue
 			}
-			if strings.Contains(text, f) || strings.Contains(lower, strings.ToLower(f)) {
+			if strings.Contains(text, f) || strings.Contains(lower, extra.lowerFeatures[i]) {
 				return true
 			}
 		}
@@ -229,13 +232,19 @@ func hasFingerprint(text string) bool {
 	return sanitizeBareHdrRe.MatchString(text)
 }
 
-// sanitizeExtraFeatures / sanitizeExtraRewrites 运行期从 config 追加的词表
-// （features.sanitize_extra_features / sanitize_extra_rewrites）。启动时一次性
-// 注入、之后只读；ConfigureSanitize 每次整体替换而不是 append，保证幂等。
-var (
-	sanitizeExtraFeatures []string
-	sanitizeExtraRewrites []sanitizeExtraRewrite
-)
+// sanitizeExtra 运行期从 config 追加的词表
+// （features.sanitize_extra_features / sanitize_extra_rewrites）。启动时注入，
+// 之后可由 config 热重载整体替换；每次替换构造新表并原子换指针，读路径
+// （sanitizeText / hasFingerprint）永远看到自洽的一份快照，不会与写入竞争。
+var sanitizeExtra atomic.Pointer[sanitizeExtraTable]
+
+// sanitizeExtraTable 一份不可变的额外词表快照（features 与 lowerFeatures 等长，
+// 下标一一对应；lowerFeatures 预计算避免每次请求对每个词做 ToLower）。
+type sanitizeExtraTable struct {
+	features      []string
+	lowerFeatures []string
+	rewrites      []sanitizeExtraRewrite
+}
 
 // sanitizeExtraRewrite 运行期额外改写规则：源串按字面量预编译（QuoteMeta）、
 // 大小写不敏感（(?i)）；replacement 在 sanitizeText 里按字面量回填
@@ -252,7 +261,7 @@ var sanitizeExtraRewriteWarnOnce sync.Once
 // ConfigureSanitize 注入运行期额外词表（启动时由 cmd/server 调用一次）。
 //
 // 上游黑名单是逐词扩充的（GUI 句 → workspace root → 后续还会加），把它做成配置
-// 项后，运维改 config.json 重启容器即可跟上，不必等本仓库发版。
+// 项后，运维改 config.json 后 10 秒内自动热重载，不必重启容器，也不必等本仓库发版。
 // 空参数 = 清空额外词表，回落到内置静态表。
 func ConfigureSanitize(extraFeatures []string, extraRewrites [][2]string) {
 	cleanFeatures := make([]string, 0, len(extraFeatures))
@@ -298,8 +307,29 @@ func ConfigureSanitize(extraFeatures []string, extraRewrites [][2]string) {
 			cleanFeatures = append(cleanFeatures, rw.src)
 		}
 	}
-	sanitizeExtraFeatures = cleanFeatures
-	sanitizeExtraRewrites = cleanRewrites
+	if len(cleanFeatures) == 0 && len(cleanRewrites) == 0 {
+		sanitizeExtra.Store(nil)
+		return
+	}
+	table := &sanitizeExtraTable{
+		features:      cleanFeatures,
+		lowerFeatures: make([]string, len(cleanFeatures)),
+		rewrites:      cleanRewrites,
+	}
+	for i, f := range cleanFeatures {
+		table.lowerFeatures[i] = strings.ToLower(f)
+	}
+	sanitizeExtra.Store(table)
+}
+
+// SanitizeExtraCounts 返回当前生效的额外词表条数（features, rewrites），
+// 供启动日志与热重载日志回显；无词表时返回 0,0。
+func SanitizeExtraCounts() (features, rewrites int) {
+	table := sanitizeExtra.Load()
+	if table == nil {
+		return 0, 0
+	}
+	return len(table.features), len(table.rewrites)
 }
 
 // sanitizeContent 兼容字符串与多模态数组；只动 text part，image 等 part 不动。

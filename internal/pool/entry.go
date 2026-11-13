@@ -102,7 +102,8 @@ type Status struct {
 // RateLimitedModel 单个被限流模型的台账行（issue #36）。
 type RateLimitedModel struct {
 	Model string `json:"model"`
-	// Until 冷却到期时刻 = 该模型的独立冷却截止（modelCooldowns[m].Until，截断后），
+	// Until 冷却到期时刻 = 该模型的**有效**冷却截止：通常为 modelCooldowns[m].Until
+	// （截断后）；若 Until 已过但上游 ResetAt 仍在未来，延伸到 ResetAt（v1.24.0）。
 	// 多模型限流时不再等于 Status.Until（账号级）。
 	Until time.Time `json:"until,omitempty"`
 	// ResetAt 上游「将在 … 重置」的原始墙钟（未经 soft_rate_max 截断）；未截断时
@@ -382,25 +383,42 @@ func (e *entry) healthy(now time.Time) bool {
 	return true
 }
 
-// modelExempt 报告账号是否处于「6004 模型级软冷却」形态：存在模型级冷却条目
-// （modelCooldowns 非空），且尚未禁用、未熔断、不在连败降权窗口内。
+// modelExempt 报告账号是否处于「6004 模型级软冷却」形态：存在**至少一条仍生效**
+// 的模型级冷却（active 条目），且账号级维度全部可用（未禁用/手动停用、不在 until
+// 冷却、未熔断、不在连败降权窗口内）——否定侧与 healthy() 同口径。
 // 此形态下账号仅对限流中的模型不可用，对其他模型仍可选（issue #31）。
 // 本谓词仅供探活侧使用（ServableNow/ServableForRealm）：/healthz 无请求模型
 // 上下文，用「存在豁免形态」表达"该账号还有别的模型可服务"；
 // chat 侧按请求模型细粒度判定（healthyForModel：全账号健康且该模型不在独立
 // 冷却内才放行），探活存在性语义与选号在豁免账号上口径一致。
+//
 // degradeUntil 按**过期口径**判定（now 已过即不在窗口内）：degradeUntil 到期后
 // 仅由 NoteSuccess 清零，若按零值口径会把「降权已到期但尚无成功入账」的账号
-// 永久挡在豁免之外。disabled/breakerUntil 维持既有形态口径（布尔/IsZero，从
-// 保守侧不豁免，零回归）。manualDisabled（上游运维停用位，issue #138）并入
-// 不豁免侧：手动摘除的账号探活不应视作可服务。降权窗口内账号对所有模型都不可
-// 选（healthy 的或门拦截 pick），豁免必须失效——否则「6004 模型冷却 + 连败降权」
-// 账号（现实可达：NoteFailures 置 degradeUntil 不清 modelCooldowns，见 degrade.go）
-// 会让 /healthz 返回 200 而该账号对所有模型 chat 实际 503。
+// 永久挡在豁免之外。disabled/breakerUntil/until 与 healthy() 同口径（窗口内不豁免）。
+// manualDisabled（上游运维停用位，issue #138）并入不豁免侧：手动摘除的账号探活
+// 不应视作可服务。降权窗口内账号对所有模型都不可选（healthy 的或门拦截 pick），
+// 豁免必须失效——否则「6004 模型冷却 + 连败降权」账号（现实可达：NoteFailures
+// 置 degradeUntil 不清 modelCooldowns，见 degrade.go）会让 /healthz 返回 200 而该
+// 账号对所有模型 chat 实际 503。
+//
+// 注意：servableFrom 的判据是 `healthy() || modelExempt()`，而两者的否定条件
+// 完全一致——healthy() 为真时短路，为假时本函数也必为假。因此 modelExempt 目前
+// 不改变探活结果，保留它是把「账号级可用 + 模型级受限」这一形态显式写进探活
+// 语义（单测锚点）；若未来 healthy() 增加新维度，两处需同步评审。
 func (e *entry) modelExempt(now time.Time) bool {
-	return len(e.modelCooldowns) > 0 &&
-		!e.disabled && !e.manualDisabled && e.breakerUntil.IsZero() &&
-		(e.degradeUntil.IsZero() || !now.Before(e.degradeUntil))
+	// 账号级不可用（禁用 / 账号级冷却 / 熔断 / 连败降权）时，模型豁免无意义：
+	// healthyForModel 会先判 healthy() 短路，探活侧必须同口径。
+	if e.disabled || e.manualDisabled || now.Before(e.until) ||
+		now.Before(e.breakerUntil) ||
+		(!e.degradeUntil.IsZero() && now.Before(e.degradeUntil)) {
+		return false
+	}
+	for _, mc := range e.modelCooldowns {
+		if mc.active(now) {
+			return true
+		}
+	}
+	return false
 }
 
 // modelCooled 报告账号对指定 model 是否正处 6004 模型级冷却（该模型的独立冷却未过期）。
@@ -413,7 +431,7 @@ func (e *entry) modelCooled(now time.Time, reqModel string) bool {
 	if !ok {
 		return false
 	}
-	return !mc.Until.IsZero() && now.Before(mc.Until)
+	return mc.active(now)
 }
 
 // healthyForModel 报告账号对指定 model 是否可选（含 6004 模型级独立冷却判定）。
@@ -469,7 +487,8 @@ func (e *entry) pruneExpiredModelCosts(now time.Time) {
 // pick 写锁路径调用，防止 map 无限膨胀；status 只读遍历天然跳过过期项，无需清理。
 //
 // 两类条目口径不同（manager 0041 审查修复）：
-//   - 6004 条目：Until 一过即删（限流窗口结束，条目没有剩余价值）；
+//   - 6004 条目：Until 与上游 ResetAt 都到达后才删（Until 只是软退避截断，
+//     上游真实限流未必解除；提前删会让 /status 虚假恢复并再次踩 6004）；
 //   - 11102 条目：Until 过后再保留 modelBlockMaxTTL 宽限期，只删更陈旧的。
 //     11102 的 Hits 是跨「多次命中」的指数退避状态（2m 起、封顶 10m），低 QPS 下
 //     2m 到期与下一次命中之间可能隔很久；若过期即删，Hits 每次从 1 重来，
@@ -483,17 +502,14 @@ func (e *entry) pruneExpiredModelCooldowns(now time.Time) {
 		return
 	}
 	for m, mc := range e.modelCooldowns {
-		switch {
-		case mc.Until.IsZero():
-			delete(e.modelCooldowns, m) // 无截止时间的破损条目：无价值，直接删
-		case now.Before(mc.Until):
-			// 仍生效：保留
-		case strings.HasPrefix(mc.Reason, "11102") && now.Sub(mc.Until) <= modelBlockMaxTTL:
-			// 11102 过期宽限期内：保留 Hits 供下一次命中继续指数退避
-		default:
-			// 6004 过期 / 11102 超出宽限期：删除
-			delete(e.modelCooldowns, m)
+		if mc.active(now) {
+			continue // Until 或上游真实 ResetAt 仍在未来：继续拦路由
 		}
+		if strings.HasPrefix(mc.Reason, "11102") && !mc.Until.IsZero() &&
+			now.Sub(mc.Until) <= modelBlockMaxTTL {
+			continue // 11102 过期宽限期内：保留 Hits 供下一次命中继续指数退避
+		}
+		delete(e.modelCooldowns, m) // 6004 已到上游重置时刻 / 11102 超出宽限期
 	}
 }
 
@@ -664,6 +680,42 @@ type modelCooldown struct {
 	// 重启后从 2m 基数重新学习）；6004 条目 Hits 恒 0。持久化来回不会写入该字段。
 	// 内存条目过期后保留 modelBlockMaxTTL 宽限期，避免低 QPS 下 Hits 被惰性清理重置。
 	Hits int
+}
+
+// active 报告该模型的独立冷却是否仍在生效。6004 的 Until 可能被 soft_rate_max
+// 截短，而上游真实 ResetAt 仍在未来；这种「软退避窗口已过、上游配额未恢复」
+// 的形态必须继续视为冷却，否则 /status 会虚假恢复、选号也会反复触发必报错的
+// 6004 调用（manager v2.11.14 / 0056）。
+func (mc modelCooldown) active(now time.Time) bool {
+	if !mc.ResetAt.IsZero() && now.Before(mc.ResetAt) {
+		return true
+	}
+	return !mc.Until.IsZero() && now.Before(mc.Until)
+}
+
+// effectiveUntil 返回台账展示用的冷却截止：Until 已被截断过期但 ResetAt 仍在
+// 未来时延伸到 ResetAt，否则保持 Until（软退避封顶仍按 soft_rate_max 展示，
+// 上游权威时点另见 RateLimitedModel.ResetAt）。
+func (mc modelCooldown) effectiveUntil(now time.Time) time.Time {
+	if !mc.ResetAt.IsZero() && now.Before(mc.ResetAt) &&
+		(mc.Until.IsZero() || !now.Before(mc.Until)) {
+		return mc.ResetAt
+	}
+	return mc.Until
+}
+
+// actualUnlock 返回该模型冷却**真正**的解锁时刻：Until 与上游 ResetAt 取较晚者。
+//
+// 6004 的 Until 会被 soft_rate_max 截短，而上游真实 ResetAt 往往仍在未来；active()
+// 会一直拦到 ResetAt，因此「何时值得重试」（ModelLockView.UnlockAt /
+// ModelBlockedNow 的 Retry-After）必须用这个时刻。只按 effectiveUntil 计算会在
+// 「Until 未到但早于 ResetAt」的整个窗口里显示虚假的提前解锁，503 的 Retry-After
+// 偏短，客户端按偏早的时刻重试再撞 6004（manager v2.11.14 / 0056）。
+func (mc modelCooldown) actualUnlock() time.Time {
+	if mc.ResetAt.After(mc.Until) {
+		return mc.ResetAt
+	}
+	return mc.Until
 }
 
 // stateFile 持久化格式。

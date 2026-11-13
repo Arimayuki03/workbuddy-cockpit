@@ -43,6 +43,7 @@
   "login": {
     "subtitle": "腾讯 CodeBuddy 账号池管理 · OpenAI 兼容反代网关",
     "username": "用户名",
+    "usernamePlaceholder": "用户名（任意值）",
     "password": "密码",
     "passwordPlaceholder": "请输入密码",
     "submit": "登录",

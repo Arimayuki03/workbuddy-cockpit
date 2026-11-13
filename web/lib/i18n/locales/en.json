@@ -43,6 +43,7 @@
   "login": {
     "subtitle": "Tencent CodeBuddy account pool console · OpenAI-compatible gateway",
     "username": "Username",
+    "usernamePlaceholder": "Username (any value)",
     "password": "Password",
     "passwordPlaceholder": "Enter your password",
     "submit": "Sign in",

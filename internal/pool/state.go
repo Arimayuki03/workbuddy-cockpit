@@ -136,13 +136,16 @@ func (p *Pool) ForceClearCooldown(uid string) (found, cleared bool) {
 	}
 	// 已禁用账号保留 disabled_reason：disableLocked 有意保留熔断观测，ForceClearCooldown
 	// 只解「暂时不可用」的计时器，不应抹掉 /status 与面板上 disabled_reason 的运维线索。
-	// clearCoolingLocked 会连 reason 一并清空，这里改用按需保 reason 的写法。
+	// clearCoolingLocked 只清账号级冷却（活跃模型台账按 v1.24.0 语义保留）；手动
+	// 「强制清冷却」是唯一承诺**全量归零**的入口，必须显式清 modelCooldowns。
 	if e.disabled {
 		saved := e.reason
 		e.clearCoolingLocked()
+		e.modelCooldowns = nil
 		e.reason = saved
 	} else {
 		e.clearCoolingLocked()
+		e.modelCooldowns = nil
 	}
 	e.fails = 0
 	e.retryCount = 0
@@ -548,13 +551,12 @@ func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, di
 // 但换模型可用"时 chat 实际 200 而 /healthz 误报 503。chat 侧按请求模型细粒度判定
 // （healthyForModel：全账号健康且该模型不在独立冷却内才放行，模型豁免作用于选号），
 // 探活侧没有请求模型上下文，取「存在豁免形态」的存在性语义——豁免账号（未禁用、
-// 未熔断、不在连败降权窗口内、存在模型级冷却条目）至少还剩触发模型之外的模型可用，
-// ServableNow 计入。
-// 注意与 chat 判定在"账号级 until 冷却 + 模型豁免并存"时并不完全重合：modelExempt
-// 不检查 until，而 healthyForModel 会先判 until 再查模型冷却；该混合形态沿 until 轴
-// 现实中不可达（plain Cooldown/CooldownSoftRate 写 until 时清空 modelCooldowns，
-// 6004/11102 只写 modelCooldowns 不写 until），此处仅为探活存在性语义，不构成 chat
-// 选号路径。但 **degrade 轴不满足该互斥**：「连败降权 + 模型豁免」并存现实可达——
+// 未熔断、不在账号级 until 冷却/连败降权窗口内、存在至少一条 active 的模型级冷却）
+// 至少还剩触发模型之外的模型可用，ServableNow 计入。
+// 注意与 chat 判定在"账号级 until 冷却 + 模型豁免并存"时保持同口径：modelExempt
+// 现在显式检查 until（v1.24.0 起账号级冷却不再清空活跃模型台账，该混合形态现实
+// 可达），与 healthyForModel 先判 healthy() 的顺序一致。**degrade 轴**同样要检查：
+// 「连败降权 + 模型豁免」并存现实可达——
 // NoteFailures 置 degradeUntil 时不清 modelCooldowns（见 degrade.go），降权窗口内
 // 账号对所有模型都不可选（healthy 的或门拦截 pick）。因此 modelExempt 对 degradeUntil
 // 按过期口径判定（窗口内不豁免，与 disabled/breakerUntil 同为豁免的否定条件），
@@ -589,6 +591,30 @@ func (p *Pool) servableFrom(realm string) bool {
 		}
 	}
 	return false
+}
+
+// AvailableCredits 返回账号池可用积分合计（排除自动封禁与手动停用；冷却/在途仍算
+// 可用）。scope=cn/global 只统计该版本；merged/空字符串统计全池。
+//
+// 与 List() 的区别：只读 credits/disabled/manualDisabled/realm 四个字段，不构造
+// Status（不排序、不扫模型冷却与成本台账、不快照在途），供客户端余额端点这类
+// 高频只读路径使用——避免 O(账号×模型) 分配长时间占用 RLock 阻塞写者。
+func (p *Pool) AvailableCredits(scope string) int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var total int64
+	for _, e := range p.byUID {
+		if e.disabled || e.manualDisabled || e.credits <= 0 {
+			continue
+		}
+		if scope == "cn" || scope == "global" {
+			if e.a.Realm() != scope {
+				continue
+			}
+		}
+		total += e.credits
+	}
+	return total
 }
 
 // List 返回所有账号状态（按 UID 排序，稳定输出）。
@@ -704,7 +730,9 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 
 // rateLimitedModelsLocked 构建单账号的限额台账行，从 modelCooldowns 遍历输出——
 // 每模型一行（含该模型的独立 until + 上游原始 resetAt），多模型同时 6004 全部展示。
-// 有效期判据 = 该模型的独立冷却 until 未过；随到期自然消失（与 /status 观感一致）。
+// 有效期判据 = 该模型的独立冷却尚未到期（ResetAt 或 Until 任一在未来）；
+// Until 展示 effectiveUntil（截断窗口已过但上游未重置时延伸到 ResetAt，
+// 未过时保持 soft_rate_max 截断值；真实解锁时刻见 ModelLockView.UnlockAt）。
 // 无模型级冷却（普通软冷却/硬冷却）→ nil（零回归）。调用方必须已持有 p.mu。
 func (p *Pool) rateLimitedModelsLocked(e *entry, now time.Time) []RateLimitedModel {
 	if len(e.modelCooldowns) == 0 {
@@ -719,10 +747,10 @@ func (p *Pool) rateLimitedModelsLocked(e *entry, now time.Time) []RateLimitedMod
 	rows := make([]RateLimitedModel, 0, len(models))
 	for _, m := range models {
 		mc := e.modelCooldowns[m]
-		if !mc.Until.IsZero() && now.Before(mc.Until) {
+		if mc.active(now) {
 			row := RateLimitedModel{
 				Model:  m,
-				Until:  mc.Until,
+				Until:  mc.effectiveUntil(now),
 				Reason: mc.Reason,
 			}
 			// 上游「将在 … 重置」的原始墙钟：无论是否被 soft_rate_max 截断都透出——

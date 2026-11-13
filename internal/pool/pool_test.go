@@ -1125,10 +1125,11 @@ func TestServableNowExemptButDegrading(t *testing.T) {
 	}
 }
 
-// TestModelCooldownsClearedByPlainCooldown 回归：6004 模型冷却后，若账号又经历一次
-// **非模型级**软冷却（plain Cooldown），modelCooldowns 必须被清空——否则上次 6004 的
-// 模型豁免会泄漏到本次账号级限流上，导致"换模型请求"错误绕过本次冷却。
-func TestModelCooldownsClearedByPlainCooldown(t *testing.T) {
+// TestAccountLevelCooldownKeepsModelLockWithoutLeak 回归（manager 0056 语义）：
+// 6004 模型冷却后账号又经历普通账号级冷却——账号级冷却期间所有模型都不可选；
+// 账号级冷却到期后，活跃的模型级冷却仍拦住触发模型（台账不得被清空），
+// 但其他模型可以正常回到该账号（不产生跨模型泄漏）。
+func TestAccountLevelCooldownKeepsModelLockWithoutLeak(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
@@ -1137,18 +1138,26 @@ func TestModelCooldownsClearedByPlainCooldown(t *testing.T) {
 	p.SetCredits("u2", 1)
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 
-	// 1) 6004 带解析时间 → 记录模型 glm-5.3。
+	// 1) 6004 带解析时间 → 记录模型 glm-5.3（5 分钟）。
 	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "6004")
 	if got := p.PickExcludingForRealm(nil, "hy3-x", ""); got == nil || got.UID != "u1" {
 		t.Fatalf("precondition: different-model should bypass, got %+v", got)
 	}
-	// 2) 账号恢复后经历普通账号级软冷却（无模型语义）。
-	p.NoteSuccess("u1") // 还原 fresh 状态（Cooldown 会重设 until）
+	// 2) 账号级软冷却：所有模型都被账号状态挡住（不是模型豁免泄漏）。
 	p.Cooldown("u1", CoolSoft, time.Minute, "429 rate limit")
-	// 3) 换模型请求不得再豁免（modelCooldowns 已清空）。
 	got := p.PickExcludingForRealm(nil, "hy3-x", "")
 	if got == nil || got.UID != "u2" {
-		t.Fatalf("plain cooldown must clear modelCooldowns (no bypass), got %+v", got)
+		t.Fatalf("account-level cooldown must block every model, got %+v", got)
+	}
+	// 3) 强制账号级冷却到期：模型级冷却仍生效，触发模型必须避开 u1。
+	p.mu.Lock()
+	p.byUID["u1"].until = time.Now().Add(-time.Second)
+	p.mu.Unlock()
+	if got := p.PickExcludingForRealm(nil, "glm-5.3", ""); got == nil || got.UID != "u2" {
+		t.Fatalf("active model cooldown must keep blocking glm-5.3, got %+v", got)
+	}
+	if got := p.PickExcludingForRealm(nil, "hy3-x", ""); got == nil || got.UID != "u1" {
+		t.Fatalf("other models must remain selectable, got %+v", got)
 	}
 }
 

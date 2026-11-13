@@ -11,17 +11,22 @@
 //	disabled           ← disableLocked（Disable / NoteSessionDead 达阈）
 //	manualDisabled     ← setManualDisabledLocked（运维端点 / CLI；只置位不清其他维度）
 //	until/coolKind     ← Cooldown(CoolSoft/Hard，固定时长) / CooldownSoftRate / CooldownSoftForModel 无解析分支
-//	modelCooldowns     ← CooldownSoftForModel 有解析分支；被 disableLocked/Cooldown/clearCoolingLocked 清（解冻 reviveCoolingLocked 保留）
+//	modelCooldowns     ← CooldownSoftForModel 有解析分支；账号级冷却/签到解冻不再清空，
+//	                     仅 prune 过期条目；disableLocked 与 ForceClearCooldown 整体清空
 //	breakerUntil       ← recordBreakerFailureLocked（NoteError 喂入）；NoteSuccess 清
 //	softStreak         ← CooldownSoftRate / CooldownSoftForModel 无解析分支；NoteSuccess 清（解冻保留：退避指数不因余额恢复重置）
 //	sessionDeadFails   ← NoteSessionDead；ClearSessionDead/NoteSuccess/ReviveDisabled 清
 //
 // 关键正交性（疑点 4 修正）：
-//   - 冷却域（until/coolKind/softStreak/modelCooldowns）与熔断器（fails/retryCount/
-//     breakerUntil）正交：冷却管「近期被限流/余额耗尽」，熔断管「反复 5xx 失败」。
-//     disableLocked 只清冷却域、不动熔断——禁用是授权/session 终态，不应覆盖熔断观测。
-//   - clearCoolingLocked 是「冷却域归零」的单一来源，被 disableLocked 与
-//     reviveCoolingLocked（签到解冻）共用，二者对冷却域的处置因此永远一致。
+//   - 冷却域（until/coolKind/softStreak）与熔断器（fails/retryCount/breakerUntil）
+//     正交：冷却管「近期被限流/余额耗尽」，熔断管「反复 5xx 失败」。
+//     disableLocked 只清账号级冷却域、不动熔断——禁用是授权/session 终态，不应覆盖
+//     熔断观测。模型级台账（modelCooldowns）语义与账号余额/账号限流正交：账号级冷却
+//     与签到解冻都保留活跃条目，只有禁用（disableLocked）与运维强制清冷却
+//     （ForceClearCooldown）会整体清空。
+//   - clearCoolingLocked 是「账号级冷却域归零」的单一来源，被 disableLocked 与
+//     ForceClearCooldown 共用；两者随后都显式清空 modelCooldowns。签到解冻走
+//     reviveCoolingLocked，不经本原语，因此模型台账不会被解冻覆盖。
 //   - manualDisabled 与 disabled 各自独立：前者是运维意图（只能由运维入口清除），
 //     后者是系统判定（可被签到解冻/refresh 等路径自动撤销）。二者都不清对方，
 //     并存时 /status 分别透出（见 entry.go Status.manual_disabled/disabled 注释）。
@@ -29,15 +34,18 @@ package pool
 
 import "time"
 
-// clearCoolingLocked 清冷却域：until/coolKind/softStreak/modelCooldowns 全归零，
-// reason 一并清空。熔断器（fails/retryCount/breakerUntil）不属冷却域，不动。
+// clearCoolingLocked 清账号级冷却域：until/coolKind/softStreak 归零，reason
+// 一并清空。熔断器（fails/retryCount/breakerUntil）不属冷却域，不动。
+// 模型级台账不由本原语清空：活跃条目保留到各自恢复时刻（现有两个调用方
+// disableLocked / ForceClearCooldown 随后显式整体清空），这里只 prune 过期条目
+// 防 map 膨胀。签到解冻走 reviveCoolingLocked，不经本函数。
 // 调用方必须已持有 p.mu。
 func (e *entry) clearCoolingLocked() {
 	e.until = time.Time{}
 	e.coolKind = 0
 	e.reason = ""
 	e.softStreak = 0
-	e.modelCooldowns = nil // 冷却域清零时一并清模型级独立冷却（模型豁免随之消失）
+	e.pruneExpiredModelCooldowns(time.Now())
 }
 
 // disableLocked 禁用迁移：置 disabled 并清冷却域（禁用是比冷却更强的不可用终态）。
@@ -51,6 +59,7 @@ func (e *entry) clearCoolingLocked() {
 // 熔断观测仍有效，不应被禁用覆盖。
 func (p *Pool) disableLocked(e *entry, reason string) {
 	e.clearCoolingLocked()
+	e.modelCooldowns = nil // 禁用是终态：模型级限流台账一并清空
 	e.disabled = true
 	e.reason = reason
 	p.dirty.Store(true)
@@ -61,12 +70,13 @@ func (p *Pool) disableLocked(e *entry, reason string) {
 // 余额恢复只证明 billing 通道健康，不证明 chat 通道健康——熔断（连续 5xx 信号）
 // 与模型级 6004 冷却都不应被覆盖。
 //
-// 不清 softStreak 与 modelCooldowns（区别于 clearCoolingLocked 的冷却域全清）：
+// 不清 softStreak 与 modelCooldowns（clearCoolingLocked 也只清账号级冷却域）：
 //   - softStreak 是连续软限流退避指数，退避的因（对端限流状态）不因本账号余额
 //     恢复而消失，保留指数让下一次限流继续退避（否则退避被解冻重置为基数，
 //     软限流的实际寿命被压进一个刷新周期——吸收 panel #55 同源修复）。
 //   - modelCooldowns 是 6004 模型级台账，对齐上游重置墙钟，语义与账号余额正交
 //     （6004 的 NoteSuccess 也不清它，同一条既有纪律）。
+//
 // 调用方必须已持有 p.mu。
 func (p *Pool) reviveCoolingLocked(e *entry, credits int64) {
 	e.credits = credits

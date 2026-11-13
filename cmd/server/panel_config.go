@@ -237,10 +237,8 @@ func restartRequiredFields(c *Config) []string {
 	// 请求日志 JSONL 归档在装配期创建 recorder（main 启动期 reqlog.New），开关与
 	// 容量/保留参数只能重启生效；request_client_info 已走 live 热改不在此列。
 	out = append(out, "logging.request_archive", "logging.request_archive_max_mb", "logging.request_retention_days")
-	// features.sanitize_extra_features / _rewrites 在 main 启动期经
-	// upstream.ConfigureSanitize 一次性写入净化词表（进程级），saveConfig 不做热更新；
-	// 不列入会让面板显示「已保存」而运行期仍用旧词表，必须提示重启。
-	out = append(out, "features.sanitize_extra_features", "features.sanitize_extra_rewrites")
+	// features.sanitize_extra_features / _rewrites 由 main 的配置监听在 10 秒内
+	// 自动热重载（sanitize_reload.go，原子换表），不需要重启，故不列入重启清单。
 	// global.enabled 在 auth.SetGlobalEnabled / handler GlobalEnabled / upstream.GlobalEnabled
 	// 三处装配期注入；prompt 文本与 global base 同理。
 	out = append(out, "global.enabled", "global.chat_base", "global.billing_base",

@@ -52,8 +52,9 @@ type ModelLockRow struct {
 // 口径与选号（healthyForModel）严格一致，三处易错点：
 //   - 只看**参与选号**的账号：disabled / manualDisabled 号跳过——它们的不可用与
 //     模型无关，计进来会把「模型被锁」和「号被停了」混为一谈；
-//   - 只看**真正拦路由**的冷却：Until 零值条目不算锁（与 modelCooled 同口径；
-//     本项目的 modelCooldown 无 panel 侧 AuditOnly 形态，未过期条目都拦路由）；
+//   - 只看**真正拦路由**的冷却：Until 与上游 ResetAt 都过期/零值才算解锁
+//     （与 modelCooled 的 active 同口径；本项目的 modelCooldown 无 panel 侧
+//     AuditOnly 形态，active 条目都拦路由）；
 //   - 已过期的冷却不算锁。本方法只读不清理——过期条目的真正删除仍由 pick 写锁
 //     路径的 pruneExpiredModelCooldowns 负责，这里按「未到期才有效」自然过滤。
 //
@@ -92,14 +93,16 @@ func (p *Pool) ModelLockView() []ModelLockRow {
 				rows[key] = a
 			}
 			a.locked++
-			// 最早解锁：取最小 Until，原因跟随最早解锁账号（运维先看「何时能好」）。
-			if a.unlockAt.IsZero() || mc.Until.Before(a.unlockAt) {
-				a.unlockAt = mc.Until
+			// 最早解锁：取最小真实解锁时刻（Until/ResetAt 较晚者），原因跟随最早解锁账号
+			// （运维先看「何时能好」）。
+			eff := mc.actualUnlock()
+			if a.unlockAt.IsZero() || eff.Before(a.unlockAt) {
+				a.unlockAt = eff
 				a.reason = mc.Reason
 			}
-			// 全部解锁：取最大 Until。
-			if a.fullyAt.IsZero() || mc.Until.After(a.fullyAt) {
-				a.fullyAt = mc.Until
+			// 全部解锁：取最大有效截止。
+			if a.fullyAt.IsZero() || eff.After(a.fullyAt) {
+				a.fullyAt = eff
 			}
 		}
 	}
@@ -169,11 +172,12 @@ func (p *Pool) ModelLockView() []ModelLockRow {
 	return out
 }
 
-// modelLockActive 单条模型级冷却条目当前是否构成「真锁」：Until 非零且未到期。
+// modelLockActive 单条模型级冷却条目当前是否构成「真锁」：Until 或上游
+// ResetAt 仍在未来（与 modelCooled 同口径）。
 // ModelLockView 的聚合判定与 ModelBlockedNow 的单点判定共用这一个谓词，保证两处
 // 口径永远一致（此前该判定的两份内联表达式就散在 ModelLockView 里，抽取即防分叉）。
 func modelLockActive(now time.Time, mc modelCooldown) bool {
-	return !mc.Until.IsZero() && now.Before(mc.Until)
+	return mc.active(now)
 }
 
 // ModelBlockedNow 回答「该 (域, 模型) 此刻是否被模型级冷却**整体**挡死」——即
@@ -215,9 +219,11 @@ func (p *Pool) ModelBlockedNow(realm, model string) (blocked bool, earliestUnloc
 		total++
 		if mc, ok := e.modelCooldowns[model]; ok && modelLockActive(now, mc) {
 			locked++
-			// 最早解锁：取最小 Until，原因跟随最早解锁账号（与 ModelLockView 同口径）。
-			if earliestUnlock.IsZero() || mc.Until.Before(earliestUnlock) {
-				earliestUnlock = mc.Until
+			// 最早解锁：取最小真实解锁时刻（Until/ResetAt 较晚者），原因跟随最早解锁
+			// 账号（与 ModelLockView 同口径）。
+			eff := mc.actualUnlock()
+			if earliestUnlock.IsZero() || eff.Before(earliestUnlock) {
+				earliestUnlock = eff
 				reason = mc.Reason
 			}
 		}

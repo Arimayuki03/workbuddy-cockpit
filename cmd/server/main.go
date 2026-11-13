@@ -331,10 +331,16 @@ func main() {
 	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
 	up.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
 	// 运行期追加的黑名单词表（features.sanitize_extra_features / _rewrites）：
-	// 上游逐词扩充时改 config.json 重启即可，不必重编译镜像。空表 = 只用内置静态表。
+	// 改 config.json 后 10 秒内自动热重载（见 sanitize_reload.go），不必重启或
+	// 重新编译。空表 = 只用内置静态表。
 	upstream.ConfigureSanitize(cfg.Features.SanitizeExtraFeatures, cfg.Features.SanitizeExtraRewrites)
-	if n := len(cfg.Features.SanitizeExtraFeatures); n > 0 {
-		log.Printf("净化额外特征词表已加载：%d 条（features.sanitize_extra_features）", n)
+	// 词表热重载（manager v2.11.11 / issue #396）：只监听 mtime+size，配置变更
+	// 10 秒内生效；解析失败保留旧词表。停止信号随 main 退出关闭。
+	stopSanitizeWatch := make(chan struct{})
+	defer close(stopSanitizeWatch)
+	go watchSanitizeConfig(*cfgPath, stopSanitizeWatch)
+	if f, r := upstream.SanitizeExtraCounts(); f > 0 || r > 0 {
+		log.Printf("净化额外词表已加载：features=%d rewrites=%d（config.json 变更可热重载）", f, r)
 	}
 	// 出站 UA（A 段）：非空才做显式覆盖，空 = 默认 WorkBuddy 三段式
 	// `WorkBuddy/<client_version> WorkBuddy/<client_version> CLI/<cli_version>`。

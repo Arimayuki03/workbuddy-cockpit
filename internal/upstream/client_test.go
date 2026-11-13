@@ -146,6 +146,10 @@ func TestClassify(t *testing.T) {
 		// hardRule 在 429 之前会误判 ErrHardCredit 硬冷却到次日 04:00，白扔号约 12h。
 		// 状态码是比关键词更权威的信号：真余额耗尽走 402，非 429 的 quota 措辞
 		// 仍归 hardRule（上方 {200,"quota exceeded"} 语义不变）。
+		// 6020「排队等待」是全局队列，不是账号级限流（manager v2.11.13 / #416）。
+		{429, "{\"code\":6020,\"msg\":\"queue.waiting.title\",\"data\":{\"queue_position\":5580,\"retry_after\":40}}", ErrUpstreamQueue},
+		{429, "{\"code\": 6020, \"msg\": \"queue.waiting.title\"}", ErrUpstreamQueue},
+		{200, "{\"code\":6020,\"msg\":\"queue.waiting.title\"}", ErrNone},
 		{429, `quota exceeded`, ErrSoftRate},
 		{429, `{"code":1,"msg":"quota exceeded, please wait"}`, ErrSoftRate},
 		{429, `insufficient credits`, ErrSoftRate},
@@ -1683,5 +1687,30 @@ func TestCompensationGlobalSkipsWithoutRequest(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&calls); n != 0 {
 		t.Errorf("global calls=%d want 0（国际版不发请求）", n)
+	}
+}
+
+// 6020 排队的等待秒数在 body 的 data.retry_after 里（manager v2.11.13 / #416）。
+func TestParseQueueRetryAfter(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want time.Duration
+		ok   bool
+	}{
+		{"数字", `{"code":6020,"msg":"queue.waiting.title","data":{"queue_position":5580,"retry_after":40}}`, 40 * time.Second, true},
+		{"字符串", `{"code":6020,"data":{"retry_after":"12"}}`, 12 * time.Second, true},
+		{"顶层", `{"retry_after":7}`, 7 * time.Second, true},
+		{"零值", `{"data":{"retry_after":0}}`, 0, false},
+		{"负值", `{"data":{"retry_after":-5}}`, 0, false},
+		{"超过上限", `{"data":{"retry_after":999999}}`, 0, false},
+		{"非 JSON", `queue.waiting`, 0, false},
+		{"无字段", `{"code":6020,"data":{"queue_position":1}}`, 0, false},
+	}
+	for _, c := range cases {
+		got, ok := ParseQueueRetryAfter(c.body)
+		if ok != c.ok || got != c.want {
+			t.Errorf("%s: ParseQueueRetryAfter=%v,%v want %v,%v", c.name, got, ok, c.want, c.ok)
+		}
 	}
 }

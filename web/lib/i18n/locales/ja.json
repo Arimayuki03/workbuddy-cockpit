@@ -43,6 +43,7 @@
   "login": {
     "subtitle": "Tencent CodeBuddy アカウントプール管理 · OpenAI 互換リバースプロキシゲートウェイ",
     "username": "ユーザー名",
+    "usernamePlaceholder": "ユーザー名（任意の値）",
     "password": "パスワード",
     "passwordPlaceholder": "パスワードを入力",
     "submit": "ログイン",

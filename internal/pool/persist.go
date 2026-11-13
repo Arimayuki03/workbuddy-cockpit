@@ -325,7 +325,7 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 				e.earliestRemaining = er
 			}
 		}
-		// 恢复 modelCooldowns，惰性过滤已过期条目（Until 在未来才恢复）。
+		// 恢复 modelCooldowns，惰性过滤已过期条目（Until 或 ResetAt 在未来才恢复）。
 		// 防止重启后残留已过期的模型级冷却条目（与 pick 路径的 pruneExpiredModelCooldowns 同口径）。
 		//
 		// 11102 旧数据钳制（manager 0041 审查修复）：升级前写入的 11102 负缓存
@@ -340,18 +340,16 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			e.modelCooldowns = make(map[string]modelCooldown, len(s.ModelCooldowns))
 			maxBlockUntil := now.Add(modelBlockMaxTTL)
 			for m, smc := range s.ModelCooldowns {
-				if smc.Until.IsZero() || !now.Before(smc.Until) {
-					continue // 过期/零值丢弃
+				mc := modelCooldown{Until: smc.Until, ResetAt: smc.ResetAt, Reason: smc.Reason}
+				if !mc.active(now) {
+					continue // ResetAt 与 Until 均过期：丢弃
 				}
 				until := smc.Until
-				if strings.HasPrefix(smc.Reason, "11102") && until.After(maxBlockUntil) {
+				if strings.HasPrefix(smc.Reason, "11102") && !until.IsZero() && until.After(maxBlockUntil) {
 					until = maxBlockUntil // 旧 6h/24h 数据钳到新封顶
 				}
-				e.modelCooldowns[m] = modelCooldown{
-					Until:   until,
-					ResetAt: smc.ResetAt,
-					Reason:  smc.Reason,
-				}
+				mc.Until = until
+				e.modelCooldowns[m] = mc
 			}
 			if len(e.modelCooldowns) == 0 {
 				e.modelCooldowns = nil
@@ -555,13 +553,13 @@ func (p *Pool) stateOverviewLocked() stateFile {
 	now := time.Now()
 	sf := stateFile{Accounts: map[string]stateAccount{}}
 	for uid, e := range p.byUID {
-		// 模型级冷却落盘（复用既有落盘循环，不新增遍历）。只写 Until 在未来的条目，
+		// 模型级冷却落盘（复用既有落盘循环，不新增遍历）。只写 active（Until 或 ResetAt 在未来）的条目，
 		// 与恢复时过期过滤同口径——落盘即清理，避免 state.json 残留已过期条目。
 		var mcs map[string]stateModelCooldown
 		if len(e.modelCooldowns) > 0 {
 			mcs = make(map[string]stateModelCooldown, len(e.modelCooldowns))
 			for m, mc := range e.modelCooldowns {
-				if mc.Until.IsZero() || !now.Before(mc.Until) {
+				if !mc.active(now) {
 					continue // 已过期：不落盘（惰性清理）
 				}
 				mcs[m] = stateModelCooldown{

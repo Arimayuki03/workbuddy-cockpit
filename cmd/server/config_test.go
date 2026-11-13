@@ -862,23 +862,19 @@ func TestSaveConfigReappliesGzipBodyEnv(t *testing.T) {
 	}
 }
 
-// TestRestartRequiredIncludesSanitizeExtra features.sanitize_extra_features /
-// _rewrites 是启动期字段（main 经 upstream.ConfigureSanitize 一次性注入），
-// 面板保存不热改，必须出现在重启清单里——否则面板显示「已保存」而运行期不生效。
-func TestRestartRequiredIncludesSanitizeExtra(t *testing.T) {
+// TestRestartRequiredExcludesSanitizeExtra features.sanitize_extra_features /
+// _rewrites 自 v1.24.0 起由 main 的 config watcher 10 秒内热重载，不属于重启
+// 生效字段——误列入会让面板每次保存都提示重启。
+func TestRestartRequiredExcludesSanitizeExtra(t *testing.T) {
 	c := Default()
 	c.APIKey = "k" // api_key 无条件必填：normalize 校验需要非空 key
 	if err := c.normalize(); err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
 	fields := restartRequiredFields(c)
-	found := map[string]bool{}
 	for _, f := range fields {
-		found[f] = true
-	}
-	for _, want := range []string{"features.sanitize_extra_features", "features.sanitize_extra_rewrites"} {
-		if !found[want] {
-			t.Errorf("restartRequiredFields missing %q; got %v", want, fields)
+		if f == "features.sanitize_extra_features" || f == "features.sanitize_extra_rewrites" {
+			t.Errorf("sanitize extra terms are hot-reloaded, must not require restart; got %v", fields)
 		}
 	}
 }
