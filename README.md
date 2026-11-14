@@ -17,7 +17,7 @@
 [![GHCR Image](https://img.shields.io/badge/image-ghcr.io%2Farimayuki03%2Fworkbuddy--cockpit-2088FF?logo=github&style=flat-square)](https://github.com/Arimayuki03/workbuddy-cockpit/pkgs/container/workbuddy-cockpit)
 [![Stars](https://img.shields.io/github/stars/Arimayuki03/workbuddy-cockpit?style=flat-square&color=6E56CF)](https://github.com/Arimayuki03/workbuddy-cockpit/stargazers)
 
-**简体中文** · [功能总览](#-功能总览) · [快速开始](#-快速开始) · [配置](#️-配置) · [架构](#️-架构总览) · [版本](#-版本) · [文档](#-文档) · [免责声明](#️-免责声明)
+**简体中文** · [English](README.en.md) · [功能总览](#-功能总览) · [快速开始](#-快速开始) · [配置](#️-配置) · [架构](#️-架构总览) · [版本](#-版本) · [文档](#-文档) · [免责声明](#️-免责声明)
 
 </div>
 
@@ -331,6 +331,7 @@ workbuddy-cockpit/
 | v1.23.0 | 2026-11-04 | **吸收 manager v2.11.5..v2.11.10（Go 网关适用部分）**——**大上下文改账号级滑动预算**（默认 2 MiB / 6 条 / 120s；保留粘性，超预算只迁移一次会话后重新绑定，不再逐请求换号丢前缀缓存；legacy 轮换需显式配置）；**网关错误契约**（上游 11102 实际答复改 404 `model_not_found`、429 统一补标准 `Retry-After`、`/v1` 与 `/v2` 兜底 404/405 回 OpenAI JSON，不再漏 HTML/纯文本）；**Responses 思考增量补 `summary_index`**；**CN 模型名去 `cn:` 前缀**（裸名即调用值，显式 `cn:` 保持兼容）；**密钥白名单版本语义**（裸名通配两版、显式前缀只放行同版本）；**DSH 新指纹首句**（`Tokens prefixed with @` → `the at-sign`）；**账号风控封禁与重登分离**（11140 unusual activity 标明申诉、不再提示重新登录）；**面板可用积分拆分**（冷却余额仍可用，封禁/停用/未知余额单列）；**出口线路补齐**（`__direct__` 保留名、signin/trial/activity/credit 读取 `proxy_routes`）；**Windows `::` 双栈监听**。未吸收的 manager UI/部署/计费类见 [发行说明](docs/RELEASE-v1.23.0.md) |
 | v1.24.0 | 2026-11-13 | **吸收 manager v2.11.10..v2.11.14（Go 网关适用部分）**——**客户端余额协议**（`/v1/credits`、`/api/usage/token/`、公开 `/api/status`；积分/token 双上限按更紧比例折算，`?scope=cn|global|merged` 分版本；停用/过期密钥仍可读余额）；**6004 限流保留到上游 ResetAt**（本地 soft_rate_max 先到也不虚假恢复；签到解冻/账号级冷却不再抹掉模型台账）；**429 返回最早恢复时间**（多号同时限流时 message/hint/Retry-After 取最早墙钟）；**6020 排队不罚号**（全局队列不冷却/不计数/不禁用，仍回 429）；**净化词表 10s 热重载**（原子换表，解析失败保留旧表）；**登录表单 method=post + 就绪前禁用**（密码不再可能写进地址栏）。未吸收 Trace Tap / HTTP/2 开关等见 [发行说明](docs/RELEASE-v1.24.0.md) |
 | v1.25.0 | 2026-11-13 | **成长中心覆盖度补齐（吸收两个 MIT 参考实现的端点配方）**——**盲盒**（`GET /v2/activity/growth/buddy/quota` + `POST /v2/activity/growth/buddy/open`；严格 `claim 旅行礼物 → 回读 idle → 开盒 → depart`，traveling/未知状态/claim 未确认一律封锁后续 Buddy 写）；**专家族**（`WorkBuddy_Valorant` + 4 个 `expert_use_*`：jump_url `ex_*` 动态解析为主、市场分页精确落位、常量表兜底，LOCAL 专家链带 `has_expert` + `expert_actual_use(mode=LOCAL,cost=0)`）；**`skill_share`**（市场技能 → `open.workbuddy.cn` asset-share 渠道 → clipboard click/success 两事件）；**小程序活动任务**（星巴克/记者节 5 项：`tasks → viewed → 事件 → 回读 → claim → claimed_at`，首版跳过 app）；**任务链硬化**（`credit_delayed=true` 记待入账不判失败、未确认 claim 不重复 POST、`valid_start/valid_end` 未上线跳过、401 刷新后重放一次）。无新增配置键；未做徽章只读端点与 MP 45s 节奏 A/B，见 [发行说明](docs/RELEASE-v1.25.0.md) |
+| v1.25.1 | 2026-11-14 | **文档英文化（无功能变更）**——新增 `README.en.md`（主体全译，版本历史为里程碑摘要）与中英切换；`.gitignore` 放行英文 README；发行说明见 [docs/RELEASE-v1.25.1.md](docs/RELEASE-v1.25.1.md) |
 
 
 完整变更见 [Releases](https://github.com/Arimayuki03/workbuddy-cockpit/releases)。

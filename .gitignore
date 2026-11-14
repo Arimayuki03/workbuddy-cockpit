@@ -93,6 +93,7 @@ SPEC.md
 # 设计/计划文档（README.md、使用指南.md 与 docs/ 定稿设计文档必须进版本库）
 *.md
 !README.md
+!README.en.md
 !使用指南.md
 !docs/DESIGN-v1.2.0-panel-manager.md
 !docs/DEPLOY-R28S.md
@@ -102,6 +103,7 @@ SPEC.md
 !docs/RELEASE-v1.23.0.md
 !docs/RELEASE-v1.24.0.md
 !docs/RELEASE-v1.25.0.md
+!docs/RELEASE-v1.25.1.md
 !docs/DESIGN-v1.25.0-growth-coverage.md
 !THIRD_PARTY_NOTICES.md
 
